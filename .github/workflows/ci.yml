@@ -57,12 +57,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27"
-      # The action installs its own binary. Declaring golangci-lint as a go.mod
-      # tool would put its dependency tree in the module graph of everyone who
-      # imports this router, which is not a price a library should charge.
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      - uses: extractions/setup-just@v3
+      # The recipe compiles the linter from the version that the justfile pins,
+      # with the Go of this job. The prebuilt binary of the action is built
+      # with an older Go, which refuses a module that targets 1.27.
+      - run: just golangci
 
   test:
     needs: lint
