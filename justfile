@@ -62,10 +62,19 @@ lint:
     go build -o /dev/null ./...
     # gofumpt, goimports and go fix all report on stdout and still exit 0, so
     # turn a non-empty report into a failure.
+    #
+    # Capture stdout only. `go run tool@version` writes "go: downloading ..."
+    # to stderr on a cold module cache, which a 2>&1 capture would read as a
+    # report and fail on. Stderr still reaches the log, and set -e still fails
+    # the recipe when the tool itself exits non-zero.
     fail_if_output() {
         local what="$1"; shift
-        local out
-        out="$("$@" 2>&1)"
+        local out status=0
+        out="$("$@")" || status=$?
+        if [ "$status" -ne 0 ]; then
+            echo "$what: the command exited $status" >&2
+            return 1
+        fi
         if [ -n "$out" ]; then
             echo "$what:" >&2
             echo "$out" >&2
