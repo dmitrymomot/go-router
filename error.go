@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 )
 
@@ -104,6 +105,22 @@ var (
 	ErrServiceUnavailable   = NewHTTPError(http.StatusServiceUnavailable)
 	ErrGatewayTimeout       = NewHTTPError(http.StatusGatewayTimeout)
 )
+
+// PanicError turns a recovered panic value into a 500 error whose internal
+// cause carries the panic and the stack. The router calls it for a panic that
+// escapes the handler chain, and [middleware.Recover] calls it for one that it
+// catches inside the chain.
+//
+// The stack reaches the error handler, which logs it. It never reaches the
+// client.
+func PanicError(recovered any) *HTTPError {
+	cause, ok := recovered.(error)
+	if !ok {
+		cause = fmt.Errorf("%v", recovered)
+	}
+	return ErrInternalServerError.WithError(
+		fmt.Errorf("panic: %w\n\n%s", cause, debug.Stack()))
+}
 
 // StatusOf returns the status code that [DefaultErrorHandler] writes for err:
 // the status of an [HTTPError], 500 for any other error, and 200 for nil.
