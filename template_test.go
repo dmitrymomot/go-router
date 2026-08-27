@@ -111,3 +111,52 @@ func BenchmarkTemplateSegment(b *testing.B) {
 	r, w := benchRouter("/reports/rep-{date}.csv", "/reports/{name}")
 	benchServe(b, r, w, "/reports/rep-20260102.csv")
 }
+
+func TestParameterEscaping(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/files/{name}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("name")) })
+	r.GET("/tree/{path...}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("path")) })
+
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"an escaped separator stays inside one segment", "/files/a%2Fb", "a/b"},
+		{"an escaped space decodes", "/files/a%20b", "a b"},
+		{"a plus sign is literal in a path", "/files/a+b", "a+b"},
+		// %25 is a literal percent. Decoding the parameter a second time would
+		// turn %252F into a separator that the client never sent.
+		{"a literal percent survives", "/files/a%25b", "a%b"},
+		{"a double encoded separator survives", "/files/a%252Fb", "a%2Fb"},
+		{"a catch-all decodes each segment", "/tree/x/a%2Fb/y", "x/a/b/y"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := do(r, http.MethodGet, tc.target).Body.String(); got != tc.want {
+				t.Errorf("param = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMountHandlerKeepsTheEscapedPath(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		//nolint:errcheck // test helper
+		w.Write([]byte(r.URL.Path + "|" + r.URL.RawPath))
+	})
+	r := newTestRouter()
+	r.MountHandler("/static", inner)
+
+	for _, tc := range []struct{ target, want string }{
+		{"/static/a/b.css", "/a/b.css|"},
+		{"/static/a%2Fb.css", "/a/b.css|/a%2Fb.css"},
+		{"/static/a%20b.css", "/a b.css|"},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			if got := do(r, http.MethodGet, tc.target).Body.String(); got != tc.want {
+				t.Errorf("path = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
