@@ -105,6 +105,22 @@ var (
 	ErrGatewayTimeout       = NewHTTPError(http.StatusGatewayTimeout)
 )
 
+// StatusOf returns the status code that [DefaultErrorHandler] writes for err:
+// the status of an [HTTPError], 500 for any other error, and 200 for nil.
+//
+// Middleware uses it to report the status of a request whose handler returned
+// an error, because the error handler runs after the middleware chain unwinds
+// and the response is still uncommitted at that point.
+func StatusOf(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	if he, ok := errors.AsType[*HTTPError](err); ok {
+		return he.Status
+	}
+	return http.StatusInternalServerError
+}
+
 // ErrorHandlerFunc renders an error that a handler or a middleware returned.
 // Set one on the router with [Router.ErrorHandler].
 type ErrorHandlerFunc[C Context] func(c C, err error)
