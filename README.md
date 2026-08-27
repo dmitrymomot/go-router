@@ -210,6 +210,98 @@ r.MountHandler("/static", http.FileServerFS(assets))
 `r.Routes()` returns every registered route, which is handy in a startup log or
 a test that guards the route table.
 
+### Mounting a subsystem with its own context
+
+Use `MountRouter` when one part of the service needs different dependencies on
+its context. The admin area below carries an `*admin.Context` with an audit
+log and a signed-in operator, while the public API keeps its own `*app.Context`.
+Neither type knows about the other.
+
+```go
+// admin/admin.go
+package admin
+
+type Context struct {
+	router.Base
+
+	Audit    *audit.Log
+	Operator *Operator      // never nil inside this router
+}
+
+func (c *Context) Log(action string) { c.Audit.Record(c.Operator.ID, action) }
+
+// Router builds the admin subsystem. It owns its factory, its middleware, its
+// error handler and its fallbacks.
+func Router(audit *audit.Log, db *sql.DB) *router.Router[*Context] {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
+		return &Context{Audit: audit}
+	})
+
+	r.Use(middleware.Recover)
+	r.Use(requireOperator(db))        // fills Context.Operator or returns 401
+
+	// Admin answers HTML, so it renders its errors as a page.
+	r.ErrorHandler(func(c *Context, err error) {
+		_ = c.HTML(router.StatusOf(err), errorPage(err))
+	})
+	r.NotFound(func(c *Context) error { return c.HTML(404, notFoundPage()) })
+
+	r.GET("/users/{id}", showUser)
+	r.POST("/users/{id}/suspend", suspendUser)
+	return r
+}
+
+func suspendUser(c *Context) error {
+	id, err := c.ParamAs[int]("id")
+	if err != nil {
+		return err
+	}
+	c.Log("suspend user")              // a method on the admin context
+	return c.Redirect(http.StatusSeeOther, fmt.Sprintf("/admin/users/%d", id))
+}
+```
+
+```go
+// main.go
+api := router.New(func(http.ResponseWriter, *http.Request) *app.Context {
+	return &app.Context{DB: db}
+})
+api.Use(middleware.Recover, middleware.RequestID)
+api.GET("/v1/users/{id}", getUser)          // *app.Context
+
+api.MountRouter("/admin", admin.Router(auditLog, db))
+
+http.ListenAndServe(":8080", api)
+```
+
+A request to `POST /admin/users/7/suspend` reaches `suspendUser` with an
+`*admin.Context`. The admin router sees the path as `/users/7/suspend`, so its
+patterns never repeat the prefix, and `c.Param("id")` is `7`.
+
+The two routers stay independent at the seam:
+
+| | outer router | mounted router |
+|---|---|---|
+| context type | `*app.Context` | `*admin.Context` |
+| context factory | its own | its own |
+| middleware | runs first, on the outer context | runs after, on its own context |
+| error handler | JSON | the HTML page above |
+| `NotFound` | the outer one | the admin one, for any path under `/admin` |
+| path a handler sees | `/admin/users/7/suspend` | `/users/7/suspend` |
+
+Two consequences worth knowing before you reach for it:
+
+- A parameter of the mount prefix does **not** cross the seam. The mounted
+  router re-matches the stripped path and knows nothing about the outer match,
+  so `r.MountRouter("/t/{tenant}", sub)` leaves `c.Param("tenant")` empty
+  inside `sub`. Read it in an outer middleware and pass it on through a header
+  or the request context, or use `Mount` and one context type instead.
+- Matching runs twice, once per router. That is a second trie walk per request,
+  which `Mount` avoids by joining the parent trie.
+
+Reach for `MountRouter` when the subsystem genuinely wants its own context, and
+for `Mount` when it is the same application split across files.
+
 ## Errors
 
 A handler returns `error`. The router hands it to the error handler.
