@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".editorconfig"
+      - ".gitignore"
+      - ".claude/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".editorconfig"
+      - ".gitignore"
+      - ".claude/**"
+
+permissions:
+  contents: read
+
+# Ordered cheapest first: lint gates the tests, the tests gate the benchmarks,
+# so a failure skips the stages behind it.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: extractions/setup-just@v3
+      # go vet, go build, gofmt, the go fix modernizers, and a vet of the
+      # benchmarks module, which is its own module and so invisible to ./...
+      - run: just lint
+
+  golangci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      # The action installs its own binary. Declaring golangci-lint as a go.mod
+      # tool would put its dependency tree in the module graph of everyone who
+      # imports this router, which is not a price a library should charge.
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: extractions/setup-just@v3
+      - run: just test
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: extractions/setup-just@v3
+      - run: just vuln
+
+  bench:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: extractions/setup-just@v3
+      # A short run: the numbers from a shared runner mean nothing, but a
+      # benchmark that stops compiling has to fail the build.
+      - run: just bench-ci
