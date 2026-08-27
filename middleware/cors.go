@@ -10,7 +10,7 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// CORSConfig configures [CORSConfig.Middleware].
+// CORSConfig configures [CORSWithConfig].
 type CORSConfig struct {
 	// Skip passes a request straight to the next handler when it returns true.
 	Skip func(c router.Context) bool
@@ -44,14 +44,11 @@ type CORSConfig struct {
 	MaxAge time.Duration
 }
 
-// CORS fills in the defaults of the config and returns it. Without a config it
-// allows no origin, so pass AllowOrigins or AllowOriginFunc.
-func CORS(cfgs ...CORSConfig) CORSConfig {
-	cfg := only("CORS", cfgs)
-	if len(cfg.AllowMethods) == 0 {
-		cfg.AllowMethods = defaultCORSMethods
-	}
-	return cfg
+// CORS returns the middleware with its default config, which allows every
+// origin without credentials. Reach for [CORSWithConfig] as soon as the answer
+// carries anything that belongs to one user.
+func CORS[C router.Context]() router.Middleware[C] {
+	return CORSWithConfig[C](CORSConfig{AllowOrigins: []string{"*"}})
 }
 
 // defaultCORSMethods is the method list of a preflight answer.
@@ -60,61 +57,65 @@ var defaultCORSMethods = []string{
 	http.MethodPut, http.MethodPatch, http.MethodDelete,
 }
 
-// Middleware answers a preflight request and adds the CORS headers to every
-// other answer.
-func (cfg CORSConfig) Middleware[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	cfg = CORS(cfg)
+// CORSWithConfig answers a preflight request and adds the CORS headers to
+// every other answer.
+func CORSWithConfig[C router.Context](cfg CORSConfig) router.Middleware[C] {
+	if len(cfg.AllowMethods) == 0 {
+		cfg.AllowMethods = defaultCORSMethods
+	}
 	methods := strings.Join(cfg.AllowMethods, ", ")
 	exposed := strings.Join(cfg.ExposeHeaders, ", ")
 	allowed := strings.Join(cfg.AllowHeaders, ", ")
 	maxAge := strconv.Itoa(int(cfg.MaxAge.Seconds()))
 
-	return func(c C) error {
-		if skipped(cfg.Skip, c) {
-			return next(c)
-		}
-		req := c.Request()
-		res := c.Response()
-		origin := req.Header.Get(router.HeaderOrigin)
+	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
+		return func(c C) error {
+			if skipped(cfg.Skip, c) {
+				return next(c)
+			}
+			req := c.Request()
+			res := c.Response()
+			origin := req.Header.Get(router.HeaderOrigin)
 
-		res.Header().Add(router.HeaderVary, router.HeaderOrigin)
-		if origin == "" || !cfg.allows(origin) {
-			return next(c)
-		}
+			res.Header().Add(router.HeaderVary, router.HeaderOrigin)
+			if origin == "" || !cfg.allows(origin) {
+				return next(c)
+			}
 
-		value := origin
-		if !cfg.AllowCredentials && slices.Contains(cfg.AllowOrigins, "*") && cfg.AllowOriginFunc == nil {
-			value = "*"
-		}
-		res.Header().Set(router.HeaderAccessControlAllowOrigin, value)
-		if cfg.AllowCredentials {
-			res.Header().Set(router.HeaderAccessControlAllowCredentials, "true")
-		}
-		if exposed != "" {
-			res.Header().Set(router.HeaderAccessControlExposeHeaders, exposed)
-		}
+			value := origin
+			if !cfg.AllowCredentials && slices.Contains(cfg.AllowOrigins, "*") && cfg.AllowOriginFunc == nil {
+				value = "*"
+			}
+			res.Header().Set(router.HeaderAccessControlAllowOrigin, value)
+			if cfg.AllowCredentials {
+				res.Header().Set(router.HeaderAccessControlAllowCredentials, "true")
+			}
+			if exposed != "" {
+				res.Header().Set(router.HeaderAccessControlExposeHeaders, exposed)
+			}
 
-		preflight := req.Method == http.MethodOptions &&
-			req.Header.Get(router.HeaderAccessControlRequestMethod) != ""
-		if !preflight {
-			return next(c)
-		}
+			preflight := req.Method == http.MethodOptions &&
+				req.Header.Get(router.HeaderAccessControlRequestMethod) != ""
+			if !preflight {
+				return next(c)
+			}
 
-		res.Header().Add(router.HeaderVary, router.HeaderAccessControlRequestMethod)
-		res.Header().Add(router.HeaderVary, router.HeaderAccessControlRequestHeaders)
-		res.Header().Set(router.HeaderAccessControlAllowMethods, methods)
+			res.Header().Add(router.HeaderVary, router.HeaderAccessControlRequestMethod)
+			res.Header().Add(router.HeaderVary, router.HeaderAccessControlRequestHeaders)
+			res.Header().Set(router.HeaderAccessControlAllowMethods, methods)
 
-		if allowed != "" {
-			res.Header().Set(router.HeaderAccessControlAllowHeaders, allowed)
-		} else if asked := req.Header.Get(router.HeaderAccessControlRequestHeaders); asked != "" {
-			res.Header().Set(router.HeaderAccessControlAllowHeaders, asked)
-		}
-		if cfg.MaxAge > 0 {
-			res.Header().Set(router.HeaderAccessControlMaxAge, maxAge)
-		}
+			if allowed != "" {
+				res.Header().Set(router.HeaderAccessControlAllowHeaders, allowed)
+			} else if asked := req.Header.Get(router.HeaderAccessControlRequestHeaders); asked != "" {
+				res.Header().Set(router.HeaderAccessControlAllowHeaders, asked)
+			}
+			if cfg.MaxAge > 0 {
+				res.Header().Set(router.HeaderAccessControlMaxAge, maxAge)
+			}
 
-		res.WriteHeader(http.StatusNoContent)
-		return nil
+			res.WriteHeader(http.StatusNoContent)
+			return nil
+		}
 	}
 }
 

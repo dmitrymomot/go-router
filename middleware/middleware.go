@@ -1,22 +1,28 @@
 // Package middleware holds the middleware that ships with the router.
 //
-// Every middleware follows the same shape. A function named after it takes an
-// optional config value, fills in the defaults and returns the config. That
-// config carries a generic Middleware method, and Go 1.27 infers the context
-// type there, so a caller never names its own context type:
+// Every middleware comes as two factories. The plain one returns the
+// middleware with its default config, and the WithConfig one takes a config:
 //
-//	r.Use(middleware.Recover().Middleware)
-//	r.Use(middleware.Timeout(middleware.TimeoutConfig{Duration: 5 * time.Second}).Middleware)
+//	r.Use(middleware.Recover[*app.Context]())
+//	r.Use(middleware.TimeoutWithConfig[*app.Context](middleware.TimeoutConfig{
+//		Duration: 5 * time.Second,
+//	}))
 //
-// Leave the config out to take the defaults. Passing more than one panics,
-// because the middleware would have to guess which one wins.
+// A factory returns [router.Middleware] directly, so the context type has to
+// be written at the call site: Go infers a type argument from the arguments of
+// a call, and these calls carry nothing that names the context. A type alias
+// takes the repetition out of it:
+//
+//	type Ctx = *app.Context
+//
+//	r.Use(middleware.Recover[Ctx](), middleware.RequestID[Ctx](), middleware.RealIP[Ctx]())
 //
 // Every config carries a Skip function. Return true from it to pass the
 // request straight to the next handler:
 //
-//	middleware.LoggerConfig{
+//	middleware.LoggerWithConfig[Ctx](middleware.LoggerConfig{
 //		Skip: func(c router.Context) bool { return c.Request().URL.Path == "/health" },
-//	}
+//	})
 //
 // Skip takes the [router.Context] interface, not the application context type,
 // so one function fits any router. Use [router.Context.Request] for the
@@ -46,20 +52,6 @@ func statusOf[C router.Context](c C, err error) int {
 		return st
 	}
 	return router.StatusOf(err)
-}
-
-// only returns the single config of a variadic argument, or the zero value
-// when the caller passed none.
-func only[T any](name string, cfgs []T) T {
-	switch len(cfgs) {
-	case 0:
-		var zero T
-		return zero
-	case 1:
-		return cfgs[0]
-	default:
-		panic("middleware: " + name + " takes at most one config")
-	}
 }
 
 // skipped reports whether the config asks to pass this request through.

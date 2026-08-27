@@ -7,7 +7,7 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// RealIPConfig configures [RealIPConfig.Middleware].
+// RealIPConfig configures [RealIPWithConfig].
 type RealIPConfig struct {
 	// Skip passes a request straight to the next handler when it returns true.
 	Skip func(c router.Context) bool
@@ -18,37 +18,38 @@ type RealIPConfig struct {
 	Headers []string
 }
 
-// RealIP fills in the defaults of the config and returns it. Call it without
-// an argument to take the defaults.
-func RealIP(cfgs ...RealIPConfig) RealIPConfig {
-	cfg := only("RealIP", cfgs)
-	if len(cfg.Headers) == 0 {
-		cfg.Headers = []string{router.HeaderXRealIP, router.HeaderXForwardedFor}
-	}
-	return cfg
+// RealIP returns the middleware with its default config: X-Real-Ip first, then
+// X-Forwarded-For.
+func RealIP[C router.Context]() router.Middleware[C] {
+	return RealIPWithConfig[C](RealIPConfig{})
 }
 
-// Middleware replaces the remote address of the request with the address that
-// a forwarding header reports.
+// RealIPWithConfig replaces the remote address of the request with the address
+// that a forwarding header reports.
 //
 // Use it only when a trusted proxy sits in front of the server and rewrites
 // those headers. A client that reaches the server directly can set any of them
 // to any value, so trusting them would let it forge its own address.
-func (cfg RealIPConfig) Middleware[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	cfg = RealIP(cfg)
-	return func(c C) error {
-		if skipped(cfg.Skip, c) {
+func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
+	if len(cfg.Headers) == 0 {
+		cfg.Headers = []string{router.HeaderXRealIP, router.HeaderXForwardedFor}
+	}
+
+	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
+		return func(c C) error {
+			if skipped(cfg.Skip, c) {
+				return next(c)
+			}
+			req := c.Request()
+			if ip := firstAddress(req.Header, cfg.Headers); ip != "" {
+				// A shallow copy is enough, because only RemoteAddr changes.
+				r := new(http.Request)
+				*r = *req
+				r.RemoteAddr = ip
+				c.SetRequest(r)
+			}
 			return next(c)
 		}
-		req := c.Request()
-		if ip := firstAddress(req.Header, cfg.Headers); ip != "" {
-			// A shallow copy is enough, because only RemoteAddr changes.
-			r := new(http.Request)
-			*r = *req
-			r.RemoteAddr = ip
-			c.SetRequest(r)
-		}
-		return next(c)
 	}
 }
 
