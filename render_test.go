@@ -1,0 +1,217 @@
+package router
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// wrapKey stands for the key that a template engine puts on the context.
+type wrapKey struct{}
+
+// comp is the shape that a generated a-h/templ template has.
+func comp(s string) ComponentFunc {
+	return func(_ context.Context, w io.Writer) error {
+		_, err := io.WriteString(w, s)
+		return err
+	}
+}
+
+func TestRender(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error { return c.Render(http.StatusOK, comp("<h1>hi</h1>")) })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<h1>hi</h1>" {
+		t.Errorf("body = %q", got)
+	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMETextHTMLCharsetUTF8 {
+		t.Errorf("Content-Type = %q, want %q", got, MIMETextHTMLCharsetUTF8)
+	}
+	if got := rec.Header().Get(HeaderContentLength); got != "11" {
+		t.Errorf("Content-Length = %q, want %q", got, "11")
+	}
+}
+
+func TestRenderKeepsTheHandlerContentType(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		c.SetHeader(HeaderContentType, "application/xhtml+xml")
+		return c.Render(http.StatusOK, comp("<p/>"))
+	})
+
+	if got := do(r, http.MethodGet, "/").Header().Get(HeaderContentType); got != "application/xhtml+xml" {
+		t.Errorf("Content-Type = %q", got)
+	}
+}
+
+// The component reads the route parameters and the values of Set, because it
+// receives the context itself.
+func TestRenderPassesTheContext(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/u/{id}", func(c *tctx) error {
+		c.Set("flash", "saved")
+		return c.Render(http.StatusOK, ComponentFunc(func(ctx context.Context, w io.Writer) error {
+			// A template engine wraps the context, so read the Base the way a
+			// generated template does.
+			ctx = context.WithValue(ctx, wrapKey{}, "wrapped")
+			b, ok := FromContext(ctx)
+			if !ok {
+				return io.ErrUnexpectedEOF
+			}
+			_, err := io.WriteString(w, ctx.Value("flash").(string)+" "+b.Param("id"))
+			return err
+		}))
+	})
+
+	if got := do(r, http.MethodGet, "/u/7").Body.String(); got != "saved 7" {
+		t.Errorf("body = %q, want %q", got, "saved 7")
+	}
+}
+
+// A component that fails halfway must not put a partial page on the wire.
+func TestRenderErrorWritesNoPartialBody(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.Render(http.StatusOK, ComponentFunc(func(_ context.Context, w io.Writer) error {
+			if _, err := io.WriteString(w, "<html>partial"); err != nil {
+				return err
+			}
+			return io.ErrUnexpectedEOF
+		}))
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "partial") {
+		t.Errorf("body leaked the partial page: %q", rec.Body.String())
+	}
+}
+
+func TestRenderHEADWritesTheLengthOnly(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error { return c.Render(http.StatusOK, comp("<h1>hi</h1>")) })
+
+	rec := do(r, http.MethodHead, "/")
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+	if got := rec.Header().Get(HeaderContentLength); got != "11" {
+		t.Errorf("Content-Length = %q, want %q", got, "11")
+	}
+}
+
+// A page larger than maxPooledRenderBuf still renders. The pool drops that
+// buffer instead of keeping it.
+func TestRenderLargePage(t *testing.T) {
+	want := strings.Repeat("x", maxPooledRenderBuf+1024)
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error { return c.Render(http.StatusOK, comp(want)) })
+
+	if got := do(r, http.MethodGet, "/").Body.String(); got != want {
+		t.Errorf("body length = %d, want %d", len(got), len(want))
+	}
+}
+
+// Concurrent renders must not read each other's buffer.
+func TestRenderIsConcurrencySafe(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/{tag}", func(c *tctx) error {
+		return c.Render(http.StatusOK, comp(strings.Repeat(c.Param("tag"), 512)))
+	})
+
+	var wg sync.WaitGroup
+	for tag := range 16 {
+		want := strings.Repeat(string(rune('a'+tag)), 512)
+		wg.Go(func() {
+			for range 32 {
+				if got := do(r, http.MethodGet, "/"+string(rune('a'+tag))).Body.String(); got != want {
+					t.Errorf("body = %q, want %q", got, want)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
+func TestRenderStream(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.RenderStream(http.StatusAccepted, ComponentFunc(func(_ context.Context, w io.Writer) error {
+			if _, err := io.WriteString(w, "a"); err != nil {
+				return err
+			}
+			w.(*Response).Flush()
+			_, err := io.WriteString(w, "b")
+			return err
+		}))
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	if got := rec.Body.String(); got != "ab" {
+		t.Errorf("body = %q, want %q", got, "ab")
+	}
+	if !rec.Flushed {
+		t.Error("the component did not reach the flusher")
+	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMETextHTMLCharsetUTF8 {
+		t.Errorf("Content-Type = %q", got)
+	}
+}
+
+// The response is already committed when a streamed component fails, so the
+// error handler keeps the status that RenderStream wrote.
+func TestRenderStreamErrorKeepsTheStatus(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.RenderStream(http.StatusOK, ComponentFunc(func(_ context.Context, w io.Writer) error {
+			if _, err := io.WriteString(w, "<html>"); err != nil {
+				return err
+			}
+			return io.ErrUnexpectedEOF
+		}))
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "<html>" {
+		t.Errorf("body = %q, want %q", got, "<html>")
+	}
+}
+
+func TestRenderStreamHEADWritesNoBody(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error { return c.RenderStream(http.StatusOK, comp("<h1>hi</h1>")) })
+
+	if n := do(r, http.MethodHead, "/").Body.Len(); n != 0 {
+		t.Errorf("body length = %d, want 0", n)
+	}
+}
+
+func BenchmarkRender(b *testing.B) {
+	page := comp("<html><body><h1>hello</h1></body></html>")
+	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+	r.GET("/", func(c *tctx) error { return c.Render(http.StatusOK, page) })
+	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/")
+}
+
+func BenchmarkRenderStream(b *testing.B) {
+	page := comp("<html><body><h1>hello</h1></body></html>")
+	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+	r.GET("/", func(c *tctx) error { return c.RenderStream(http.StatusOK, page) })
+	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/")
+}
