@@ -152,7 +152,8 @@ type errorBody struct {
 // DefaultErrorHandler writes the error to the response. It reads the status
 // and the message from an [HTTPError] and reports any other error as a 500
 // with the standard status text, so an internal message never reaches the
-// client. It logs the internal cause with [slog.Default].
+// client. It logs the internal cause with [slog.Default], at error level, or
+// at debug level when the client cancelled the request.
 //
 // It writes JSON unless the client asked for text. A client that sends no
 // Accept header gets JSON, because a service that calls another service
@@ -169,7 +170,14 @@ func DefaultErrorHandler[C Context](c C, err error) {
 	}
 
 	if he.Status >= http.StatusInternalServerError || he.Err != nil {
-		slog.ErrorContext(b.req.Context(), "router: request failed",
+		// A client that went away is not a server fault. A long streamed page
+		// fails that way whenever a reader closes the tab, so report it at
+		// debug level and keep it out of the 5xx alerts.
+		level := slog.LevelError
+		if errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled) {
+			level = slog.LevelDebug
+		}
+		slog.Log(b.req.Context(), level, "router: request failed",
 			slog.String("method", b.req.Method),
 			slog.String("path", b.req.URL.Path),
 			slog.String("route", b.pattern),

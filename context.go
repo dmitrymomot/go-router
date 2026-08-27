@@ -194,6 +194,15 @@ func (b *Base) Value(key any) any {
 //
 // It answers through [context.Context.Value], so it still finds the Base after
 // a template engine wraps the context, as the a-h/templ runtime does.
+//
+// The Base is only valid until the call that handed it over returns, because
+// [NewPooled] reuses it for the next request. Read what you need and copy it;
+// never store the Base itself, and never pass it to a goroutine that outlives
+// the request.
+//
+// It returns the request state, not the application context. A template that
+// needs a user or a database takes it as a parameter, which is what keeps the
+// value typed.
 func FromContext(ctx context.Context) (*Base, bool) {
 	b, ok := ctx.Value(baseKeyType{}).(*Base)
 	return b, ok

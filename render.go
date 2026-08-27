@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,6 +158,22 @@ var renderBufs = sync.Pool{
 	New: func() any { return bytes.NewBuffer(make([]byte, 0, renderBufSize)) },
 }
 
+// keepBuf reports whether the pool keeps buf after a render. It drops one that
+// a large page grew past the ceiling.
+func keepBuf(buf *bytes.Buffer) bool { return buf.Cap() <= maxPooledRenderBuf }
+
+// renderError turns a component failure into an error for the error handler.
+//
+// An [HTTPError] from the component passes through untouched, so a template
+// that reports [ErrNotFound] still answers 404. Any other error is internal
+// and becomes a 500 whose message never reaches the client.
+func renderError(err error) error {
+	if _, ok := errors.AsType[*HTTPError](err); ok {
+		return err
+	}
+	return ErrInternalServerError.WithError(fmt.Errorf("router: render component: %w", err))
+}
+
 // Render writes an HTML body from a [Component].
 //
 // It renders into a buffer before it writes the header, so a component that
@@ -168,17 +185,24 @@ var renderBufs = sync.Pool{
 // [Base.Set] through ctx.Value, and the request itself through [FromContext].
 // That context is only valid until Render returns, because [NewPooled] reuses
 // it.
+//
+// An [HTTPError] that the component returns keeps its status, so a template
+// that reports [ErrNotFound] answers 404. Any other error becomes a 500.
+//
+// A HEAD request still runs the component, because the length of the page is
+// the answer. [Base.RenderStream] skips it.
 func (b *Base) Render(status int, c Component) error {
 	buf := renderBufs.Get().(*bytes.Buffer)
+	buf.Reset()
 	defer func() {
-		if buf.Cap() <= maxPooledRenderBuf {
+		if keepBuf(buf) {
 			buf.Reset()
 			renderBufs.Put(buf)
 		}
 	}()
 
 	if err := c.Render(b, buf); err != nil {
-		return ErrInternalServerError.WithError(fmt.Errorf("router: render component: %w", err))
+		return renderError(err)
 	}
 	return b.Blob(status, MIMETextHTMLCharsetUTF8, buf.Bytes())
 }
@@ -189,7 +213,12 @@ func (b *Base) Render(status int, c Component) error {
 //
 // A component that fails leaves a partial body on the wire. The error still
 // reaches the error handler, which logs it and writes nothing more, because
-// the response is already committed.
+// the response is already committed. A write that failed because the client
+// went away is logged at debug level, not as a server fault.
+//
+// A HEAD request answers with the headers alone and never runs the component,
+// so the response carries no Content-Length. [Base.Render] answers one with a
+// length instead.
 func (b *Base) RenderStream(status int, c Component) error {
 	b.contentType(MIMETextHTMLCharsetUTF8)
 	b.res.WriteHeader(status)
@@ -197,7 +226,7 @@ func (b *Base) RenderStream(status int, c Component) error {
 		return nil
 	}
 	if err := c.Render(b, b.res); err != nil {
-		return ErrInternalServerError.WithError(fmt.Errorf("router: render component: %w", err))
+		return renderError(err)
 	}
 	return nil
 }
