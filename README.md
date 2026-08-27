@@ -54,8 +54,12 @@ func main() {
 		return &Context{DB: db}
 	})
 
-	r.Use(middleware.Recover, middleware.RequestID, middleware.RealIP)
-	r.Use(middleware.Logger(nil).Middleware)
+	r.Use(
+		middleware.Recover(middleware.RecoverConfig{}).Middleware,
+		middleware.RequestID(middleware.RequestIDConfig{}).Middleware,
+		middleware.RealIP(middleware.RealIPConfig{}).Middleware,
+		middleware.Logger(middleware.LoggerConfig{}).Middleware,
+	)
 
 	r.GET("/health", func(c *Context) error {
 		return c.String(http.StatusOK, "ok")
@@ -237,7 +241,7 @@ func Router(audit *audit.Log, db *sql.DB) *router.Router[*Context] {
 		return &Context{Audit: audit}
 	})
 
-	r.Use(middleware.Recover)
+	r.Use(middleware.Recover(middleware.RecoverConfig{}).Middleware)
 	r.Use(requireOperator(db))        // fills Context.Operator or returns 401
 
 	// Admin answers HTML, so it renders its errors as a page.
@@ -266,7 +270,10 @@ func suspendUser(c *Context) error {
 api := router.New(func(http.ResponseWriter, *http.Request) *app.Context {
 	return &app.Context{DB: db}
 })
-api.Use(middleware.Recover, middleware.RequestID)
+api.Use(
+	middleware.Recover(middleware.RecoverConfig{}).Middleware,
+	middleware.RequestID(middleware.RequestIDConfig{}).Middleware,
+)
 api.GET("/v1/users/{id}", getUser)          // *app.Context
 
 api.MountRouter("/admin", admin.Router(auditLog, db))
@@ -379,16 +386,35 @@ Request bodies are capped at 4 MiB. Change it with `r.MaxBodyBytes(n)`.
 type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 ```
 
-A middleware without settings is a plain generic function. One with settings is
-a value with a generic `Middleware` method. Go 1.27 infers the context type in
-both positions, so you never write it:
+Every middleware follows one shape. A function named after it takes a config,
+fills in the defaults and returns it. That config carries a generic
+`Middleware` method, and Go 1.27 infers the context type there, so you never
+name your own context type:
 
 ```go
-r.Use(middleware.Recover, middleware.RequestID, middleware.RealIP)
-r.Use(middleware.Logger(log).Middleware)
-r.Use(middleware.CORS("https://app.example").Middleware)
-r.Use(middleware.Timeout(5 * time.Second).Middleware)
+r.Use(middleware.Recover(middleware.RecoverConfig{}).Middleware)
+r.Use(middleware.RequestID(middleware.RequestIDConfig{IgnoreInbound: true}).Middleware)
+r.Use(middleware.RealIP(middleware.RealIPConfig{Headers: []string{"Cf-Connecting-Ip"}}).Middleware)
+r.Use(middleware.Logger(middleware.LoggerConfig{Logger: log}).Middleware)
+r.Use(middleware.CORS(middleware.CORSConfig{AllowOrigins: []string{"https://app.example"}}).Middleware)
+r.Use(middleware.Timeout(middleware.TimeoutConfig{Duration: 5 * time.Second}).Middleware)
 ```
+
+Every config carries a `Skip`. Return true from it and the request goes
+straight to the next handler:
+
+```go
+middleware.Logger(middleware.LoggerConfig{
+	Skip: func(c router.Context) bool { return c.Request().URL.Path == "/health" },
+}).Middleware
+```
+
+`Skip` takes the `router.Context` interface, not your context type, so one
+function fits any router. It reaches the request through `c.Request()` and the
+matched route through `c.RoutePattern()`.
+
+One middleware per file, named after it: `recover.go`, `requestid.go`,
+`realip.go`, `logger.go`, `cors.go`, `timeout.go`.
 
 Standard `func(http.Handler) http.Handler` middleware works through an adapter:
 
@@ -397,10 +423,10 @@ r.Use(router.WrapMiddleware[*Context](gziphandler.GzipHandler))
 r.GET("/metrics", router.WrapHandler[*Context](promhttp.Handler()))
 ```
 
-`middleware.Timeout` puts a deadline on the request context and does not
-abandon a running handler, so your handler has to watch the context. Read
-`RealIP` before you trust it: use it only behind a proxy that rewrites the
-forwarding headers.
+`Timeout` puts a deadline on the request context and does not abandon a
+running handler, so your handler has to watch the context. Read `RealIP`
+before you trust it: use it only behind a proxy that rewrites the forwarding
+headers.
 
 ## Context pooling
 
@@ -473,8 +499,8 @@ prefix tree gives you for free. The trade is deliberate.
   `res.JSON[User]()` — the caller names the type, no out-parameter.
 - **Generic methods** also give `r.MountRouter(prefix, sub)`, which accepts a
   router whose context type differs from the caller's.
-- **Generalized function type inference** is what makes `r.Use(middleware.Recover)`
-  and `r.Use(middleware.Logger(log).Middleware)` compile without a type argument.
+- **Generalized function type inference** is what makes
+  `r.Use(middleware.Logger(cfg).Middleware)` compile without a type argument.
 - **`encoding/json/v2`** is the codec: stricter, and faster to decode.
 - **stdlib `uuid`** backs `middleware.RequestID`.
 - **`testing/synctest`** runs the timeout test on a fake clock.
