@@ -148,7 +148,7 @@ func setScalar(fv reflect.Value, s string) error {
 	}
 
 	if fv.CanAddr() {
-		if u, ok := fv.Addr().Interface().(encoding.TextUnmarshaler); ok {
+		if u, ok := reflect.TypeAssert[encoding.TextUnmarshaler](fv.Addr()); ok {
 			if err := u.UnmarshalText([]byte(s)); err != nil {
 				return fmt.Errorf("cannot parse %q as %s: %w", s, fv.Type(), err)
 			}
