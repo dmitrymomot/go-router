@@ -3,10 +3,19 @@
 #	goanalysis_metalinter: SA4023: package "routertest_test": runtime error:
 #	index out of range [1] with length 1
 #
-# The crash comes from the analyzer, not from the code: adding any method to
-# routertest.Response is enough to trigger it, and that type also carries the
-# generic method JSON[T]. No release past v2.13.1 fixes it yet, so SA4023 stays
-# off until one does. Every other staticcheck check keeps its default state.
+# The crash is in the analyzer, not in the code that it reads. It appears when
+# a package under analysis reaches a generic function that declares two type
+# parameters: router.SSEComponent[T any, C Component] is the one here, and
+# giving it a single parameter again makes the whole run pass. The index in the
+# message is the tell, because it reads element [1] of a list that holds one.
+#
+# routertest_test is only where it surfaces: that package imports the router,
+# and it is the first one whose analysis loads those facts.
+#
+# v2.13.1 is the newest release, so there is nothing to upgrade to. SA4023
+# stays off until a release fixes it. Every other staticcheck check keeps its
+# default state, which is why the list repeats the ones that golangci-lint
+# excludes by default.
 version: "2"
 
 linters:
