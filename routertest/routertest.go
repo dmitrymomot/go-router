@@ -192,9 +192,10 @@ type Event struct {
 //		routertest.Event{Name: "tick", Data: "two"},
 //	)
 //
-// It reads the body the way a client does: it drops every comment, it drops a
-// frame that carries no data field, such as the retry frame that opens a
-// stream, and it joins the data lines of one event with a line feed.
+// It reads the body the way a client does: it strips one leading byte order
+// mark, it drops every comment, it drops a frame that carries no data field,
+// such as the retry frame that opens a stream, and it joins the data lines of
+// one event with a line feed.
 //
 // The recorder holds the whole body, so the handler has to return before the
 // body is readable. Test a stream that never ends with [NewServer] and a
@@ -207,7 +208,11 @@ func Events(r *Response) []Event {
 		id      string
 		hasData bool
 	)
-	for line := range eventLines(r.Body) {
+	// A client strips one leading byte order mark before it parses, so a body
+	// that opens with one still names its first field.
+	body := bytes.TrimPrefix(r.Body, []byte("\ufeff"))
+
+	for line := range eventLines(body) {
 		switch {
 		case line == "":
 			if !hasData {

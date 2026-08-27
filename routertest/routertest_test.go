@@ -133,6 +133,7 @@ func TestEventsParsing(t *testing.T) {
 		want   []routertest.Event
 	}{
 		{"empty stream", "", nil},
+		{"byte order mark", "\ufeffevent: tick\ndata: one\n\n", []routertest.Event{{Name: "tick", Data: "one"}}},
 		{"one event", "data: one\n\n", []routertest.Event{{Data: "one"}}},
 		{"carriage returns", "event: tick\r\ndata: one\r\n\r\n", []routertest.Event{{Name: "tick", Data: "one"}}},
 		{"lone carriage returns", "event: tick\rdata: one\r\r", []routertest.Event{{Name: "tick", Data: "one"}}},
