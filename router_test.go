@@ -226,7 +226,7 @@ func TestMountSameContext(t *testing.T) {
 
 func TestMountHandlerStripsThePrefix(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "path=%s", r.URL.Path)
+		_, _ = fmt.Fprintf(w, "path=%s", r.URL.Path)
 	})
 
 	r := newTestRouter()
@@ -429,7 +429,7 @@ func TestWrapHandlerAndWrapMiddleware(t *testing.T) {
 	r.Use(WrapMiddleware[*tctx](tagging))
 	r.GET("/plain", WrapHandler[*tctx](http.HandlerFunc(
 		func(w http.ResponseWriter, req *http.Request) {
-			fmt.Fprint(w, req.Context().Value(ctxKey("who")))
+			_, _ = fmt.Fprint(w, req.Context().Value(ctxKey("who")))
 		})))
 
 	rec := do(r, http.MethodGet, "/plain")

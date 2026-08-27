@@ -358,16 +358,6 @@ func parseBraceSegment(raw, pattern string) (name, expr string, wildcard bool, e
 	return body, "", false, nil
 }
 
-// splitSegment splits a path that starts with "/" into its first segment and
-// the remainder, which is empty or starts with "/".
-func splitSegment(path string) (seg, rest string) {
-	p := path[1:]
-	if i := strings.IndexByte(p, '/'); i >= 0 {
-		return p[:i], p[i:]
-	}
-	return p, ""
-}
-
 // edgeKind is the way one edge of the radix tree consumes the path.
 type edgeKind uint8
 

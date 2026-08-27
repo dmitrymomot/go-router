@@ -95,7 +95,7 @@ func Serve(h http.Handler, req *http.Request) *Response {
 	h.ServeHTTP(rec, req)
 	res := rec.Result()
 	body, _ := io.ReadAll(res.Body)
-	res.Body.Close()
+	_ = res.Body.Close()
 	res.Body = io.NopCloser(bytes.NewReader(body))
 	return &Response{Response: res, Body: body, Recorder: rec}
 }
