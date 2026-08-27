@@ -62,10 +62,18 @@ lint:
     go build -o /dev/null ./...
     # gofumpt, goimports and go fix all report on stdout and still exit 0, so
     # turn a non-empty report into a failure.
+    #
+    # Only stdout counts. "go run tool@version" writes its download progress to
+    # stderr, which a cold module cache fills and which says nothing about the
+    # code. stderr still reaches the log, and a non-zero exit still fails.
     fail_if_output() {
         local what="$1"; shift
-        local out
-        out="$("$@" 2>&1)"
+        local out status=0
+        out="$("$@")" || status=$?
+        if [ "$status" -ne 0 ]; then
+            echo "$what: the command exited $status" >&2
+            return 1
+        fi
         if [ -n "$out" ]; then
             echo "$what:" >&2
             echo "$out" >&2
