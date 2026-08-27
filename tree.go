@@ -19,10 +19,11 @@ type methodHandler[C Context] struct {
 // order static, regular expression, parameter, catch-all, so a literal path
 // always wins over a parameter.
 type node[C Context] struct {
-	static   map[string]*node[C]
-	regexes  []*node[C]
-	param    *node[C]
-	wildcard *node[C]
+	static    map[string]*node[C]
+	templates []*node[C]
+	regexes   []*node[C]
+	param     *node[C]
+	wildcard  *node[C]
 
 	// seg describes the segment that reaches this node.
 	seg segment
@@ -32,8 +33,36 @@ type node[C Context] struct {
 	names   []string
 }
 
-// child returns the existing child for seg, or nil.
-func (n *node[C]) child(seg segment) *node[C] {
+// child returns the existing child for seg, or nil. It reports an error when a
+// child has the same shape under other parameter names, because two names for
+// one position would make Param ambiguous.
+func (n *node[C]) child(seg segment) (*node[C], error) {
+	if seg.kind == segTemplate {
+		want := templateSkeleton(seg.parts)
+		names := templateNames(seg.parts)
+		for _, c := range n.templates {
+			if templateSkeleton(c.seg.parts) != want {
+				continue
+			}
+			if !slices.Equal(templateNames(c.seg.parts), names) {
+				return nil, fmt.Errorf("%q has the shape of %q, which already uses the parameter names %v",
+					seg.value, c.seg.value, templateNames(c.seg.parts))
+			}
+			return c, nil
+		}
+		return nil, nil
+	}
+
+	c := n.plainChild(seg)
+	if c != nil && seg.kind != segStatic && c.seg.value != seg.value {
+		return nil, fmt.Errorf("the parameter at this position is already named %q, not %q",
+			c.seg.value, seg.value)
+	}
+	return c, nil
+}
+
+// plainChild returns the existing child for a non-template segment, or nil.
+func (n *node[C]) plainChild(seg segment) *node[C] {
 	switch seg.kind {
 	case segStatic:
 		return n.static[seg.value]
@@ -60,6 +89,8 @@ func (n *node[C]) addChild(seg segment) *node[C] {
 			n.static = make(map[string]*node[C], 4)
 		}
 		n.static[seg.value] = c
+	case segTemplate:
+		n.templates = append(n.templates, c)
 	case segRegex:
 		n.regexes = append(n.regexes, c)
 	case segParam:
@@ -80,14 +111,12 @@ func (n *node[C]) insert(method, pattern string, h HandlerFunc[C]) error {
 
 	cur := n
 	for _, seg := range segs {
-		next := cur.child(seg)
-		switch {
-		case next == nil:
+		next, err := cur.child(seg)
+		if err != nil {
+			return fmt.Errorf("router: %q conflicts with an existing route: %w", normalizePattern(pattern), err)
+		}
+		if next == nil {
 			next = cur.addChild(seg)
-		case seg.kind != segStatic && next.seg.value != seg.value:
-			// Two names for one position would make Param ambiguous.
-			return fmt.Errorf("router: %q conflicts with an existing route: the parameter at this position is named %q, not %q",
-				normalizePattern(pattern), next.seg.value, seg.value)
 		}
 		cur = next
 	}
@@ -192,6 +221,13 @@ func search[C Context](n *node[C], path, method string, vals []string, st *match
 			return m, v
 		}
 	}
+	for _, c := range n.templates {
+		if w, ok := appendTemplateValues(vals, c.seg.parts, seg); ok {
+			if m, v := search(c, rest, method, w, st); m != nil {
+				return m, v
+			}
+		}
+	}
 	for _, c := range n.regexes {
 		if c.seg.re.MatchString(seg) {
 			if m, v := search(c, rest, method, append(vals, seg), st); m != nil {
@@ -229,6 +265,9 @@ func (n *node[C]) walk(fn func(pattern, method string)) {
 	for _, k := range keys {
 		n.static[k].walk(fn)
 	}
+	for _, c := range n.templates {
+		c.walk(fn)
+	}
 	for _, c := range n.regexes {
 		c.walk(fn)
 	}
@@ -242,11 +281,17 @@ func (n *node[C]) walk(fn func(pattern, method string)) {
 
 // maxParams returns the deepest parameter count in the trie.
 func (n *node[C]) maxParams(depth int) int {
-	if n.seg.kind != segStatic && n.seg.value != "" {
+	switch {
+	case n.seg.kind == segTemplate:
+		depth += len(templateNames(n.seg.parts))
+	case n.seg.kind != segStatic && n.seg.value != "":
 		depth++
 	}
 	best := depth
 	for _, c := range n.static {
+		best = max(best, c.maxParams(depth))
+	}
+	for _, c := range n.templates {
 		best = max(best, c.maxParams(depth))
 	}
 	for _, c := range n.regexes {
