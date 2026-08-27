@@ -169,6 +169,11 @@ func TestDefaultErrorHandlerAnswersHTMXWithHTML(t *testing.T) {
 			if got := rec.Body.String(); got != tc.body {
 				t.Errorf("body = %q, want %q", got, tc.body)
 			}
+			// Two answers for one URL, so a shared cache has to keep them
+			// apart.
+			if got := rec.Header().Get(HeaderVary); got != HeaderHXRequest {
+				t.Errorf("%s = %q, want %q", HeaderVary, got, HeaderHXRequest)
+			}
 		})
 	}
 }

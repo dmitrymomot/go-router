@@ -663,3 +663,87 @@ func TestHXRejectsInvalidUTF8(t *testing.T) {
 		})
 	}
 }
+
+// TestHXReportsAFailureOfADroppedLink proves that the failure belongs to the
+// request and not to the value, so a handler that drops one link of the chain
+// still reports it instead of answering as though the header went out.
+func TestHXReportsAFailureOfADroppedLink(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		hx := c.HX()
+		hx.Retarget("bad\nvalue") // the returned chain is dropped
+		return hx.Render(http.StatusOK, comp("x"))
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if got := rec.Header().Get(HeaderHXRetarget); got != "" {
+		t.Errorf("%s = %q, want no header", HeaderHXRetarget, got)
+	}
+}
+
+// TestHXTriggerRejectsARepeatedName proves that the header never carries the
+// same event twice: the JSON form would hold a duplicate object member, which
+// encoding/json/v2 refuses to read and which a browser resolves by keeping the
+// last one, so the earlier event would vanish.
+func TestHXTriggerRejectsARepeatedName(t *testing.T) {
+	ends := map[string]func(c *tctx) error{
+		"Trigger": func(c *tctx) error {
+			return c.HX().Trigger("saved", "saved").NoSwap()
+		},
+		"TriggerEvents": func(c *tctx) error {
+			return c.HX().TriggerEvents(
+				HXEvent{Name: "saved", Detail: 1},
+				HXEvent{Name: "saved", Detail: 2},
+			).NoSwap()
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			r := newTestRouter()
+			r.GET("/", end)
+
+			rec := do(r, http.MethodGet, "/")
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want 500", rec.Code)
+			}
+			if got := rec.Header().Get(HeaderHXTrigger); got != "" {
+				t.Errorf("%s = %q, want no header", HeaderHXTrigger, got)
+			}
+		})
+	}
+}
+
+func TestHTMXWantsPartial(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{"a browser", nil, false},
+		{"htmx", map[string]string{HeaderHXRequest: "true"}, true},
+		{
+			"boosted",
+			map[string]string{HeaderHXRequest: "true", HeaderHXBoosted: "true"},
+			false,
+		},
+		{
+			"a history restore",
+			map[string]string{HeaderHXRequest: "true", HeaderHXHistoryRestoreRequest: "true"},
+			false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			if got := HTMXWantsPartial(req); got != tc.want {
+				t.Errorf("HTMXWantsPartial() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

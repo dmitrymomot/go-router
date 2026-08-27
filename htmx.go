@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -180,6 +181,21 @@ func (b *Base) IsHTMX() bool { return hxTrue(b.req.Header.Get(HeaderHXRequest)) 
 // also an htmx request.
 func (b *Base) IsBoosted() bool { return hxTrue(b.req.Header.Get(HeaderHXBoosted)) }
 
+// HTMXWantsPartial reports whether r takes an HTML fragment: htmx made it, and
+// it is neither boosted nor a history restore, both of which ask for a whole
+// page instead.
+//
+// It is the rule that [HTMXPartial] routes by, and the one that
+// middleware.HTMXRedirect converts a redirect by, so that the two never
+// disagree about the same request. It takes an [http.Request] because
+// middleware outside this package holds one and not a [Base].
+func HTMXWantsPartial(r *http.Request) bool {
+	h := r.Header
+	return hxTrue(h.Get(HeaderHXRequest)) &&
+		!hxTrue(h.Get(HeaderHXBoosted)) &&
+		!hxTrue(h.Get(HeaderHXHistoryRestoreRequest))
+}
+
 // hxTrue reports whether a header carries the "true" that htmx sends.
 func hxTrue(v string) bool { return strings.EqualFold(v, "true") }
 
@@ -204,8 +220,7 @@ func HTMXPartial[C Context](partial, page HandlerFunc[C]) HandlerFunc[C] {
 	return func(c C) error {
 		b := c.base()
 		b.Vary(HeaderHXRequest, HeaderHXBoosted)
-		hx := b.HTMX()
-		if hx.Request && !hx.Boosted && !hx.HistoryRestore {
+		if HTMXWantsPartial(b.req) {
 			return partial(c)
 		}
 		return page(c)
@@ -285,14 +300,20 @@ func (l HXLocation) isPathOnly() bool {
 //	Render  RenderStream  HTML  String  JSON  NoContent
 //	NoSwap  Redirect  Location  LocationWith
 //
-// A chain that ends on a header method instead has to read the error with
-// [HXResponse.Err], or it drops it.
+// The failure belongs to the request and not to the value, so a handler that
+// drops one link still reports it:
 //
-// The value holds no state of its own beyond that error, so passing it around
-// costs nothing and it never escapes to the heap.
+//	hx := c.HX()
+//	hx.Retarget("#row-7")            // the returned chain is dropped
+//	return hx.Render(http.StatusOK, view.Row(row))   // still reports a failure
+//
+// A chain that ends on no such method at all has to read the failure with
+// [HXResponse.Err], or nothing does.
+//
+// The value holds one pointer, so passing it around costs nothing and it never
+// escapes to the heap.
 type HXResponse struct {
-	b   *Base
-	err error
+	b *Base
 }
 
 // HX starts an htmx response. See [HXResponse] for the chain that it opens.
@@ -300,8 +321,14 @@ func (b *Base) HX() HXResponse { return HXResponse{b: b} }
 
 // Err returns the first failure of the chain, and nil for a chain that wrote
 // every header. A method that writes the body reports the same error, so read
-// this only when the chain ends without one.
-func (h HXResponse) Err() error { return h.err }
+// this only when the chain ends on none of them.
+func (h HXResponse) Err() error { return h.b.hxErr }
+
+// fail records the first failure of the chain.
+func (h HXResponse) fail(err error) HXResponse {
+	h.b.hxErr = ErrInternalServerError.WithError(err)
+	return h
+}
 
 // set writes one header, unless the chain already failed.
 //
@@ -310,13 +337,11 @@ func (h HXResponse) Err() error { return h.err }
 // way, but a selector or a URL that holds one is a bug worth reporting instead
 // of a header that silently means something else.
 func (h HXResponse) set(name, value string) HXResponse {
-	if h.err != nil {
+	if h.b.hxErr != nil {
 		return h
 	}
 	if strings.ContainsAny(value, "\r\n") {
-		h.err = ErrInternalServerError.WithError(
-			fmt.Errorf("router: the %s header holds a line break: %q", name, value))
-		return h
+		return h.fail(fmt.Errorf("router: the %s header holds a line break: %q", name, value))
 	}
 	h.b.res.Header().Set(name, value)
 	return h
@@ -423,14 +448,17 @@ func (h HXResponse) TriggerEventsAfterSettle(events ...HXEvent) HXResponse {
 
 // triggerNames writes a comma separated list of event names.
 func (h HXResponse) triggerNames(header string, names []string) HXResponse {
-	if h.err != nil || len(names) == 0 {
+	if h.b.hxErr != nil || len(names) == 0 {
 		return h
 	}
-	for _, n := range names {
+	for i, n := range names {
 		if err := validEventName(n); err != nil {
-			h.err = ErrInternalServerError.WithError(
-				fmt.Errorf("router: the %s header cannot carry the event name %q: %w", header, n, err))
-			return h
+			return h.fail(fmt.Errorf(
+				"router: the %s header cannot carry the event name %q: %w", header, n, err))
+		}
+		if slices.Contains(names[:i], n) {
+			return h.fail(fmt.Errorf(
+				"router: the %s header names the event %q twice", header, n))
 		}
 	}
 	return h.set(header, strings.Join(names, ", "))
@@ -471,34 +499,47 @@ func isASCII(s string) bool {
 
 // triggerEvents writes the JSON form of a trigger header.
 func (h HXResponse) triggerEvents(header string, events []HXEvent) HXResponse {
-	if h.err != nil || len(events) == 0 {
+	if h.b.hxErr != nil || len(events) == 0 {
 		return h
 	}
+
+	// A repeated name would write the same object member twice, which
+	// encoding/json/v2 refuses to read and which the browser resolves by
+	// keeping the last one, so the earlier event would vanish without a word.
+	// The builder writes the members itself, so the check has to live here.
+	var seen map[string]bool
+	if len(events) > 1 {
+		seen = make(map[string]bool, len(events))
+	}
+
 	var sb strings.Builder
 	sb.WriteByte('{')
 	for i, e := range events {
 		if e.Name == "" {
-			h.err = ErrInternalServerError.WithError(
-				fmt.Errorf("router: the %s header holds an event without a name", header))
-			return h
+			return h.fail(fmt.Errorf("router: the %s header holds an event without a name", header))
+		}
+		if seen != nil {
+			if seen[e.Name] {
+				return h.fail(fmt.Errorf(
+					"router: the %s header names the event %q twice", header, e.Name))
+			}
+			seen[e.Name] = true
 		}
 		if i > 0 {
 			sb.WriteByte(',')
 		}
 		name, err := json.Marshal(e.Name, h.b.headerJSONOptions()...)
 		if err != nil {
-			h.err = ErrInternalServerError.WithError(
-				fmt.Errorf("router: encode the name of the %s event %q: %w", header, e.Name, err))
-			return h
+			return h.fail(fmt.Errorf(
+				"router: encode the name of the %s event %q: %w", header, e.Name, err))
 		}
 		sb.Write(name)
 		sb.WriteByte(':')
 
 		detail, err := json.Marshal(e.Detail, h.b.headerJSONOptions()...)
 		if err != nil {
-			h.err = ErrInternalServerError.WithError(
-				fmt.Errorf("router: encode the detail of the %s event %q: %w", header, e.Name, err))
-			return h
+			return h.fail(fmt.Errorf(
+				"router: encode the detail of the %s event %q: %w", header, e.Name, err))
 		}
 		sb.Write(detail)
 	}
@@ -554,8 +595,8 @@ func writeUnicodeEscape(sb *strings.Builder, r rune) {
 
 // Render writes an HTML body from a [Component], as [Base.Render] does.
 func (h HXResponse) Render(status int, c Component) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.Render(status, c)
 }
@@ -563,24 +604,24 @@ func (h HXResponse) Render(status int, c Component) error {
 // RenderStream writes an HTML body straight to the client, as
 // [Base.RenderStream] does.
 func (h HXResponse) RenderStream(status int, c Component) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.RenderStream(status, c)
 }
 
 // HTML writes an HTML body, as [Base.HTML] does.
 func (h HXResponse) HTML(status int, html string) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.HTML(status, html)
 }
 
 // String writes a plain text body, as [Base.String] does.
 func (h HXResponse) String(status int, s string) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.String(status, s)
 }
@@ -589,16 +630,16 @@ func (h HXResponse) String(status int, s string) error {
 // like any other, so reach for it only when a listener of a triggered event
 // reads the answer.
 func (h HXResponse) JSON(status int, v any, opts ...json.Options) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.JSON(status, v, opts...)
 }
 
 // NoContent writes the status line alone, as [Base.NoContent] does.
 func (h HXResponse) NoContent(status int) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.NoContent(status)
 }
@@ -622,15 +663,15 @@ func (h HXResponse) NoSwap() error { return h.NoContent(http.StatusNoContent) }
 // A request that htmx did not make gets a plain 303 See Other, so the same
 // handler still serves a browser that runs no JavaScript.
 func (h HXResponse) Redirect(url string) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, url)
 	}
 	h = h.set(HeaderHXRedirect, url)
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.NoContent(http.StatusOK)
 }
@@ -642,15 +683,15 @@ func (h HXResponse) Redirect(url string) error {
 // A request that htmx did not make gets a plain 303 See Other, as
 // [HXResponse.Redirect] explains.
 func (h HXResponse) Location(path string) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, path)
 	}
 	h = h.set(HeaderHXLocation, path)
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.NoContent(http.StatusOK)
 }
@@ -662,12 +703,11 @@ func (h HXResponse) Location(path string) error {
 //
 // It reports an error when loc names no path.
 func (h HXResponse) LocationWith(loc HXLocation) error {
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	if loc.Path == "" {
-		return ErrInternalServerError.WithError(
-			fmt.Errorf("router: an HX-Location needs a path"))
+		return h.fail(errors.New("router: an HX-Location needs a path")).b.hxErr
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, loc.Path)
@@ -679,12 +719,11 @@ func (h HXResponse) LocationWith(loc HXLocation) error {
 
 	data, err := json.Marshal(loc, h.b.headerJSONOptions()...)
 	if err != nil {
-		return ErrInternalServerError.WithError(
-			fmt.Errorf("router: encode the HX-Location header: %w", err))
+		return h.fail(fmt.Errorf("router: encode the HX-Location header: %w", err)).b.hxErr
 	}
 	h = h.set(HeaderHXLocation, escapeNonASCII(string(data)))
-	if h.err != nil {
-		return h.err
+	if h.b.hxErr != nil {
+		return h.b.hxErr
 	}
 	return h.b.NoContent(http.StatusOK)
 }

@@ -109,6 +109,11 @@ type Base struct {
 	// jsonOpts are the encoding/json/v2 options of the router.
 	jsonOpts []json.Options
 
+	// hxErr is the first failure of the htmx response chain. It lives here
+	// rather than on the [HXResponse] value, so that a handler which drops one
+	// link of the chain still reports the failure.
+	hxErr error
+
 	// resStorage backs res, so that a context needs one allocation and not two.
 	resStorage Response
 
@@ -155,6 +160,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.hostPattern = ""
 	b.hostIdx = -1
 	b.pathEscaped = false
+	b.hxErr = nil
 	clear(b.store)
 }
 
@@ -319,9 +325,14 @@ func (b *Base) SetHeader(key, value string) { b.res.Header().Set(key, value) }
 //
 //	c.Vary(router.HeaderHXRequest)
 //
-// [HTMXPartial] calls it for you.
-func (b *Base) Vary(names ...string) {
-	h := b.res.Header()
+// [HTMXPartial] calls it for you. [AddVary] is the same for a response that
+// the caller holds as an [http.Header], which is what middleware outside this
+// package has.
+func (b *Base) Vary(names ...string) { AddVary(b.res.Header(), names...) }
+
+// AddVary adds header names to the Vary header of h, and skips a name that it
+// already carries. [Base.Vary] is this for the response in flight.
+func AddVary(h http.Header, names ...string) {
 	for _, name := range names {
 		if name == "" || headerContainsToken(h, HeaderVary, name) {
 			continue
