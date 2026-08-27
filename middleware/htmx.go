@@ -1,8 +1,8 @@
 package middleware
 
 import (
+	"io"
 	"net/http"
-	"strings"
 
 	"github.com/dmitrymomot/go-router"
 )
@@ -37,7 +37,8 @@ func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFu
 // means.
 //
 // Three kinds of request pass through untouched, because each one wants the
-// redirect that the handler wrote:
+// redirect that the handler wrote. [router.HTMXWantsPartial] is the rule, the
+// same one that [router.HTMXPartial] routes by:
 //
 //   - a request that htmx did not make, which is any browser navigation;
 //   - a boosted request, which htmx follows itself and swaps as the new page,
@@ -59,11 +60,22 @@ func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Mid
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
-			if skipped(cfg.Skip, c) || !hxNavigates(c.Request()) {
+			if skipped(cfg.Skip, c) {
 				return next(c)
 			}
 
 			res := c.Response()
+
+			// The same URL answers a browser with a 3xx and htmx with a 200,
+			// so a shared cache has to keep the two apart. This runs for every
+			// request of the scope, because the browser answer needs the
+			// header just as much as the htmx one.
+			router.AddVary(res.Header(), router.HeaderHXRequest)
+
+			if !router.HTMXWantsPartial(c.Request()) {
+				return next(c)
+			}
+
 			w := &hxRedirectWriter{ResponseWriter: res.ResponseWriter, header: header}
 			res.ResponseWriter = w
 			defer func() {
@@ -96,6 +108,13 @@ type hxRedirectWriter struct {
 // server-sent event stream under this middleware needs it.
 func (w *hxRedirectWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// WriteString writes a string body. Without it [io.WriteString] would stop at
+// this wrapper and copy the string into a byte slice, because the writer of the
+// server underneath is the one that implements [io.StringWriter].
+func (w *hxRedirectWriter) WriteString(s string) (int, error) {
+	return io.WriteString(w.ResponseWriter, s)
+}
+
 // WriteHeader writes the status line, and turns a redirect into the htmx one.
 func (w *hxRedirectWriter) WriteHeader(code int) {
 	if code >= http.StatusMultipleChoices && code < http.StatusBadRequest {
@@ -109,18 +128,3 @@ func (w *hxRedirectWriter) WriteHeader(code int) {
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
-
-// hxNavigates reports whether an htmx request wants the browser to navigate
-// rather than a redirect that htmx follows for itself.
-//
-// It reads the headers rather than the context, because [router.Context]
-// carries the request and not the htmx helpers of [router.Base].
-func hxNavigates(r *http.Request) bool {
-	h := r.Header
-	return hxTrue(h.Get(router.HeaderHXRequest)) &&
-		!hxTrue(h.Get(router.HeaderHXBoosted)) &&
-		!hxTrue(h.Get(router.HeaderHXHistoryRestoreRequest))
-}
-
-// hxTrue reports whether a header carries the "true" that htmx sends.
-func hxTrue(v string) bool { return strings.EqualFold(v, "true") }

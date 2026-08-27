@@ -80,6 +80,11 @@ func TestHTMXRedirect(t *testing.T) {
 			if got := rec.Header().Get(router.HeaderLocation); got != tc.location {
 				t.Errorf("%s = %q, want %q", router.HeaderLocation, got, tc.location)
 			}
+			// Both answers need it: a cache that stored the 200 would hand a
+			// browser navigation a blank page.
+			if got := rec.Header().Get(router.HeaderVary); got != router.HeaderHXRequest {
+				t.Errorf("%s = %q, want %q", router.HeaderVary, got, router.HeaderHXRequest)
+			}
 		})
 	}
 }
@@ -107,6 +112,10 @@ func TestHTMXRedirectSkip(t *testing.T) {
 	rec := hxGet(r, "/go", map[string]string{router.HeaderHXRequest: "true"})
 	if rec.Code != http.StatusSeeOther {
 		t.Errorf("status = %d, want 303", rec.Code)
+	}
+	// A skipped request has one answer, so it needs no Vary either.
+	if got := rec.Header().Get(router.HeaderVary); got != "" {
+		t.Errorf("%s = %q, want no header", router.HeaderVary, got)
 	}
 }
 
