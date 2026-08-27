@@ -367,3 +367,89 @@ func splitSegment(path string) (seg, rest string) {
 	}
 	return p, ""
 }
+
+// edgeKind is the way one edge of the radix tree consumes the path.
+type edgeKind uint8
+
+const (
+	// edgeLiteral consumes a run of literal text, which may span several
+	// segments. The tree compresses those runs, so a static route costs a few
+	// string comparisons instead of one lookup per segment.
+	edgeLiteral edgeKind = iota
+
+	// The kinds below consume exactly one segment.
+	edgeTemplate
+	edgeRegex
+	edgeParam
+
+	// edgeWildcard consumes the rest of the path.
+	edgeWildcard
+)
+
+// edge is one step of a pattern in the form that the radix tree inserts.
+type edge struct {
+	kind  edgeKind
+	lit   string // edgeLiteral: the text to consume
+	name  string // the parameter name
+	re    *regexp.Regexp
+	parts []segPart // edgeTemplate
+	raw   string    // edgeTemplate: the segment as written, for messages
+}
+
+// patternEdges turns the segments of a pattern into the edges of the radix
+// tree. It joins neighbouring literal segments into one edge, which is what
+// the tree compresses.
+//
+// The "/" in front of a parameter or a catch-all belongs to that edge, not to
+// the literal before it. Two things follow. /v1/users and /v1/users/{id} share
+// one node instead of hanging a node that holds a single "/" underneath, which
+// takes a level out of every parameter route. And /files matches
+// /files/{path...} as well as /files/a/b.
+func patternEdges(segs []segment) []edge {
+	var (
+		edges []edge
+		lit   strings.Builder
+	)
+	flush := func() {
+		if lit.Len() > 0 {
+			edges = append(edges, edge{kind: edgeLiteral, lit: lit.String()})
+			lit.Reset()
+		}
+	}
+
+	if len(segs) == 0 {
+		return []edge{{kind: edgeLiteral, lit: "/"}}
+	}
+
+	for _, sg := range segs {
+		switch sg.kind {
+		case segStatic:
+			lit.WriteByte('/')
+			lit.WriteString(sg.value)
+		case segWildcard:
+			flush()
+			edges = append(edges, edge{kind: edgeWildcard, name: sg.value})
+		case segTemplate:
+			flush()
+			edges = append(edges, edge{kind: edgeTemplate, name: sg.value, parts: sg.parts, raw: sg.value})
+		case segRegex:
+			flush()
+			edges = append(edges, edge{kind: edgeRegex, name: sg.value, re: sg.re})
+		default:
+			flush()
+			edges = append(edges, edge{kind: edgeParam, name: sg.value})
+		}
+	}
+	flush()
+	return edges
+}
+
+// commonPrefixLen returns the length of the longest prefix that a and b share.
+func commonPrefixLen(a, b string) int {
+	n := min(len(a), len(b))
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
+}

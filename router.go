@@ -493,6 +493,14 @@ func (r *Router[C]) build() {
 	tree.walk(func(pattern, method string) {
 		r.routes = append(r.routes, Route{Method: method, Pattern: pattern})
 	})
+	// The tree walks in match order, which is an implementation detail. Sort,
+	// so that Routes reads the same way whatever shape the tree took.
+	slices.SortFunc(r.routes, func(a, b Route) int {
+		if c := strings.Compare(a.Pattern, b.Pattern); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Method, b.Method)
+	})
 }
 
 // concatMiddleware joins two chains into a new slice.
@@ -584,7 +592,7 @@ func (r *Router[C]) route(c C, req *http.Request) {
 
 	switch {
 	case n != nil:
-		if n.seg.kind == segWildcard && len(vals) > 0 {
+		if n.kind == edgeWildcard && len(vals) > 0 {
 			b.rawTail = vals[len(vals)-1]
 		}
 		if escaped {

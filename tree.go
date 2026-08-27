@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -14,104 +15,47 @@ type methodHandler[C Context] struct {
 	handler HandlerFunc[C]
 }
 
-// node is one segment of the route trie. A node holds its children grouped by
-// the kind of segment that reaches them. The matcher tries the groups in the
-// order static, regular expression, parameter, catch-all, so a literal path
-// always wins over a parameter.
+// node is one node of the route tree.
+//
+// The tree is a compressed radix tree over the literal text of the patterns: a
+// node consumes a run of literal characters that may span several segments, so
+// a static route costs a handful of string comparisons rather than one lookup
+// per segment. Every static child of a node starts with a different byte,
+// which is what indices records, so picking the branch is a byte scan.
+//
+// A parameter, a regular expression, a template such as "rep-{date}.csv" and a
+// catch-all each get their own child, because they consume by a rule that
+// literal text cannot express. The matcher tries the children in the order
+// literal, template, regular expression, parameter, catch-all, so a literal
+// path always wins, and it backtracks when a branch dies further down.
 type node[C Context] struct {
-	statics   []*node[C]
+	// prefix is the literal text that this node consumes. It is empty for the
+	// root and for every node that is not a literal.
+	prefix string
+
+	// indices holds the first byte of each entry of statics, in the same
+	// order.
+	indices string
+	statics []*node[C]
+
 	templates []*node[C]
 	regexes   []*node[C]
 	param     *node[C]
 	wildcard  *node[C]
 
-	// seg describes the segment that reaches this node.
-	seg segment
+	// The fields below describe a node that is not a literal.
+	kind  edgeKind
+	name  string
+	re    *regexp.Regexp
+	parts []segPart
+	raw   string
 
 	routes  []methodHandler[C]
 	pattern string
 	names   []string
 }
 
-// child returns the existing child for seg, or nil. It reports an error when a
-// child has the same shape under other parameter names, because two names for
-// one position would make Param ambiguous.
-func (n *node[C]) child(seg segment) (*node[C], error) {
-	if seg.kind == segTemplate {
-		want := templateSkeleton(seg.parts)
-		names := templateNames(seg.parts)
-		for _, c := range n.templates {
-			if templateSkeleton(c.seg.parts) != want {
-				continue
-			}
-			if !slices.Equal(templateNames(c.seg.parts), names) {
-				return nil, fmt.Errorf("%q has the shape of %q, which already uses the parameter names %v",
-					seg.value, c.seg.value, templateNames(c.seg.parts))
-			}
-			return c, nil
-		}
-		return nil, nil
-	}
-
-	c := n.plainChild(seg)
-	if c != nil && seg.kind != segStatic && c.seg.value != seg.value {
-		return nil, fmt.Errorf("the parameter at this position is already named %q, not %q",
-			c.seg.value, seg.value)
-	}
-	return c, nil
-}
-
-// staticChild finds a literal child. A node has a handful of them, and a
-// linear scan that compares the length and the first byte first beats a hash
-// of the whole segment at that size.
-func (n *node[C]) staticChild(seg string) *node[C] {
-	for _, c := range n.statics {
-		v := c.seg.value
-		if len(v) == len(seg) && (len(v) == 0 || v[0] == seg[0]) && v == seg {
-			return c
-		}
-	}
-	return nil
-}
-
-// plainChild returns the existing child for a non-template segment, or nil.
-func (n *node[C]) plainChild(seg segment) *node[C] {
-	switch seg.kind {
-	case segStatic:
-		return n.staticChild(seg.value)
-	case segRegex:
-		for _, c := range n.regexes {
-			if c.seg.re.String() == seg.re.String() {
-				return c
-			}
-		}
-		return nil
-	case segParam:
-		return n.param
-	default:
-		return n.wildcard
-	}
-}
-
-// addChild creates and links a child for seg.
-func (n *node[C]) addChild(seg segment) *node[C] {
-	c := &node[C]{seg: seg}
-	switch seg.kind {
-	case segStatic:
-		n.statics = append(n.statics, c)
-	case segTemplate:
-		n.templates = append(n.templates, c)
-	case segRegex:
-		n.regexes = append(n.regexes, c)
-	case segParam:
-		n.param = c
-	default:
-		n.wildcard = c
-	}
-	return c
-}
-
-// insert adds a route to the trie. It reports an error when the pattern
+// insert adds a route to the tree. It reports an error when the pattern
 // conflicts with a pattern that is already registered.
 func (n *node[C]) insert(method, pattern string, h HandlerFunc[C]) error {
 	segs, names, err := parsePattern(pattern)
@@ -120,13 +64,14 @@ func (n *node[C]) insert(method, pattern string, h HandlerFunc[C]) error {
 	}
 
 	cur := n
-	for _, seg := range segs {
-		next, err := cur.child(seg)
+	for _, e := range patternEdges(segs) {
+		if e.kind == edgeLiteral {
+			cur = cur.insertLiteral(e.lit)
+			continue
+		}
+		next, err := cur.insertSpecial(e)
 		if err != nil {
 			return fmt.Errorf("router: %q conflicts with an existing route: %w", normalizePattern(pattern), err)
-		}
-		if next == nil {
-			next = cur.addChild(seg)
 		}
 		cur = next
 	}
@@ -142,6 +87,98 @@ func (n *node[C]) insert(method, pattern string, h HandlerFunc[C]) error {
 	}
 	cur.routes = append(cur.routes, methodHandler[C]{method: method, handler: h})
 	return nil
+}
+
+// insertLiteral walks the literal text into the tree and returns the node that
+// ends it. It splits a node whose prefix only partly matches, which is what
+// keeps every static child of a node starting with a different byte.
+func (n *node[C]) insertLiteral(text string) *node[C] {
+	cur := n
+	for text != "" {
+		i := strings.IndexByte(cur.indices, text[0])
+		if i < 0 {
+			child := &node[C]{kind: edgeLiteral, prefix: text}
+			cur.indices += string(text[0])
+			cur.statics = append(cur.statics, child)
+			return child
+		}
+
+		child := cur.statics[i]
+		shared := commonPrefixLen(child.prefix, text)
+		if shared < len(child.prefix) {
+			// The new text branches away in the middle of this node. Keep the
+			// shared head here and move everything else into a child.
+			tail := new(node[C])
+			*tail = *child
+			tail.prefix = child.prefix[shared:]
+
+			*child = node[C]{kind: edgeLiteral, prefix: child.prefix[:shared]}
+			child.indices = string(tail.prefix[0])
+			child.statics = []*node[C]{tail}
+		}
+		text = text[shared:]
+		cur = child
+	}
+	return cur
+}
+
+// insertSpecial links the child that consumes a parameter, a regular
+// expression, a template or a catch-all.
+func (n *node[C]) insertSpecial(e edge) (*node[C], error) {
+	switch e.kind {
+	case edgeTemplate:
+		want := templateSkeleton(e.parts)
+		names := templateNames(e.parts)
+		for _, c := range n.templates {
+			if templateSkeleton(c.parts) != want {
+				continue
+			}
+			if !slices.Equal(templateNames(c.parts), names) {
+				return nil, fmt.Errorf("%q has the shape of %q, which already uses the parameter names %v",
+					e.raw, c.raw, templateNames(c.parts))
+			}
+			return c, nil
+		}
+		c := &node[C]{kind: edgeTemplate, name: e.name, parts: e.parts, raw: e.raw}
+		n.templates = append(n.templates, c)
+		return c, nil
+
+	case edgeRegex:
+		for _, c := range n.regexes {
+			if c.re.String() != e.re.String() {
+				continue
+			}
+			if c.name != e.name {
+				return nil, namingConflict(c.name, e.name)
+			}
+			return c, nil
+		}
+		c := &node[C]{kind: edgeRegex, name: e.name, re: e.re}
+		n.regexes = append(n.regexes, c)
+		return c, nil
+
+	case edgeWildcard:
+		if n.wildcard == nil {
+			n.wildcard = &node[C]{kind: edgeWildcard, name: e.name}
+		} else if n.wildcard.name != e.name {
+			return nil, namingConflict(n.wildcard.name, e.name)
+		}
+		return n.wildcard, nil
+
+	default:
+		if n.param == nil {
+			n.param = &node[C]{kind: edgeParam, name: e.name}
+		} else if n.param.name != e.name {
+			return nil, namingConflict(n.param.name, e.name)
+		}
+		return n.param, nil
+	}
+}
+
+// namingConflict reports two names for one position, which would make Param
+// ambiguous.
+func namingConflict(existing, want string) error {
+	return fmt.Errorf("the parameter at this position is already named %q, not %q", existing, want)
 }
 
 // handler returns the handler for the method. A HEAD request falls back to the
@@ -200,20 +237,21 @@ func (st *matchState[C]) record(n *node[C], vals []string) {
 	}
 }
 
-// search walks the trie. It returns the node that answers method for path and
-// the parameter values in declaration order.
+// search walks the tree. n has already consumed its own part of the path, and
+// rest is what remains. It returns the node that answers method and the
+// parameter values in declaration order.
 //
 // vals shares one backing array across the whole walk. A branch that fails
 // leaves values behind, and the next branch overwrites them at the same index,
 // so only the values of the branch that succeeds reach the caller.
-func search[C Context](n *node[C], path, method string, vals []string, st *matchState[C]) (*node[C], []string) {
-	if path == "" || path == "/" {
+func search[C Context](n *node[C], rest, method string, vals []string, st *matchState[C]) (*node[C], []string) {
+	if rest == "" {
 		if n.handler(method) != nil {
 			return n, vals
 		}
 		st.record(n, vals)
-		// A catch-all also matches an empty remainder, as in /files for
-		// the pattern /files/{path...}.
+		// A catch-all also matches an empty remainder, as in /files for the
+		// pattern /files/{path...}.
 		if n.wildcard != nil {
 			w := append(vals, "")
 			if n.wildcard.handler(method) != nil {
@@ -224,34 +262,58 @@ func search[C Context](n *node[C], path, method string, vals []string, st *match
 		return nil, nil
 	}
 
-	seg, rest := splitSegment(path)
+	// A short inline scan beats strings.IndexByte here: a node holds a handful
+	// of literal children, and the call overhead outweighs the search.
+	head := rest[0]
+	for i := 0; i < len(n.indices); i++ {
+		if n.indices[i] != head {
+			continue
+		}
+		if c := n.statics[i]; strings.HasPrefix(rest, c.prefix) {
+			if m, v := search(c, rest[len(c.prefix):], method, vals, st); m != nil {
+				return m, v
+			}
+		}
+		break
+	}
 
-	if c := n.staticChild(seg); c != nil {
-		if m, v := search(c, rest, method, vals, st); m != nil {
-			return m, v
-		}
+	// Every other kind owns the separator in front of it, so none of them can
+	// match in the middle of a segment. That check is also what keeps
+	// /assets/* from answering /assetsfoo.
+	if head != '/' {
+		return nil, nil
 	}
-	for _, c := range n.templates {
-		if w, ok := appendTemplateValues(vals, c.seg.parts, seg); ok {
-			if m, v := search(c, rest, method, w, st); m != nil {
+
+	if n.templates != nil || n.regexes != nil || n.param != nil {
+		body := rest[1:]
+		seg, tail := body, ""
+		if i := strings.IndexByte(body, '/'); i >= 0 {
+			seg, tail = body[:i], body[i:]
+		}
+
+		for _, c := range n.templates {
+			if w, ok := appendTemplateValues(vals, c.parts, seg); ok {
+				if m, v := search(c, tail, method, w, st); m != nil {
+					return m, v
+				}
+			}
+		}
+		for _, c := range n.regexes {
+			if c.re.MatchString(seg) {
+				if m, v := search(c, tail, method, append(vals, seg), st); m != nil {
+					return m, v
+				}
+			}
+		}
+		if n.param != nil && seg != "" {
+			if m, v := search(n.param, tail, method, append(vals, seg), st); m != nil {
 				return m, v
 			}
 		}
 	}
-	for _, c := range n.regexes {
-		if c.seg.re.MatchString(seg) {
-			if m, v := search(c, rest, method, append(vals, seg), st); m != nil {
-				return m, v
-			}
-		}
-	}
-	if n.param != nil && seg != "" {
-		if m, v := search(n.param, rest, method, append(vals, seg), st); m != nil {
-			return m, v
-		}
-	}
+
 	if n.wildcard != nil {
-		w := append(vals, path[1:])
+		w := append(vals, rest[1:])
 		if n.wildcard.handler(method) != nil {
 			return n.wildcard, w
 		}
@@ -260,16 +322,14 @@ func search[C Context](n *node[C], path, method string, vals []string, st *match
 	return nil, nil
 }
 
-// walk calls fn for every registered route, in trie order.
+// walk calls fn for every registered route.
 func (n *node[C]) walk(fn func(pattern, method string)) {
 	if n.pattern != "" {
 		for _, mh := range n.routes {
 			fn(n.pattern, mh.method)
 		}
 	}
-	sorted := slices.Clone(n.statics)
-	slices.SortFunc(sorted, func(a, b *node[C]) int { return strings.Compare(a.seg.value, b.seg.value) })
-	for _, c := range sorted {
+	for _, c := range n.statics {
 		c.walk(fn)
 	}
 	for _, c := range n.templates {
@@ -284,33 +344,6 @@ func (n *node[C]) walk(fn func(pattern, method string)) {
 	if n.wildcard != nil {
 		n.wildcard.walk(fn)
 	}
-}
-
-// maxParams returns the deepest parameter count in the trie.
-func (n *node[C]) maxParams(depth int) int {
-	switch {
-	case n.seg.kind == segTemplate:
-		depth += len(templateNames(n.seg.parts))
-	case n.seg.kind != segStatic && n.seg.value != "":
-		depth++
-	}
-	best := depth
-	for _, c := range n.statics {
-		best = max(best, c.maxParams(depth))
-	}
-	for _, c := range n.templates {
-		best = max(best, c.maxParams(depth))
-	}
-	for _, c := range n.regexes {
-		best = max(best, c.maxParams(depth))
-	}
-	if n.param != nil {
-		best = max(best, n.param.maxParams(depth))
-	}
-	if n.wildcard != nil {
-		best = max(best, n.wildcard.maxParams(depth))
-	}
-	return best
 }
 
 // unescapeParams decodes percent escapes in place.
