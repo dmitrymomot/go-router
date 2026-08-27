@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"strings"
 
@@ -51,6 +52,17 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 			return next(c)
 		}
 	}
+}
+
+// ClientIP returns the address of the client, without the port. It reads what
+// [RealIPWithConfig] wrote, and falls back to the address of the connection
+// when that middleware is not in the chain.
+func ClientIP[C router.Context](c C) string {
+	host, _, err := net.SplitHostPort(c.Request().RemoteAddr)
+	if err != nil {
+		return c.Request().RemoteAddr
+	}
+	return host
 }
 
 // firstAddress returns the first address that any of the headers reports.

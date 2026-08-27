@@ -29,21 +29,7 @@
 // request and [router.Context.RoutePattern] for the matched route.
 package middleware
 
-import (
-	"net"
-
-	"github.com/dmitrymomot/go-router"
-)
-
-// ClientIP returns the address of the client, without the port. Put [RealIP]
-// in front of it to read the address that a trusted proxy reports.
-func ClientIP[C router.Context](c C) string {
-	host, _, err := net.SplitHostPort(c.Request().RemoteAddr)
-	if err != nil {
-		return c.Request().RemoteAddr
-	}
-	return host
-}
+import "github.com/dmitrymomot/go-router"
 
 // statusOf returns the status that the client sees, whether the handler wrote
 // it or an error will produce it.
