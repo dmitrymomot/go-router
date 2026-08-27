@@ -91,8 +91,10 @@ analyze:
 
 # Run golangci-lint
 golangci:
-    # CI runs the same linter through its own action, which ships a prebuilt
-    # binary instead of compiling one per job.
+    # CI runs this recipe rather than the golangci-lint action: the prebuilt
+    # binary of the action is built with an older Go, which refuses a module
+    # that targets 1.27. Compiling from the pinned version costs a minute and
+    # keeps CI and a local run on the same linter.
     go run {{ golangci }} run ./...
 
 # Report known vulnerabilities in the module and the toolchain
