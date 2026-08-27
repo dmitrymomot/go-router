@@ -1,7 +1,9 @@
 package router
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -109,8 +111,8 @@ func TestRenderHEADWritesTheLengthOnly(t *testing.T) {
 	}
 }
 
-// A page larger than maxPooledRenderBuf still renders. The pool drops that
-// buffer instead of keeping it.
+// A page larger than maxPooledRenderBuf still renders. TestKeepBuf covers the
+// decision to drop its buffer.
 func TestRenderLargePage(t *testing.T) {
 	want := strings.Repeat("x", maxPooledRenderBuf+1024)
 	r := newTestRouter()
@@ -199,6 +201,98 @@ func TestRenderStreamHEADWritesNoBody(t *testing.T) {
 
 	if n := do(r, http.MethodHead, "/").Body.Len(); n != 0 {
 		t.Errorf("body length = %d, want 0", n)
+	}
+}
+
+// keepBuf is the branch that stops one large page from pinning its buffer for
+// the life of the process.
+func TestKeepBuf(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cap  int
+		want bool
+	}{
+		{"a fresh buffer", renderBufSize, true},
+		{"exactly the ceiling", maxPooledRenderBuf, true},
+		{"one byte over", maxPooledRenderBuf + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := bytes.NewBuffer(make([]byte, 0, tc.cap))
+			if got := keepBuf(buf); got != tc.want {
+				t.Errorf("keepBuf(cap %d) = %v, want %v", tc.cap, got, tc.want)
+			}
+		})
+	}
+}
+
+// An HTTPError from a component keeps its status, so a template that reports a
+// missing record answers 404 and not 500.
+func TestRenderKeepsAnHTTPErrorStatus(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.Render(http.StatusOK, ComponentFunc(func(context.Context, io.Writer) error {
+			return ErrNotFound.WithMessage("no such post")
+		}))
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "no such post") {
+		t.Errorf("body = %q, want the message of the component", got)
+	}
+}
+
+// Any other error is internal, so its message stays server-side.
+func TestRenderHidesAnInternalError(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.Render(http.StatusOK, ComponentFunc(func(context.Context, io.Writer) error {
+			return errors.New("connection string: user=root password=hunter2")
+		}))
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "hunter2") {
+		t.Errorf("body leaked the internal cause: %q", rec.Body.String())
+	}
+}
+
+// A panic inside a component must not poison the buffer pool, so the request
+// after it renders correctly.
+func TestRenderPanicKeepsThePoolUsable(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/boom", func(c *tctx) error {
+		return c.Render(http.StatusOK, ComponentFunc(func(_ context.Context, w io.Writer) error {
+			if _, err := io.WriteString(w, "<html>partial"); err != nil {
+				return err
+			}
+			panic("template blew up")
+		}))
+	})
+	r.GET("/ok", func(c *tctx) error { return c.Render(http.StatusOK, comp("<h1>hi</h1>")) })
+
+	if code := do(r, http.MethodGet, "/boom").Code; code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", code)
+	}
+	if got := do(r, http.MethodGet, "/ok").Body.String(); got != "<h1>hi</h1>" {
+		t.Errorf("body = %q, want %q", got, "<h1>hi</h1>")
+	}
+}
+
+// FromContext reports false outside a request, which keeps a template
+// renderable from a test or a static site generator.
+func TestFromContextWithoutABase(t *testing.T) {
+	b, ok := FromContext(context.Background())
+	if ok {
+		t.Errorf("ok = true, want false")
+	}
+	if b != nil {
+		t.Errorf("base = %v, want nil", b)
 	}
 }
 
