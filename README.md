@@ -537,18 +537,26 @@ you.
 ## Development
 
 ```bash
-just check          # fmt, lint, test
+just check          # fmt, lint, analyze, golangci-lint, test
+just fmt            # go fmt, gofumpt, goimports, betteralign
+just lint           # vet, build, format check, go fix modernizers, benchmarks module
+just analyze        # x/tools modernize, betteralign
+just golangci       # golangci-lint
 just test           # go test -race -cover ./...
-just lint           # vet, build, gofmt, the go fix modernizers, benchmarks module
 just bench          # benchmarks of this module
 just bench-compare  # against chi, echo and http.ServeMux
 just vuln           # govulncheck
 ```
 
-CI runs the same recipes, plus golangci-lint. Linters are installed by CI
-rather than declared as go.mod tools, because a tool directive would put the
-whole linter dependency tree into the module graph of everyone who imports
-this router.
+CI runs the same recipes. Tool versions are pinned at the top of the
+[justfile](justfile) and run through `go run tool@version`, not declared as
+go.mod tools: a tool directive would put the whole linter dependency tree into
+the module graph of everyone who imports this router.
+
+`betteralign` runs in opt-in mode. Only structs marked `betteralign:check` are
+reordered, which today is `Base` and `Response` — the two the router allocates
+per request. Field order is load-bearing elsewhere: reordering the JSON error
+body would change the wire format.
 
 ## License
 
