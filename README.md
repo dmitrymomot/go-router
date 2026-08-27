@@ -45,6 +45,9 @@ type Context struct {
 	User *User
 }
 
+// Ctx spares you from writing *Context at every middleware call.
+type Ctx = *Context
+
 func main() {
 	db := openDB()
 
@@ -55,10 +58,10 @@ func main() {
 	})
 
 	r.Use(
-		middleware.Recover().Middleware,
-		middleware.RequestID().Middleware,
-		middleware.RealIP().Middleware,
-		middleware.Logger().Middleware,
+		middleware.Recover[Ctx](),
+		middleware.RequestID[Ctx](),
+		middleware.RealIP[Ctx](),
+		middleware.Logger[Ctx](),
 	)
 
 	r.GET("/health", func(c *Context) error {
@@ -241,7 +244,7 @@ func Router(audit *audit.Log, db *sql.DB) *router.Router[*Context] {
 		return &Context{Audit: audit}
 	})
 
-	r.Use(middleware.Recover().Middleware)
+	r.Use(middleware.Recover[*Context]())
 	r.Use(requireOperator(db))        // fills Context.Operator or returns 401
 
 	// Admin answers HTML, so it renders its errors as a page.
@@ -271,8 +274,8 @@ api := router.New(func(http.ResponseWriter, *http.Request) *app.Context {
 	return &app.Context{DB: db}
 })
 api.Use(
-	middleware.Recover().Middleware,
-	middleware.RequestID().Middleware,
+	middleware.Recover[*app.Context](),
+	middleware.RequestID[*app.Context](),
 )
 api.GET("/v1/users/{id}", getUser)          // *app.Context
 
@@ -386,35 +389,48 @@ Request bodies are capped at 4 MiB. Change it with `r.MaxBodyBytes(n)`.
 type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 ```
 
-Every middleware follows one shape. A function named after it takes an
-optional config, fills in the defaults and returns it. That config carries a
-generic `Middleware` method, and Go 1.27 infers the context type there, so you
-never name your own context type. Leave the config out to take the defaults:
+Every middleware comes as two factories. The plain one returns the middleware
+with its default config; the `WithConfig` one takes a config:
 
 ```go
-r.Use(middleware.Recover().Middleware)
-r.Use(middleware.RequestID(middleware.RequestIDConfig{IgnoreInbound: true}).Middleware)
-r.Use(middleware.RealIP(middleware.RealIPConfig{Headers: []string{"Cf-Connecting-Ip"}}).Middleware)
-r.Use(middleware.Logger(middleware.LoggerConfig{Logger: log}).Middleware)
-r.Use(middleware.CORS(middleware.CORSConfig{AllowOrigins: []string{"https://app.example"}}).Middleware)
-r.Use(middleware.Timeout(middleware.TimeoutConfig{Duration: 5 * time.Second}).Middleware)
+r.Use(middleware.Recover[Ctx]())
+r.Use(middleware.RequestID[Ctx]())
+r.Use(middleware.RealIP[Ctx]())
+
+r.Use(middleware.LoggerWithConfig[Ctx](middleware.LoggerConfig{Logger: log}))
+r.Use(middleware.CORSWithConfig[Ctx](middleware.CORSConfig{
+	AllowOrigins: []string{"https://app.example"},
+}))
+r.Use(middleware.TimeoutWithConfig[Ctx](middleware.TimeoutConfig{
+	Duration: 5 * time.Second,
+}))
+```
+
+A factory returns `router.Middleware[C]` directly, so the context type has to
+be written at the call site: Go infers a type argument from the arguments of a
+call, and these calls carry nothing that names the context. One type alias
+takes the repetition out of it:
+
+```go
+type Ctx = *app.Context
 ```
 
 Every config carries a `Skip`. Return true from it and the request goes
 straight to the next handler:
 
 ```go
-middleware.Logger(middleware.LoggerConfig{
+middleware.LoggerWithConfig[Ctx](middleware.LoggerConfig{
 	Skip: func(c router.Context) bool { return c.Request().URL.Path == "/health" },
-}).Middleware
+})
 ```
 
 `Skip` takes the `router.Context` interface, not your context type, so one
 function fits any router. It reaches the request through `c.Request()` and the
 matched route through `c.RoutePattern()`.
 
-Passing more than one config panics, because the middleware would have to
-guess which one wins.
+Two defaults are worth knowing: `CORS[Ctx]()` allows every origin without
+credentials, and `Timeout[Ctx]()` applies a deadline of `DefaultTimeout`, 30
+seconds.
 
 One middleware per file, named after it: `recover.go`, `requestid.go`,
 `realip.go`, `logger.go`, `cors.go`, `timeout.go`.
@@ -503,8 +519,9 @@ you.
   `res.JSON[User]()` — the caller names the type, no out-parameter.
 - **Generic methods** also give `r.MountRouter(prefix, sub)`, which accepts a
   router whose context type differs from the caller's.
-- **Generalized function type inference** is what makes
-  `r.Use(middleware.Logger(cfg).Middleware)` compile without a type argument.
+- **Generalized function type inference** lets a bare generic function stand in
+  for a `Middleware[C]`, which is how a hand-written middleware reaches
+  `r.Use` without a type argument.
 - **`encoding/json/v2`** is the codec: stricter, and faster to decode.
 - **stdlib `uuid`** backs `middleware.RequestID`.
 - **`testing/synctest`** runs the timeout test on a fake clock.
