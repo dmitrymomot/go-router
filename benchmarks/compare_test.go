@@ -56,6 +56,17 @@ func newOurs() http.Handler {
 	return r
 }
 
+func newOursPooled() http.Handler {
+	r := router.NewPooled(
+		func() *appContext { return new(appContext) },
+		func(c *appContext) {},
+	)
+	for _, rt := range routes {
+		r.GET(rt.ours, func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	}
+	return r
+}
+
 func newChi() http.Handler {
 	r := chi.NewRouter()
 	for _, rt := range routes {
@@ -97,6 +108,7 @@ func BenchmarkRouters(b *testing.B) {
 		h    http.Handler
 	}{
 		{"go-router", newOurs()},
+		{"go-router-pooled", newOursPooled()},
 		{"chi", newChi()},
 		{"echo", newEcho()},
 		{"stdlib", newStdlib()},
