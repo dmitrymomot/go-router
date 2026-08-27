@@ -11,9 +11,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/dmitrymomot/go-router"
 	"github.com/go-chi/chi/v5"
 	"github.com/labstack/echo/v4"
+
+	"github.com/dmitrymomot/go-router"
 )
 
 // routes is one route set in the three pattern dialects.
@@ -24,9 +25,11 @@ var routes = []struct{ ours, chi, echo string }{
 	{"/v1/users/{id}", "/v1/users/{id}", "/v1/users/:id"},
 	{"/v1/users/{id}/sessions/{sid}", "/v1/users/{id}/sessions/{sid}", "/v1/users/:id/sessions/:sid"},
 	{"/v1/orgs/{org}/repos/{repo}", "/v1/orgs/{org}/repos/{repo}", "/v1/orgs/:org/repos/:repo"},
-	{"/v1/orgs/{org}/repos/{repo}/issues/{num}/comments",
+	{
 		"/v1/orgs/{org}/repos/{repo}/issues/{num}/comments",
-		"/v1/orgs/:org/repos/:repo/issues/:num/comments"},
+		"/v1/orgs/{org}/repos/{repo}/issues/{num}/comments",
+		"/v1/orgs/:org/repos/:repo/issues/:num/comments",
+	},
 	{"/v1/search/repos", "/v1/search/repos", "/v1/search/repos"},
 	{"/assets/{path...}", "/assets/*", "/assets/*"},
 }
