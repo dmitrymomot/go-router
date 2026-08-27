@@ -62,10 +62,18 @@ lint:
     go build -o /dev/null ./...
     # gofumpt, goimports and go fix all report on stdout and still exit 0, so
     # turn a non-empty report into a failure.
+    #
+    # Only stdout counts. `go run tool@version` writes its "go: downloading"
+    # progress to stderr, which a cold module cache produces on every CI job
+    # and which is not a finding. A tool that truly fails still fails the
+    # recipe, because set -e reads the exit status of the assignment.
     fail_if_output() {
         local what="$1"; shift
         local out
-        out="$("$@" 2>&1)"
+        if ! out="$("$@")"; then
+            echo "$what: the tool itself failed" >&2
+            return 1
+        fi
         if [ -n "$out" ]; then
             echo "$what:" >&2
             echo "$out" >&2
@@ -91,8 +99,9 @@ analyze:
 
 # Run golangci-lint
 golangci:
-    # CI runs the same linter through its own action, which ships a prebuilt
-    # binary instead of compiling one per job.
+    # CI runs this same recipe. A prebuilt golangci-lint binary carries the Go
+    # version it was built with and refuses a module that targets a later one,
+    # so the linter is compiled here with the Go of the job.
     go run {{ golangci }} run ./...
 
 # Report known vulnerabilities in the module and the toolchain
