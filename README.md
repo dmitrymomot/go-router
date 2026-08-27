@@ -1286,9 +1286,10 @@ go.mod tools: a tool directive would put the whole linter dependency tree into
 the module graph of everyone who imports this router.
 
 `betteralign` runs in opt-in mode. Only structs marked `betteralign:check` are
-reordered, which today is `Base` and `Response` — the two the router allocates
-per request. Field order is load-bearing elsewhere: reordering the JSON error
-body would change the wire format.
+reordered, which today is `Base` and `Response`, the two the router allocates
+per request, and `HTMXRequest`, which a handler builds per call. Field order is
+load-bearing elsewhere: reordering the JSON error body would change the wire
+format.
 
 ## License
 
