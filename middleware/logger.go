@@ -31,10 +31,13 @@ type LoggerConfig struct {
 	Message string
 }
 
-// Logger returns the middleware with its default config, which writes to
-// [slog.Default].
-func Logger[C router.Context]() router.Middleware[C] {
-	return LoggerWithConfig[C](LoggerConfig{})
+// Logger is [LoggerWithConfig] with its default config, which writes to
+// [slog.Default]. It is a middleware itself, so it goes into Use without a
+// call:
+//
+//	r.Use(middleware.Logger[Ctx])
+func Logger[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+	return LoggerWithConfig[C](LoggerConfig{})(next)
 }
 
 // LoggerWithConfig writes one record per request.

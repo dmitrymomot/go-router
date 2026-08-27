@@ -19,10 +19,13 @@ type RealIPConfig struct {
 	Headers []string
 }
 
-// RealIP returns the middleware with its default config: X-Real-Ip first, then
-// X-Forwarded-For.
-func RealIP[C router.Context]() router.Middleware[C] {
-	return RealIPWithConfig[C](RealIPConfig{})
+// RealIP is [RealIPWithConfig] with its default config: X-Real-Ip first, then
+// X-Forwarded-For. It is a middleware itself, so it goes into Use without a
+// call:
+//
+//	r.Use(middleware.RealIP[Ctx])
+func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+	return RealIPWithConfig[C](RealIPConfig{})(next)
 }
 
 // RealIPWithConfig replaces the remote address of the request with the address

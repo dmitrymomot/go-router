@@ -1,21 +1,21 @@
 // Package middleware holds the middleware that ships with the router.
 //
-// Every middleware comes as two factories. The plain one returns the
-// middleware with its default config, and the WithConfig one takes a config:
+// Every middleware comes in two forms. The plain one is a [router.Middleware]
+// itself, with the default config, so it goes into Use without a call. The
+// WithConfig one is a factory that takes a config:
 //
-//	r.Use(middleware.Recover[*app.Context]())
+//	r.Use(middleware.Recover[*app.Context])
 //	r.Use(middleware.TimeoutWithConfig[*app.Context](middleware.TimeoutConfig{
 //		Duration: 5 * time.Second,
 //	}))
 //
-// A factory returns [router.Middleware] directly, so the context type has to
-// be written at the call site: Go infers a type argument from the arguments of
-// a call, and these calls carry nothing that names the context. A type alias
-// takes the repetition out of it:
+// The context type has to be written at the call site: Go infers a type
+// argument from the arguments of a call, and these calls carry nothing that
+// names the context. A type alias takes the repetition out of it:
 //
 //	type Ctx = *app.Context
 //
-//	r.Use(middleware.Recover[Ctx](), middleware.RequestID[Ctx](), middleware.RealIP[Ctx]())
+//	r.Use(middleware.Recover[Ctx], middleware.RequestID[Ctx], middleware.RealIP[Ctx])
 //
 // Every config carries a Skip function. Return true from it to pass the
 // request straight to the next handler:

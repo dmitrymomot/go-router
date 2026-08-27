@@ -44,14 +44,14 @@ func skipPath(path string) func(router.Context) bool {
 func TestDefaultFactories(t *testing.T) {
 	r := newRouter()
 	r.Use(
-		middleware.Recover[*appContext](),
-		middleware.RequestID[*appContext](),
-		middleware.RealIP[*appContext](),
+		middleware.Recover[*appContext],
+		middleware.RequestID[*appContext],
+		middleware.RealIP[*appContext],
 		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
 			Logger: slog.New(slog.DiscardHandler),
 		}),
-		middleware.CORS[*appContext](),
-		middleware.Timeout[*appContext](),
+		middleware.CORS[*appContext],
+		middleware.Timeout[*appContext],
 	)
 	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
 
@@ -68,7 +68,7 @@ func TestDefaultFactories(t *testing.T) {
 // because it is the one default that is permissive.
 func TestDefaultCORSAllowsEveryOrigin(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.CORS[*appContext]())
+	r.Use(middleware.CORS[*appContext])
 	r.GET("/data", func(c *appContext) error { return c.String(http.StatusOK, "data") })
 
 	req := httptest.NewRequest(http.MethodGet, "/data", nil)
@@ -82,7 +82,7 @@ func TestDefaultCORSAllowsEveryOrigin(t *testing.T) {
 // not a no-op.
 func TestDefaultTimeoutAppliesADeadline(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.Timeout[*appContext]())
+	r.Use(middleware.Timeout[*appContext])
 	r.GET("/", func(c *appContext) error {
 		d, ok := c.Request().Context().Deadline()
 		if !ok {

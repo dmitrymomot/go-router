@@ -41,7 +41,7 @@ func Example() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
 		return &Context{DB: db}
 	})
-	r.Use(middleware.Recover[*Context](), middleware.RequestID[*Context]())
+	r.Use(middleware.Recover[*Context], middleware.RequestID[*Context])
 
 	r.GET("/users/{id}", func(c *Context) error {
 		u, ok := c.DB.find(c.Param("id"))
