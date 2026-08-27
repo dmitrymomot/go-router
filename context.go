@@ -70,33 +70,39 @@ const maxInlineParams = 8
 
 // Base holds the per-request state that the router owns. Embed it in the
 // application context type, either by value or through a pointer.
+//
+// betteralign:check
+//
+// The router allocates one of these per request, so its layout is worth
+// keeping tight.
 type Base struct {
 	req *http.Request
 	res *Response
 
-	// resStorage backs res, so that a context needs one allocation and not two.
-	resStorage Response
+	store    map[string]any
+	paramArr [maxInlineParams]string
 
-	pattern    string
-	paramNames []string
-	paramVals  []string
-	paramArr   [maxInlineParams]string
+	pattern string
 
 	// rawTail is the part of the path that a catch-all matched, in the same
 	// form as the matched path. MountHandler needs it to rebuild the path for
 	// the mounted handler.
 	rawTail string
 
-	// pathEscaped reports whether the matched path was still percent encoded.
-	pathEscaped bool
-
-	// maxBody is the request body limit that the router applies to Bind.
-	maxBody int64
+	paramNames []string
+	paramVals  []string
 
 	// jsonOpts are the encoding/json/v2 options of the router.
 	jsonOpts []json.Options
 
-	store map[string]any
+	// resStorage backs res, so that a context needs one allocation and not two.
+	resStorage Response
+
+	// maxBody is the request body limit that the router applies to Bind.
+	maxBody int64
+
+	// pathEscaped reports whether the matched path was still percent encoded.
+	pathEscaped bool
 }
 
 // NewBase returns a Base that is bound to w and r. Use it when the application

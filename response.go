@@ -12,8 +12,14 @@ import (
 //
 // Response implements Unwrap, so [http.NewResponseController] reaches the
 // hijack and deadline methods of the writer underneath.
+//
+// betteralign:check
+//
+// A Response lives inside every [Base], so its layout is worth keeping tight.
 type Response struct {
 	http.ResponseWriter
+
+	before []func()
 
 	// Status is the status code that the handler wrote. It is 0 until the
 	// handler commits the response.
@@ -24,8 +30,6 @@ type Response struct {
 
 	// Committed reports whether the header is already written.
 	Committed bool
-
-	before []func()
 }
 
 // Unwrap returns the writer underneath, for [http.NewResponseController].
