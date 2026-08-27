@@ -107,3 +107,53 @@ func BenchmarkMiddlewareChain(b *testing.B) {
 	r.GET("/users/{id}", func(c *tctx) error { return c.NoContent(http.StatusOK) })
 	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/users/42")
 }
+
+// benchHostRouter builds the four host shapes that a multi-tenant service
+// needs, each with the same small route set.
+func benchHostRouter() (*Router[*tctx], *nopWriter) {
+	ok := func(c *tctx) error { return c.NoContent(http.StatusOK) }
+	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.GET("/", ok)
+		h.GET("/blog/{slug}", ok)
+	})
+	r.Host("api.example.com", func(h *Router[*tctx]) { h.GET("/v1/users/{id}", ok) })
+	r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *Router[*tctx]) {
+		h.GET("/", ok)
+		h.GET("/settings", ok)
+	})
+	r.GET("/healthz", ok)
+	return r, &nopWriter{h: make(http.Header)}
+}
+
+func benchServeHost(b *testing.B, r http.Handler, w http.ResponseWriter, host, target string) {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Host = host
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		r.ServeHTTP(w, req)
+	}
+}
+
+func BenchmarkHostExact(b *testing.B) {
+	r, w := benchHostRouter()
+	benchServeHost(b, r, w, "api.example.com", "/v1/users/42")
+}
+
+func BenchmarkHostParam(b *testing.B) {
+	r, w := benchHostRouter()
+	benchServeHost(b, r, w, "acme.example.com", "/settings")
+}
+
+func BenchmarkHostAny(b *testing.B) {
+	r, w := benchHostRouter()
+	benchServeHost(b, r, w, "acme.com", "/settings")
+}
+
+// BenchmarkHostFallback measures a route that no host scope registered, which
+// costs the host lookup and then a second trie walk.
+func BenchmarkHostFallback(b *testing.B) {
+	r, w := benchHostRouter()
+	benchServeHost(b, r, w, "api.example.com", "/healthz")
+}

@@ -130,3 +130,27 @@ func TestHandlerOnARouteWithoutTheParameter(t *testing.T) {
 	routertest.Get(r, "/static/css/app.css").AssertBody(t, appCSS)
 	routertest.Get(r, "/favicon.ico").AssertStatus(t, http.StatusNotFound)
 }
+
+// TestMountInsideAHostScope covers the seam between the two features: a host
+// scope hands Mount a scope like any other, and the catch-all of the assets
+// has to leave the parameters of the host readable.
+func TestMountInsideAHostScope(t *testing.T) {
+	r := newRouter()
+	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"})
+	r.Host("{tenant}.example.com", func(h *router.Router[*appContext]) {
+		static.Mount(h, a)
+		h.GET("/who", func(c *appContext) error {
+			return c.String(http.StatusOK, c.Param("tenant"))
+		})
+	})
+
+	res := routertest.Get(r, a.URL("css/app.css"), routertest.Host("acme.example.com"))
+	res.AssertStatus(t, http.StatusOK)
+	res.AssertBody(t, appCSS)
+
+	routertest.Get(r, "/who", routertest.Host("acme.example.com")).AssertBody(t, "acme")
+
+	// The assets answer that host alone.
+	routertest.Get(r, a.URL("css/app.css"), routertest.Host("other.invalid")).
+		AssertStatus(t, http.StatusNotFound)
+}

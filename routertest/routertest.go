@@ -27,6 +27,15 @@ func Header(key, value string) RequestOption {
 	return func(r *http.Request) { r.Header.Set(key, value) }
 }
 
+// Host sets the host that the request names, which is what a host route
+// matches against. Setting it through [Header] does not work, because net/http
+// carries the host in a field of its own.
+//
+//	res := routertest.Get(r, "/", routertest.Host("api.example.com"))
+func Host(host string) RequestOption {
+	return func(r *http.Request) { r.Host = host }
+}
+
 // Cookie adds a cookie to the request.
 func Cookie(c *http.Cookie) RequestOption {
 	return func(r *http.Request) { r.AddCookie(c) }

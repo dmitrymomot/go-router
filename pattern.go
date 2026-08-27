@@ -239,13 +239,34 @@ func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
 
 // appendTemplateValues matches seg against a template and appends the
 // parameter values in declaration order.
+func appendTemplateValues(dst []string, parts []segPart, seg string) ([]string, bool) {
+	base := len(dst)
+	for range templateArity(parts) {
+		dst = append(dst, "")
+	}
+	return dst, matchTemplate(dst[base:], parts, seg)
+}
+
+// templateArity returns the number of parameters that a template declares.
+func templateArity(parts []segPart) int {
+	n := 0
+	for _, p := range parts {
+		if p.lit == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// matchTemplate matches seg against a template and writes the parameter values
+// into out, which holds one slot per parameter in declaration order.
 //
 // Literals are matched as far to the right as the segment allows, so a
 // parameter takes as much as it can. "rep-{date}.csv" reads "a.csv" out of
 // "rep-a.csv.csv", and "{name}.{ext}" splits "a.b.txt" into "a.b" and "txt".
 //
 // No parameter may be empty, which is what keeps "rep-.csv" from matching.
-func appendTemplateValues(dst []string, parts []segPart, seg string) ([]string, bool) {
+func matchTemplate(out []string, parts []segPart, seg string) bool {
 	lo, hi := 0, len(seg)
 
 	// Peel the literals at both ends. What is left alternates parameter,
@@ -253,7 +274,7 @@ func appendTemplateValues(dst []string, parts []segPart, seg string) ([]string, 
 	first, last := 0, len(parts)-1
 	if parts[first].lit != "" {
 		if !strings.HasPrefix(seg, parts[first].lit) {
-			return dst, false
+			return false
 		}
 		lo = len(parts[first].lit)
 		first++
@@ -261,18 +282,13 @@ func appendTemplateValues(dst []string, parts []segPart, seg string) ([]string, 
 	if last >= first && parts[last].lit != "" {
 		lit := parts[last].lit
 		if hi-len(lit) < lo || !strings.HasSuffix(seg[:hi], lit) {
-			return dst, false
+			return false
 		}
 		hi -= len(lit)
 		last--
 	}
 	if first > last {
-		return dst, false
-	}
-
-	base := len(dst)
-	for range (last-first)/2 + 1 {
-		dst = append(dst, "")
+		return false
 	}
 
 	// Walk the inner literals from the right, so each parameter keeps as much
@@ -282,14 +298,14 @@ func appendTemplateValues(dst []string, parts []segPart, seg string) ([]string, 
 		lit := parts[i].lit
 		j := strings.LastIndex(seg[lo:end], lit)
 		if j < 0 {
-			return dst, false
+			return false
 		}
-		if !setTemplateValue(dst, base+(i+1-first)/2, parts[i+1], seg[lo+j+len(lit):end]) {
-			return dst, false
+		if !setTemplateValue(out, (i+1-first)/2, parts[i+1], seg[lo+j+len(lit):end]) {
+			return false
 		}
 		end = lo + j
 	}
-	return dst, setTemplateValue(dst, base, parts[first], seg[lo:end])
+	return setTemplateValue(out, 0, parts[first], seg[lo:end])
 }
 
 // setTemplateValue stores one parameter value after it checks that the value
