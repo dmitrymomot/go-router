@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
@@ -346,4 +347,73 @@ func ExampleBase_Render() {
 	// Output:
 	// 200 text/html; charset=utf-8
 	// <h1>hello</h1><p>/posts/hello</p>
+}
+
+// ExampleServeSSE streams the values of a channel to the client as
+// server-sent events, each one encoded as JSON.
+//
+// The channel of the example is closed, so the stream ends and the handler
+// returns. A real one stays open until the client goes away, and the handler
+// blocks in ServeSSE for as long as that takes.
+func ExampleServeSSE() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.GET("/users/stream", func(c *Context) error {
+		users := make(chan *User, 2)
+		users <- &User{ID: "7", Name: "ann"}
+		users <- &User{ID: "8", Name: "bob"}
+		close(users)
+
+		return router.ServeSSE(c, users, router.SSEJSON[*User]("user"),
+			router.SSEHeartbeat(15*time.Second))
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/stream", nil))
+	fmt.Println(rec.Code, rec.Header().Get("Content-Type"))
+	fmt.Print(rec.Body.String())
+	// Output:
+	// 200 text/event-stream
+	// event: user
+	// data: {"id":"7","name":"ann"}
+	//
+	// event: user
+	// data: {"id":"8","name":"bob"}
+}
+
+// ExampleNewSSEStream declares the shape of a stream once, and every request
+// of the route reuses it. The events carry HTML here, which is what an htmx
+// page reads with its sse extension.
+func ExampleNewSSEStream() {
+	stream := router.NewSSEStream(
+		router.SSEComponent("user", card),
+		router.SSERetry(3*time.Second),
+	)
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.GET("/users/stream", func(c *Context) error {
+		users := make(chan *User, 1)
+		users <- &User{ID: "7", Name: "ann"}
+		close(users)
+
+		return stream.Serve(c, users)
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/stream", nil))
+	fmt.Print(rec.Body.String())
+	// Output:
+	// retry: 3000
+	//
+	// event: user
+	// data: <li id="user-7">ann</li>
+}
+
+// card stands for the template that renders one user, the way page stands for
+// a whole page.
+func card(u *User) router.ComponentFunc {
+	return func(_ context.Context, w io.Writer) error {
+		_, err := fmt.Fprintf(w, "<li id=%q>%s</li>", "user-"+u.ID, u.Name)
+		return err
+	}
 }

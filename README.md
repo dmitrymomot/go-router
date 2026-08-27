@@ -679,6 +679,132 @@ gets an empty `200` for what was a 500.
 Keep the JSON handler for an API scope and mount the HTML one under the pages
 scope; see [Mounting a subsystem with its own context](#mounting-a-subsystem-with-its-own-context).
 
+## Server-sent events
+
+`ServeSSE` streams the values of a channel to the client. A sender turns each
+value into events, so the channel carries your own type and never an encoded
+one:
+
+```go
+r.GET("/notifications", func(c *app.Context) error {
+	ch, unsubscribe := c.Bus.Subscribe(c.User.ID)
+	defer unsubscribe()
+
+	return router.ServeSSE(c, ch, router.SSEJSON[Notification]("notification"),
+		router.SSEHeartbeat(15*time.Second))
+})
+```
+
+The handler blocks until the channel closes or the client goes away, and
+returns `nil` for either, because neither is a failure. It starts no goroutine,
+so a pooled context stays safe.
+
+Four senders cover the usual payloads:
+
+| Sender | Writes |
+| --- | --- |
+| `router.SSEJSON[T]("name")` | the value as JSON |
+| `router.SSEText[T]("name")` | the value through `fmt.Sprint` |
+| `router.SSEComponent("name", view)` | the value as HTML, from a templ component |
+| `router.SSEEvents()` | a channel that already carries `router.Event` |
+
+Write your own for anything else, or to send several events for one value:
+
+```go
+func send(s *router.SSEWriter, p Post) error {
+	if err := s.SendComponent("post", view.PostCard(p)); err != nil {
+		return err
+	}
+	return s.SendJSON("count", p.Comments)
+}
+```
+
+### One stream, many routes
+
+`NewSSEStream` holds the sender and the options, so a route declares the shape
+of its events once. The value carries no request state, so it lives at package
+level and every request reuses it:
+
+```go
+var feed = router.NewSSEStream(
+	router.SSEComponent("post", view.PostCard),
+	router.SSEHeartbeat(15*time.Second),
+	router.SSERetry(3*time.Second),
+)
+
+r.GET("/feed", func(c *app.Context) error {
+	ch, unsubscribe := c.Bus.Posts(c.User.ID)
+	defer unsubscribe()
+	return feed.Serve(c, ch)
+})
+```
+
+### Options
+
+| Option | Effect |
+| --- | --- |
+| `SSEHeartbeat(d)` | sends `: ping` every `d`, which keeps a proxy from closing a connection that carries no event for a while |
+| `SSERetry(d)` | asks the client to wait `d` before it reconnects |
+| `SSEClose(e)` | sends `e` when the channel closes, which tells the client that the stream is over |
+
+Only a driver honours them, because only a driver owns the loop.
+
+### Writing the loop yourself
+
+`c.SSE` commits the response and hands back the writer. Reach for it when the
+events come from somewhere other than one channel:
+
+```go
+r.GET("/progress/{id}", func(c *app.Context) error {
+	s, err := c.SSE(http.StatusOK)
+	if err != nil {
+		return err
+	}
+
+	for _, step := range c.Jobs.Steps(c.Param("id"), c.LastEventID()) {
+		if err := s.Send(router.Event{ID: step.ID, Name: "step", Data: step.Text}); err != nil {
+			return err
+		}
+	}
+	return nil
+})
+```
+
+`Send`, `SendData`, `SendJSON`, `SendComponent` and `Comment` each write a whole
+frame and flush it. A write or a flush that fails closes the stream, and every
+later send reports the same failure, so a loop that watches its errors ends. An
+event that the writer rejects before it writes anything — a line break in `ID`
+or `Name`, a value that fails to encode, a component that fails — leaves the
+stream open, because nothing reached the client.
+
+`SendJSON` encodes straight into the frame and `SendComponent` renders into it,
+so a value that fails to encode, or a template that fails halfway, leaves
+nothing on the wire.
+
+A line break inside `Data` becomes a data line of its own, so a multiline
+payload stays one event. A line break inside `ID` or `Name` is a bug — it would
+let the value forge events of its own — so the writer reports it and writes
+nothing.
+
+### Reconnects
+
+A browser reconnects by itself after any end of the stream, and sends the `ID`
+of the last event it saw in `Last-Event-ID`. Read it with `c.LastEventID()` and
+replay what the client missed.
+
+### What the stream sets
+
+`text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`, and
+`Connection: keep-alive` on HTTP/1. It also clears the write deadline of the
+connection, because a stream outlives any `Server.WriteTimeout`, and it flushes
+the header at once, so the `EventSource` of a browser fires its open event
+before the first event arrives.
+
+> Skip the middleware that a long stream does not survive: `middleware.Timeout`
+> cuts it at its deadline, and a compression wrapper buffers the events until
+> the client sees none. Give each of them a `Skip` for the route, or apply them
+> to a scope that leaves the stream out.
+
 ## Middleware
 
 ```go
@@ -926,7 +1052,8 @@ you.
   `r.Use` without a type argument.
 - **`encoding/json/v2`** is the codec: stricter, and faster to decode.
 - **stdlib `uuid`** backs `middleware.RequestID`.
-- **`testing/synctest`** runs the timeout test on a fake clock.
+- **`testing/synctest`** runs the timeout and the heartbeat tests on a fake
+  clock.
 
 ## Limitations
 
