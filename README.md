@@ -123,6 +123,7 @@ type Context struct {
 |---|---|
 | `Request()` `SetRequest(r)` `Response()` | the request and the response wrapper |
 | `Param(name)` `ParamAs[T](name)` `ParamNames()` `RoutePattern()` | route parameters |
+| `Host()` `RouteHost()` | the request host, and the host pattern that matched |
 | `Query(name)` `QueryAs[T](name)` `QueryAsDefault(name, def)` | query parameters |
 | `Bind[T]()` `BindJSON[T]()` `BindForm[T]()` `BindQuery[T]()` | request decoding |
 | `JSON` `String` `Stringf` `HTML` `Blob` `Stream` `NoContent` `Redirect` `Attachment` | response rendering |
@@ -150,6 +151,8 @@ r.Handle(method, pattern, handler, ...)
 r.Any(pattern, handler, ...)               // every standard method
 r.Match([]string{"GET", "POST"}, pattern, handler, ...)
 ```
+
+Routes can also answer one host; see [Host routing](#host-routing).
 
 ### Pattern syntax
 
@@ -214,8 +217,8 @@ r.MountRouter("/admin", adminRouter)   // *admin.Context
 r.MountHandler("/static", http.FileServerFS(assets))
 ```
 
-`r.Routes()` returns every registered route, which is handy in a startup log or
-a test that guards the route table.
+`r.Routes()` returns every registered route, with the host pattern that owns
+it, which is handy in a startup log or a test that guards the route table.
 
 ### Mounting a subsystem with its own context
 
@@ -311,6 +314,166 @@ Two consequences worth knowing before you reach for it:
 
 Reach for `MountRouter` when the subsystem genuinely wants its own context, and
 for `Mount` when it is the same application split across files.
+
+## Host routing
+
+`Host` opens a scope that answers one host. Everything inside it — routes,
+middleware, `NotFound`, `MethodNotAllowed`, `ErrorHandler` — belongs to that
+host alone.
+
+```go
+r := router.New(newCtx)
+r.Use(middleware.Recover[Ctx](), middleware.Logger[Ctx]())   // every host
+
+// 1. The main site.
+r.Host("example.com", func(h *router.Router[Ctx]) {
+	h.GET("/", landing)
+	h.Route("/blog", func(b *router.Router[Ctx]) {
+		b.GET("/", blogIndex)
+		b.GET("/{slug}", blogPost)
+	})
+})
+
+// 2. A fixed subdomain, with middleware and a 404 of its own.
+r.Host("api.example.com", func(h *router.Router[Ctx]) {
+	h.Use(apiKey)
+	h.NotFound(func(c *Context) error { return c.JSON(404, errBody) })
+	h.GET("/v1/users/{id}", getUser)
+})
+
+// 3 + 4. One tenant application, on a subdomain or on a domain the tenant
+//        brought along. Both host patterns share one scope.
+r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *router.Router[Ctx]) {
+	h.Use(resolveTenant)              // c.Param("tenant"), or c.Host()
+	h.GET("/", dashboard)
+})
+
+// A route outside every host scope answers on any host.
+r.GET("/healthz", health)
+```
+
+```go
+func resolveTenant(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
+	return func(c *Context) error {
+		t, err := c.DB.Tenant(c, c.Param("tenant"), c.Host())   // slug, else domain
+		if err != nil {
+			return router.ErrNotFound.WithError(err)
+		}
+		c.Tenant = t
+		return next(c)
+	}
+}
+```
+
+### Pattern syntax
+
+| Host pattern | Matches |
+|---|---|
+| `example.com` | that host exactly |
+| `{tenant}.example.com` | one label, readable as `c.Param("tenant")` |
+| `{tenant:[a-z0-9-]+}.example.com` | one label that the regular expression accepts |
+| `acme-{env}.example.com` | part of a label |
+| `{sub...}.example.com` | one or more leading labels, as one value |
+| `*.example.com` | one label, with no value kept |
+| `*` | any host — this is how a custom domain arrives |
+
+A host parameter is an ordinary route parameter: `c.Param("tenant")` reads it,
+and it comes before the parameters of the path in `ParamNames()`. A name that
+the host and the path both declare is a registration error.
+
+The router matches the host without its port, without a trailing dot and in
+lower case, so `example.com` also answers `Example.com:8080` in development. A
+port inside a pattern is a registration error.
+
+### Which host wins
+
+A fixed host beats a pattern, a pattern with more static labels beats one with
+fewer, and `*` comes last. So with all four cases above registered:
+
+| Request host | Answers |
+|---|---|
+| `example.com` | `example.com` |
+| `api.example.com` | `api.example.com` |
+| `acme.example.com` | `{tenant}.example.com`, `c.Param("tenant")` is `acme` |
+| `acme.com` | `*`, `c.Host()` is `acme.com` |
+
+Registering `www.example.com` takes it out of `{tenant}.example.com`, which is
+how you reserve a subdomain.
+
+### The fallbacks
+
+- A route that **no** host scope registered answers **every** host. It is also
+  the fallback when the matched host has no route for the path, which is what
+  puts `/healthz` on all four hosts above.
+- A host that matches **no** pattern still reaches those host-free routes, and
+  then the `NotFound` of the root.
+- With no match anywhere the answer is **404**.
+- `NotFound`, `MethodNotAllowed` and `ErrorHandler` inside a host scope apply
+  to that host. Each falls back to the one of the root while it is unset.
+  A route that answers every host uses the ones of the root.
+
+### One error handler per host
+
+```go
+// JSON for the API.
+r.Host("api.example.com", func(h *router.Router[Ctx]) {
+	h.ErrorHandler(func(c *Context, err error) {
+		_ = c.JSON(router.StatusOf(err), errorBody(err))
+	})
+	h.GET("/v1/users/{id}", getUser)
+})
+
+// A branded page for the main site.
+r.Host("example.com", func(h *router.Router[Ctx]) {
+	h.ErrorHandler(func(c *Context, err error) {
+		_ = c.HTML(router.StatusOf(err), sitePage(err))
+	})
+	h.GET("/", landing)
+})
+
+// A page in the colours of the tenant. The host parameter is on the context
+// before the error handler runs, on a 404 as well as on a returned error.
+r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *router.Router[Ctx]) {
+	h.Use(resolveTenant)
+	h.ErrorHandler(func(c *Context, err error) {
+		_ = c.HTML(router.StatusOf(err), tenantPage(c.Param("tenant"), c.Host(), err))
+	})
+	h.GET("/", dashboard)
+})
+```
+
+The handler renders every failure of that host: an error a handler or a
+middleware returned, a panic that escaped the chain, and a 404 or a 405 while
+`NotFound` and `MethodNotAllowed` are unset. `c.Param(...)` and `c.Host()` read
+the same values they do inside a handler.
+
+`c.Tenant`, on the other hand, is only set when `resolveTenant` reached that
+far. A 404 for an unknown tenant runs the middleware first, so it is; a 404 on
+a host that no scope claims never enters the scope at all, and the root handler
+renders it.
+
+### A host with its own context type
+
+`HostRouter` hands a whole host to a router that carries a different context
+type, with its own factory, middleware, error handler and fallbacks. It is the
+host analogue of `MountRouter`, and the path reaches it unchanged.
+
+```go
+r.HostRouter("api.example.com", api.Router(db))       // *api.Context
+r.HostHandler("docs.example.com", http.FileServerFS(docs))
+```
+
+The middleware of `r` still runs in front of it, which is where a recover, a
+request id and a log line belong. A parameter of the host pattern does not
+cross the seam; read it in a middleware of `r` and pass it on.
+
+### Cost
+
+The host lookup runs once, before the path. A fixed host is one map lookup; a
+pattern is one suffix comparison and one byte scan. Each host owns its own
+route trie, so the path match after it costs exactly what it costs in a router
+without host routes, and the whole step allocates nothing. A router that
+registers no host scope never enters the code at all.
 
 ## Errors
 
@@ -482,6 +645,8 @@ res.AssertStatus(t, http.StatusCreated)
 
 out, err := res.JSON[User]()
 
+res = routertest.Get(r, "/", routertest.Host("acme.example.com"))   // a host route
+
 srv := routertest.NewServer(t, r)   // a real server, stopped when the test ends
 ```
 
@@ -505,6 +670,12 @@ context object at all — it looks the handler up and calls it with the request
 the server already allocated. `NewPooled` closes that gap; echo does the same
 thing by default and pays for it with the same caveats listed above.
 
+Host routing costs the lookup that resolves it, and nothing else:
+
+| | fixed host | `{tenant}.example.com` | `*` | a host-free route |
+|---|---|---|---|---|
+| **go-router** | 89 ns, 1 alloc | 100 ns, 1 alloc | 92 ns, 1 alloc | 92 ns, 1 alloc |
+
 Matching uses a compressed radix tree, the same structure echo uses, so a
 static route costs a few string comparisons rather than one lookup per
 segment. Echo stays ahead by 10 to 20 percent: it carries a smaller context
@@ -517,8 +688,9 @@ you.
 
 - **Generic methods** give `c.Bind[CreateUser]()`, `c.ParamAs[int]("id")` and
   `res.JSON[User]()` — the caller names the type, no out-parameter.
-- **Generic methods** also give `r.MountRouter(prefix, sub)`, which accepts a
-  router whose context type differs from the caller's.
+- **Generic methods** also give `r.MountRouter(prefix, sub)` and
+  `r.HostRouter(host, sub)`, which accept a router whose context type differs
+  from the caller's.
 - **Generalized function type inference** lets a bare generic function stand in
   for a `Middleware[C]`, which is how a hand-written middleware reaches
   `r.Use` without a type argument.
@@ -530,6 +702,7 @@ you.
 
 - A catch-all must span a whole segment, and two parameters cannot sit side by
   side inside one.
+- A host pattern carries no port, and an IP literal host is not routable.
 - Register every route before the first request. The router compiles its trie
   once and refuses a later change.
 - Pooling is opt-in, and it hands you the usual lifetime rules with it.

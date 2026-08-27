@@ -138,6 +138,102 @@ func ExampleRouter_MountRouter() {
 	// 200 root sees user 7 at /users/7
 }
 
+// serveHost sends a request that names a host.
+func serveHost(h http.Handler, method, host, target string) string {
+	req := httptest.NewRequest(method, target, nil)
+	req.Host = host
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return fmt.Sprint(rec.Code, " ", rec.Body.String())
+}
+
+// ExampleRouter_Host routes a whole service by host: a main site, a fixed
+// subdomain for the API, a subdomain per tenant, and the domain that a tenant
+// brings along.
+func ExampleRouter_Host() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	// The main site.
+	r.Host("example.com", func(h *router.Router[*Context]) {
+		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
+		h.Route("/blog", func(b *router.Router[*Context]) {
+			b.GET("/{slug}", func(c *Context) error {
+				return c.Stringf(http.StatusOK, "post %s", c.Param("slug"))
+			})
+		})
+	})
+
+	// A fixed subdomain, with middleware of its own.
+	r.Host("api.example.com", func(h *router.Router[*Context]) {
+		h.GET("/v1/users/{id}", func(c *Context) error {
+			return c.Stringf(http.StatusOK, "user %s", c.Param("id"))
+		})
+	})
+
+	// One tenant application, on a subdomain or on a domain of the tenant's
+	// own. The subdomain fills the parameter; the custom domain does not, so
+	// the handler falls back to the host itself.
+	r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *router.Router[*Context]) {
+		h.GET("/", func(c *Context) error {
+			tenant := c.Param("tenant")
+			if tenant == "" {
+				tenant = "domain:" + c.Host()
+			}
+			return c.Stringf(http.StatusOK, "dashboard of %s", tenant)
+		})
+	})
+
+	// A route outside every host scope answers on any host.
+	r.GET("/healthz", func(c *Context) error { return c.String(http.StatusOK, "ok") })
+
+	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/"))
+	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/blog/hello"))
+	fmt.Println(serveHost(r, http.MethodGet, "api.example.com", "/v1/users/7"))
+	fmt.Println(serveHost(r, http.MethodGet, "acme.example.com", "/"))
+	fmt.Println(serveHost(r, http.MethodGet, "acme.com", "/"))
+	fmt.Println(serveHost(r, http.MethodGet, "acme.com", "/healthz"))
+	// Output:
+	// 200 landing
+	// 200 post hello
+	// 200 user 7
+	// 200 dashboard of acme
+	// 200 dashboard of domain:acme.com
+	// 200 ok
+}
+
+// ExampleRouter_HostRouter gives a host to a router that carries a different
+// context type, with its own middleware, error handler and fallbacks.
+func ExampleRouter_HostRouter() {
+	type APIContext struct {
+		router.Base
+		Version string
+	}
+
+	api := router.New(func(http.ResponseWriter, *http.Request) *APIContext {
+		return &APIContext{Version: "v1"}
+	})
+	api.NotFound(func(c *APIContext) error {
+		return c.Stringf(http.StatusNotFound, "%s: no such endpoint", c.Version)
+	})
+	api.GET("/users/{id}", func(c *APIContext) error {
+		return c.Stringf(http.StatusOK, "%s user %s", c.Version, c.Param("id"))
+	})
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.HostRouter("api.example.com", api)
+	r.Host("example.com", func(h *router.Router[*Context]) {
+		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
+	})
+
+	fmt.Println(serveHost(r, http.MethodGet, "api.example.com", "/users/7"))
+	fmt.Println(serveHost(r, http.MethodGet, "api.example.com", "/nope"))
+	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/"))
+	// Output:
+	// 200 v1 user 7
+	// 404 v1: no such endpoint
+	// 200 landing
+}
+
 // ExampleBase_Bind decodes a request body into a type that the caller names.
 func ExampleBase_Bind() {
 	type CreateUser struct {
