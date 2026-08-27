@@ -42,8 +42,8 @@ func Example() {
 		return &Context{DB: db}
 	})
 	r.Use(
-		middleware.Recover(middleware.RecoverConfig{}).Middleware,
-		middleware.RequestID(middleware.RequestIDConfig{}).Middleware,
+		middleware.Recover().Middleware,
+		middleware.RequestID().Middleware,
 	)
 
 	r.GET("/users/{id}", func(c *Context) error {

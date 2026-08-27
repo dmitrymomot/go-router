@@ -55,10 +55,10 @@ func main() {
 	})
 
 	r.Use(
-		middleware.Recover(middleware.RecoverConfig{}).Middleware,
-		middleware.RequestID(middleware.RequestIDConfig{}).Middleware,
-		middleware.RealIP(middleware.RealIPConfig{}).Middleware,
-		middleware.Logger(middleware.LoggerConfig{}).Middleware,
+		middleware.Recover().Middleware,
+		middleware.RequestID().Middleware,
+		middleware.RealIP().Middleware,
+		middleware.Logger().Middleware,
 	)
 
 	r.GET("/health", func(c *Context) error {
@@ -241,7 +241,7 @@ func Router(audit *audit.Log, db *sql.DB) *router.Router[*Context] {
 		return &Context{Audit: audit}
 	})
 
-	r.Use(middleware.Recover(middleware.RecoverConfig{}).Middleware)
+	r.Use(middleware.Recover().Middleware)
 	r.Use(requireOperator(db))        // fills Context.Operator or returns 401
 
 	// Admin answers HTML, so it renders its errors as a page.
@@ -271,8 +271,8 @@ api := router.New(func(http.ResponseWriter, *http.Request) *app.Context {
 	return &app.Context{DB: db}
 })
 api.Use(
-	middleware.Recover(middleware.RecoverConfig{}).Middleware,
-	middleware.RequestID(middleware.RequestIDConfig{}).Middleware,
+	middleware.Recover().Middleware,
+	middleware.RequestID().Middleware,
 )
 api.GET("/v1/users/{id}", getUser)          // *app.Context
 
@@ -386,13 +386,13 @@ Request bodies are capped at 4 MiB. Change it with `r.MaxBodyBytes(n)`.
 type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 ```
 
-Every middleware follows one shape. A function named after it takes a config,
-fills in the defaults and returns it. That config carries a generic
-`Middleware` method, and Go 1.27 infers the context type there, so you never
-name your own context type:
+Every middleware follows one shape. A function named after it takes an
+optional config, fills in the defaults and returns it. That config carries a
+generic `Middleware` method, and Go 1.27 infers the context type there, so you
+never name your own context type. Leave the config out to take the defaults:
 
 ```go
-r.Use(middleware.Recover(middleware.RecoverConfig{}).Middleware)
+r.Use(middleware.Recover().Middleware)
 r.Use(middleware.RequestID(middleware.RequestIDConfig{IgnoreInbound: true}).Middleware)
 r.Use(middleware.RealIP(middleware.RealIPConfig{Headers: []string{"Cf-Connecting-Ip"}}).Middleware)
 r.Use(middleware.Logger(middleware.LoggerConfig{Logger: log}).Middleware)
@@ -412,6 +412,9 @@ middleware.Logger(middleware.LoggerConfig{
 `Skip` takes the `router.Context` interface, not your context type, so one
 function fits any router. It reaches the request through `c.Request()` and the
 matched route through `c.RoutePattern()`.
+
+Passing more than one config panics, because the middleware would have to
+guess which one wins.
 
 One middleware per file, named after it: `recover.go`, `requestid.go`,
 `realip.go`, `logger.go`, `cors.go`, `timeout.go`.
