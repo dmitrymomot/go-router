@@ -61,11 +61,13 @@ lint:
     go vet ./...
     go build -o /dev/null ./...
     # gofumpt, goimports and go fix all report on stdout and still exit 0, so
-    # turn a non-empty report into a failure.
+    # turn a non-empty report into a failure. Only stdout counts: `go run`
+    # writes "go: downloading ..." to stderr whenever the module cache is cold,
+    # as it is on every CI runner, and that is not a finding.
     fail_if_output() {
         local what="$1"; shift
         local out
-        out="$("$@" 2>&1)"
+        out="$("$@")"
         if [ -n "$out" ]; then
             echo "$what:" >&2
             echo "$out" >&2
