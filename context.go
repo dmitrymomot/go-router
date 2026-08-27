@@ -42,8 +42,24 @@ type Context interface {
 	// Request returns the request that is in flight.
 	Request() *http.Request
 
+	// SetRequest replaces the request, which middleware does to attach a new
+	// context or to rewrite a field.
+	SetRequest(r *http.Request)
+
 	// Response returns the response writer wrapper.
 	Response() *Response
+
+	// Set stores a value for the lifetime of the request.
+	Set(key string, value any)
+
+	// Get returns a value that Set stored.
+	Get(key string) (any, bool)
+
+	// Param returns the value of a route parameter.
+	Param(name string) string
+
+	// RoutePattern returns the pattern of the matched route.
+	RoutePattern() string
 
 	base() *Base
 }
