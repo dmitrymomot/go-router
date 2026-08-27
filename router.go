@@ -64,6 +64,7 @@ type Router[C Context] struct {
 	errHandler       ErrorHandlerFunc[C]
 	notFoundChain    HandlerFunc[C]
 	notAllowedChain  HandlerFunc[C]
+	optionsChain     HandlerFunc[C]
 	autoOptions      bool
 	redirectSlash    bool
 	maxBody          int64
@@ -400,6 +401,7 @@ func (r *Router[C]) build() {
 	r.tree = tree
 	r.notFoundChain = chain(r.notFound, r.mws)
 	r.notAllowedChain = chain(r.methodNotAllowed, r.mws)
+	r.optionsChain = chain(func(c C) error { return c.base().NoContent(http.StatusNoContent) }, r.mws)
 	r.started.Store(true)
 }
 
@@ -464,7 +466,9 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		allow := strings.Join(st.pathMatch.allowed(), ", ")
 		b.res.Header().Set(HeaderAllow, allow)
 		if req.Method == http.MethodOptions && root.autoOptions {
-			b.res.WriteHeader(http.StatusNoContent)
+			// The middleware of the root runs here too, so that a CORS
+			// preflight reaches the CORS middleware.
+			root.dispatch(c, root.optionsChain)
 			return
 		}
 		root.dispatch(c, root.notAllowedChain)
