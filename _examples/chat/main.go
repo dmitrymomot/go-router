@@ -196,11 +196,11 @@ func postMessage(c Ctx) error {
 
 // events streams the room to one reader.
 func events(c Ctx) error {
-	ch, leave := c.Room.join()
-	defer leave()
+	ch, unsubscribe := c.Room.join()
+	defer unsubscribe()
 
-	// The defer that follows runs before leave, so the room still holds every
-	// other reader when the notice goes out.
+	// The defer that follows runs before unsubscribe, so the room still holds
+	// every other reader when the notice goes out.
 	c.Room.broadcast(notice(c.User, "joined the chat"))
 	defer c.Room.broadcast(notice(c.User, "left the chat"))
 
