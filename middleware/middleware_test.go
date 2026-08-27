@@ -4,8 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
@@ -39,49 +39,62 @@ func skipPath(path string) func(router.Context) bool {
 	return func(c router.Context) bool { return c.Request().URL.Path == path }
 }
 
-// TestConstructorsTakeAtMostOneConfig pins the variadic contract: no argument
-// means the defaults, one argument configures, and more is a mistake that the
-// middleware refuses to guess about.
-func TestConstructorsTakeAtMostOneConfig(t *testing.T) {
-	tests := []struct {
-		name string
-		call func()
-	}{
-		{"Recover", func() { middleware.Recover(middleware.RecoverConfig{}, middleware.RecoverConfig{}) }},
-		{"RequestID", func() { middleware.RequestID(middleware.RequestIDConfig{}, middleware.RequestIDConfig{}) }},
-		{"RealIP", func() { middleware.RealIP(middleware.RealIPConfig{}, middleware.RealIPConfig{}) }},
-		{"Logger", func() { middleware.Logger(middleware.LoggerConfig{}, middleware.LoggerConfig{}) }},
-		{"CORS", func() { middleware.CORS(middleware.CORSConfig{}, middleware.CORSConfig{}) }},
-		{"Timeout", func() { middleware.Timeout(middleware.TimeoutConfig{}, middleware.TimeoutConfig{}) }},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				msg, _ := recover().(string)
-				if !strings.Contains(msg, "at most one config") {
-					t.Errorf("panic = %q, want one about the config count", msg)
-				}
-			}()
-			tc.call()
-		})
-	}
-}
-
-// TestDefaultsWithoutAConfig checks that every constructor is usable with no
-// argument at all.
-func TestDefaultsWithoutAConfig(t *testing.T) {
+// TestDefaultFactories checks that the plain factory of every middleware
+// returns a usable middleware.
+func TestDefaultFactories(t *testing.T) {
 	r := newRouter()
 	r.Use(
-		middleware.Recover().Middleware,
-		middleware.RequestID().Middleware,
-		middleware.RealIP().Middleware,
-		middleware.Logger(middleware.LoggerConfig{Logger: slog.New(slog.DiscardHandler)}).Middleware,
-		middleware.CORS().Middleware,
-		middleware.Timeout().Middleware,
+		middleware.Recover[*appContext](),
+		middleware.RequestID[*appContext](),
+		middleware.RealIP[*appContext](),
+		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+			Logger: slog.New(slog.DiscardHandler),
+		}),
+		middleware.CORS[*appContext](),
+		middleware.Timeout[*appContext](),
 	)
 	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
 
+	rec := get(r, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Header().Get(router.HeaderXRequestID) == "" {
+		t.Error("RequestID did not set the header")
+	}
+}
+
+// TestDefaultCORSAllowsEveryOrigin pins what the plain CORS factory does,
+// because it is the one default that is permissive.
+func TestDefaultCORSAllowsEveryOrigin(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.CORS[*appContext]())
+	r.GET("/data", func(c *appContext) error { return c.String(http.StatusOK, "data") })
+
+	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	req.Header.Set(router.HeaderOrigin, "https://anywhere.example")
+	if got := do(r, req).Header().Get(router.HeaderAccessControlAllowOrigin); got != "*" {
+		t.Errorf("allow origin = %q, want %q", got, "*")
+	}
+}
+
+// TestDefaultTimeoutAppliesADeadline pins that the plain Timeout factory is
+// not a no-op.
+func TestDefaultTimeoutAppliesADeadline(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.Timeout[*appContext]())
+	r.GET("/", func(c *appContext) error {
+		d, ok := c.Request().Context().Deadline()
+		if !ok {
+			return router.ErrInternalServerError.WithMessage("no deadline")
+		}
+		if until := time.Until(d); until <= 0 || until > middleware.DefaultTimeout {
+			return router.ErrInternalServerError.WithMessage("deadline is %s away", until)
+		}
+		return c.NoContent(http.StatusOK)
+	})
+
 	if rec := get(r, "/"); rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
+		t.Errorf("status = %d, want 200: %s", rec.Code, rec.Body)
 	}
 }

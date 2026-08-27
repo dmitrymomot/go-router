@@ -11,7 +11,7 @@ import (
 
 func realIPRouter(cfg middleware.RealIPConfig) *router.Router[*appContext] {
 	r := newRouter()
-	r.Use(middleware.RealIP(cfg).Middleware)
+	r.Use(middleware.RealIPWithConfig[*appContext](cfg))
 	r.GET("/", func(c *appContext) error {
 		return c.String(http.StatusOK, middleware.ClientIP(c))
 	})

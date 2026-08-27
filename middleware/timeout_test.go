@@ -14,7 +14,7 @@ import (
 
 func timeoutRouter(cfg middleware.TimeoutConfig) *router.Router[*appContext] {
 	r := newRouter()
-	r.Use(middleware.Timeout(cfg).Middleware)
+	r.Use(middleware.TimeoutWithConfig[*appContext](cfg))
 	r.GET("/slow", func(c *appContext) error {
 		<-c.Done()
 		return c.Err()
@@ -77,7 +77,7 @@ func TestTimeoutSkip(t *testing.T) {
 
 func TestTimeoutPassesTheDeadlineToTheHandler(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.Timeout(middleware.TimeoutConfig{Duration: time.Minute}).Middleware)
+	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: time.Minute}))
 	r.GET("/", func(c *appContext) error {
 		if _, ok := c.Request().Context().Deadline(); !ok {
 			return router.ErrInternalServerError.WithMessage("no deadline")

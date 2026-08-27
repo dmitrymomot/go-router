@@ -17,7 +17,7 @@ func loggerRouter(cfg middleware.LoggerConfig) (*router.Router[*appContext], *by
 		cfg.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	r := newRouter()
-	r.Use(middleware.Logger(cfg).Middleware)
+	r.Use(middleware.LoggerWithConfig[*appContext](cfg))
 	r.GET("/gone", func(*appContext) error { return router.ErrGone })
 	r.GET("/ok", func(c *appContext) error { return c.String(http.StatusOK, "fine") })
 	r.GET("/health", func(c *appContext) error { return c.NoContent(http.StatusNoContent) })

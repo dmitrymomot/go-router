@@ -10,7 +10,7 @@ import (
 
 func TestRecoverTurnsAPanicIntoA500(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.Recover().Middleware)
+	r.Use(middleware.Recover[*appContext]())
 	r.GET("/boom", func(*appContext) error { panic("handler exploded") })
 
 	rec := get(r, "/boom")
@@ -24,7 +24,7 @@ func TestRecoverTurnsAPanicIntoA500(t *testing.T) {
 
 func TestRecoverPassesOnErrAbortHandler(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.Recover().Middleware)
+	r.Use(middleware.Recover[*appContext]())
 	r.GET("/abort", func(*appContext) error { panic(http.ErrAbortHandler) })
 
 	defer func() {
@@ -37,7 +37,7 @@ func TestRecoverPassesOnErrAbortHandler(t *testing.T) {
 
 func TestRecoverSkip(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.Recover(middleware.RecoverConfig{Skip: skipPath("/boom")}).Middleware)
+	r.Use(middleware.RecoverWithConfig[*appContext](middleware.RecoverConfig{Skip: skipPath("/boom")}))
 	r.GET("/boom", func(*appContext) error { panic("handler exploded") })
 
 	// The router still catches the panic that this middleware passed over.

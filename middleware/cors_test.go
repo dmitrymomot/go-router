@@ -11,7 +11,7 @@ import (
 
 func corsRouter(cfg middleware.CORSConfig) *router.Router[*appContext] {
 	r := newRouter()
-	r.Use(middleware.CORS(cfg).Middleware)
+	r.Use(middleware.CORSWithConfig[*appContext](cfg))
 	r.GET("/data", func(c *appContext) error { return c.String(http.StatusOK, "data") })
 	return r
 }

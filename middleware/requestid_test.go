@@ -11,7 +11,7 @@ import (
 
 func requestIDRouter(cfg middleware.RequestIDConfig) *router.Router[*appContext] {
 	r := newRouter()
-	r.Use(middleware.RequestID(cfg).Middleware)
+	r.Use(middleware.RequestIDWithConfig[*appContext](cfg))
 	r.GET("/", func(c *appContext) error {
 		return c.String(http.StatusOK, middleware.RequestIDFrom(c))
 	})
