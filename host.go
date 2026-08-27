@@ -75,6 +75,12 @@ type hostEntry[C Context] struct {
 
 	tree *node[C]
 
+	// mws is the middleware of the scope that opened this host, which wraps
+	// the fallbacks below. haveMWs marks it as recorded, because an empty
+	// chain is a legitimate value.
+	mws     []Middleware[C]
+	haveMWs bool
+
 	// idx is the position of this entry inside hostSet.all. [Base] records it,
 	// which is how the error handler finds the entry again.
 	idx int32
@@ -438,10 +444,12 @@ func normalizeHost(host string) string {
 func asciiLower(s string) string {
 	for i := range len(s) {
 		if c := s[i]; c >= 'A' && c <= 'Z' {
+			// Everything before i is already lower case, so only the tail
+			// needs rewriting.
 			b := []byte(s)
-			for ; i < len(b); i++ {
-				if c := b[i]; c >= 'A' && c <= 'Z' {
-					b[i] = c + ('a' - 'A')
+			for j := i; j < len(b); j++ {
+				if c := b[j]; c >= 'A' && c <= 'Z' {
+					b[j] = c + ('a' - 'A')
 				}
 			}
 			return string(b)

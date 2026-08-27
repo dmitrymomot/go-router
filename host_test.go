@@ -50,6 +50,7 @@ func siteRouter() *Router[*tctx] {
 	})
 
 	r.GET("/healthz", echoHost) // every host answers it
+	r.GET("/{page}", echoHost)  // a host-free route with a parameter of its own
 	return r
 }
 
@@ -72,6 +73,9 @@ func TestHostMatch(t *testing.T) {
 		{"example.com", "/healthz", "|/healthz"},
 		{"api.example.com", "/healthz", "|/healthz"},
 		{"acme.com", "/healthz", "|/healthz"},
+
+		// A host-free route with a parameter, reached from a matched host.
+		{"api.example.com", "/legal", "|/{page} page=legal"},
 
 		// The port, the case and a trailing dot do not take part.
 		{"Example.COM:8443", "/", "example.com|/"},
@@ -642,6 +646,123 @@ func TestPerHostErrorHandlers(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("body = %q, want %q", got, tt.want)
 			}
+		})
+	}
+}
+
+// TestHostParamsSurviveTheHostFreeWalk guards the host parameters against the
+// walk of the host-free trie, which appends behind them and must not write
+// over them when it matches nothing.
+func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
+	build := func() *Router[*tctx] {
+		r := newTestRouter()
+		r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
+			h.NotFound(func(c *tctx) error {
+				return c.String(http.StatusNotFound, "404 tenant="+c.Param("tenant"))
+			})
+			h.GET("/", echoHost)
+		})
+		r.GET("/{page}", echoHost) // host-free, and it carries a parameter
+		return r
+	}
+
+	// The host trie misses, then the host-free trie writes "nope" into the
+	// shared array while it tries /{page} and fails.
+	r := build()
+	if got := doHost(r, http.MethodGet, "acme.example.com", "/nope/deep").Body.String(); got != "404 tenant=acme" {
+		t.Errorf("body = %q, want %q", got, "404 tenant=acme")
+	}
+
+	// The trailing-slash check walks the same two tries, into the same array.
+	rs := build()
+	rs.RedirectTrailingSlash(true)
+	if got := doHost(rs, http.MethodGet, "acme.example.com", "/nope/deep/").Body.String(); got != "404 tenant=acme" {
+		t.Errorf("body after the slash check = %q, want %q", got, "404 tenant=acme")
+	}
+}
+
+// TestHostInheritsTheFallbackOfTheRoot covers a fallback that a scope below the
+// root sets: a host that sets none of its own still inherits it.
+func TestHostInheritsTheFallbackOfTheRoot(t *testing.T) {
+	r := newTestRouter()
+	// A Group, not the root itself, and it comes before the host scope.
+	r.Group(func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "custom 404") })
+		g.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "custom 405") })
+	})
+	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
+
+	if got := doHost(r, http.MethodGet, "other.invalid", "/nope").Body.String(); got != "custom 404" {
+		t.Errorf("404 with no host = %q, want %q", got, "custom 404")
+	}
+	if got := doHost(r, http.MethodGet, "example.com", "/nope").Body.String(); got != "custom 404" {
+		t.Errorf("404 on a host = %q, want %q", got, "custom 404")
+	}
+	if got := doHost(r, http.MethodPost, "example.com", "/").Body.String(); got != "custom 405" {
+		t.Errorf("405 on a host = %q, want %q", got, "custom 405")
+	}
+}
+
+// TestHostFreeRouteUsesTheRootFallbacks pins the rule that a route which
+// answers every host is rendered by the root, whatever host it arrived on.
+func TestHostFreeRouteUsesTheRootFallbacks(t *testing.T) {
+	r := newTestRouter()
+	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "root 405") })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "host 405") })
+		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "host err") })
+		h.GET("/site", echoHost)
+	})
+	r.GET("/healthz", echoHost)
+	r.GET("/boom", func(c *tctx) error { return ErrForbidden })
+
+	tests := []struct {
+		name, method, path, want string
+	}{
+		{"405 on a host-free route", http.MethodPost, "/healthz", "root 405"},
+		{"error on a host-free route", http.MethodGet, "/boom", "root err"},
+		{"405 on a route of the host", http.MethodPost, "/site", "host 405"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doHost(r, tt.method, "example.com", tt.path).Body.String(); got != tt.want {
+				t.Errorf("body = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// RouteHost reports no host for a route that answers every host.
+	r2 := newTestRouter()
+	r2.Host("example.com", func(h *Router[*tctx]) { h.GET("/site", echoHost) })
+	r2.GET("/healthz", echoHost)
+	if got := doHost(r2, http.MethodGet, "example.com", "/healthz").Body.String(); got != "|/healthz" {
+		t.Errorf("body = %q, want %q", got, "|/healthz")
+	}
+}
+
+// TestHostNestedScopePanicsAtRegistration keeps the nesting error with the
+// stack of the caller, instead of leaving it for the first request.
+func TestHostNestedScopePanicsAtRegistration(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		fn   func(h *Router[*tctx])
+	}{
+		{"directly", func(h *Router[*tctx]) { h.Host("api.example.com", nil) }},
+		{"through a group", func(h *Router[*tctx]) {
+			h.Group(func(g *Router[*tctx]) { g.Host("api.example.com", nil) })
+		}},
+		{"through a route", func(h *Router[*tctx]) {
+			h.Route("/v1", func(g *Router[*tctx]) { g.Host("api.example.com", nil) })
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("want a panic at registration, not at the first request")
+				}
+			}()
+			newTestRouter().Host("example.com", tt.fn)
 		})
 	}
 }

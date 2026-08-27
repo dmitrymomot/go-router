@@ -13,11 +13,13 @@ import (
 
 // Route describes one registered route. [Router.Routes] returns them.
 type Route struct {
-	// Host is the host pattern of the scope that registered the route. It is
-	// empty for a route that answers every host.
-	Host    string
 	Method  string
 	Pattern string
+
+	// Host is the host pattern of the scope that registered the route. It is
+	// empty for a route that answers every host. It comes last, so that an
+	// unkeyed literal of the two fields above still compiles.
+	Host string
 }
 
 // stdMethods are the methods that [Router.Any] and [Router.MountHandler]
@@ -60,6 +62,10 @@ type Router[C Context] struct {
 	// hosts holds the host patterns that [Router.Host] bound to this scope. It
 	// is nil for a scope that answers every host.
 	hosts []hostSpec
+
+	// inHost reports that a host scope encloses this one, which is what lets
+	// Hosts refuse a nested host scope at registration.
+	inHost bool
 
 	// The fallbacks of this scope. Each one is nil until the scope sets it.
 	// The root carries the defaults, and a host scope that leaves one unset
@@ -256,7 +262,7 @@ func (r *Router[C]) Use(mws ...Middleware[C]) {
 
 // newChild adds a scope below r.
 func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
-	c := &Router[C]{root: r.root, prefix: prefix, mws: mws}
+	c := &Router[C]{root: r.root, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
 	r.children = append(r.children, c)
 	return c
 }
@@ -352,6 +358,9 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	}
 	if len(patterns) == 0 {
 		panic("router: Hosts needs at least one pattern")
+	}
+	if r.inHost || len(r.hosts) > 0 {
+		panic("router: a host scope cannot sit inside another host scope")
 	}
 	specs := make([]hostSpec, 0, len(patterns))
 	for _, p := range patterns {
@@ -592,28 +601,6 @@ func (r *Router[C]) build() {
 		p := joinPattern(prefix, rt.prefix)
 		m := concatMiddleware(mws, rt.mws)
 
-		// A scope that carries host patterns runs once per pattern, so the
-		// same routes reach every host that the scope claims.
-		targets := []*hostEntry[C]{host}
-		if len(rt.hosts) > 0 {
-			if host != nil {
-				panic("router: a host scope cannot sit inside another host scope")
-			}
-			targets = targets[:0]
-			for _, spec := range rt.hosts {
-				e := r.hostEntry(spec)
-				// The middleware of the host scope wraps the fallbacks of the
-				// host too, so a CORS preflight or a log line still sees a 404
-				// that this host answered.
-				if e.optionsChain == nil {
-					e.optionsChain = chain(autoOptions[C], m)
-					e.notFoundChain = chain(r.notFound, m)
-					e.notAllowedChain = chain(r.methodNotAllowed, m)
-				}
-				targets = append(targets, e)
-			}
-		}
-
 		// The handler chain of a route does not depend on the host, so build
 		// it once even when the scope answers several of them.
 		handlers := make([]HandlerFunc[C], len(rt.regs))
@@ -621,7 +608,27 @@ func (r *Router[C]) build() {
 			handlers[i] = chain(reg.handler, concatMiddleware(m, reg.mws))
 		}
 
-		for _, e := range targets {
+		// A scope that carries host patterns runs once per pattern, so the
+		// same routes reach every host that the scope claims. A scope that
+		// carries none runs once, against the host it inherited.
+		rounds := max(len(rt.hosts), 1)
+		for i := range rounds {
+			e := host
+			if len(rt.hosts) > 0 {
+				if host != nil {
+					panic("router: a host scope cannot sit inside another host scope")
+				}
+				e = r.hostEntry(rt.hosts[i])
+				// The fallbacks of the host wrap in the middleware of the
+				// scope that opened it, so a CORS preflight or a log line
+				// still sees a 404 that this host answered. Building them is
+				// left until the walk ends, because a scope below may still
+				// set the fallbacks of the root that they fall back to.
+				if !e.haveMWs {
+					e.mws, e.haveMWs = m, true
+				}
+			}
+
 			tree, names := r.tree, []string(nil)
 			if e != nil {
 				tree, names = e.tree, e.names
@@ -634,9 +641,15 @@ func (r *Router[C]) build() {
 			notFound, notAllowed, errh := r.fallbacks(e)
 			if rt.notFound != nil {
 				*notFound = chain(rt.notFound, m)
+				if e == nil {
+					r.notFound = rt.notFound // what a host inherits
+				}
 			}
 			if rt.methodNotAllowed != nil {
 				*notAllowed = chain(rt.methodNotAllowed, m)
+				if e == nil {
+					r.methodNotAllowed = rt.methodNotAllowed
+				}
 			}
 			if rt.errHandler != nil {
 				*errh = rt.errHandler
@@ -656,6 +669,20 @@ func (r *Router[C]) build() {
 
 	r.collectRoutes()
 	if r.hostSet != nil {
+		// r.notFound and r.methodNotAllowed are final now, so a host that set
+		// no fallback of its own inherits the one the application chose,
+		// wherever the scope that chose it sat.
+		for _, e := range r.hostSet.all {
+			if e.optionsChain == nil {
+				e.optionsChain = chain(autoOptions[C], e.mws)
+			}
+			if e.notFoundChain == nil {
+				e.notFoundChain = chain(r.notFound, e.mws)
+			}
+			if e.notAllowedChain == nil {
+				e.notAllowedChain = chain(r.methodNotAllowed, e.mws)
+			}
+		}
 		slices.SortStableFunc(r.hostSet.pats, func(a, b *hostEntry[C]) int {
 			return lessSpecific(&a.hostSpec, &b.hostSpec)
 		})
@@ -812,12 +839,15 @@ func (r *Router[C]) route(c C, req *http.Request) {
 	// Resolve the host once, before the path. A router without host scopes
 	// skips this whole step.
 	var (
-		host     *hostEntry[C]
-		hostVals []string
+		host *hostEntry[C]
+		// hostVals holds the values of the host parameters. Every later walk
+		// appends behind it rather than over it, so the values that the
+		// fallbacks read survive a walk that matches nothing.
+		hostVals = b.paramArr[:0]
 	)
 	if r.hostSet != nil {
-		b.host = normalizeHost(req.Host)
-		host, hostVals = r.hostSet.match(b.host, b.paramArr[:0])
+		b.host, b.hostKnown = normalizeHost(req.Host), true
+		host, hostVals = r.hostSet.match(b.host, hostVals)
 		if host != nil {
 			b.hostIdx, b.hostPattern = host.idx, host.pattern
 			// Publish the host parameters before the path match, so that a
@@ -828,7 +858,7 @@ func (r *Router[C]) route(c C, req *http.Request) {
 		}
 	}
 
-	if r.redirectSlash && trimmed != path && r.canMatch(host, trimmed, req.Method) {
+	if r.redirectSlash && trimmed != path && r.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):]) {
 		redirectTo(b.res, req, trimmed, escaped)
 		return
 	}
@@ -846,7 +876,7 @@ func (r *Router[C]) route(c C, req *http.Request) {
 	// A route that no host scope registered answers every host, so it is the
 	// fallback when the routes of the matched host do not fit the path.
 	if n == nil && r.anyHostRoutes {
-		if m, v := search(r.tree, trimmed, req.Method, b.paramArr[:0], &anySt); m != nil {
+		if m, v := search(r.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt); m != nil {
 			n, vals, nHost = m, v, 0
 			// The matched route carries no host, so the fallbacks of the root
 			// render it.
@@ -870,7 +900,11 @@ func (r *Router[C]) route(c C, req *http.Request) {
 	case hostSt.pathMatch != nil || anySt.pathMatch != nil:
 		match, matched, skip := hostSt.pathMatch, hostSt.pathVals, len(hostVals)
 		if match == nil {
+			// The path belongs to a route that answers every host, so the
+			// fallbacks of the root render it, as they do for a full match.
 			match, matched, skip = anySt.pathMatch, anySt.pathVals, 0
+			host = nil
+			b.hostIdx, b.hostPattern = -1, ""
 		}
 		if escaped {
 			unescapeParams(matched[skip:])
@@ -983,11 +1017,12 @@ func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 }
 
 // canMatch reports whether the path has a route for the method, on the matched
-// host or on no host at all.
-func (r *Router[C]) canMatch(host *hostEntry[C], path, method string) bool {
+// host or on no host at all. scratch is the room that the walk fills with
+// parameter values, which the answer discards.
+func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []string) bool {
 	if host != nil {
 		var st matchState[C]
-		if n, _ := search(host.tree, path, method, nil, &st); n != nil || st.pathMatch != nil {
+		if n, _ := search(host.tree, path, method, scratch, &st); n != nil || st.pathMatch != nil {
 			return true
 		}
 	}
@@ -995,7 +1030,7 @@ func (r *Router[C]) canMatch(host *hostEntry[C], path, method string) bool {
 		return false
 	}
 	var st matchState[C]
-	n, _ := search(r.tree, path, method, nil, &st)
+	n, _ := search(r.tree, path, method, scratch, &st)
 	return n != nil || st.pathMatch != nil
 }
 

@@ -120,6 +120,10 @@ type Base struct {
 	// routing returned.
 	hostIdx int32
 
+	// hostKnown reports that host holds the answer of normalizeHost. An empty
+	// host is a legitimate answer, so it cannot mark the field as unset.
+	hostKnown bool
+
 	// pathEscaped reports whether the matched path was still percent encoded.
 	pathEscaped bool
 }
@@ -147,6 +151,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.paramVals = b.paramArr[:0]
 	b.rawTail = ""
 	b.host = ""
+	b.hostKnown = false
 	b.hostPattern = ""
 	b.hostIdx = -1
 	b.pathEscaped = false
@@ -229,8 +234,8 @@ func (b *Base) RouteHost() string { return b.hostPattern }
 // request and the :authority of an HTTP/2 one. Trust it only as far as you
 // trust the client, or the proxy in front of it, to send the right one.
 func (b *Base) Host() string {
-	if b.host == "" {
-		b.host = normalizeHost(b.req.Host)
+	if !b.hostKnown {
+		b.host, b.hostKnown = normalizeHost(b.req.Host), true
 	}
 	return b.host
 }
