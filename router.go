@@ -79,7 +79,9 @@ type Router[C Context] struct {
 //		return &app.Context{DB: db, Log: log}
 //	})
 //
-// New panics when newContext is nil.
+// New panics when newContext is nil. newContext itself must never return a
+// nil context, because the router writes the request state into the embedded
+// [Base].
 func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Router[C] {
 	if newContext == nil {
 		panic("router: New needs a context factory")
@@ -320,37 +322,66 @@ func stripMountPrefix(r *http.Request, rawTail string) *http.Request {
 // Root settings
 // ---------------------------------------------------------------------------
 
+// mustNotBeServing refuses a setting change once the router compiled its
+// trie, because the serving goroutines read these fields without a lock.
+func (r *Router[C]) mustNotBeServing(what string) {
+	if r.root.started.Load() {
+		panic("router: cannot change " + what + " after the router started serving")
+	}
+}
+
 // NotFound sets the handler for a request that matches no route. The
 // middleware of the root applies to it.
-func (r *Router[C]) NotFound(h HandlerFunc[C]) { r.root.notFound = h }
+func (r *Router[C]) NotFound(h HandlerFunc[C]) {
+	r.mustNotBeServing("the not-found handler")
+	r.root.notFound = h
+}
 
 // MethodNotAllowed sets the handler for a request whose path matches a route
 // but whose method does not. The router sets the Allow header before it calls
 // the handler.
-func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) { r.root.methodNotAllowed = h }
+func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
+	r.mustNotBeServing("the method-not-allowed handler")
+	r.root.methodNotAllowed = h
+}
 
 // ErrorHandler sets the function that renders an error which a handler or a
 // middleware returned. The default is [DefaultErrorHandler].
-func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) { r.root.errHandler = h }
+func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
+	r.mustNotBeServing("the error handler")
+	r.root.errHandler = h
+}
 
 // HandleOPTIONS controls the automatic answer to an OPTIONS request that no
 // route handles: status 204 with an Allow header. It is on by default.
-func (r *Router[C]) HandleOPTIONS(on bool) { r.root.autoOptions = on }
+func (r *Router[C]) HandleOPTIONS(on bool) {
+	r.mustNotBeServing("the OPTIONS setting")
+	r.root.autoOptions = on
+}
 
 // MaxBodyBytes caps the request body that [Base.Bind] and its variants read.
 // The default is [DefaultMaxBodyBytes]. Zero removes the cap.
-func (r *Router[C]) MaxBodyBytes(n int64) { r.root.maxBody = n }
+func (r *Router[C]) MaxBodyBytes(n int64) {
+	r.mustNotBeServing("the body limit")
+	r.root.maxBody = n
+}
 
 // JSONOptions sets the encoding/json/v2 options that [Base.JSON] and
 // [Base.BindJSON] apply by default. A per-call option overrides them.
 //
 //	r.JSONOptions(json.RejectUnknownMembers(true))
-func (r *Router[C]) JSONOptions(opts ...json.Options) { r.root.jsonOpts = opts }
+func (r *Router[C]) JSONOptions(opts ...json.Options) {
+	r.mustNotBeServing("the JSON options")
+	r.root.jsonOpts = opts
+}
 
 // RedirectTrailingSlash makes the router answer 301 for a path that ends in
 // "/" when the path without it has a route. By default the router treats
 // "/users/" and "/users" as the same path and answers directly.
-func (r *Router[C]) RedirectTrailingSlash(on bool) { r.root.redirectSlash = on }
+func (r *Router[C]) RedirectTrailingSlash(on bool) {
+	r.mustNotBeServing("the trailing slash setting")
+	r.root.redirectSlash = on
+}
 
 // Routes returns every registered route, sorted by pattern. It compiles the
 // trie if the router has not served a request yet.
@@ -369,6 +400,15 @@ func (r *Router[C]) Routes() []Route {
 // error and not a request error.
 func (r *Router[C]) build() {
 	tree := new(node[C])
+
+	// Publish the trie and the fallbacks first. A malformed pattern panics
+	// below, and a caller that recovers must not then meet a nil trie.
+	r.tree = tree
+	r.notFoundChain = chain(r.notFound, r.mws)
+	r.notAllowedChain = chain(r.methodNotAllowed, r.mws)
+	r.optionsChain = chain(func(c C) error { return c.base().NoContent(http.StatusNoContent) }, r.mws)
+	r.started.Store(true)
+
 	open := make(map[*Router[C]]bool)
 
 	var walk func(rt *Router[C], prefix string, mws []Middleware[C])
@@ -397,12 +437,6 @@ func (r *Router[C]) build() {
 	tree.walk(func(pattern, method string) {
 		r.routes = append(r.routes, Route{Method: method, Pattern: pattern})
 	})
-
-	r.tree = tree
-	r.notFoundChain = chain(r.notFound, r.mws)
-	r.notAllowedChain = chain(r.methodNotAllowed, r.mws)
-	r.optionsChain = chain(func(c C) error { return c.base().NoContent(http.StatusNoContent) }, r.mws)
-	r.started.Store(true)
 }
 
 // concatMiddleware joins two chains into a new slice.
@@ -492,7 +526,9 @@ func (r *Router[C]) canMatch(path, method string) bool {
 	return n != nil || st.pathMatch != nil
 }
 
-// redirectTo answers 301 and points at the same URL with a new path.
+// redirectTo points the client at the same URL with a new path. It answers 308
+// for a method other than GET or HEAD, because a 301 makes some clients repeat
+// the request as a GET and drop the body.
 func redirectTo(w http.ResponseWriter, req *http.Request, escapedPath string) {
 	u := *req.URL
 	u.RawPath = ""
@@ -504,5 +540,9 @@ func redirectTo(w http.ResponseWriter, req *http.Request, escapedPath string) {
 	if unescaped != escapedPath {
 		u.RawPath = escapedPath
 	}
-	http.Redirect(w, req, u.RequestURI(), http.StatusMovedPermanently)
+	status := http.StatusMovedPermanently
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		status = http.StatusPermanentRedirect
+	}
+	http.Redirect(w, req, u.RequestURI(), status)
 }
