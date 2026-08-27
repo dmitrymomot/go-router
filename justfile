@@ -84,7 +84,12 @@ lint:
     fail_if_output "goimports would rewrite" go run {{ goimports }} -l -local {{ local }} .
     fail_if_output "go fix has modernizations to apply" go fix -diff ./...
     # The benchmarks are their own module, so the walk above never reaches them.
-    cd benchmarks && go vet ./...
+    (cd benchmarks && go vet ./...)
+    # So is every example, and the go tool skips a directory named with a
+    # leading underscore as well, so ./... misses them twice over.
+    for dir in _examples/*/; do
+        (cd "$dir" && go build ./... && go vet ./...)
+    done
 
 # Run the static analyzers: the wider modernizer set, and struct layout
 analyze:
