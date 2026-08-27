@@ -12,8 +12,9 @@ type RecoverConfig struct {
 	Skip func(c router.Context) bool
 }
 
-// Recover fills in the defaults of the config and returns it.
-func Recover(cfg RecoverConfig) RecoverConfig { return cfg }
+// Recover fills in the defaults of the config and returns it. Call it without
+// an argument to take the defaults.
+func Recover(cfg ...RecoverConfig) RecoverConfig { return only("Recover", cfg) }
 
 // Middleware turns a panic in a handler into a 500 error, with the stack in
 // the internal cause so that the error handler logs it and the client never

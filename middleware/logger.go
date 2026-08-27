@@ -31,8 +31,10 @@ type LoggerConfig struct {
 	Message string
 }
 
-// Logger fills in the defaults of the config and returns it.
-func Logger(cfg LoggerConfig) LoggerConfig {
+// Logger fills in the defaults of the config and returns it. Call it without
+// an argument to log to slog.Default.
+func Logger(cfgs ...LoggerConfig) LoggerConfig {
+	cfg := only("Logger", cfgs)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}

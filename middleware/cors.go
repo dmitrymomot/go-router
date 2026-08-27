@@ -44,8 +44,10 @@ type CORSConfig struct {
 	MaxAge time.Duration
 }
 
-// CORS fills in the defaults of the config and returns it.
-func CORS(cfg CORSConfig) CORSConfig {
+// CORS fills in the defaults of the config and returns it. Without a config it
+// allows no origin, so pass AllowOrigins or AllowOriginFunc.
+func CORS(cfgs ...CORSConfig) CORSConfig {
+	cfg := only("CORS", cfgs)
 	if len(cfg.AllowMethods) == 0 {
 		cfg.AllowMethods = defaultCORSMethods
 	}

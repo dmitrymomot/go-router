@@ -18,8 +18,10 @@ type RealIPConfig struct {
 	Headers []string
 }
 
-// RealIP fills in the defaults of the config and returns it.
-func RealIP(cfg RealIPConfig) RealIPConfig {
+// RealIP fills in the defaults of the config and returns it. Call it without
+// an argument to take the defaults.
+func RealIP(cfgs ...RealIPConfig) RealIPConfig {
+	cfg := only("RealIP", cfgs)
 	if len(cfg.Headers) == 0 {
 		cfg.Headers = []string{router.HeaderXRealIP, router.HeaderXForwardedFor}
 	}

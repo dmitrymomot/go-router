@@ -29,8 +29,10 @@ type RequestIDConfig struct {
 	IgnoreInbound bool
 }
 
-// RequestID fills in the defaults of the config and returns it.
-func RequestID(cfg RequestIDConfig) RequestIDConfig {
+// RequestID fills in the defaults of the config and returns it. Call it
+// without an argument to take the defaults.
+func RequestID(cfgs ...RequestIDConfig) RequestIDConfig {
+	cfg := only("RequestID", cfgs)
 	if cfg.Header == "" {
 		cfg.Header = router.HeaderXRequestID
 	}

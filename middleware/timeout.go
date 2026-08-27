@@ -26,8 +26,10 @@ type TimeoutConfig struct {
 	Message string
 }
 
-// Timeout fills in the defaults of the config and returns it.
-func Timeout(cfg TimeoutConfig) TimeoutConfig {
+// Timeout fills in the defaults of the config and returns it. Without a config
+// the duration is zero, which turns the middleware off.
+func Timeout(cfgs ...TimeoutConfig) TimeoutConfig {
+	cfg := only("Timeout", cfgs)
 	if cfg.Status == 0 {
 		cfg.Status = http.StatusServiceUnavailable
 	}
