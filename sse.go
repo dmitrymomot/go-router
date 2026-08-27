@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,10 @@ type Event struct {
 	// ID is the "id" field. The client sends the last ID that it saw back in
 	// the Last-Event-ID header of its next connection, which
 	// [Base.LastEventID] reads.
+	//
+	// An empty ID leaves the field out, so the client keeps the ID of the
+	// event before it. A stream cannot clear that ID again, which would take
+	// an id field with an empty value.
 	ID string
 
 	// Name is the "event" field, the name that addEventListener takes. An
@@ -128,6 +133,11 @@ type SSEWriter struct {
 // [http.Server.WriteTimeout]. Then it writes the header and flushes it, so
 // that the EventSource of a browser fires its open event at once.
 //
+// The stream owns Cache-Control, X-Accel-Buffering and Connection, and
+// overwrites what the handler set on them, because a stream that a proxy
+// buffers or a client caches is not a stream. The media type is the handler's
+// to keep, as it is in [Base.Render].
+//
 // The status belongs to the whole stream. A browser only accepts 200; any
 // other code makes its EventSource fail instead of read.
 //
@@ -190,7 +200,7 @@ func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {
 		return nil, err
 	}
 	if !s.head {
-		s.buf.Reset()
+		s.resetBuf()
 		if s.retryField(s.cfg.retry) {
 			if err := s.commit(); err != nil {
 				return nil, err
@@ -229,7 +239,8 @@ func (s *SSEWriter) Closed() bool { return s.head || s.err != nil }
 
 // Send writes one event.
 func (s *SSEWriter) Send(e Event) error {
-	if err := s.begin(e); err != nil {
+	ok, err := s.begin(e)
+	if !ok {
 		return err
 	}
 	s.lines.WriteString(e.Data)
@@ -246,7 +257,8 @@ func (s *SSEWriter) SendData(data string) error { return s.Send(Event{Data: data
 // nothing on the wire. The router options of [Router.JSONOptions] apply, and
 // opts overrides them.
 func (s *SSEWriter) SendJSON(name string, v any, opts ...json.Options) error {
-	if err := s.begin(Event{Name: name}); err != nil {
+	ok, err := s.begin(Event{Name: name})
+	if !ok {
 		return err
 	}
 	if err := json.MarshalWrite(&s.lines, v, s.b.jsonOptions(opts)...); err != nil {
@@ -263,7 +275,8 @@ func (s *SSEWriter) SendJSON(name string, v any, opts ...json.Options) error {
 // halfway leaves nothing on the wire, because the frame reaches the client
 // only after the component returns.
 func (s *SSEWriter) SendComponent(name string, c Component) error {
-	if err := s.begin(Event{Name: name}); err != nil {
+	ok, err := s.begin(Event{Name: name})
+	if !ok {
 		return err
 	}
 	if err := c.Render(s.b, &s.lines); err != nil {
@@ -278,27 +291,42 @@ func (s *SSEWriter) Comment(text string) error {
 	if s.Closed() {
 		return s.err
 	}
-	s.buf.Reset()
+	s.resetBuf()
 	s.lines = sseLines{buf: &s.buf, prefix: ": "}
 	s.lines.WriteString(text)
 	return s.end()
 }
 
-// begin starts a frame and writes the single line fields of e.
-func (s *SSEWriter) begin(e Event) error {
+// begin starts a frame and writes the single line fields of e. It reports
+// whether the frame started, which a closed stream and a rejected field both
+// stop. The answer cannot be the error alone, because a HEAD request closes a
+// stream without a failure to report, and a caller that read that nil as
+// "carry on" would write into a frame that never started.
+func (s *SSEWriter) begin(e Event) (bool, error) {
 	if s.Closed() {
-		return s.err
+		return false, s.err
 	}
-	s.buf.Reset()
+	s.resetBuf()
 	if err := s.field("id", e.ID); err != nil {
-		return err
+		return false, err
 	}
 	if err := s.field("event", e.Name); err != nil {
-		return err
+		return false, err
 	}
 	s.retryField(e.Retry)
 	s.lines = sseLines{buf: &s.buf, prefix: "data: "}
-	return nil
+	return true, nil
+}
+
+// resetBuf empties the frame buffer. It drops one that a large event grew past
+// the ceiling that [Base.Render] uses for its pool, so that a stream which
+// sends one huge event does not hold that room for the hours it then runs.
+func (s *SSEWriter) resetBuf() {
+	if s.buf.Cap() > maxPooledRenderBuf {
+		s.buf = bytes.Buffer{}
+		return
+	}
+	s.buf.Reset()
 }
 
 // retryField writes the retry field, and reports whether the delay reached a
@@ -552,10 +580,14 @@ func SSEEvents() SSESender[Event] {
 //
 // The stream answers 200, which is the only status that an EventSource takes.
 //
-// It returns nil when the channel closes, and nil when the client goes away,
-// because neither is a failure of the server. It returns the error of a send
-// or of the sender, which the error handler then logs; the response is already
-// committed, so nothing more reaches the client.
+// It returns nil when the channel closes, and nil when it sees that the client
+// went away, because neither is a failure of the server. A busy stream usually
+// learns of the disconnect through the send that fails first, and then it
+// returns that write error, as [Base.RenderStream] does; the error handler
+// logs such an error at debug level, not as a server fault.
+//
+// It returns the error of a send or of the sender too. The response is already
+// committed by then, so nothing more reaches the client.
 //
 // It starts no goroutine of its own, so nothing touches the context after the
 // handler returns and a pooled context stays safe. The producer that fills ch
@@ -632,7 +664,7 @@ func NewSSEStream[T any](send SSESender[T], opts ...SSEOption) *SSEStream[T] {
 	if send == nil {
 		panic("router: NewSSEStream needs a sender")
 	}
-	return &SSEStream[T]{send: send, opts: opts}
+	return &SSEStream[T]{send: send, opts: slices.Clone(opts)}
 }
 
 // Serve opens the stream for one request and feeds it from ch. It answers as

@@ -326,18 +326,38 @@ func TestSSESendAfterAFailure(t *testing.T) {
 
 // A HEAD request gets the headers alone, and every send is a no-op.
 func TestSSEHEAD(t *testing.T) {
+	var (
+		open             bool
+		sendErr, commErr error
+		reached          bool
+	)
+
 	r := newTestRouter()
 	r.GET("/events", sseOpen(func(s *SSEWriter) error {
-		if !s.Closed() {
-			t.Error("the writer reports the stream as open for a HEAD request")
-		}
-		if err := s.Send(Event{Data: "hello"}); err != nil {
-			t.Errorf("Send reported %v, want no error", err)
-		}
-		return s.Comment("ping")
+		// The router recovers a panic from a handler, and the response is
+		// already committed, so an assertion that runs here reports nothing
+		// once a send panics. Carry the answers out and read them after the
+		// request, and let reached report that the handler ran to its end.
+		open = !s.Closed()
+		sendErr = s.Send(Event{Data: "hello"})
+		commErr = s.Comment("ping")
+		reached = true
+		return nil
 	}, SSERetry(time.Second)))
 
 	rec := do(r, http.MethodHead, "/events")
+	if !reached {
+		t.Fatal("the handler did not reach its end, so a send failed hard")
+	}
+	if open {
+		t.Error("the writer reports the stream as open for a HEAD request")
+	}
+	if sendErr != nil {
+		t.Errorf("Send reported %v, want no error", sendErr)
+	}
+	if commErr != nil {
+		t.Errorf("Comment reported %v, want no error", commErr)
+	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
@@ -767,7 +787,11 @@ func TestSSEOverAServer(t *testing.T) {
 		}
 	}
 
-	ch <- "hello"
+	select {
+	case ch <- "hello":
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler is not reading the channel")
+	}
 	for _, want := range []string{"event: msg\n", "data: hello\n", "\n"} {
 		if got := readLine(); got != want {
 			t.Fatalf("line = %q, want %q", got, want)
@@ -880,23 +904,36 @@ func TestSSEEverySendReportsTheFailure(t *testing.T) {
 
 // Every send is a no-op for a HEAD request, and none of them reports an error.
 func TestSSEEverySendIsANoOpForHEAD(t *testing.T) {
+	var (
+		errs    map[string]error
+		reached bool
+	)
+
 	r := newTestRouter()
 	r.GET("/events", sseOpen(func(s *SSEWriter) error {
-		for name, err := range map[string]error{
+		// Read the answers after the request, so that a send which panics
+		// fails the test instead of skipping the assertions. See TestSSEHEAD.
+		errs = map[string]error{
 			"Send":          s.Send(Event{Data: "one"}),
 			"SendData":      s.SendData("one"),
 			"SendJSON":      s.SendJSON("x", 1),
 			"SendComponent": s.SendComponent("x", comp("<p/>")),
 			"Comment":       s.Comment("ping"),
-		} {
-			if err != nil {
-				t.Errorf("%s = %v, want no error", name, err)
-			}
 		}
+		reached = true
 		return nil
 	}))
 
-	if rec := do(r, http.MethodHead, "/events"); rec.Body.Len() != 0 {
+	rec := do(r, http.MethodHead, "/events")
+	if !reached {
+		t.Fatal("the handler did not reach its end, so a send failed hard")
+	}
+	for name, err := range errs {
+		if err != nil {
+			t.Errorf("%s = %v, want no error", name, err)
+		}
+	}
+	if rec.Body.Len() != 0 {
 		t.Errorf("body = %q, want empty", rec.Body.String())
 	}
 }
@@ -989,6 +1026,48 @@ func TestSSERejectedEventKeepsTheStreamOpen(t *testing.T) {
 	}), sseReq())
 
 	if got, want := rec.Body.String(), "data: still open\n\n"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// A stream that sent one huge event drops the room for it, so a connection
+// that then runs for hours does not hold it.
+func TestSSEDropsALargeFrameBuffer(t *testing.T) {
+	var big, after int
+
+	sseServe(sseOpen(func(s *SSEWriter) error {
+		if err := s.SendData(strings.Repeat("x", maxPooledRenderBuf+1024)); err != nil {
+			return err
+		}
+		big = s.buf.Cap()
+		if err := s.SendData("small"); err != nil {
+			return err
+		}
+		after = s.buf.Cap()
+		return nil
+	}), sseReq())
+
+	if big <= maxPooledRenderBuf {
+		t.Fatalf("the buffer of the large frame held %d bytes, want more than %d", big, maxPooledRenderBuf)
+	}
+	if after > maxPooledRenderBuf {
+		t.Errorf("the buffer still holds %d bytes after a small frame, want it dropped", after)
+	}
+}
+
+// The options of a stream belong to it, so a caller that keeps the slice
+// cannot reach into a stream that it already built.
+func TestNewSSEStreamCopiesTheOptions(t *testing.T) {
+	opts := []SSEOption{SSERetry(time.Second)}
+	stream := NewSSEStream(SSEText[string]("msg"), opts...)
+	opts[0] = SSERetry(9 * time.Second)
+
+	rec := sseServe(func(c *tctx) error {
+		return stream.Serve(c, closedChan("one"))
+	}, sseReq())
+
+	want := "retry: 1000\n\nevent: msg\ndata: one\n\n"
+	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
