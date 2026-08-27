@@ -528,8 +528,10 @@ loses to every literal route, so `/api/ping` still reaches its handler.
 
 The fallback answers a navigation only: the path carries no file extension, or
 the client accepts `text/html`. A missing script keeps its 404, because an HTML
-body in its place breaks the page in a way that is hard to read. The index
-itself always revalidates, because it names the versioned assets.
+body in its place breaks the page in a way that is hard to read. Set
+`Config.Fallback` to replace that test when the routes of the application do not
+fit it. The index itself always revalidates, whatever path reached it, because
+it names the versioned assets.
 
 ### The rest of the API
 

@@ -87,12 +87,17 @@ func cutSegment(name, seg string) (string, bool) {
 }
 
 // fallback reports whether the single page application index answers this
-// miss. It answers a navigation only: a path without a file extension, or a
+// miss. Config.Fallback decides when it is set.
+//
+// The default answers a navigation only: a path without a file extension, or a
 // client that accepts text/html. A missing script keeps its 404, because an
 // HTML body in its place breaks the page in a way that is hard to read.
 func (a *Assets) fallback(r *http.Request, name string) bool {
 	if !a.spa || name == a.index {
 		return false
+	}
+	if a.isNavigation != nil {
+		return a.isNavigation(r)
 	}
 	if path.Ext(name) == "" {
 		return true
@@ -187,12 +192,14 @@ func (a *Assets) etag(name string, info fs.FileInfo) string {
 // cacheControl returns the Cache-Control header of one answer.
 func (a *Assets) cacheControl(name string, versioned bool) string {
 	switch {
+	// The index names the versioned assets, so it revalidates whatever path
+	// reached it. A browser that kept it would keep asking for the assets of
+	// the previous build, and a versioned path reaches the index too: through
+	// a directory, through the bare build tag, and through URL(Index).
+	case path.Base(name) == path.Base(a.index):
+		return "no-cache"
 	case versioned:
 		return immutableCacheControl
-	case path.Base(name) == path.Base(a.index):
-		// The index names the versioned assets. A browser that kept it would
-		// keep asking for the assets of the previous build.
-		return "no-cache"
 	default:
 		return a.cache
 	}

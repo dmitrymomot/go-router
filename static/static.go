@@ -44,6 +44,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -101,9 +102,23 @@ type Config struct {
 	// in a way that is hard to read.
 	SPA bool
 
+	// Fallback replaces that navigation test. It runs only while SPA is set,
+	// and it decides whether this request answers with Index instead of 404.
+	//
+	// Set it when the routes of the application do not fit the default, such
+	// as a route that ends in something the default reads as a file
+	// extension:
+	//
+	//	Fallback: func(r *http.Request) bool {
+	//		return !strings.HasPrefix(r.URL.Path, "/api/")
+	//	}
+	Fallback func(r *http.Request) bool
+
 	// MaxAge is how long a browser may keep an answer whose path carried no
 	// build tag. It defaults to zero, which asks the browser to revalidate.
-	// Dir mode ignores it and always revalidates.
+	// Dir mode ignores it and always revalidates, and so does a MaxAge below
+	// one second, because "max-age=0" lets a shared cache keep the answer
+	// where "no-cache" makes it ask again.
 	//
 	// The index file always revalidates, because it names the versioned
 	// assets.
@@ -132,15 +147,22 @@ type Assets struct {
 	// comes from the size and the modification time instead.
 	etags map[string]string
 
+	// isNavigation is Config.Fallback. It is nil while the default rule
+	// decides which miss the index answers.
+	isNavigation func(r *http.Request) bool
+
 	prefix string
 	build  string
 	index  string
 
+	// urlBase is the prefix joined with the build tag, so that URL appends a
+	// name and nothing else.
+	urlBase string
+
 	// cache is the Cache-Control of an answer whose path carried no build tag.
 	cache string
 
-	spa  bool
-	live bool
+	spa bool
 }
 
 // New returns the asset set that cfg describes. It reports an error when the
@@ -155,13 +177,13 @@ func New(cfg Config) (*Assets, error) {
 	}
 
 	a := &Assets{
-		notFound: cfg.NotFound,
-		prefix:   normalizePrefix(cfg.Prefix),
-		build:    strings.Trim(cfg.Build, "/"),
-		index:    cfg.Index,
-		cache:    "no-cache",
-		spa:      cfg.SPA,
-		live:     cfg.Dir != "",
+		notFound:     cfg.NotFound,
+		isNavigation: cfg.Fallback,
+		prefix:       normalizePrefix(cfg.Prefix),
+		build:        strings.Trim(cfg.Build, "/"),
+		index:        cfg.Index,
+		cache:        "no-cache",
+		spa:          cfg.SPA,
 	}
 	if a.notFound == nil {
 		a.notFound = http.NotFoundHandler()
@@ -172,8 +194,14 @@ func New(cfg Config) (*Assets, error) {
 	if strings.Contains(a.build, "/") {
 		return nil, fmt.Errorf("static: the build tag %q spans more than one path segment", cfg.Build)
 	}
+	// An index that no file system can open answers 404 for every directory
+	// and for every fallback, which reads as a missing page rather than as
+	// the misconfiguration it is.
+	if !fs.ValidPath(a.index) {
+		return nil, fmt.Errorf("static: the index %q is not a file name inside the asset set", cfg.Index)
+	}
 
-	if a.live {
+	if live := cfg.Dir != ""; live {
 		dir := cfg.Dir
 		if root := path.Clean("/" + cfg.Root); root != "/" {
 			dir = filepath.Join(dir, filepath.FromSlash(root[1:]))
@@ -186,6 +214,7 @@ func New(cfg Config) (*Assets, error) {
 			return nil, fmt.Errorf("static: %s is not a directory", dir)
 		}
 		a.fsys = liveFS(dir)
+		a.setURLBase()
 		return a, nil
 	}
 
@@ -205,10 +234,22 @@ func New(cfg Config) (*Assets, error) {
 	if a.build == "" {
 		a.build = sum
 	}
-	if cfg.MaxAge > 0 {
-		a.cache = "public, max-age=" + strconv.FormatInt(int64(cfg.MaxAge.Seconds()), 10)
+	// A MaxAge under a second truncates to "max-age=0", which a shared cache
+	// may store. Leave the stricter default in place instead.
+	if secs := int64(cfg.MaxAge / time.Second); secs > 0 {
+		a.cache = "public, max-age=" + strconv.FormatInt(secs, 10)
 	}
+	a.setURLBase()
 	return a, nil
+}
+
+// setURLBase joins the prefix and the build tag once. Both are fixed after New
+// returns, so URL never has to build them again.
+func (a *Assets) setURLBase() {
+	a.urlBase = a.prefix
+	if a.build != "" {
+		a.urlBase += "/" + a.build
+	}
 }
 
 // Must returns the asset set that cfg describes and panics when [New] reports
@@ -259,14 +300,15 @@ func (a *Assets) Has(name string) bool {
 // that the asset exists; use [Assets.Has] for that.
 func (a *Assets) URL(name string) string {
 	name = cleanName(name)
-	switch {
-	case name == "":
+	if name == "" {
 		return a.Prefix()
-	case a.build == "":
-		return a.prefix + "/" + name
-	default:
-		return a.prefix + "/" + a.build + "/" + name
 	}
+	// EscapedPath percent encodes what a path may not carry raw, such as a
+	// space or a "#", and returns the string untouched when nothing needs it.
+	// text/template writes the result as it stands, so URL cannot leave that
+	// to the html/template escaper.
+	u := url.URL{Path: a.urlBase + "/" + name}
+	return u.EscapedPath()
 }
 
 // FuncMap returns the template functions of the asset set: "asset" is

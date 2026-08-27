@@ -18,6 +18,9 @@ import (
 	"github.com/dmitrymomot/go-router/static"
 )
 
+// immutableCache is the Cache-Control of a versioned answer.
+const immutableCache = "public, max-age=31536000, immutable"
+
 const (
 	rootIndex = "<html>root</html>"
 	subIndex  = "<html>sub</html>"
@@ -336,8 +339,12 @@ func TestPathTraversalStaysInside(t *testing.T) {
 	a := newAssets(t, static.Config{FS: fsys, Root: "css"})
 
 	for _, target := range []string{"/../secret.txt", "/%2e%2e/secret.txt", "/a/../../secret.txt"} {
-		if rec := get(a, target); rec.Body.String() == "secret" {
+		rec := get(a, target)
+		if rec.Body.String() == "secret" {
 			t.Fatalf("%s escaped the asset root", target)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", target, rec.Code)
 		}
 	}
 }
@@ -651,8 +658,14 @@ func TestNewReportsAnUnreadableAssetSet(t *testing.T) {
 func TestTheBareBuildTagAnswersTheIndex(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), Build: "v1"})
 
-	if got := get(a, "/v1").Body.String(); got != rootIndex {
+	rec := get(a, "/v1")
+	if got := rec.Body.String(); got != rootIndex {
 		t.Fatalf("body = %q, want the index", got)
+	}
+	// The index names the versioned assets, so the build tag in the path does
+	// not make it immutable.
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("cache control = %q, want no-cache", got)
 	}
 }
 
@@ -694,5 +707,68 @@ func TestSPAAnswersADirectoryWithoutAnIndex(t *testing.T) {
 	// route of the application.
 	if got := get(a, "/css").Body.String(); got != rootIndex {
 		t.Fatalf("body = %q, want the index", got)
+	}
+}
+
+func TestVersionedIndexStillRevalidates(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static", Build: "v1"})
+
+	for _, target := range []string{"/v1/index.html", "/v1/sub"} {
+		if got := get(a, target).Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("%s: cache control = %q, want no-cache", target, got)
+		}
+	}
+	// Every other file under the tag keeps the immutable answer.
+	if got := get(a, "/v1/css/app.css").Header().Get("Cache-Control"); got != immutableCache {
+		t.Errorf("cache control = %q, want an immutable one", got)
+	}
+}
+
+func TestNewRefusesAnIndexOutsideTheSet(t *testing.T) {
+	for _, index := range []string{"/index.html", "../index.html", "./"} {
+		if _, err := static.New(static.Config{FS: assetFS(), Index: index}); err == nil {
+			t.Errorf("New accepted the index %q", index)
+		}
+	}
+}
+
+func TestMaxAgeUnderASecondKeepsNoCache(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), MaxAge: 500 * time.Millisecond})
+
+	// "public, max-age=0" lets a shared cache keep the answer, so the shorter
+	// request has to leave the stricter default in place.
+	if got := get(a, "/css/app.css").Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("cache control = %q, want no-cache", got)
+	}
+}
+
+func TestFallbackReplacesTheNavigationTest(t *testing.T) {
+	a := newAssets(t, static.Config{
+		FS:       assetFS(),
+		SPA:      true,
+		Fallback: func(r *http.Request) bool { return !strings.HasPrefix(r.URL.Path, "/api/") },
+	})
+
+	// The default rule would answer both from the extension and the Accept
+	// header; the replacement reads the path alone.
+	if got := get(a, "/reports/2026.01").Body.String(); got != rootIndex {
+		t.Errorf("body = %q, want the index", got)
+	}
+	if rec := get(a, "/api/absent", header("Accept", "text/html")); rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for a path the fallback refuses", rec.Code)
+	}
+}
+
+func TestURLEscapesTheName(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static", Build: "v1"})
+
+	if got := a.URL("my file.css"); got != "/static/v1/my%20file.css" {
+		t.Errorf("URL = %q, want the space escaped", got)
+	}
+	if got := a.URL("a#b.css"); got != "/static/v1/a%23b.css" {
+		t.Errorf("URL = %q, want the fragment marker escaped", got)
+	}
+	if got := a.URL("css/app.css"); got != "/static/v1/css/app.css" {
+		t.Errorf("URL = %q, want the plain name untouched", got)
 	}
 }

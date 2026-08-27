@@ -29,8 +29,8 @@ func Example() {
 	// example pins it to keep the output stable.
 	assets := static.Must(static.Config{FS: dist, Prefix: "/static", Build: "v1"})
 
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
-		return new(Context)
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext {
+		return new(appContext)
 	})
 	static.Mount(r, assets)
 
@@ -54,9 +54,4 @@ func ExampleAssets_FuncMap() {
 	tmpl.Execute(os.Stdout, nil)
 	// Output:
 	// <link rel="stylesheet" href="/static/v1/css/app.css">
-}
-
-// Context is the request context of the example application.
-type Context struct {
-	router.Base
 }

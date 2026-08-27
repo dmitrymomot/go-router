@@ -118,3 +118,15 @@ func TestHandlerReportsAWrongMethod(t *testing.T) {
 	res.AssertStatus(t, http.StatusMethodNotAllowed)
 	res.AssertHeader(t, "Allow", "GET, HEAD")
 }
+
+func TestHandlerOnARouteWithoutTheParameter(t *testing.T) {
+	r := newRouter()
+	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"})
+	// No catch-all: the handler has to read the request path instead of
+	// resolving the empty parameter to the index.
+	r.GET("/static/css/app.css", static.Handler[*appContext](a))
+	r.GET("/favicon.ico", static.Handler[*appContext](a))
+
+	routertest.Get(r, "/static/css/app.css").AssertBody(t, appCSS)
+	routertest.Get(r, "/favicon.ico").AssertStatus(t, http.StatusNotFound)
+}
