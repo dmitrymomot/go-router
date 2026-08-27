@@ -38,6 +38,18 @@ jobs:
       # benchmarks module, which is its own module and so invisible to ./...
       - run: just lint
 
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: extractions/setup-just@v3
+      # modernize and betteralign, which compile from source; they run beside
+      # lint rather than after it so the slow build overlaps the fast checks.
+      - run: just analyze
+
   golangci:
     runs-on: ubuntu-latest
     steps:
