@@ -1,15 +1,23 @@
 // Package middleware holds the middleware that ships with the router.
 //
-// A middleware without settings is a plain generic function, so type inference
-// resolves the context type at the point of use:
+// Every middleware follows the same shape. A function named after it takes a
+// config value, fills in the defaults and returns the config. That config
+// carries a generic Middleware method, and Go 1.27 infers the context type
+// there, so a caller never names its own context type:
 //
-//	r.Use(middleware.Recover, middleware.RealIP, middleware.RequestID)
+//	r.Use(middleware.Recover(middleware.RecoverConfig{}).Middleware)
+//	r.Use(middleware.Timeout(middleware.TimeoutConfig{Duration: 5 * time.Second}).Middleware)
 //
-// A middleware with settings is a value with a generic Middleware method, new
-// in Go 1.27, and inference resolves the context type there as well:
+// Every config carries a Skip function. Return true from it to pass the
+// request straight to the next handler:
 //
-//	r.Use(middleware.Logger(log).Middleware)
-//	r.Use(middleware.CORS(middleware.CORSConfig{AllowOrigins: []string{"*"}}).Middleware)
+//	middleware.LoggerConfig{
+//		Skip: func(c router.Context) bool { return c.Request().URL.Path == "/health" },
+//	}
+//
+// Skip takes the [router.Context] interface, not the application context type,
+// so one function fits any router. Use [router.Context.Request] for the
+// request and [router.Context.RoutePattern] for the matched route.
 package middleware
 
 import (
@@ -35,4 +43,9 @@ func statusOf[C router.Context](c C, err error) int {
 		return st
 	}
 	return router.StatusOf(err)
+}
+
+// skipped reports whether the config asks to pass this request through.
+func skipped[C router.Context](skip func(router.Context) bool, c C) bool {
+	return skip != nil && skip(c)
 }

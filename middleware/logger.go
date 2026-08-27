@@ -9,6 +9,10 @@ import (
 
 // LoggerConfig configures [LoggerConfig.Middleware].
 type LoggerConfig struct {
+	// Skip passes a request straight to the next handler when it returns true.
+	// Use it to keep a health check out of the log.
+	Skip func(c router.Context) bool
+
 	// Logger receives the records. It defaults to [slog.Default].
 	Logger *slog.Logger
 
@@ -23,20 +27,25 @@ type LoggerConfig struct {
 	// to [slog.LevelError].
 	ServerErrorLevel slog.Level
 
-	// Skip drops the record for a request whose path it accepts. Use it to
-	// keep a health check out of the log.
-	Skip func(path string) bool
+	// Message is the text of the record. It defaults to "request".
+	Message string
 }
 
-// Logger returns a configuration that writes one record per request to l.
-// Pass nil to use [slog.Default].
-func Logger(l *slog.Logger) LoggerConfig {
-	return LoggerConfig{
-		Logger:           l,
-		Level:            slog.LevelInfo,
-		ClientErrorLevel: slog.LevelWarn,
-		ServerErrorLevel: slog.LevelError,
+// Logger fills in the defaults of the config and returns it.
+func Logger(cfg LoggerConfig) LoggerConfig {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
+	if cfg.ClientErrorLevel == 0 {
+		cfg.ClientErrorLevel = slog.LevelWarn
+	}
+	if cfg.ServerErrorLevel == 0 {
+		cfg.ServerErrorLevel = slog.LevelError
+	}
+	if cfg.Message == "" {
+		cfg.Message = "request"
+	}
+	return cfg
 }
 
 // Middleware writes one record per request.
@@ -45,23 +54,13 @@ func Logger(l *slog.Logger) LoggerConfig {
 // error, because the error handler runs after this middleware returns and the
 // response is still uncommitted at that moment.
 func (cfg LoggerConfig) Middleware[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	log := cfg.Logger
-	if log == nil {
-		log = slog.Default()
-	}
-	if cfg.ClientErrorLevel == 0 {
-		cfg.ClientErrorLevel = slog.LevelWarn
-	}
-	if cfg.ServerErrorLevel == 0 {
-		cfg.ServerErrorLevel = slog.LevelError
-	}
-
+	cfg = Logger(cfg)
 	return func(c C) error {
-		req := c.Request()
-		if cfg.Skip != nil && cfg.Skip(req.URL.Path) {
+		if skipped(cfg.Skip, c) {
 			return next(c)
 		}
 
+		req := c.Request()
 		start := time.Now()
 		err := next(c)
 		status := statusOf(c, err)
@@ -89,7 +88,7 @@ func (cfg LoggerConfig) Middleware[C router.Context](next router.HandlerFunc[C])
 		if err != nil {
 			attrs = append(attrs, slog.Any("error", err))
 		}
-		log.LogAttrs(req.Context(), level, "request", attrs...)
+		cfg.Logger.LogAttrs(req.Context(), level, cfg.Message, attrs...)
 		return err
 	}
 }

@@ -11,6 +11,9 @@ import (
 
 // TimeoutConfig configures [TimeoutConfig.Middleware].
 type TimeoutConfig struct {
+	// Skip passes a request straight to the next handler when it returns true.
+	Skip func(c router.Context) bool
+
 	// Duration is the deadline for one request. Zero disables the middleware.
 	Duration time.Duration
 
@@ -23,8 +26,16 @@ type TimeoutConfig struct {
 	Message string
 }
 
-// Timeout returns a configuration with the given deadline.
-func Timeout(d time.Duration) TimeoutConfig { return TimeoutConfig{Duration: d} }
+// Timeout fills in the defaults of the config and returns it.
+func Timeout(cfg TimeoutConfig) TimeoutConfig {
+	if cfg.Status == 0 {
+		cfg.Status = http.StatusServiceUnavailable
+	}
+	if cfg.Message == "" {
+		cfg.Message = http.StatusText(cfg.Status)
+	}
+	return cfg
+}
 
 // Middleware puts a deadline on the request context and reports a timeout
 // after the handler returns.
@@ -35,19 +46,12 @@ func Timeout(d time.Duration) TimeoutConfig { return TimeoutConfig{Duration: d} 
 // handler that ignores the context still runs to the end, and the client then
 // sees the answer of that handler and not a timeout.
 func (cfg TimeoutConfig) Middleware[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	status := cfg.Status
-	if status == 0 {
-		status = http.StatusServiceUnavailable
-	}
-	message := cfg.Message
-	if message == "" {
-		message = http.StatusText(status)
-	}
-
+	cfg = Timeout(cfg)
 	return func(c C) error {
-		if cfg.Duration <= 0 {
+		if cfg.Duration <= 0 || skipped(cfg.Skip, c) {
 			return next(c)
 		}
+
 		req := c.Request()
 		ctx, cancel := context.WithTimeout(req.Context(), cfg.Duration)
 		defer cancel()
@@ -56,7 +60,7 @@ func (cfg TimeoutConfig) Middleware[C router.Context](next router.HandlerFunc[C]
 		err := next(c)
 
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) && !c.Response().Committed {
-			return router.NewHTTPError(status, message).WithError(
+			return router.NewHTTPError(cfg.Status, cfg.Message).WithError(
 				errors.Join(err, context.DeadlineExceeded))
 		}
 		return err

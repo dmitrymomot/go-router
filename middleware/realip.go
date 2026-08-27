@@ -7,16 +7,39 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// RealIP replaces the remote address of the request with the address that
-// X-Real-Ip, or the first entry of X-Forwarded-For, reports.
+// RealIPConfig configures [RealIPConfig.Middleware].
+type RealIPConfig struct {
+	// Skip passes a request straight to the next handler when it returns true.
+	Skip func(c router.Context) bool
+
+	// Headers are the headers to read, in order of preference. They default to
+	// X-Real-Ip and then X-Forwarded-For. A header that holds a comma
+	// separated list contributes its first entry.
+	Headers []string
+}
+
+// RealIP fills in the defaults of the config and returns it.
+func RealIP(cfg RealIPConfig) RealIPConfig {
+	if len(cfg.Headers) == 0 {
+		cfg.Headers = []string{router.HeaderXRealIP, router.HeaderXForwardedFor}
+	}
+	return cfg
+}
+
+// Middleware replaces the remote address of the request with the address that
+// a forwarding header reports.
 //
 // Use it only when a trusted proxy sits in front of the server and rewrites
-// those headers. A client that reaches the server directly can set either
-// header to any value, so trusting them would let it forge its own address.
-func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+// those headers. A client that reaches the server directly can set any of them
+// to any value, so trusting them would let it forge its own address.
+func (cfg RealIPConfig) Middleware[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+	cfg = RealIP(cfg)
 	return func(c C) error {
+		if skipped(cfg.Skip, c) {
+			return next(c)
+		}
 		req := c.Request()
-		if ip := realIP(req.Header.Get(router.HeaderXRealIP), req.Header.Get(router.HeaderXForwardedFor)); ip != "" {
+		if ip := firstAddress(req.Header, cfg.Headers); ip != "" {
 			// A shallow copy is enough, because only RemoteAddr changes.
 			r := new(http.Request)
 			*r = *req
@@ -27,11 +50,17 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 	}
 }
 
-// realIP picks the first usable address from the two headers.
-func realIP(realIP, forwardedFor string) string {
-	if realIP != "" {
-		return strings.TrimSpace(realIP)
+// firstAddress returns the first address that any of the headers reports.
+func firstAddress(h http.Header, headers []string) string {
+	for _, name := range headers {
+		v := h.Get(name)
+		if v == "" {
+			continue
+		}
+		first, _, _ := strings.Cut(v, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
+		}
 	}
-	first, _, _ := strings.Cut(forwardedFor, ",")
-	return strings.TrimSpace(first)
+	return ""
 }

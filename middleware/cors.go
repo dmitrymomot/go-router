@@ -12,6 +12,9 @@ import (
 
 // CORSConfig configures [CORSConfig.Middleware].
 type CORSConfig struct {
+	// Skip passes a request straight to the next handler when it returns true.
+	Skip func(c router.Context) bool
+
 	// AllowOrigins lists the origins that may read the response. A single
 	// entry "*" allows every origin. An empty list allows none.
 	AllowOrigins []string
@@ -41,10 +44,12 @@ type CORSConfig struct {
 	MaxAge time.Duration
 }
 
-// CORS returns a configuration that allows the named origins. Pass "*" to
-// allow every origin.
-func CORS(origins ...string) CORSConfig {
-	return CORSConfig{AllowOrigins: origins}
+// CORS fills in the defaults of the config and returns it.
+func CORS(cfg CORSConfig) CORSConfig {
+	if len(cfg.AllowMethods) == 0 {
+		cfg.AllowMethods = defaultCORSMethods
+	}
+	return cfg
 }
 
 // defaultCORSMethods is the method list of a preflight answer.
@@ -56,16 +61,16 @@ var defaultCORSMethods = []string{
 // Middleware answers a preflight request and adds the CORS headers to every
 // other answer.
 func (cfg CORSConfig) Middleware[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	allowMethods := cfg.AllowMethods
-	if len(allowMethods) == 0 {
-		allowMethods = defaultCORSMethods
-	}
-	methods := strings.Join(allowMethods, ", ")
+	cfg = CORS(cfg)
+	methods := strings.Join(cfg.AllowMethods, ", ")
 	exposed := strings.Join(cfg.ExposeHeaders, ", ")
 	allowed := strings.Join(cfg.AllowHeaders, ", ")
 	maxAge := strconv.Itoa(int(cfg.MaxAge.Seconds()))
 
 	return func(c C) error {
+		if skipped(cfg.Skip, c) {
+			return next(c)
+		}
 		req := c.Request()
 		res := c.Response()
 		origin := req.Header.Get(router.HeaderOrigin)
