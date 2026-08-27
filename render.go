@@ -59,11 +59,22 @@ func (b *Base) HTML(status int, html string) error {
 // It uses encoding/json/v2, which rejects invalid UTF-8 and duplicate object
 // names.
 func (b *Base) JSON(status int, v any, opts ...json.Options) error {
-	data, err := json.Marshal(v, opts...)
+	data, err := json.Marshal(v, b.jsonOptions(opts)...)
 	if err != nil {
 		return ErrInternalServerError.WithError(fmt.Errorf("router: encode JSON response: %w", err))
 	}
 	return b.Blob(status, MIMEApplicationJSONCharsetUTF8, data)
+}
+
+// jsonOptions puts the options of the router in front of the per-call ones, so
+// that a call can override a default.
+func (b *Base) jsonOptions(opts []json.Options) []json.Options {
+	if len(b.jsonOpts) == 0 {
+		return opts
+	}
+	out := make([]json.Options, 0, len(b.jsonOpts)+len(opts))
+	out = append(out, b.jsonOpts...)
+	return append(out, opts...)
 }
 
 // JSONPretty writes v as indented JSON.

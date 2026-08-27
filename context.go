@@ -25,6 +25,7 @@ package router
 
 import (
 	"context"
+	"encoding/json/v2"
 	"net/http"
 	"net/url"
 	"time"
@@ -65,6 +66,16 @@ type Base struct {
 	paramVals  []string
 	paramArr   [maxInlineParams]string
 
+	// rawTail is the still escaped part of the path that a catch-all matched.
+	// MountHandler needs it to rebuild the path for the mounted handler.
+	rawTail string
+
+	// maxBody is the request body limit that the router applies to Bind.
+	maxBody int64
+
+	// jsonOpts are the encoding/json/v2 options of the router.
+	jsonOpts []json.Options
+
 	store map[string]any
 }
 
@@ -89,6 +100,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.pattern = ""
 	b.paramNames = nil
 	b.paramVals = b.paramArr[:0]
+	b.rawTail = ""
 }
 
 // setRoute records the matched route on the context.

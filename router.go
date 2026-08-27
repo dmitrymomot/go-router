@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json/v2"
 	"net/http"
 	"net/url"
 	"slices"
@@ -65,6 +66,8 @@ type Router[C Context] struct {
 	notAllowedChain  HandlerFunc[C]
 	autoOptions      bool
 	redirectSlash    bool
+	maxBody          int64
+	jsonOpts         []json.Options
 }
 
 // New returns a root router. newContext builds the application context for one
@@ -86,6 +89,7 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 		methodNotAllowed: defaultMethodNotAllowed[C],
 		errHandler:       DefaultErrorHandler[C],
 		autoOptions:      true,
+		maxBody:          DefaultMaxBodyBytes,
 	}
 	r.root = r
 	return r
@@ -332,6 +336,16 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) { r.root.errHandler = h 
 // route handles: status 204 with an Allow header. It is on by default.
 func (r *Router[C]) HandleOPTIONS(on bool) { r.root.autoOptions = on }
 
+// MaxBodyBytes caps the request body that [Base.Bind] and its variants read.
+// The default is [DefaultMaxBodyBytes]. Zero removes the cap.
+func (r *Router[C]) MaxBodyBytes(n int64) { r.root.maxBody = n }
+
+// JSONOptions sets the encoding/json/v2 options that [Base.JSON] and
+// [Base.BindJSON] apply by default. A per-call option overrides them.
+//
+//	r.JSONOptions(json.RejectUnknownMembers(true))
+func (r *Router[C]) JSONOptions(opts ...json.Options) { r.root.jsonOpts = opts }
+
 // RedirectTrailingSlash makes the router answer 301 for a path that ends in
 // "/" when the path without it has a route. By default the router treats
 // "/users/" and "/users" as the same path and answers directly.
@@ -415,6 +429,8 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	c := root.newCtx(w, req)
 	b := c.base()
 	b.init(w, req)
+	b.maxBody = root.maxBody
+	b.jsonOpts = root.jsonOpts
 
 	path := req.URL.EscapedPath()
 	if path == "" || path[0] != '/' {
