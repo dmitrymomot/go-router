@@ -1006,6 +1006,17 @@ res = routertest.Get(r, "/", routertest.Host("acme.example.com"))   // a host ro
 srv := routertest.NewServer(t, r)   // a real server, stopped when the test ends
 ```
 
+A stream that ends reads back as the events a client would parse, comments and
+retry frames left out:
+
+```go
+res := routertest.Get(r, "/events")
+res.AssertEvents(t,
+	routertest.Event{ID: "1", Name: "tick", Data: "one"},
+	routertest.Event{ID: "2", Name: "tick", Data: "two"},
+)
+```
+
 ## Performance
 
 Apple M3 Max, Go 1.27, one route set of 26 patterns. Run it yourself with

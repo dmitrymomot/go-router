@@ -6,12 +6,16 @@
 //	res := routertest.Do(r, http.MethodPost, "/users", routertest.JSONBody(in))
 //	res.AssertStatus(t, http.StatusCreated)
 //	out, err := res.JSON[User]()
+//
+// [Response.Events] reads a server-sent event stream back the way a client
+// parses it.
 package routertest
 
 import (
 	"bytes"
 	"encoding/json/v2"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -159,4 +163,119 @@ func (r *Response) AssertHeader(tb testing.TB, key, want string) {
 // redirect or reads a streaming body.
 func NewServer(tb testing.TB, h http.Handler) *httptest.Server {
 	return httptest.NewTestServer(tb, h)
+}
+
+// Event is one event that a server-sent event stream carried, as a client
+// parses it out of the body.
+type Event struct {
+	// ID is the last id that the stream named at or before this event. A
+	// client carries it forward the same way, and sends it back in
+	// Last-Event-ID when it reconnects.
+	ID string
+
+	// Name is the event field of the frame. It is empty when the frame named
+	// none, which a client reports as the type "message".
+	Name string
+
+	// Data is the data of the event, with its lines joined by a line feed.
+	Data string
+}
+
+// Events parses the response body as a server-sent event stream and returns
+// the events that it carried:
+//
+//	res := routertest.Get(r, "/events")
+//	res.AssertStatus(t, http.StatusOK)
+//	res.AssertEvents(t,
+//		routertest.Event{Name: "tick", Data: "one"},
+//		routertest.Event{Name: "tick", Data: "two"},
+//	)
+//
+// It reads the body the way a client does: it drops every comment, it drops a
+// frame that carries no data field, such as the retry frame that opens a
+// stream, and it joins the data lines of one event with a line feed.
+//
+// The recorder holds the whole body, so the handler has to return before the
+// body is readable. Test a stream that never ends with [NewServer] and a
+// client that reads it as it arrives.
+func (r *Response) Events() []Event {
+	var (
+		events  []Event
+		data    []byte
+		name    string
+		id      string
+		hasData bool
+	)
+	for line := range eventLines(r.Body) {
+		switch {
+		case line == "":
+			if !hasData {
+				// A frame without data dispatches nothing, and it still
+				// clears the name.
+				name = ""
+				continue
+			}
+			events = append(events, Event{
+				ID:   id,
+				Name: name,
+				Data: string(bytes.TrimSuffix(data, []byte("\n"))),
+			})
+			data, hasData, name = data[:0], false, ""
+
+		case strings.HasPrefix(line, ":"):
+			// A comment, which a client ignores.
+
+		default:
+			field, value, _ := strings.Cut(line, ":")
+			value = strings.TrimPrefix(value, " ")
+			switch field {
+			case "event":
+				name = value
+			case "data":
+				data = append(append(data, value...), '\n')
+				hasData = true
+			case "id":
+				// A client ignores an id that holds a NUL.
+				if !strings.ContainsRune(value, 0) {
+					id = value
+				}
+			}
+		}
+	}
+	return events
+}
+
+// AssertEvents fails the test when the events of the stream differ from want.
+func (r *Response) AssertEvents(tb testing.TB, want ...Event) {
+	tb.Helper()
+	got := r.Events()
+	if len(got) != len(want) {
+		tb.Fatalf("%d events, want %d; body: %s", len(got), len(want), r.Body)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			tb.Fatalf("event %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// eventLines returns the lines of a server-sent event stream. A line ends at a
+// line feed, at a carriage return, or at the pair, and a last line that no
+// break ends is not a line yet, so the sequence leaves it out.
+func eventLines(b []byte) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for len(b) > 0 {
+			i := bytes.IndexAny(b, "\r\n")
+			if i < 0 {
+				return
+			}
+			if !yield(string(b[:i])) {
+				return
+			}
+			if b[i] == '\r' && i+1 < len(b) && b[i+1] == '\n' {
+				i++
+			}
+			b = b[i+1:]
+		}
+	}
 }
