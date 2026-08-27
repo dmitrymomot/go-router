@@ -169,3 +169,52 @@ func serve(h http.Handler, method, target string) string {
 	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
 	return fmt.Sprint(rec.Code, " ", rec.Body.String())
 }
+
+// ExampleNewPooled reuses contexts across requests. The factory takes no
+// request, and reset clears every field that a handler writes.
+func ExampleNewPooled() {
+	r := router.NewPooled(
+		func() *Context { return &Context{DB: &store{}} },
+		func(c *Context) { c.User = nil },
+	)
+
+	r.GET("/whoami", func(c *Context) error {
+		if c.User == nil {
+			return c.String(http.StatusOK, "anonymous")
+		}
+		return c.String(http.StatusOK, c.User.Name)
+	})
+	r.GET("/login", func(c *Context) error {
+		c.User = &User{ID: "7", Name: "ann"}
+		return c.String(http.StatusOK, "signed in as "+c.User.Name)
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/login"))
+	// The next request reuses that context, and reset cleared the user.
+	fmt.Println(serve(r, http.MethodGet, "/whoami"))
+	// Output:
+	// 200 signed in as ann
+	// 200 anonymous
+}
+
+// ExampleRouter_GET_partialSegment reads part of a path segment.
+func ExampleRouter_GET_partialSegment() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.GET("/reports/rep-{date}.csv", func(c *Context) error {
+		date, err := c.ParamAs[int]("date")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "report for %d", date)
+	})
+	r.GET("/files/{name}.{ext}", func(c *Context) error {
+		return c.Stringf(http.StatusOK, "name=%s ext=%s", c.Param("name"), c.Param("ext"))
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/reports/rep-20260102.csv"))
+	fmt.Println(serve(r, http.MethodGet, "/files/notes.v2.txt"))
+	// Output:
+	// 200 report for 20260102
+	// 200 name=notes.v2 ext=txt
+}
