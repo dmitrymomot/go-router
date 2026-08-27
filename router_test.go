@@ -360,17 +360,28 @@ func TestPanics(t *testing.T) {
 			r.GET("/users/{id}", echoRoute)
 			r.GET("/users/{uid}/posts", echoRoute)
 			r.Routes()
-		}, "is named"},
+		}, "already named"},
 		{"catch-all is not last", func() {
 			r := newTestRouter()
 			r.GET("/files/{path...}/x", echoRoute)
 			r.Routes()
 		}, "catch-all must be the last segment"},
-		{"partial segment parameter", func() {
+		{"two parameters side by side", func() {
 			r := newTestRouter()
-			r.GET("/files/name-{id}", echoRoute)
+			r.GET("/files/{a}{b}", echoRoute)
 			r.Routes()
-		}, "whole segment"},
+		}, "side by side"},
+		{"a catch-all inside a segment", func() {
+			r := newTestRouter()
+			r.GET("/files/name-{path...}", echoRoute)
+			r.Routes()
+		}, "catch-all must span a whole segment"},
+		{"two spellings of one segment shape", func() {
+			r := newTestRouter()
+			r.GET("/reports/rep-{date}.csv", echoRoute)
+			r.GET("/reports/rep-{day}.csv", echoRoute)
+			r.Routes()
+		}, "already uses the parameter names"},
 		{"use after route", func() {
 			r := newTestRouter()
 			r.GET("/a", echoRoute)
@@ -472,4 +483,105 @@ func TestConfigurationAfterServingPanics(t *testing.T) {
 		}
 	}()
 	r.MaxBodyBytes(1)
+}
+
+func TestErrorHandlerCatchesEverything(t *testing.T) {
+	type failure struct {
+		status int
+		msg    string
+	}
+	var seen []failure
+
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) {
+		seen = append(seen, failure{StatusOf(err), err.Error()})
+		_ = c.String(StatusOf(err), "handled")
+	})
+	r.GET("/panic", func(*tctx) error { panic("boom") })
+	r.GET("/error", func(*tctx) error { return ErrConflict })
+	r.POST("/error", echoRoute)
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{"a returned error", http.MethodGet, "/error", http.StatusConflict},
+		{"a panic", http.MethodGet, "/panic", http.StatusInternalServerError},
+		{"no route", http.MethodGet, "/missing", http.StatusNotFound},
+		{"the wrong method", http.MethodDelete, "/error", http.StatusMethodNotAllowed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen = nil
+			rec := do(r, tc.method, tc.path)
+			if len(seen) != 1 {
+				t.Fatalf("the error handler ran %d times, want 1", len(seen))
+			}
+			if seen[0].status != tc.status {
+				t.Errorf("status = %d, want %d", seen[0].status, tc.status)
+			}
+			if rec.Body.String() != "handled" {
+				t.Errorf("body = %q, want %q", rec.Body.String(), "handled")
+			}
+		})
+	}
+
+	// The panic reaches the handler with its stack in the internal cause.
+	seen = nil
+	do(r, http.MethodGet, "/panic")
+	if !strings.Contains(seen[0].msg, "panic: boom") {
+		t.Errorf("error = %q, want the panic value", seen[0].msg)
+	}
+	if !strings.Contains(seen[0].msg, "router.(*Router[") && !strings.Contains(seen[0].msg, "goroutine") {
+		t.Errorf("error = %q, want a stack", seen[0].msg)
+	}
+}
+
+func TestFallbackHandlersBeatTheErrorHandler(t *testing.T) {
+	errorHandlerRan := false
+
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) {
+		errorHandlerRan = true
+		_ = c.String(StatusOf(err), "error handler")
+	})
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "not found") })
+	r.MethodNotAllowed(func(c *tctx) error {
+		return c.String(http.StatusMethodNotAllowed, "method not allowed")
+	})
+	r.GET("/only", echoRoute)
+
+	if got := do(r, http.MethodGet, "/missing").Body.String(); got != "not found" {
+		t.Errorf("body = %q, want %q", got, "not found")
+	}
+	if got := do(r, http.MethodPost, "/only").Body.String(); got != "method not allowed" {
+		t.Errorf("body = %q, want %q", got, "method not allowed")
+	}
+	if errorHandlerRan {
+		t.Error("the error handler ran; the fallback handlers must win")
+	}
+}
+
+func TestPanicInTheErrorHandlerAnswers500(t *testing.T) {
+	r := newTestRouter()
+	r.ErrorHandler(func(*tctx, error) { panic("the renderer is broken") })
+	r.GET("/", func(*tctx) error { return ErrConflict })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+}
+
+func TestErrAbortHandlerStillReachesTheServer(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(*tctx) error { panic(http.ErrAbortHandler) })
+
+	defer func() {
+		if rec := recover(); rec != http.ErrAbortHandler {
+			t.Errorf("recovered %v, want http.ErrAbortHandler", rec)
+		}
+	}()
+	do(r, http.MethodGet, "/")
 }
