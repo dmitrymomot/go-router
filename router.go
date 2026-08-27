@@ -323,7 +323,7 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 	prefix = normalizePattern(prefix)
 	handler := func(c C) error {
 		b := c.base()
-		req := stripMountPrefix(b.req, b.rawTail)
+		req := stripMountPrefix(b.req, b.rawTail, b.pathEscaped)
 		b.SetRequest(req)
 		h.ServeHTTP(b.res, req)
 		return nil
@@ -334,27 +334,23 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 
 // stripMountPrefix returns a shallow copy of the request whose path is the
 // part that the mount pattern did not consume.
-func stripMountPrefix(r *http.Request, rawTail string) *http.Request {
+func stripMountPrefix(r *http.Request, tail string, escaped bool) *http.Request {
 	r2 := new(http.Request)
 	*r2 = *r
 	u := new(url.URL)
 	*u = *r.URL
 	r2.URL = u
 
-	if rawTail == "" {
+	if tail == "" {
 		u.Path, u.RawPath = "/", ""
 		return r2
 	}
-	escaped := "/" + rawTail
-	unescaped, err := url.PathUnescape(escaped)
-	if err != nil {
-		unescaped = escaped
-	}
-	u.Path = unescaped
-	if unescaped != escaped {
-		u.RawPath = escaped
-	} else {
-		u.RawPath = ""
+	rest := "/" + tail
+	u.Path, u.RawPath = rest, ""
+	if escaped {
+		if unescaped, err := url.PathUnescape(rest); err == nil && unescaped != rest {
+			u.Path, u.RawPath = unescaped, rest
+		}
 	}
 	return r2
 }
@@ -568,7 +564,8 @@ func (r *Router[C]) release(c C) {
 func (r *Router[C]) route(c C, req *http.Request) {
 	b := c.base()
 
-	path := req.URL.EscapedPath()
+	path, escaped := requestPath(req.URL)
+	b.pathEscaped = escaped
 	if path == "" || path[0] != '/' {
 		path = "/" + path
 	}
@@ -578,7 +575,7 @@ func (r *Router[C]) route(c C, req *http.Request) {
 	}
 
 	if r.redirectSlash && trimmed != path && r.canMatch(trimmed, req.Method) {
-		redirectTo(b.res, req, trimmed)
+		redirectTo(b.res, req, trimmed, escaped)
 		return
 	}
 
@@ -590,12 +587,16 @@ func (r *Router[C]) route(c C, req *http.Request) {
 		if n.seg.kind == segWildcard && len(vals) > 0 {
 			b.rawTail = vals[len(vals)-1]
 		}
-		unescapeParams(vals)
+		if escaped {
+			unescapeParams(vals)
+		}
 		b.setRoute(n.pattern, n.names, vals)
 		r.dispatch(c, n.handler(req.Method))
 
 	case st.pathMatch != nil:
-		unescapeParams(st.pathVals)
+		if escaped {
+			unescapeParams(st.pathVals)
+		}
 		b.setRoute(st.pathMatch.pattern, st.pathMatch.names, st.pathVals)
 		b.res.Header().Set(HeaderAllow, strings.Join(st.pathMatch.allowed(), ", "))
 		if req.Method == http.MethodOptions && r.autoOptions {
@@ -609,6 +610,26 @@ func (r *Router[C]) route(c C, req *http.Request) {
 	default:
 		r.dispatch(c, r.notFoundChain)
 	}
+}
+
+// requestPath returns the path that the trie matches against, and reports
+// whether that path is still percent encoded.
+//
+// net/url fills RawPath only when the raw request path differs from the
+// canonical escaping of the decoded path, which happens exactly when a segment
+// carries an escaped separator such as %2F. Every other request already has
+// the decoded path in Path, so matching reads it directly instead of asking
+// EscapedPath to rescan the whole path, and the parameters need no decoding
+// afterwards.
+//
+// That distinction also keeps a literal percent intact: "/a%25b" arrives as
+// Path "/a%b" with an empty RawPath, and decoding it a second time would turn
+// "%252F" into a separator that the client never sent.
+func requestPath(u *url.URL) (path string, escaped bool) {
+	if u.RawPath != "" {
+		return u.RawPath, true
+	}
+	return u.Path, false
 }
 
 // dispatch runs a handler and hands any error to the error handler.
@@ -649,16 +670,14 @@ func (r *Router[C]) canMatch(path, method string) bool {
 // redirectTo points the client at the same URL with a new path. It answers 308
 // for a method other than GET or HEAD, because a 301 makes some clients repeat
 // the request as a GET and drop the body.
-func redirectTo(w http.ResponseWriter, req *http.Request, escapedPath string) {
+func redirectTo(w http.ResponseWriter, req *http.Request, path string, escaped bool) {
 	u := *req.URL
-	u.RawPath = ""
-	unescaped, err := url.PathUnescape(escapedPath)
-	if err != nil {
-		unescaped = escapedPath
-	}
-	u.Path = unescaped
-	if unescaped != escapedPath {
-		u.RawPath = escapedPath
+	u.Path, u.RawPath = path, ""
+	if escaped {
+		u.RawPath = path
+		if unescaped, err := url.PathUnescape(path); err == nil {
+			u.Path = unescaped
+		}
 	}
 	status := http.StatusMovedPermanently
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {

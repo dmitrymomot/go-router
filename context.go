@@ -82,9 +82,13 @@ type Base struct {
 	paramVals  []string
 	paramArr   [maxInlineParams]string
 
-	// rawTail is the still escaped part of the path that a catch-all matched.
-	// MountHandler needs it to rebuild the path for the mounted handler.
+	// rawTail is the part of the path that a catch-all matched, in the same
+	// form as the matched path. MountHandler needs it to rebuild the path for
+	// the mounted handler.
 	rawTail string
+
+	// pathEscaped reports whether the matched path was still percent encoded.
+	pathEscaped bool
 
 	// maxBody is the request body limit that the router applies to Bind.
 	maxBody int64
@@ -117,6 +121,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.paramNames = nil
 	b.paramVals = b.paramArr[:0]
 	b.rawTail = ""
+	b.pathEscaped = false
 	clear(b.store)
 }
 
