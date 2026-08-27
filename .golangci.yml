@@ -12,10 +12,15 @@
 # routertest_test is only where it surfaces: that package imports the router,
 # and it is the first one whose analysis loads those facts.
 #
-# v2.13.1 is the newest release, so there is nothing to upgrade to. SA4023
-# stays off until a release fixes it. Every other staticcheck check keeps its
-# default state, which is why the list repeats the ones that golangci-lint
-# excludes by default.
+# v2.13.1 is the newest release as of 2026-08-27, so there is nothing to
+# upgrade to. Every other staticcheck check keeps its default state, which is
+# why the list repeats the ones that golangci-lint excludes by default.
+#
+# TODO: on the next bump of the golangci version in the justfile, delete the
+# -SA4023 line and run `just golangci`. Nothing else reports that the crash is
+# gone, so an exclusion that outlives its bug is the failure mode to watch for.
+# Reproduce the crash at any time by giving SSEComponent a single type
+# parameter again.
 version: "2"
 
 linters:
