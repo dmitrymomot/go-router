@@ -1,7 +1,9 @@
 package router_test
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -217,4 +219,35 @@ func ExampleRouter_GET_partialSegment() {
 	// Output:
 	// 200 report for 20260102
 	// 200 name=notes.v2 ext=txt
+}
+
+// page stands for a template that the a-h/templ generator produces. A
+// generated templ.Component has exactly this shape, so it satisfies
+// router.Component and needs no adapter.
+func page(title string) router.ComponentFunc {
+	return func(ctx context.Context, w io.Writer) error {
+		path := "unknown"
+		if c, ok := router.FromContext(ctx); ok {
+			path = c.Path()
+		}
+		_, err := fmt.Fprintf(w, "<h1>%s</h1><p>%s</p>", title, path)
+		return err
+	}
+}
+
+// ExampleBase_Render writes an HTML body from a template component. The
+// component reads the request through router.FromContext.
+func ExampleBase_Render() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.GET("/posts/{slug}", func(c *Context) error {
+		return c.Render(http.StatusOK, page(c.Param("slug")))
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/posts/hello", nil))
+	fmt.Println(rec.Code, rec.Header().Get("Content-Type"))
+	fmt.Println(rec.Body.String())
+	// Output:
+	// 200 text/html; charset=utf-8
+	// <h1>hello</h1><p>/posts/hello</p>
 }
