@@ -534,6 +534,22 @@ you.
   once and refuses a later change.
 - Pooling is opt-in, and it hands you the usual lifetime rules with it.
 
+## Development
+
+```bash
+just check          # fmt, lint, test
+just test           # go test -race -cover ./...
+just lint           # vet, build, gofmt, the go fix modernizers, benchmarks module
+just bench          # benchmarks of this module
+just bench-compare  # against chi, echo and http.ServeMux
+just vuln           # govulncheck
+```
+
+CI runs the same recipes, plus golangci-lint. Linters are installed by CI
+rather than declared as go.mod tools, because a tool directive would put the
+whole linter dependency tree into the module graph of everyone who imports
+this router.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
