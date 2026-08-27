@@ -1,0 +1,395 @@
+package router
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// tctx is the application context that the tests use.
+type tctx struct {
+	Base
+	Tag string
+}
+
+func newTestRouter() *Router[*tctx] {
+	return New(func(http.ResponseWriter, *http.Request) *tctx { return &tctx{Tag: "app"} })
+}
+
+// echoRoute writes the pattern and every parameter, so one assertion covers
+// both the match and the parameter values.
+func echoRoute(c *tctx) error {
+	parts := []string{c.RoutePattern()}
+	for _, n := range c.ParamNames() {
+		parts = append(parts, n+"="+c.Param(n))
+	}
+	return c.String(http.StatusOK, strings.Join(parts, " "))
+}
+
+func do(h http.Handler, method, target string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
+	return rec
+}
+
+func TestMatch(t *testing.T) {
+	r := newTestRouter()
+	for _, p := range []string{
+		"/",
+		"/users",
+		"/users/new",
+		"/users/{id}",
+		"/users/{id}/posts/{postID}",
+		"/a/{x}/c",
+		"/a/b/d",
+		"/files/{path...}",
+		"/assets/*",
+		"/orders/{id:[0-9]+}",
+		"/orders/{id}/cancel",
+	} {
+		r.GET(p, echoRoute)
+	}
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/", "/"},
+		{"/users", "/users"},
+		{"/users/", "/users"},
+		{"/users/new", "/users/new"},
+		{"/users/42", "/users/{id} id=42"},
+		{"/users/42/posts/7", "/users/{id}/posts/{postID} id=42 postID=7"},
+		{"/a/b/c", "/a/{x}/c x=b"}, // static "b" fails deeper, the walk backtracks
+		{"/a/b/d", "/a/b/d"},
+		{"/a/z/c", "/a/{x}/c x=z"},
+		{"/files/a/b/c.txt", "/files/{path...} path=a/b/c.txt"},
+		{"/files", "/files/{path...} path="},
+		{"/assets/css/app.css", "/assets/* *=css/app.css"},
+		{"/orders/17", "/orders/{id:[0-9]+} id=17"},
+		{"/orders/17/cancel", "/orders/{id}/cancel id=17"},
+		{"/orders/abc/cancel", "/orders/{id}/cancel id=abc"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := do(r, http.MethodGet, tc.path)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if got := rec.Body.String(); got != tc.want {
+				t.Errorf("body = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRegexParamFallsBackToPlainParam(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/orders/{id:[0-9]+}", func(c *tctx) error { return c.String(200, "numeric "+c.Param("id")) })
+	r.GET("/orders/{id}", func(c *tctx) error { return c.String(200, "any "+c.Param("id")) })
+
+	if got := do(r, http.MethodGet, "/orders/12").Body.String(); got != "numeric 12" {
+		t.Errorf("numeric route: %q", got)
+	}
+	if got := do(r, http.MethodGet, "/orders/ab").Body.String(); got != "any ab" {
+		t.Errorf("fallback route: %q", got)
+	}
+}
+
+func TestNotFoundAndMethodNotAllowed(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/users", echoRoute)
+	r.POST("/users", echoRoute)
+
+	if rec := do(r, http.MethodGet, "/missing"); rec.Code != http.StatusNotFound {
+		t.Errorf("missing path status = %d, want 404", rec.Code)
+	}
+
+	rec := do(r, http.MethodDelete, "/users")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get(HeaderAllow); got != "GET, HEAD, OPTIONS, POST" {
+		t.Errorf("Allow = %q", got)
+	}
+}
+
+func TestAutomaticHeadAndOptions(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/users", func(c *tctx) error { return c.String(200, "list") })
+
+	if rec := do(r, http.MethodHead, "/users"); rec.Code != http.StatusOK {
+		t.Errorf("HEAD status = %d, want 200", rec.Code)
+	}
+
+	rec := do(r, http.MethodOptions, "/users")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS status = %d, want 204", rec.Code)
+	}
+	if got := rec.Header().Get(HeaderAllow); got != "GET, HEAD, OPTIONS" {
+		t.Errorf("Allow = %q", got)
+	}
+
+	r2 := newTestRouter()
+	r2.HandleOPTIONS(false)
+	r2.GET("/users", echoRoute)
+	if rec := do(r2, http.MethodOptions, "/users"); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("disabled OPTIONS status = %d, want 405", rec.Code)
+	}
+}
+
+func TestRedirectTrailingSlash(t *testing.T) {
+	r := newTestRouter()
+	r.RedirectTrailingSlash(true)
+	r.GET("/users", echoRoute)
+
+	rec := do(r, http.MethodGet, "/users/?page=2")
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", rec.Code)
+	}
+	if got := rec.Header().Get(HeaderLocation); got != "/users?page=2" {
+		t.Errorf("Location = %q", got)
+	}
+}
+
+func TestGroupRouteAndMiddlewareOrder(t *testing.T) {
+	var order []string
+	mark := func(name string) Middleware[*tctx] {
+		return func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+			return func(c *tctx) error {
+				order = append(order, name)
+				return next(c)
+			}
+		}
+	}
+
+	r := newTestRouter()
+	r.Use(mark("root"))
+	r.Route("/admin", func(g *Router[*tctx]) {
+		g.Use(mark("admin"))
+		g.GET("/users", echoRoute, mark("route"))
+	})
+	r.GET("/open", echoRoute)
+
+	if got := do(r, http.MethodGet, "/admin/users").Body.String(); got != "/admin/users" {
+		t.Fatalf("body = %q", got)
+	}
+	if want := "root admin route"; strings.Join(order, " ") != want {
+		t.Errorf("order = %q, want %q", strings.Join(order, " "), want)
+	}
+
+	order = nil
+	do(r, http.MethodGet, "/open")
+	if want := "root"; strings.Join(order, " ") != want {
+		t.Errorf("order = %q, want %q", strings.Join(order, " "), want)
+	}
+}
+
+func TestWithAddsMiddlewareToOneRoute(t *testing.T) {
+	hit := 0
+	count := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error { hit++; return next(c) }
+	}
+
+	r := newTestRouter()
+	r.With(count).POST("/login", echoRoute)
+	r.GET("/health", echoRoute)
+
+	do(r, http.MethodPost, "/login")
+	do(r, http.MethodGet, "/health")
+	if hit != 1 {
+		t.Errorf("middleware ran %d times, want 1", hit)
+	}
+}
+
+func TestMountSameContext(t *testing.T) {
+	api := New(func(http.ResponseWriter, *http.Request) *tctx { return &tctx{} })
+	api.GET("/users/{id}", echoRoute)
+
+	r := newTestRouter()
+	r.Route("/tenants/{tid}", func(g *Router[*tctx]) {
+		g.Mount("/api", api)
+	})
+
+	rec := do(r, http.MethodGet, "/tenants/acme/api/users/7")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	// The prefix parameter stays readable inside the mounted router.
+	if got, want := rec.Body.String(), "/tenants/{tid}/api/users/{id} tid=acme id=7"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestMountHandlerStripsThePrefix(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "path=%s", r.URL.Path)
+	})
+
+	r := newTestRouter()
+	r.MountHandler("/static", inner)
+
+	for _, tc := range []struct{ target, want string }{
+		{"/static/css/app.css", "path=/css/app.css"},
+		{"/static", "path=/"},
+		{"/static/", "path=/"},
+	} {
+		if got := do(r, http.MethodGet, tc.target).Body.String(); got != tc.want {
+			t.Errorf("%s: body = %q, want %q", tc.target, got, tc.want)
+		}
+	}
+}
+
+func TestMountRouterWithAnotherContextType(t *testing.T) {
+	type adminCtx struct {
+		Base
+		Role string
+	}
+	admin := New(func(http.ResponseWriter, *http.Request) *adminCtx {
+		return &adminCtx{Role: "admin"}
+	})
+	admin.GET("/users/{id}", func(c *adminCtx) error {
+		return c.String(http.StatusOK, c.Role+":"+c.Param("id")+":"+c.Path())
+	})
+
+	r := newTestRouter()
+	r.MountRouter("/admin", admin)
+
+	rec := do(r, http.MethodGet, "/admin/users/9")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got, want := rec.Body.String(), "admin:9:/users/9"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestEscapedParameter(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/files/{name}", func(c *tctx) error { return c.String(200, c.Param("name")) })
+
+	if got := do(r, http.MethodGet, "/files/a%2Fb").Body.String(); got != "a/b" {
+		t.Errorf("param = %q, want %q", got, "a/b")
+	}
+}
+
+func TestErrorHandling(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/boom", func(*tctx) error { return ErrForbidden.WithMessage("no entry") })
+	r.GET("/internal", func(*tctx) error { return fmt.Errorf("database is down") })
+
+	rec := do(r, http.MethodGet, "/boom")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+	if got := rec.Body.String(); got != "no entry" {
+		t.Errorf("body = %q", got)
+	}
+
+	rec = do(r, http.MethodGet, "/internal")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "database") {
+		t.Errorf("body leaks the internal cause: %q", rec.Body.String())
+	}
+}
+
+func TestCustomFallbacks(t *testing.T) {
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "nothing here") })
+	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "wrong method") })
+	r.GET("/only", echoRoute)
+
+	if got := do(r, http.MethodGet, "/other").Body.String(); got != "nothing here" {
+		t.Errorf("not found body = %q", got)
+	}
+	if got := do(r, http.MethodPost, "/only").Body.String(); got != "wrong method" {
+		t.Errorf("method not allowed body = %q", got)
+	}
+}
+
+func TestRoutesIntrospection(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/users", echoRoute)
+	r.POST("/users", echoRoute)
+	r.Route("/admin", func(g *Router[*tctx]) { g.GET("/stats", echoRoute) })
+
+	got := r.Routes()
+	want := []Route{
+		{Method: http.MethodGet, Pattern: "/admin/stats"},
+		{Method: http.MethodGet, Pattern: "/users"},
+		{Method: http.MethodPost, Pattern: "/users"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("route %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPanics(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func()
+		want string
+	}{
+		{"duplicate route", func() {
+			r := newTestRouter()
+			r.GET("/a", echoRoute)
+			r.GET("/a", echoRoute)
+			r.Routes()
+		}, "already registered"},
+		{"conflicting parameter names", func() {
+			r := newTestRouter()
+			r.GET("/users/{id}", echoRoute)
+			r.GET("/users/{uid}/posts", echoRoute)
+			r.Routes()
+		}, "is named"},
+		{"catch-all is not last", func() {
+			r := newTestRouter()
+			r.GET("/files/{path...}/x", echoRoute)
+			r.Routes()
+		}, "catch-all must be the last segment"},
+		{"partial segment parameter", func() {
+			r := newTestRouter()
+			r.GET("/files/name-{id}", echoRoute)
+			r.Routes()
+		}, "whole segment"},
+		{"use after route", func() {
+			r := newTestRouter()
+			r.GET("/a", echoRoute)
+			r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+		}, "Use must come before"},
+		{"route after serving", func() {
+			r := newTestRouter()
+			r.GET("/a", echoRoute)
+			do(r, http.MethodGet, "/a")
+			r.GET("/b", echoRoute)
+		}, "after the router started serving"},
+		{"router mounted inside itself", func() {
+			r := newTestRouter()
+			r.Mount("/self", r)
+			r.Routes()
+		}, "mounted inside itself"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				got := recover()
+				if got == nil {
+					t.Fatalf("no panic, want one that mentions %q", tc.want)
+				}
+				if msg := fmt.Sprint(got); !strings.Contains(msg, tc.want) {
+					t.Errorf("panic = %q, want one that mentions %q", msg, tc.want)
+				}
+			}()
+			tc.fn()
+		})
+	}
+}
