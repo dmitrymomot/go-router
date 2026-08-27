@@ -151,6 +151,8 @@ r.Match([]string{"GET", "POST"}, pattern, handler, ...)
 | `/users` | that path exactly |
 | `/users/{id}` | one segment, readable as `c.Param("id")` |
 | `/orders/{id:[0-9]+}` | one segment that the regular expression accepts |
+| `/reports/rep-{date}.csv` | part of a segment; `c.Param("date")` is `20260102`, not the file name |
+| `/files/{name}.{ext}` | two parameters in one segment |
 | `/files/{path...}` | the rest of the path, including slashes |
 | `/assets/*` | the rest of the path, readable as `c.Param("*")` |
 
@@ -158,8 +160,14 @@ Children are tried in the order static, regular expression, parameter,
 catch-all, so a literal path always wins. The walk backtracks: with
 `/a/{x}/c` and `/a/b/d` registered, `/a/b/c` still reaches the first route.
 
-A parameter must span a whole segment. `name-{id}` is a registration error; use
-a regular expression parameter instead.
+In a segment that mixes text with parameters, literals bind as far right as
+the segment allows, so each parameter takes as much as it can. That is one rule
+for both readings you would expect: `rep-{date}.csv` reads `a.csv` out of
+`rep-a.csv.csv`, and `{name}.{ext}` splits `a.b.txt` into `a.b` and `txt`. No
+parameter may be empty, so `rep-.csv` does not match. Two parameters side by
+side, as in `{a}{b}`, are a registration error: put text between them.
+
+A catch-all still has to span a whole segment.
 
 `/users/` and `/users` are the same path. Call `r.RedirectTrailingSlash(true)`
 to answer 301 (308 for a method with a body) instead.
@@ -216,6 +224,16 @@ return fmt.Errorf("query users: %w", err)                  // 500, message hidde
 `errors.Is` matches on the status code, so `errors.Is(err, router.ErrNotFound)`
 is true for any 404 that your code produced.
 
+One error handler renders **every** failure of a request:
+
+- an error a handler or a middleware returned,
+- a panic that escaped the chain, as a 500 carrying the panic and its stack,
+- a path with no route, as `ErrNotFound`,
+- a method no route answers, as `ErrMethodNotAllowed`.
+
+The last two reach it only while `NotFound` and `MethodNotAllowed` are unset.
+**A handler set there wins** and answers the request itself.
+
 The default handler writes JSON unless the client asked for a text type, logs
 the internal cause with `log/slog`, and never puts an internal message in the
 body. Replace it wholesale when you need a different shape:
@@ -228,6 +246,11 @@ r.MethodNotAllowed(func(c *Context) error { ... })
 
 The router answers `405` with an `Allow` header on its own, answers `OPTIONS`
 with `204` and an `Allow` header, and serves `HEAD` from the `GET` handler.
+
+A panic never kills the connection: the router recovers it and hands it to the
+error handler. `middleware.Recover` is still useful, because it catches the
+panic *inside* the chain, where a logger above it still records the request.
+`http.ErrAbortHandler` passes through both untouched.
 
 ## Binding
 
@@ -287,6 +310,33 @@ abandon a running handler, so your handler has to watch the context. Read
 `RealIP` before you trust it: use it only behind a proxy that rewrites the
 forwarding headers.
 
+## Context pooling
+
+`NewPooled` reuses contexts instead of allocating one per request, which
+removes the single allocation a request costs.
+
+```go
+r := router.NewPooled(
+	func() *app.Context { return &app.Context{DB: db} },       // no request here
+	func(c *app.Context) { c.User = nil; c.Tenant = "" },      // clear your fields
+)
+```
+
+Two rules, and the API enforces the first one:
+
+1. **The factory takes no request.** A pooled context outlives the request that
+   first built it. Read anything request specific in a middleware or a handler.
+2. **`reset` must clear every field a handler writes.** The router clears the
+   embedded `Base` itself. A field `reset` forgets carries one user's data into
+   the next request, so write it as an explicit assignment of every field.
+
+Never keep a context, its request, or its response writer alive after the
+handler returns. A goroutine that outlives the request would then read and
+write the context of an unrelated one. Copy what it needs before it starts.
+
+A context whose request panicked is dropped rather than pooled, because its
+state is unknown at that point.
+
 ## Testing
 
 ```go
@@ -305,15 +355,18 @@ Apple M3 Max, Go 1.27, one route set of 26 patterns. Run it yourself with
 
 | | static | one parameter | eight segments, three parameters |
 |---|---|---|---|
-| **go-router** | 103 ns, 1 alloc | 98 ns, 1 alloc | 164 ns, 1 alloc |
-| chi | 118 ns, 2 allocs | 210 ns, 4 allocs | 307 ns, 4 allocs |
-| echo | 33 ns, 0 allocs | 40 ns, 0 allocs | 66 ns, 0 allocs |
-| `http.ServeMux` | 99 ns, 0 allocs | 100 ns, 1 alloc | 254 ns, 3 allocs |
+| **go-router**, pooled | 70 ns, 0 allocs | 68 ns, 0 allocs | 135 ns, 0 allocs |
+| **go-router** | 106 ns, 1 alloc | 101 ns, 1 alloc | 166 ns, 1 alloc |
+| chi | 120 ns, 2 allocs | 206 ns, 4 allocs | 294 ns, 4 allocs |
+| echo | 32 ns, 0 allocs | 39 ns, 0 allocs | 66 ns, 0 allocs |
+| `http.ServeMux` | 97 ns, 0 allocs | 97 ns, 1 alloc | 253 ns, 3 allocs |
 
-The one allocation is your context. Route parameters land in an array inside
-`Base`, so matching itself allocates nothing for up to eight parameters. Echo
-reaches zero by pooling its contexts; this router allocates yours fresh every
-time, so a field a handler sets can never survive into the next request.
+Without pooling, the one allocation is your context: route parameters land in
+an array inside `Base`, so matching itself allocates nothing for up to eight
+parameters. `http.ServeMux` reaches zero on a static route because it has no
+context object at all — it looks the handler up and calls it with the request
+the server already allocated. `NewPooled` closes that gap; echo does the same
+thing by default and pays for it with the same caveats listed above.
 
 ## What Go 1.27 buys
 
@@ -329,10 +382,11 @@ time, so a field a handler sets can never survive into the next request.
 
 ## Limitations
 
-- A parameter must span a whole segment. Use `{name:regexp}` for the rest.
+- A catch-all must span a whole segment, and two parameters cannot sit side by
+  side inside one.
 - Register every route before the first request. The router compiles its trie
   once and refuses a later change.
-- Contexts are not pooled.
+- Pooling is opt-in, and it hands you the usual lifetime rules with it.
 
 ## License
 
