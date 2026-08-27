@@ -126,6 +126,7 @@ type Context struct {
 | `Query(name)` `QueryAs[T](name)` `QueryAsDefault(name, def)` | query parameters |
 | `Bind[T]()` `BindJSON[T]()` `BindForm[T]()` `BindQuery[T]()` | request decoding |
 | `JSON` `String` `Stringf` `HTML` `Blob` `Stream` `NoContent` `Redirect` `Attachment` | response rendering |
+| `Render` `RenderStream` | template components, such as [templ](https://templ.guide) |
 | `Set(k, v)` `Get(k)` | per-request values |
 | `Deadline` `Done` `Err` `Value` | `Base` is a `context.Context` |
 
@@ -386,6 +387,134 @@ Request bodies are capped at 4 MiB. Change it with `r.MaxBodyBytes(n)`.
 
 > `encoding/json/v2` refuses to encode a `time.Duration` without a format tag.
 > Write `json:"ttl,format:nano"` or use a string.
+
+## Templates
+
+`Render` writes an HTML body from a component:
+
+```go
+type Component interface {
+	Render(ctx context.Context, w io.Writer) error
+}
+```
+
+That is the interface a [templ](https://templ.guide) template satisfies, so a
+generated template goes straight to `Render` and the router still imports
+nothing:
+
+```go
+r.GET("/posts/{slug}", func(c *app.Context) error {
+	post, err := c.DB.Post(c, c.Param("slug"))
+	if err != nil {
+		return err
+	}
+	return c.Render(http.StatusOK, view.Post(post))   // view.Post is a templ.Component
+})
+```
+
+`Render` builds the page in a pooled buffer before it writes the header, the
+way `JSON` does. A template that fails halfway therefore produces a clean 500
+instead of half a page, and the response carries a `Content-Length`.
+
+An error from the template reaches the error handler. An `HTTPError` keeps its
+status, so a template that reports `router.ErrNotFound` answers 404; any other
+error becomes a 500 whose message stays server-side.
+
+The buffer pool starts each page at 8 KiB and keeps a buffer up to 512 KiB. A
+page larger than that still renders, but its buffer is dropped instead of
+pooled, so a service whose pages routinely exceed 512 KiB allocates one per
+request.
+
+### Reading the request from a template
+
+The component receives the context itself. `Set` values arrive through
+`ctx.Value`, and `FromContext` returns the whole `Base`, which is what a nav bar
+needs to mark the active link:
+
+```templ
+templ Nav() {
+	if c, ok := router.FromContext(ctx); ok {
+		<a href="/docs" aria-current={ ariaCurrent(c.Path() == "/docs") }>Docs</a>
+	}
+}
+```
+
+`FromContext` answers through `Value`, so it still finds the `Base` after the
+templ runtime wraps the context. It reports `false` outside a request, which
+keeps a template renderable from a test or a static site generator.
+
+It returns the request state, not your `*app.Context`. A template that needs
+the user or the database takes it as a parameter — `view.Post(post, user)` —
+which keeps the value typed and the template testable. Reaching for
+`c.Get("user").(*User)` inside a template gives back the type assertion the
+router exists to remove.
+
+> The context is only valid until `Render` returns. A pooled router reuses it
+> for the next request, so a template must not hold on to it, and must not hand
+> it to a goroutine that outlives the request.
+
+### Streaming
+
+`RenderStream` writes straight to the client, with no buffer. Use it for a page
+too large to hold in memory, or for one that sends its shell early:
+
+```go
+return c.RenderStream(http.StatusOK, view.Feed(items))   // @templ.Flush() reaches the client
+```
+
+It commits the response before the template runs, so a failure leaves a partial
+page on the wire. The error still reaches the error handler, which logs it and
+writes nothing more; a write that failed because the client went away is logged
+at debug level rather than as a 500.
+
+A `HEAD` request answers with the headers alone and never runs the template, so
+a streamed route sends no `Content-Length`. `Render` runs the template for a
+`HEAD` and sends the length.
+
+### Fragments and other templ helpers
+
+`ComponentFunc` adapts any function of that shape, which reaches the parts of
+templ that the interface alone does not cover. Rendering named fragments for an
+htmx request is the common one:
+
+```go
+r.GET("/rows", func(c *app.Context) error {
+	return c.Render(http.StatusOK, router.ComponentFunc(
+		func(ctx context.Context, w io.Writer) error {
+			return templ.RenderFragments(ctx, w, view.Table(rows), "rows")
+		}))
+})
+```
+
+### An HTML error page
+
+The error handler renders a component like any other handler. It replaces
+`DefaultErrorHandler` wholesale, so it has to keep the logging, and it has to
+answer even when the error page itself fails to render:
+
+```go
+r.ErrorHandler(func(c *Context, err error) {
+	status := router.StatusOf(err)
+	if status >= 500 {
+		slog.ErrorContext(c, "request failed",
+			slog.String("route", c.RoutePattern()), slog.Any("error", err))
+	}
+	if c.Response().Committed {
+		return
+	}
+	if renderErr := c.Render(status, view.Error(status)); renderErr != nil {
+		slog.ErrorContext(c, "error page failed", slog.Any("error", renderErr))
+		//nolint:errcheck // the error handler is the last stop
+		c.String(status, http.StatusText(status))
+	}
+})
+```
+
+Without the fallback a broken error template writes nothing, and the client
+gets an empty `200` for what was a 500.
+
+Keep the JSON handler for an API scope and mount the HTML one under the pages
+scope; see [Mounting a subsystem with its own context](#mounting-a-subsystem-with-its-own-context).
 
 ## Middleware
 

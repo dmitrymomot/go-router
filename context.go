@@ -163,15 +163,49 @@ func (b *Base) Done() <-chan struct{} { return b.req.Context().Done() }
 // Err implements [context.Context].
 func (b *Base) Err() error { return b.req.Context().Err() }
 
+// baseKeyType is the key under which [FromContext] finds the [Base].
+type baseKeyType struct{}
+
 // Value implements [context.Context]. It reads the values that [Base.Set]
 // stored first, then falls back to the request context.
 func (b *Base) Value(key any) any {
-	if s, ok := key.(string); ok {
-		if v, ok := b.store[s]; ok {
+	switch k := key.(type) {
+	case string:
+		if v, ok := b.store[k]; ok {
 			return v
 		}
+	case baseKeyType:
+		return b
 	}
 	return b.req.Context().Value(key)
+}
+
+// FromContext returns the [Base] that [Base.Render] handed to a component, and
+// reports whether the context carries one.
+//
+// A template reads the request through it, which a nav bar needs to mark the
+// active link:
+//
+//	templ Nav() {
+//		if c, ok := router.FromContext(ctx); ok {
+//			<a href="/docs" aria-current={ current(c.Path() == "/docs") }>Docs</a>
+//		}
+//	}
+//
+// It answers through [context.Context.Value], so it still finds the Base after
+// a template engine wraps the context, as the a-h/templ runtime does.
+//
+// The Base is only valid until the call that handed it over returns, because
+// [NewPooled] reuses it for the next request. Read what you need and copy it;
+// never store the Base itself, and never pass it to a goroutine that outlives
+// the request.
+//
+// It returns the request state, not the application context. A template that
+// needs a user or a database takes it as a parameter, which is what keeps the
+// value typed.
+func FromContext(ctx context.Context) (*Base, bool) {
+	b, ok := ctx.Value(baseKeyType{}).(*Base)
+	return b, ok
 }
 
 // Set stores a value for the lifetime of the request.
