@@ -58,11 +58,9 @@ jobs:
         with:
           go-version: "1.27"
       - uses: extractions/setup-just@v3
-      # The recipe compiles the pinned linter with the Go of this job, which is
-      # what a go 1.27 module needs: a prebuilt golangci-lint binary carries the
-      # Go it was built with, and refuses a module that targets a later one.
-      # It still runs through go run tool@version, so the linter never enters
-      # the module graph of anyone who imports this router.
+      # The recipe compiles the linter from the version that the justfile pins,
+      # with the Go of this job. The prebuilt binary of the action is built
+      # with an older Go, which refuses a module that targets 1.27.
       - run: just golangci
 
   test:
