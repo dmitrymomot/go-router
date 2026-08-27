@@ -214,6 +214,10 @@ r.MountRouter("/admin", adminRouter)   // *admin.Context
 r.MountHandler("/static", http.FileServerFS(assets))
 ```
 
+For the files of a front-end build, reach for [the `static` package](#static-assets)
+instead of a bare `http.FileServerFS`: it adds the build tag, the cache headers
+and the single page fallback.
+
 `r.Routes()` returns every registered route, which is handy in a startup log or
 a test that guards the route table.
 
@@ -446,6 +450,103 @@ r.GET("/metrics", router.WrapHandler[*Context](promhttp.Handler()))
 running handler, so your handler has to watch the context. Read `RealIP`
 before you trust it: use it only behind a proxy that rewrites the forwarding
 headers.
+
+## Static assets
+
+The `static` package serves the files of a front-end build and writes their
+URLs into a template.
+
+```go
+//go:embed all:dist
+var dist embed.FS
+
+assets := static.Must(static.Config{
+	FS:     dist,
+	Root:   "dist",        // //go:embed keeps the directory name in the paths
+	Prefix: "/static",
+})
+
+static.Mount(r, assets)          // GET and HEAD under /static
+tmpl.Funcs(assets.FuncMap())     // {{ asset "css/app.css" }}
+```
+
+`assets.URL("css/app.css")` returns `/static/9f2c1ab40e3d/css/app.css`. The
+middle segment is the build tag, which `New` derives from the content of the
+files. A path that carries it answers `Cache-Control: public, max-age=31536000,
+immutable`, so the browser keeps the file until the next build changes the tag.
+A path without the tag still answers, with a revalidating header instead, and
+the tag of an older build answers 404.
+
+### Two modes
+
+| | `Config.FS` | `Config.Dir` |
+|---|---|---|
+| source | an embedded file system | a directory on disk, read per request |
+| build tag | derived from the content | none |
+| `Cache-Control` | immutable for a versioned path | `no-cache` |
+| `ETag` | the content hash, read once at startup | the size and the modification time |
+
+`Dir` opens the file again on every request, so an edit reaches the next
+reload, and `os.OpenInRoot` refuses a path that leaves the directory. Pick the
+mode with a build tag of your own, so that one call site serves both builds:
+
+```go
+//go:build dev
+
+func assetConfig() static.Config {
+	return static.Config{Dir: "web/dist", Prefix: "/static"}
+}
+```
+
+```go
+//go:build !dev
+
+//go:embed all:dist
+var dist embed.FS
+
+func assetConfig() static.Config {
+	return static.Config{FS: dist, Root: "dist", Prefix: "/static"}
+}
+```
+
+`go run -tags dev .` then reads the disk, and the release build embeds.
+
+### Single page application
+
+Leave `Prefix` empty and set `SPA`:
+
+```go
+assets := static.Must(static.Config{FS: dist, Root: "dist", SPA: true})
+
+r.GET("/api/ping", ping)
+static.Mount(r, assets)
+```
+
+A path that matches no file answers with `index.html` and status 200, which is
+how the application serves its own routes. The catch-all that `Mount` registers
+loses to every literal route, so `/api/ping` still reaches its handler.
+
+The fallback answers a navigation only: the path carries no file extension, or
+the client accepts `text/html`. A missing script keeps its 404, because an HTML
+body in its place breaks the page in a way that is hard to read. Set
+`Config.Fallback` to replace that test when the routes of the application do not
+fit it. The index itself always revalidates, whatever path reached it, because
+it names the versioned assets.
+
+### The rest of the API
+
+| | |
+|---|---|
+| `a.URL(name)` | the public URL of one asset, with the build tag |
+| `a.FuncMap()` | `{"asset": a.URL}`, for `text/template` and `html/template` |
+| `a.Has(name)` | whether the set holds the file |
+| `a.Prefix()` `a.Build()` | the normalized prefix and the build tag |
+
+`Assets` is an `http.Handler` as well, so `r.MountHandler("/static", assets)`
+and `http.StripPrefix` serve it too. `Mount` differs in two ways: it registers
+`GET` and `HEAD` only, and a miss returns `router.ErrNotFound`, which the
+`NotFound` handler or the error handler of the router renders. `MountHandler`
+answers a miss from `Config.NotFound` instead.
 
 ## Context pooling
 
