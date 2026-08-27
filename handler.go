@@ -1,6 +1,9 @@
 package router
 
-import "net/http"
+import (
+	"net/http"
+	"slices"
+)
 
 // HandlerFunc handles a request. It returns an error to hand control to the
 // error handler of the router, which turns the error into a response.
@@ -12,8 +15,8 @@ type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 
 // chain wraps h with mws. mws[0] ends up outermost.
 func chain[C Context](h HandlerFunc[C], mws []Middleware[C]) HandlerFunc[C] {
-	for i := len(mws) - 1; i >= 0; i-- {
-		h = mws[i](h)
+	for _, mw := range slices.Backward(mws) {
+		h = mw(h)
 	}
 	return h
 }

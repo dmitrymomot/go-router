@@ -53,8 +53,8 @@ func (e *HTTPError) Unwrap() error { return e.Err }
 // Is reports whether target is an HTTPError with the same status code. It lets
 // errors.Is match a returned error against a sentinel such as [ErrNotFound].
 func (e *HTTPError) Is(target error) bool {
-	var t *HTTPError
-	return errors.As(target, &t) && t.Status == e.Status
+	t, ok := errors.AsType[*HTTPError](target)
+	return ok && t.Status == e.Status
 }
 
 // WithMessage returns a copy that carries the message.
@@ -128,8 +128,8 @@ func DefaultErrorHandler[C Context](c C, err error) {
 	}
 	b := c.base()
 
-	var he *HTTPError
-	if !errors.As(err, &he) {
+	he, ok := errors.AsType[*HTTPError](err)
+	if !ok {
 		he = ErrInternalServerError.WithError(err)
 	}
 
