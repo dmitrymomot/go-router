@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -158,6 +159,11 @@ type errorBody struct {
 // It writes JSON unless the client asked for text. A client that sends no
 // Accept header gets JSON, because a service that calls another service
 // usually sends none and still wants a machine readable answer.
+//
+// An htmx request is the exception: it gets the message as HTML, with its
+// markup escaped, because htmx swaps what it receives into a page. One that
+// names JSON in its Accept header still gets JSON. The answer therefore varies
+// on HX-Request, which it adds to the Vary header.
 func DefaultErrorHandler[C Context](c C, err error) {
 	if err == nil {
 		return
@@ -196,11 +202,29 @@ func DefaultErrorHandler[C Context](c C, err error) {
 		return
 	}
 
+	// The body and its media type both depend on HX-Request, so a shared cache
+	// has to keep the two answers apart. Without it a cache that stores error
+	// responses hands an htmx fragment to an API client, or a JSON object to a
+	// page.
+	b.Vary(HeaderHXRequest)
+
 	if acceptsJSON(b.req) {
 		b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
 		b.res.WriteHeader(he.Status)
 		//nolint:errcheck // The connection is already failing; nothing to report.
 		json.MarshalWrite(b.res, errorBody{Status: he.Status, Error: he.Message, Details: he.Details})
+		return
+	}
+
+	// An htmx page may swap this body into itself, so the message goes out as
+	// HTML with its markup escaped. htmx swaps no 4xx or 5xx by default, but
+	// a page that configures responseHandling, or that uses the
+	// response-targets extension, does.
+	if b.IsHTMX() {
+		b.res.Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
+		b.res.WriteHeader(he.Status)
+		//nolint:errcheck // Same as above.
+		b.res.WriteString(html.EscapeString(he.Message))
 		return
 	}
 
@@ -213,12 +237,21 @@ func DefaultErrorHandler[C Context](c C, err error) {
 // acceptsJSON reports whether the client takes a JSON body. It answers yes
 // unless the client named the types it takes and every one of them is a text
 // type.
+//
+// htmx is the exception. It sends "Accept: */*" and swaps what it receives
+// into a page, so a JSON error would land there as text. A client that names
+// JSON still gets JSON, which is what an htmx page that sets its own Accept
+// header asked for.
 func acceptsJSON(r *http.Request) bool {
 	accept := r.Header.Get(HeaderAccept)
+	if strings.Contains(accept, "json") {
+		return true
+	}
+	if hxTrue(r.Header.Get(HeaderHXRequest)) {
+		return false
+	}
 	switch {
-	case accept == "",
-		strings.Contains(accept, "json"),
-		strings.Contains(accept, "*/*"):
+	case accept == "", strings.Contains(accept, "*/*"):
 		return true
 	default:
 		return !strings.Contains(accept, "text/")

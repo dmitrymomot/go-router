@@ -84,7 +84,22 @@ lint:
     fail_if_output "goimports would rewrite" go run {{ goimports }} -l -local {{ local }} .
     fail_if_output "go fix has modernizations to apply" go fix -diff ./...
     # The benchmarks are their own module, so the walk above never reaches them.
-    cd benchmarks && go vet ./...
+    (cd benchmarks && go vet ./...)
+    # So is every example, and the go tool skips a directory named with a
+    # leading underscore as well, so ./... misses them twice over. The build
+    # writes to /dev/null: an example is a main package, so a plain "go build"
+    # would drop its binary in the working tree on every run.
+    for dir in _examples/*/; do
+        # An unmatched glob stays literal, and cd would then fail the recipe
+        # with a message about a directory that nobody asked for.
+        [ -d "$dir" ] || continue
+        (
+            cd "$dir"
+            go build -o /dev/null ./...
+            go vet ./...
+            fail_if_output "go fix has modernizations to apply in $dir" go fix -diff ./...
+        )
+    done
 
 # Run the static analyzers: the wider modernizer set, and struct layout
 analyze:
