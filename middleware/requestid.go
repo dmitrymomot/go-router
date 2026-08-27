@@ -29,11 +29,15 @@ type RequestIDConfig struct {
 	IgnoreInbound bool
 }
 
-// RequestID returns the middleware with its default config: the X-Request-Id
+// RequestID is [RequestIDWithConfig] with its default config: the X-Request-Id
 // header, a UUID version 7, and the identifier of the request kept when it
 // carries one.
-func RequestID[C router.Context]() router.Middleware[C] {
-	return RequestIDWithConfig[C](RequestIDConfig{})
+//
+// It is a middleware itself, so it goes into Use without a call:
+//
+//	r.Use(middleware.RequestID[Ctx])
+func RequestID[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+	return RequestIDWithConfig[C](RequestIDConfig{})(next)
 }
 
 // RequestIDWithConfig gives every request an identifier. It keeps the one that

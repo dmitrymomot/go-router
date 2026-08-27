@@ -58,10 +58,10 @@ func main() {
 	})
 
 	r.Use(
-		middleware.Recover[Ctx](),
-		middleware.RequestID[Ctx](),
-		middleware.RealIP[Ctx](),
-		middleware.Logger[Ctx](),
+		middleware.Recover[Ctx],
+		middleware.RequestID[Ctx],
+		middleware.RealIP[Ctx],
+		middleware.Logger[Ctx],
 	)
 
 	r.GET("/health", func(c *Context) error {
@@ -248,7 +248,7 @@ func Router(audit *audit.Log, db *sql.DB) *router.Router[*Context] {
 		return &Context{Audit: audit}
 	})
 
-	r.Use(middleware.Recover[*Context]())
+	r.Use(middleware.Recover[*Context])
 	r.Use(requireOperator(db))        // fills Context.Operator or returns 401
 
 	// Admin answers HTML, so it renders its errors as a page.
@@ -278,8 +278,8 @@ api := router.New(func(http.ResponseWriter, *http.Request) *app.Context {
 	return &app.Context{DB: db}
 })
 api.Use(
-	middleware.Recover[*app.Context](),
-	middleware.RequestID[*app.Context](),
+	middleware.Recover[*app.Context],
+	middleware.RequestID[*app.Context],
 )
 api.GET("/v1/users/{id}", getUser)          // *app.Context
 
@@ -393,13 +393,14 @@ Request bodies are capped at 4 MiB. Change it with `r.MaxBodyBytes(n)`.
 type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 ```
 
-Every middleware comes as two factories. The plain one returns the middleware
-with its default config; the `WithConfig` one takes a config:
+Every middleware comes in two forms. The plain one is a `router.Middleware[C]`
+itself, with the default config, so it goes into `Use` without a call; the
+`WithConfig` one is a factory that takes a config:
 
 ```go
-r.Use(middleware.Recover[Ctx]())
-r.Use(middleware.RequestID[Ctx]())
-r.Use(middleware.RealIP[Ctx]())
+r.Use(middleware.Recover[Ctx])
+r.Use(middleware.RequestID[Ctx])
+r.Use(middleware.RealIP[Ctx])
 
 r.Use(middleware.LoggerWithConfig[Ctx](middleware.LoggerConfig{Logger: log}))
 r.Use(middleware.CORSWithConfig[Ctx](middleware.CORSConfig{
@@ -410,10 +411,9 @@ r.Use(middleware.TimeoutWithConfig[Ctx](middleware.TimeoutConfig{
 }))
 ```
 
-A factory returns `router.Middleware[C]` directly, so the context type has to
-be written at the call site: Go infers a type argument from the arguments of a
-call, and these calls carry nothing that names the context. One type alias
-takes the repetition out of it:
+The context type has to be written at the call site: Go infers a type argument
+from the arguments of a call, and these calls carry nothing that names the
+context. One type alias takes the repetition out of it:
 
 ```go
 type Ctx = *app.Context
@@ -432,8 +432,8 @@ middleware.LoggerWithConfig[Ctx](middleware.LoggerConfig{
 function fits any router. It reaches the request through `c.Request()` and the
 matched route through `c.RoutePattern()`.
 
-Two defaults are worth knowing: `CORS[Ctx]()` allows every origin without
-credentials, and `Timeout[Ctx]()` applies a deadline of `DefaultTimeout`, 30
+Two defaults are worth knowing: `CORS[Ctx]` allows every origin without
+credentials, and `Timeout[Ctx]` applies a deadline of `DefaultTimeout`, 30
 seconds.
 
 One middleware per file, named after it: `recover.go`, `requestid.go`,

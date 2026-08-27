@@ -12,9 +12,12 @@ type RecoverConfig struct {
 	Skip func(c router.Context) bool
 }
 
-// Recover returns the middleware with its default config.
-func Recover[C router.Context]() router.Middleware[C] {
-	return RecoverWithConfig[C](RecoverConfig{})
+// Recover is [RecoverWithConfig] with its default config. It is a middleware
+// itself, so it goes into Use without a call:
+//
+//	r.Use(middleware.Recover[Ctx])
+func Recover[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+	return RecoverWithConfig[C](RecoverConfig{})(next)
 }
 
 // RecoverWithConfig turns a panic in a handler into a 500 error, with the

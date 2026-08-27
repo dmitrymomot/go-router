@@ -29,10 +29,13 @@ type TimeoutConfig struct {
 	Message string
 }
 
-// Timeout returns the middleware with its default config, which is a deadline
-// of [DefaultTimeout].
-func Timeout[C router.Context]() router.Middleware[C] {
-	return TimeoutWithConfig[C](TimeoutConfig{Duration: DefaultTimeout})
+// Timeout is [TimeoutWithConfig] with its default config, which is a deadline
+// of [DefaultTimeout]. It is a middleware itself, so it goes into Use without
+// a call:
+//
+//	r.Use(middleware.Timeout[Ctx])
+func Timeout[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+	return TimeoutWithConfig[C](TimeoutConfig{Duration: DefaultTimeout})(next)
 }
 
 // TimeoutWithConfig puts a deadline on the request context and reports a

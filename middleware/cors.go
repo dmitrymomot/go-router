@@ -44,11 +44,15 @@ type CORSConfig struct {
 	MaxAge time.Duration
 }
 
-// CORS returns the middleware with its default config, which allows every
-// origin without credentials. Reach for [CORSWithConfig] as soon as the answer
+// CORS is [CORSWithConfig] with its default config, which allows every origin
+// without credentials. Reach for [CORSWithConfig] as soon as the answer
 // carries anything that belongs to one user.
-func CORS[C router.Context]() router.Middleware[C] {
-	return CORSWithConfig[C](CORSConfig{AllowOrigins: []string{"*"}})
+//
+// It is a middleware itself, so it goes into Use without a call:
+//
+//	r.Use(middleware.CORS[Ctx])
+func CORS[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
+	return CORSWithConfig[C](CORSConfig{AllowOrigins: []string{"*"}})(next)
 }
 
 // defaultCORSMethods is the method list of a preflight answer.
