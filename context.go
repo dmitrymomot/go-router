@@ -117,6 +117,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.paramNames = nil
 	b.paramVals = b.paramArr[:0]
 	b.rawTail = ""
+	clear(b.store)
 }
 
 // setRoute records the matched route on the context.

@@ -2,6 +2,7 @@ package router
 
 import (
 	"encoding/json/v2"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -55,6 +56,8 @@ type Router[C Context] struct {
 
 	// The fields below belong to the root only.
 	newCtx           func(http.ResponseWriter, *http.Request) C
+	pool             *sync.Pool
+	reset            func(C)
 	once             sync.Once
 	started          atomic.Bool
 	tree             *node[C]
@@ -95,6 +98,44 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 		maxBody:          DefaultMaxBodyBytes,
 	}
 	r.root = r
+	return r
+}
+
+// NewPooled returns a root router that reuses application contexts instead of
+// allocating one per request. It removes the single allocation that a request
+// otherwise costs.
+//
+// newContext takes no request, because a pooled context outlives the request
+// that first created it: read anything request specific in a middleware or a
+// handler, never in the factory.
+//
+// reset must clear every field that a handler or a middleware writes. The
+// router clears the embedded [Base] itself. A field that reset forgets carries
+// the data of one request into the next one, which is a data leak between
+// users, so write reset as an explicit assignment of every field:
+//
+//	r := router.NewPooled(
+//		func() *app.Context { return &app.Context{DB: db} },
+//		func(c *app.Context) { c.User = nil; c.Tenant = "" },
+//	)
+//
+// Never keep a context, its request or its response writer alive after the
+// handler returns. A goroutine that outlives the request would then read and
+// write the context of an unrelated request. Copy what the goroutine needs
+// before it starts.
+//
+// The router does not pool a context whose request panicked, because its state
+// is unknown at that point.
+func NewPooled[C Context](newContext func() C, reset func(c C)) *Router[C] {
+	if newContext == nil {
+		panic("router: NewPooled needs a context factory")
+	}
+	if reset == nil {
+		panic("router: NewPooled needs a reset function")
+	}
+	r := New(func(http.ResponseWriter, *http.Request) C { return newContext() })
+	r.pool = &sync.Pool{New: func() any { return newContext() }}
+	r.reset = reset
 	return r
 }
 
@@ -332,6 +373,10 @@ func (r *Router[C]) mustNotBeServing(what string) {
 
 // NotFound sets the handler for a request that matches no route. The
 // middleware of the root applies to it.
+//
+// It takes precedence over the error handler: once set, a request that matches
+// no route goes to this handler and never reaches [Router.ErrorHandler].
+// Without it the router returns [ErrNotFound], which the error handler renders.
 func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 	r.mustNotBeServing("the not-found handler")
 	r.root.notFound = h
@@ -340,13 +385,28 @@ func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 // MethodNotAllowed sets the handler for a request whose path matches a route
 // but whose method does not. The router sets the Allow header before it calls
 // the handler.
+//
+// It takes precedence over the error handler in the same way [Router.NotFound]
+// does. Without it the router returns [ErrMethodNotAllowed].
 func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 	r.mustNotBeServing("the method-not-allowed handler")
 	r.root.methodNotAllowed = h
 }
 
-// ErrorHandler sets the function that renders an error which a handler or a
-// middleware returned. The default is [DefaultErrorHandler].
+// ErrorHandler sets the one function that renders every failure of a request:
+//
+//   - an error that a handler or a middleware returned,
+//   - a panic that escaped the handler chain, as a 500 whose internal cause
+//     carries the panic and the stack,
+//   - a request that matched no route, as [ErrNotFound],
+//   - a request whose method no route answers, as [ErrMethodNotAllowed].
+//
+// The last two reach it only while [Router.NotFound] and
+// [Router.MethodNotAllowed] are unset. A handler set there answers the request
+// itself and wins.
+//
+// The default is [DefaultErrorHandler]. A panic inside the error handler is
+// logged and answered with a bare 500, so a broken renderer cannot loop.
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 	r.mustNotBeServing("the error handler")
 	r.root.errHandler = h
@@ -462,11 +522,51 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	root := r.root
 	root.once.Do(root.build)
 
-	c := root.newCtx(w, req)
+	c := root.acquire(w, req)
+	defer root.release(c)
+	root.route(c, req)
+}
+
+// acquire returns a context that is bound to the request. It takes one from
+// the pool when [NewPooled] created the router.
+func (r *Router[C]) acquire(w http.ResponseWriter, req *http.Request) C {
+	var c C
+	if r.pool != nil {
+		c = r.pool.Get().(C)
+	} else {
+		c = r.newCtx(w, req)
+	}
 	b := c.base()
 	b.init(w, req)
-	b.maxBody = root.maxBody
-	b.jsonOpts = root.jsonOpts
+	b.maxBody = r.maxBody
+	b.jsonOpts = r.jsonOpts
+	return c
+}
+
+// release ends the request. It turns a panic that escaped the handler chain
+// into an error for the error handler, and returns the context to the pool.
+//
+// A panic leaves the context in an unknown state, so release drops it instead
+// of pooling it.
+func (r *Router[C]) release(c C) {
+	if rec := recover(); rec != nil {
+		// http.ErrAbortHandler is how a handler asks the server to drop the
+		// connection without a log entry. Let it through.
+		if rec == http.ErrAbortHandler {
+			panic(rec)
+		}
+		r.handleError(c, PanicError(rec))
+		return
+	}
+	if r.pool != nil {
+		r.reset(c)
+		r.pool.Put(c)
+	}
+}
+
+// route matches the request and runs the handler that answers it.
+func (r *Router[C]) route(c C, req *http.Request) {
+	b := c.base()
 
 	path := req.URL.EscapedPath()
 	if path == "" || path[0] != '/' {
@@ -477,13 +577,13 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
 
-	if root.redirectSlash && trimmed != path && root.canMatch(trimmed, req.Method) {
+	if r.redirectSlash && trimmed != path && r.canMatch(trimmed, req.Method) {
 		redirectTo(b.res, req, trimmed)
 		return
 	}
 
 	var st matchState[C]
-	n, vals := search(root.tree, trimmed, req.Method, b.paramArr[:0], &st)
+	n, vals := search(r.tree, trimmed, req.Method, b.paramArr[:0], &st)
 
 	switch {
 	case n != nil:
@@ -492,31 +592,51 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		unescapeParams(vals)
 		b.setRoute(n.pattern, n.names, vals)
-		root.dispatch(c, n.handler(req.Method))
+		r.dispatch(c, n.handler(req.Method))
 
 	case st.pathMatch != nil:
 		unescapeParams(st.pathVals)
 		b.setRoute(st.pathMatch.pattern, st.pathMatch.names, st.pathVals)
-		allow := strings.Join(st.pathMatch.allowed(), ", ")
-		b.res.Header().Set(HeaderAllow, allow)
-		if req.Method == http.MethodOptions && root.autoOptions {
+		b.res.Header().Set(HeaderAllow, strings.Join(st.pathMatch.allowed(), ", "))
+		if req.Method == http.MethodOptions && r.autoOptions {
 			// The middleware of the root runs here too, so that a CORS
 			// preflight reaches the CORS middleware.
-			root.dispatch(c, root.optionsChain)
+			r.dispatch(c, r.optionsChain)
 			return
 		}
-		root.dispatch(c, root.notAllowedChain)
+		r.dispatch(c, r.notAllowedChain)
 
 	default:
-		root.dispatch(c, root.notFoundChain)
+		r.dispatch(c, r.notFoundChain)
 	}
 }
 
 // dispatch runs a handler and hands any error to the error handler.
 func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) {
 	if err := h(c); err != nil {
-		r.errHandler(c, err)
+		r.handleError(c, err)
 	}
+}
+
+// handleError runs the error handler. It catches a panic from that handler
+// too, because the alternative is an endless loop of failed renderings.
+func (r *Router[C]) handleError(c C, err error) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		if rec == http.ErrAbortHandler {
+			panic(rec)
+		}
+		b := c.base()
+		slog.ErrorContext(b.req.Context(), "router: the error handler panicked",
+			slog.Any("panic", rec), slog.Any("error", err))
+		if !b.res.Committed {
+			b.res.WriteHeader(http.StatusInternalServerError)
+		}
+	}()
+	r.errHandler(c, err)
 }
 
 // canMatch reports whether the path has a route for the method.
