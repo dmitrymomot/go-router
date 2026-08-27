@@ -52,6 +52,7 @@ func TestDefaultFactories(t *testing.T) {
 		}),
 		middleware.CORS[*appContext],
 		middleware.Timeout[*appContext],
+		middleware.HTMXRedirect[*appContext],
 	)
 	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
 
