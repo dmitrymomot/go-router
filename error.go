@@ -137,7 +137,9 @@ type errorBody struct {
 // with the standard status text, so an internal message never reaches the
 // client. It logs the internal cause with [slog.Default].
 //
-// It writes JSON when the client accepts JSON, and plain text otherwise.
+// It writes JSON unless the client asked for text. A client that sends no
+// Accept header gets JSON, because a service that calls another service
+// usually sends none and still wants a machine readable answer.
 func DefaultErrorHandler[C Context](c C, err error) {
 	if err == nil {
 		return
@@ -183,15 +185,17 @@ func DefaultErrorHandler[C Context](c C, err error) {
 	b.res.WriteString(he.Message)
 }
 
-// acceptsJSON reports whether the client prefers a JSON body.
+// acceptsJSON reports whether the client takes a JSON body. It answers yes
+// unless the client named the types it takes and every one of them is a text
+// type.
 func acceptsJSON(r *http.Request) bool {
-	if strings.Contains(r.Header.Get(HeaderContentType), "json") {
-		return true
-	}
 	accept := r.Header.Get(HeaderAccept)
-	if accept == "" {
-		return false
+	switch {
+	case accept == "",
+		strings.Contains(accept, "json"),
+		strings.Contains(accept, "*/*"):
+		return true
+	default:
+		return !strings.Contains(accept, "text/")
 	}
-	return strings.Contains(accept, "json") ||
-		strings.Contains(accept, "*/*")
 }

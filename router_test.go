@@ -284,8 +284,17 @@ func TestErrorHandling(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
 	}
-	if got := rec.Body.String(); got != "no entry" {
-		t.Errorf("body = %q", got)
+	if got, want := rec.Body.String(), `{"status":403,"error":"no entry"}`; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+
+	// A browser asks for HTML, so the same error comes back as text.
+	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
+	req.Header.Set(HeaderAccept, "text/html,application/xhtml+xml")
+	textRec := httptest.NewRecorder()
+	r.ServeHTTP(textRec, req)
+	if got := textRec.Body.String(); got != "no entry" {
+		t.Errorf("text body = %q, want %q", got, "no entry")
 	}
 
 	rec = do(r, http.MethodGet, "/internal")
