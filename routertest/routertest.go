@@ -7,8 +7,7 @@
 //	res.AssertStatus(t, http.StatusCreated)
 //	out, err := res.JSON[User]()
 //
-// [Response.Events] reads a server-sent event stream back the way a client
-// parses it.
+// [Events] reads a server-sent event stream back the way a client parses it.
 package routertest
 
 import (
@@ -182,11 +181,13 @@ type Event struct {
 }
 
 // Events parses the response body as a server-sent event stream and returns
-// the events that it carried:
+// the events that it carried.
+//
+// Usage:
 //
 //	res := routertest.Get(r, "/events")
 //	res.AssertStatus(t, http.StatusOK)
-//	res.AssertEvents(t,
+//	routertest.AssertEvents(t, res,
 //		routertest.Event{Name: "tick", Data: "one"},
 //		routertest.Event{Name: "tick", Data: "two"},
 //	)
@@ -198,7 +199,7 @@ type Event struct {
 // The recorder holds the whole body, so the handler has to return before the
 // body is readable. Test a stream that never ends with [NewServer] and a
 // client that reads it as it arrives.
-func (r *Response) Events() []Event {
+func Events(r *Response) []Event {
 	var (
 		events  []Event
 		data    []byte
@@ -246,9 +247,9 @@ func (r *Response) Events() []Event {
 }
 
 // AssertEvents fails the test when the events of the stream differ from want.
-func (r *Response) AssertEvents(tb testing.TB, want ...Event) {
+func AssertEvents(tb testing.TB, r *Response, want ...Event) {
 	tb.Helper()
-	got := r.Events()
+	got := Events(r)
 	if len(got) != len(want) {
 		tb.Fatalf("%d events, want %d; body: %s", len(got), len(want), r.Body)
 	}

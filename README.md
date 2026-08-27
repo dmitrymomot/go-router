@@ -1011,7 +1011,7 @@ retry frames left out:
 
 ```go
 res := routertest.Get(r, "/events")
-res.AssertEvents(t,
+routertest.AssertEvents(t, res,
 	routertest.Event{ID: "1", Name: "tick", Data: "one"},
 	routertest.Event{ID: "2", Name: "tick", Data: "two"},
 )

@@ -117,7 +117,7 @@ func TestEvents(t *testing.T) {
 	res := routertest.Get(eventRouter(), "/events")
 	res.AssertStatus(t, http.StatusOK)
 	res.AssertHeader(t, "Content-Type", "text/event-stream")
-	res.AssertEvents(t,
+	routertest.AssertEvents(t, res,
 		routertest.Event{ID: "1", Name: "tick", Data: "one"},
 		routertest.Event{ID: "1", Data: "two\nlines"},
 		routertest.Event{ID: "3", Name: "tick", Data: "three"},
@@ -157,7 +157,7 @@ func TestEventsParsing(t *testing.T) {
 				io.WriteString(w, tt.stream)
 			}), "/events")
 
-			got := res.Events()
+			got := routertest.Events(res)
 			if len(got) != len(tt.want) {
 				t.Fatalf("%d events, want %d: %+v", len(got), len(tt.want), got)
 			}
