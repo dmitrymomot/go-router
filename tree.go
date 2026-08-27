@@ -19,7 +19,7 @@ type methodHandler[C Context] struct {
 // order static, regular expression, parameter, catch-all, so a literal path
 // always wins over a parameter.
 type node[C Context] struct {
-	static    map[string]*node[C]
+	statics   []*node[C]
 	templates []*node[C]
 	regexes   []*node[C]
 	param     *node[C]
@@ -61,11 +61,24 @@ func (n *node[C]) child(seg segment) (*node[C], error) {
 	return c, nil
 }
 
+// staticChild finds a literal child. A node has a handful of them, and a
+// linear scan that compares the length and the first byte first beats a hash
+// of the whole segment at that size.
+func (n *node[C]) staticChild(seg string) *node[C] {
+	for _, c := range n.statics {
+		v := c.seg.value
+		if len(v) == len(seg) && (len(v) == 0 || v[0] == seg[0]) && v == seg {
+			return c
+		}
+	}
+	return nil
+}
+
 // plainChild returns the existing child for a non-template segment, or nil.
 func (n *node[C]) plainChild(seg segment) *node[C] {
 	switch seg.kind {
 	case segStatic:
-		return n.static[seg.value]
+		return n.staticChild(seg.value)
 	case segRegex:
 		for _, c := range n.regexes {
 			if c.seg.re.String() == seg.re.String() {
@@ -85,10 +98,7 @@ func (n *node[C]) addChild(seg segment) *node[C] {
 	c := &node[C]{seg: seg}
 	switch seg.kind {
 	case segStatic:
-		if n.static == nil {
-			n.static = make(map[string]*node[C], 4)
-		}
-		n.static[seg.value] = c
+		n.statics = append(n.statics, c)
 	case segTemplate:
 		n.templates = append(n.templates, c)
 	case segRegex:
@@ -216,7 +226,7 @@ func search[C Context](n *node[C], path, method string, vals []string, st *match
 
 	seg, rest := splitSegment(path)
 
-	if c, ok := n.static[seg]; ok {
+	if c := n.staticChild(seg); c != nil {
 		if m, v := search(c, rest, method, vals, st); m != nil {
 			return m, v
 		}
@@ -257,13 +267,10 @@ func (n *node[C]) walk(fn func(pattern, method string)) {
 			fn(n.pattern, mh.method)
 		}
 	}
-	keys := make([]string, 0, len(n.static))
-	for k := range n.static {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	for _, k := range keys {
-		n.static[k].walk(fn)
+	sorted := slices.Clone(n.statics)
+	slices.SortFunc(sorted, func(a, b *node[C]) int { return strings.Compare(a.seg.value, b.seg.value) })
+	for _, c := range sorted {
+		c.walk(fn)
 	}
 	for _, c := range n.templates {
 		c.walk(fn)
@@ -288,7 +295,7 @@ func (n *node[C]) maxParams(depth int) int {
 		depth++
 	}
 	best := depth
-	for _, c := range n.static {
+	for _, c := range n.statics {
 		best = max(best, c.maxParams(depth))
 	}
 	for _, c := range n.templates {
