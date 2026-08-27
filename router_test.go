@@ -585,3 +585,30 @@ func TestErrAbortHandlerStillReachesTheServer(t *testing.T) {
 	}()
 	do(r, http.MethodGet, "/")
 }
+
+func TestMountRouterDoesNotShareParameters(t *testing.T) {
+	type adminCtx struct {
+		Base
+	}
+
+	sub := New(func(http.ResponseWriter, *http.Request) *adminCtx { return new(adminCtx) })
+	sub.GET("/users/{id}", func(c *adminCtx) error {
+		return c.Stringf(http.StatusOK, "tenant=%q id=%q path=%q",
+			c.Param("tenant"), c.Param("id"), c.Path())
+	})
+
+	r := newTestRouter()
+	r.MountRouter("/t/{tenant}", sub)
+
+	rec := do(r, http.MethodGet, "/t/acme/users/7")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	// The mounted router re-matches the stripped path, so a parameter of the
+	// prefix does not cross the seam. Use Mount and one context type when the
+	// prefix parameter has to reach the mounted routes.
+	want := `tenant="" id="7" path="/users/7"`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
