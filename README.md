@@ -447,11 +447,11 @@ Apple M3 Max, Go 1.27, one route set of 26 patterns. Run it yourself with
 
 | | static | one parameter | eight segments, three parameters |
 |---|---|---|---|
-| **go-router**, pooled | 70 ns, 0 allocs | 68 ns, 0 allocs | 135 ns, 0 allocs |
-| **go-router** | 106 ns, 1 alloc | 101 ns, 1 alloc | 166 ns, 1 alloc |
+| **go-router**, pooled | 53 ns, 0 allocs | 53 ns, 0 allocs | 97 ns, 0 allocs |
+| **go-router** | 92 ns, 1 alloc | 91 ns, 1 alloc | 135 ns, 1 alloc |
 | chi | 120 ns, 2 allocs | 206 ns, 4 allocs | 294 ns, 4 allocs |
 | echo | 32 ns, 0 allocs | 39 ns, 0 allocs | 66 ns, 0 allocs |
-| `http.ServeMux` | 97 ns, 0 allocs | 97 ns, 1 alloc | 253 ns, 3 allocs |
+| `http.ServeMux` | 98 ns, 0 allocs | 100 ns, 1 alloc | 261 ns, 3 allocs |
 
 Without pooling, the one allocation is your context: route parameters land in
 an array inside `Base`, so matching itself allocates nothing for up to eight
@@ -459,6 +459,13 @@ parameters. `http.ServeMux` reaches zero on a static route because it has no
 context object at all — it looks the handler up and calls it with the request
 the server already allocated. `NewPooled` closes that gap; echo does the same
 thing by default and pays for it with the same caveats listed above.
+
+Echo is still about 1.5x faster on the walk itself. It matches with a
+compressed radix tree, so a static route is a handful of prefix comparisons,
+while this router splits the path into segments and looks each one up. That
+buys the pattern syntax above: regular expression parameters, partial
+segments, and backtracking across parameter kinds, none of which a compressed
+prefix tree gives you for free. The trade is deliberate.
 
 ## What Go 1.27 buys
 
