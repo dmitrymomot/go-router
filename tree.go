@@ -55,12 +55,22 @@ type node[C Context] struct {
 	names   []string
 }
 
-// insert adds a route to the tree. It reports an error when the pattern
-// conflicts with a pattern that is already registered.
-func (n *node[C]) insert(method, pattern string, h HandlerFunc[C]) error {
+// insert adds a route to the tree. hostNames holds the parameter names of the
+// host pattern that owns this tree, which run in front of the ones of the path.
+// It reports an error when the pattern conflicts with a pattern that is already
+// registered.
+func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C]) error {
 	segs, names, err := parsePattern(pattern)
 	if err != nil {
 		return err
+	}
+	if len(hostNames) > 0 {
+		for _, hn := range hostNames {
+			if slices.Contains(names, hn) {
+				return fmt.Errorf("router: parameter %q of %q is already declared by the host pattern", hn, normalizePattern(pattern))
+			}
+		}
+		names = append(slices.Clone(hostNames), names...)
 	}
 
 	cur := n

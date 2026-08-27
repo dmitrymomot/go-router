@@ -61,6 +61,12 @@ type Context interface {
 	// RoutePattern returns the pattern of the matched route.
 	RoutePattern() string
 
+	// Host returns the request host, without its port and in lower case.
+	Host() string
+
+	// RouteHost returns the host pattern of the matched route.
+	RouteHost() string
+
 	base() *Base
 }
 
@@ -84,6 +90,14 @@ type Base struct {
 
 	pattern string
 
+	// host is the request host that the router matched against, without its
+	// port and in lower case. Host fills it on demand.
+	host string
+
+	// hostPattern is the host pattern of the matched route, empty for a route
+	// that answers every host.
+	hostPattern string
+
 	// rawTail is the part of the path that a catch-all matched, in the same
 	// form as the matched path. MountHandler needs it to rebuild the path for
 	// the mounted handler.
@@ -100,6 +114,11 @@ type Base struct {
 
 	// maxBody is the request body limit that the router applies to Bind.
 	maxBody int64
+
+	// hostIdx is the index of the matched host entry inside the router, or -1.
+	// The error handler and the fallbacks read it to find the host again after
+	// routing returned.
+	hostIdx int32
 
 	// pathEscaped reports whether the matched path was still percent encoded.
 	pathEscaped bool
@@ -127,6 +146,9 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.paramNames = nil
 	b.paramVals = b.paramArr[:0]
 	b.rawTail = ""
+	b.host = ""
+	b.hostPattern = ""
+	b.hostIdx = -1
 	b.pathEscaped = false
 	clear(b.store)
 }
@@ -191,6 +213,27 @@ func (b *Base) Get(key string) (any, bool) {
 // RoutePattern returns the pattern of the matched route, for example
 // "/users/{id}". It is empty when no route matched.
 func (b *Base) RoutePattern() string { return b.pattern }
+
+// RouteHost returns the host pattern of the matched route, for example
+// "{tenant}.example.com". It is empty when the route answers every host and
+// when no route matched.
+func (b *Base) RouteHost() string { return b.hostPattern }
+
+// Host returns the host that the request names, without its port, without a
+// trailing dot and in lower case. Read it to resolve a tenant that reaches the
+// service on a domain of its own:
+//
+//	tenant, err := tenants.ByDomain(c, c.Host())
+//
+// It reads [http.Request.Host], which carries the Host header of an HTTP/1.1
+// request and the :authority of an HTTP/2 one. Trust it only as far as you
+// trust the client, or the proxy in front of it, to send the right one.
+func (b *Base) Host() string {
+	if b.host == "" {
+		b.host = normalizeHost(b.req.Host)
+	}
+	return b.host
+}
 
 // Param returns the value of the named route parameter, or an empty string.
 func (b *Base) Param(name string) string {
