@@ -310,6 +310,26 @@ func (b *Base) Header() http.Header { return b.req.Header }
 // SetHeader sets a response header.
 func (b *Base) SetHeader(key, value string) { b.res.Header().Set(key, value) }
 
+// Vary adds header names to the Vary response header, and skips a name that
+// the header already carries.
+//
+// A route whose answer depends on a request header has to name that header, or
+// a shared cache serves one client the answer of another. A handler that
+// branches on [Base.IsHTMX] is the common case:
+//
+//	c.Vary(router.HeaderHXRequest)
+//
+// [HTMXPartial] calls it for you.
+func (b *Base) Vary(names ...string) {
+	h := b.res.Header()
+	for _, name := range names {
+		if name == "" || headerContainsToken(h, HeaderVary, name) {
+			continue
+		}
+		h.Add(HeaderVary, name)
+	}
+}
+
 // Query returns the first value of the named query parameter.
 func (b *Base) Query(name string) string { return b.req.URL.Query().Get(name) }
 

@@ -39,6 +39,19 @@ func Host(host string) RequestOption {
 	return func(r *http.Request) { r.Host = host }
 }
 
+// HTMX marks the request as one that htmx made, which is what
+// router.Base.IsHTMX reads:
+//
+//	res := routertest.Get(r, "/messages", routertest.HTMX())
+//
+// Pass [Header] for the other htmx request headers, such as HX-Target.
+//
+// The name is written out rather than taken from the router, because every
+// helper here works with any [http.Handler] and the package imports no router.
+func HTMX() RequestOption {
+	return Header("HX-Request", "true")
+}
+
 // Cookie adds a cookie to the request.
 func Cookie(c *http.Cookie) RequestOption {
 	return func(r *http.Request) { r.AddCookie(c) }

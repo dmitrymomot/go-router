@@ -73,6 +73,17 @@ func TestFormBodyAndHeader(t *testing.T) {
 	res.AssertHeader(t, "X-Who", "bo")
 }
 
+func TestHTMXOption(t *testing.T) {
+	r := newRouter()
+	r.GET("/panel", router.HTMXPartial(
+		func(c *appContext) error { return c.String(http.StatusOK, "fragment") },
+		func(c *appContext) error { return c.String(http.StatusOK, "page") },
+	))
+
+	routertest.Get(r, "/panel", routertest.HTMX()).AssertBody(t, "fragment")
+	routertest.Get(r, "/panel").AssertBody(t, "page")
+}
+
 func TestNewServer(t *testing.T) {
 	srv := routertest.NewServer(t, newRouter())
 

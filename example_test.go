@@ -417,3 +417,78 @@ func card(u *User) router.ComponentFunc {
 		return err
 	}
 }
+
+// ExampleBase_HX writes the htmx headers of an answer. Each method sets one
+// header and returns the chain; the last one writes the body.
+func ExampleBase_HX() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.PUT("/users/{id}", func(c *Context) error {
+		u := &User{ID: c.Param("id"), Name: "ann"}
+		return c.HX().
+			Retarget("#user-"+u.ID).
+			Reswap(router.HXSwapOuterHTML).
+			Trigger("user-saved").
+			Render(http.StatusOK, card(u))
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/users/7", nil))
+	fmt.Println(rec.Code)
+	fmt.Println(rec.Header().Get(router.HeaderHXRetarget), rec.Header().Get(router.HeaderHXReswap))
+	fmt.Println(rec.Header().Get(router.HeaderHXTrigger))
+	fmt.Println(rec.Body.String())
+	// Output:
+	// 200
+	// #user-7 outerHTML
+	// user-saved
+	// <li id="user-7">ann</li>
+}
+
+// ExampleBase_HX_redirect sends the browser to another page. htmx would follow
+// a 303 inside the request that it made and swap the answer, so the handler
+// asks for a client-side redirect instead. A client that is not htmx still
+// gets the 303.
+func ExampleBase_HX_redirect() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/join", func(c *Context) error { return c.HX().Redirect("/chat") })
+
+	for _, htmx := range []bool{true, false} {
+		req := httptest.NewRequest(http.MethodPost, "/join", nil)
+		if htmx {
+			req.Header.Set(router.HeaderHXRequest, "true")
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Printf("%d HX-Redirect=%q Location=%q\n", rec.Code,
+			rec.Header().Get(router.HeaderHXRedirect),
+			rec.Header().Get("Location"))
+	}
+	// Output:
+	// 200 HX-Redirect="/chat" Location=""
+	// 303 HX-Redirect="" Location="/chat"
+}
+
+// ExampleHTMXPartial gives one URL two answers: the fragment that htmx swaps,
+// and the page that a browser navigates to.
+func ExampleHTMXPartial() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.GET("/users", router.HTMXPartial(
+		func(c *Context) error { return c.Render(http.StatusOK, card(&User{ID: "7", Name: "ann"})) },
+		func(c *Context) error { return c.Render(http.StatusOK, page("users")) },
+	))
+
+	for _, htmx := range []bool{true, false} {
+		req := httptest.NewRequest(http.MethodGet, "/users", nil)
+		if htmx {
+			req.Header.Set(router.HeaderHXRequest, "true")
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Println(rec.Body.String())
+	}
+	// Output:
+	// <li id="user-7">ann</li>
+	// <h1>users</h1><p>/users</p>
+}
