@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -401,4 +402,74 @@ func TestPanics(t *testing.T) {
 			tc.fn()
 		})
 	}
+}
+
+func TestWrapHandlerAndWrapMiddleware(t *testing.T) {
+	// A standard middleware that both replaces the request and wraps the
+	// response writer, which is the shape that exercises the adapter.
+	tagging := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(&prefixWriter{ResponseWriter: w, prefix: "["},
+				req.WithContext(context.WithValue(req.Context(), ctxKey("who"), "std")))
+		})
+	}
+
+	r := newTestRouter()
+	r.Use(WrapMiddleware[*tctx](tagging))
+	r.GET("/plain", WrapHandler[*tctx](http.HandlerFunc(
+		func(w http.ResponseWriter, req *http.Request) {
+			fmt.Fprint(w, req.Context().Value(ctxKey("who")))
+		})))
+
+	rec := do(r, http.MethodGet, "/plain")
+	if got, want := rec.Body.String(), "[std"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+type ctxKey string
+
+// prefixWriter writes a prefix before the first body byte, the way a standard
+// middleware wraps the writer it was handed.
+type prefixWriter struct {
+	http.ResponseWriter
+	prefix string
+	done   bool
+}
+
+func (w *prefixWriter) Write(b []byte) (int, error) {
+	if !w.done {
+		w.done = true
+		//nolint:errcheck // test helper
+		w.ResponseWriter.Write([]byte(w.prefix))
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func TestRedirectTrailingSlashKeepsTheMethod(t *testing.T) {
+	r := newTestRouter()
+	r.RedirectTrailingSlash(true)
+	r.POST("/users", echoRoute)
+
+	rec := do(r, http.MethodPost, "/users/")
+	if rec.Code != http.StatusPermanentRedirect {
+		t.Errorf("status = %d, want 308 so that the client keeps the body", rec.Code)
+	}
+}
+
+func TestConfigurationAfterServingPanics(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/a", echoRoute)
+	do(r, http.MethodGet, "/a")
+
+	defer func() {
+		msg := fmt.Sprint(recover())
+		if !strings.Contains(msg, "after the router started serving") {
+			t.Errorf("panic = %q", msg)
+		}
+	}()
+	r.MaxBodyBytes(1)
 }
