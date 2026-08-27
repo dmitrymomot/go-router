@@ -60,9 +60,13 @@ jobs:
       # The action installs its own binary. Declaring golangci-lint as a go.mod
       # tool would put its dependency tree in the module graph of everyone who
       # imports this router, which is not a price a library should charge.
-      - uses: golangci/golangci-lint-action@v6
+      #
+      # Pin the same version the justfile pins, so `just golangci` and this job
+      # agree. "latest" on action v6 resolves to the newest v1, which is built
+      # with go1.24 and refuses a module that targets 1.27.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.13.1
 
   test:
     needs: lint
