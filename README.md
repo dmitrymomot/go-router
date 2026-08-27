@@ -412,6 +412,15 @@ r.GET("/posts/{slug}", func(c *app.Context) error {
 way `JSON` does. A template that fails halfway therefore produces a clean 500
 instead of half a page, and the response carries a `Content-Length`.
 
+An error from the template reaches the error handler. An `HTTPError` keeps its
+status, so a template that reports `router.ErrNotFound` answers 404; any other
+error becomes a 500 whose message stays server-side.
+
+The buffer pool starts each page at 8 KiB and keeps a buffer up to 512 KiB. A
+page larger than that still renders, but its buffer is dropped instead of
+pooled, so a service whose pages routinely exceed 512 KiB allocates one per
+request.
+
 ### Reading the request from a template
 
 The component receives the context itself. `Set` values arrive through
@@ -430,8 +439,15 @@ templ Nav() {
 templ runtime wraps the context. It reports `false` outside a request, which
 keeps a template renderable from a test or a static site generator.
 
+It returns the request state, not your `*app.Context`. A template that needs
+the user or the database takes it as a parameter — `view.Post(post, user)` —
+which keeps the value typed and the template testable. Reaching for
+`c.Get("user").(*User)` inside a template gives back the type assertion the
+router exists to remove.
+
 > The context is only valid until `Render` returns. A pooled router reuses it
-> for the next request, so a template must not hold on to it.
+> for the next request, so a template must not hold on to it, and must not hand
+> it to a goroutine that outlives the request.
 
 ### Streaming
 
@@ -444,7 +460,12 @@ return c.RenderStream(http.StatusOK, view.Feed(items))   // @templ.Flush() reach
 
 It commits the response before the template runs, so a failure leaves a partial
 page on the wire. The error still reaches the error handler, which logs it and
-writes nothing more.
+writes nothing more; a write that failed because the client went away is logged
+at debug level rather than as a 500.
+
+A `HEAD` request answers with the headers alone and never runs the template, so
+a streamed route sends no `Content-Length`. `Render` runs the template for a
+`HEAD` and sends the length.
 
 ### Fragments and other templ helpers
 
@@ -463,18 +484,30 @@ r.GET("/rows", func(c *app.Context) error {
 
 ### An HTML error page
 
-The error handler renders a component like any other handler:
+The error handler renders a component like any other handler. It replaces
+`DefaultErrorHandler` wholesale, so it has to keep the logging, and it has to
+answer even when the error page itself fails to render:
 
 ```go
 r.ErrorHandler(func(c *Context, err error) {
 	status := router.StatusOf(err)
+	if status >= 500 {
+		slog.ErrorContext(c, "request failed",
+			slog.String("route", c.RoutePattern()), slog.Any("error", err))
+	}
 	if c.Response().Committed {
 		return
 	}
-	//nolint:errcheck // the error handler is the last stop
-	c.Render(status, view.Error(status))
+	if renderErr := c.Render(status, view.Error(status)); renderErr != nil {
+		slog.ErrorContext(c, "error page failed", slog.Any("error", renderErr))
+		//nolint:errcheck // the error handler is the last stop
+		c.String(status, http.StatusText(status))
+	}
 })
 ```
+
+Without the fallback a broken error template writes nothing, and the client
+gets an empty `200` for what was a 500.
 
 Keep the JSON handler for an API scope and mount the HTML one under the pages
 scope; see [Mounting a subsystem with its own context](#mounting-a-subsystem-with-its-own-context).
