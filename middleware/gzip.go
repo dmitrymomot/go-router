@@ -86,7 +86,7 @@ func GzipWithConfig[C router.Context](cfg GzipConfig) router.Middleware[C] {
 			}
 
 			res := c.Response()
-			addVaryField(res.Header(), router.HeaderAcceptEncoding)
+			router.AddVary(res.Header(), router.HeaderAcceptEncoding)
 
 			req := c.Request()
 			if req.Method == http.MethodHead || !acceptsGzip(req.Header.Get(router.HeaderAcceptEncoding)) {
@@ -401,18 +401,4 @@ func encodingWanted(params string) bool {
 		return err == nil && q > 0
 	}
 	return true
-}
-
-// addVaryField adds a field name to Vary unless the header already names it.
-// A second mention costs a cache one more comparison and answers nothing.
-func addVaryField(h http.Header, field string) {
-	for _, v := range h.Values(router.HeaderVary) {
-		for part := range strings.SplitSeq(v, ",") {
-			part = strings.TrimSpace(part)
-			if part == "*" || strings.EqualFold(part, field) {
-				return
-			}
-		}
-	}
-	h.Add(router.HeaderVary, field)
 }

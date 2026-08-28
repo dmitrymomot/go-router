@@ -496,7 +496,16 @@ func (b *Base) Vary(names ...string) { AddVary(b.res.Header(), names...) }
 
 // AddVary adds header names to the Vary header of h, and skips a name that it
 // already carries. [Base.Vary] is this for the response in flight.
+//
+// Every writer of a Vary header goes through it, in this package and in the
+// middleware, so that two of them naming the same header write it once: a
+// repeated field costs a cache one more comparison and answers nothing.
 func AddVary(h http.Header, names ...string) {
+	// A Vary of "*" already says that the answer varies on everything, so a
+	// field name beside it adds nothing.
+	if headerContainsToken(h, HeaderVary, "*") {
+		return
+	}
 	for _, name := range names {
 		if name == "" || headerContainsToken(h, HeaderVary, name) {
 			continue

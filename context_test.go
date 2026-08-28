@@ -307,3 +307,20 @@ func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
 		t.Error("init left a deferred failure behind, which a pooled context would carry on")
 	}
 }
+
+// Every writer of a Vary header goes through AddVary, so two of them naming
+// the same header write it once and a Vary of "*" swallows the rest.
+func TestAddVarySkipsWhatTheHeaderAlreadyNames(t *testing.T) {
+	h := http.Header{}
+	AddVary(h, HeaderCookie)
+	AddVary(h, HeaderCookie, "cookie", "")
+	if got := h.Values(HeaderVary); len(got) != 1 || got[0] != HeaderCookie {
+		t.Errorf("Vary = %v, want one %q", got, HeaderCookie)
+	}
+
+	h = http.Header{"Vary": {"*"}}
+	AddVary(h, HeaderCookie)
+	if got := h.Values(HeaderVary); len(got) != 1 || got[0] != "*" {
+		t.Errorf("Vary = %v, want the wildcard alone", got)
+	}
+}

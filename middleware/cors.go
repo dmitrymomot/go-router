@@ -121,7 +121,7 @@ func CORSWithConfig[C router.Context](cfg CORSConfig) router.Middleware[C] {
 			res := c.Response()
 			origin := req.Header.Get(router.HeaderOrigin)
 
-			res.Header().Add(router.HeaderVary, router.HeaderOrigin)
+			router.AddVary(res.Header(), router.HeaderOrigin)
 			if origin == "" {
 				return next(c)
 			}
@@ -151,8 +151,8 @@ func CORSWithConfig[C router.Context](cfg CORSConfig) router.Middleware[C] {
 				return next(c)
 			}
 
-			res.Header().Add(router.HeaderVary, router.HeaderAccessControlRequestMethod)
-			res.Header().Add(router.HeaderVary, router.HeaderAccessControlRequestHeaders)
+			router.AddVary(res.Header(),
+				router.HeaderAccessControlRequestMethod, router.HeaderAccessControlRequestHeaders)
 			// The router sets Allow on the response before it dispatches the
 			// OPTIONS chain, so the truthful method list is already here.
 			res.Header().Set(router.HeaderAccessControlAllowMethods,
