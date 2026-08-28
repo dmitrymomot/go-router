@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -169,9 +170,10 @@ func TestProblemErrorHandlerExposesTheCause(t *testing.T) {
 	}
 }
 
-// The logging is the logging of the default handler: the internal cause at
-// error level, and a client that went away at debug level.
-func TestProblemErrorHandlerLogsLikeTheDefault(t *testing.T) {
+// It logs the internal cause at error level, a client that went away at debug
+// level, and every failure from 500 up. A problem that a handler described
+// carries no internal cause, so one below 500 reaches no log.
+func TestProblemErrorHandlerLogsTheInternalCause(t *testing.T) {
 	tests := []struct {
 		name   string
 		cancel bool
@@ -211,6 +213,44 @@ func TestProblemErrorHandlerLogsLikeTheDefault(t *testing.T) {
 				if level != tc.want[i] {
 					t.Errorf("level = %v, want %v", level, tc.want[i])
 				}
+			}
+		})
+	}
+}
+
+// A [ProblemError] below 500 is the one record the two handlers do not share.
+// The problem handler reads the failure as described and logs nothing, and
+// [DefaultErrorHandler] logs the error that it re-wrapped as an internal cause.
+func TestProblemErrorHandlerSkipsTheLogOfADescribedProblem(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler ErrorHandlerFunc[*tctx]
+		want    []slog.Level
+	}{
+		{"the problem handler", ProblemErrorHandler[*tctx](false), nil},
+		{"the default handler", DefaultErrorHandler[*tctx], []slog.Level{slog.LevelError}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &levelRecorder{Handler: slog.Default().Handler()}
+			old := slog.Default()
+			slog.SetDefault(slog.New(rec))
+			defer slog.SetDefault(old)
+
+			r := newTestRouter()
+			r.ErrorHandler(tc.handler)
+			r.GET("/orders/7", func(*tctx) error {
+				return &ProblemError{Status: http.StatusConflict, Title: "Too little credit"}
+			})
+			got := do(r, http.MethodGet, "/orders/7")
+
+			// The status is the same either way, so the record is the whole of
+			// the difference.
+			if got.Code != http.StatusConflict {
+				t.Errorf("status = %d, want %d", got.Code, http.StatusConflict)
+			}
+			if !slices.Equal(rec.levels, tc.want) {
+				t.Errorf("logged %v, want %v", rec.levels, tc.want)
 			}
 		})
 	}

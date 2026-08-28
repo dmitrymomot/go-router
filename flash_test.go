@@ -208,6 +208,49 @@ func TestFlashesDropsACookieItCannotTrust(t *testing.T) {
 	}
 }
 
+// A page on a sibling subdomain sets a cookie of the same name, and the
+// browser sends it ahead of the one this server wrote. The messages are in the
+// one that verifies.
+func TestFlashesTakesTheCookieThatVerifies(t *testing.T) {
+	cc := testCodec()
+	post := cookieBase()
+	addFlashes(t, post, cc, Flash{Kind: "success", Message: "saved"})
+	signed, ok := flashCookieOf(t, post)
+	if !ok {
+		t.Fatal("AddFlash wrote no cookie")
+	}
+
+	get := cookieBase(
+		&http.Cookie{Name: FlashCookieName, Value: "planted-by-a-neighbour"},
+		&http.Cookie{Name: FlashCookieName, Value: signed.Value},
+	)
+
+	wantFlashes(t, get.Flashes(cc), []Flash{{Kind: "success", Message: "saved"}})
+}
+
+// AddFlash reads past the planted cookie too, so the message it adds joins the
+// ones the request carries instead of starting a list again.
+func TestAddFlashTakesTheCookieThatVerifies(t *testing.T) {
+	cc := testCodec()
+	first := cookieBase()
+	addFlashes(t, first, cc, Flash{Kind: "info", Message: "one"})
+	signed, ok := flashCookieOf(t, first)
+	if !ok {
+		t.Fatal("AddFlash wrote no cookie")
+	}
+
+	second := cookieBase(
+		&http.Cookie{Name: FlashCookieName, Value: "planted-by-a-neighbour"},
+		&http.Cookie{Name: FlashCookieName, Value: signed.Value},
+	)
+	addFlashes(t, second, cc, Flash{Kind: "info", Message: "two"})
+
+	wantFlashes(t, flashRequest(t, second).Flashes(cc), []Flash{
+		{Kind: "info", Message: "one"},
+		{Kind: "info", Message: "two"},
+	})
+}
+
 func TestFlashesDropsAnExpiredCookie(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cc := testCodec()

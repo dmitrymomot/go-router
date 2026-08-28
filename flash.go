@@ -97,7 +97,8 @@ func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 // header even when the handler goes on to render a page. A second call answers
 // with nothing, because it reads what the response already says. A cookie that
 // does not verify, or one whose expiry passed, reads as no messages and clears
-// the same way.
+// the same way. A request that carries two cookies of the name reads the first
+// that verifies, which is the one that this server wrote.
 //
 // The answer carries Vary: Cookie, so that a shared cache cannot hand one user
 // the messages of another.
@@ -105,7 +106,7 @@ func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 // Read it before the handler writes the body. A header that a committed
 // response gains never reaches the client.
 func (b *Base) Flashes(cc *CookieCodec) []Flash {
-	raw, ok := b.flashCookie()
+	raw, ok := b.flashCookie(cc)
 	if !ok || raw == "" {
 		return nil
 	}
@@ -116,7 +117,7 @@ func (b *Base) Flashes(cc *CookieCodec) []Flash {
 
 // flashes returns the messages that the cookie carries, without clearing it.
 func (b *Base) flashes(cc *CookieCodec) []Flash {
-	raw, ok := b.flashCookie()
+	raw, ok := b.flashCookie(cc)
 	if !ok {
 		return nil
 	}
@@ -166,7 +167,12 @@ func (b *Base) clearFlashCookie() {
 // empty value that the clearing header left. A helper that read the request
 // alone would add a message to a list that another call already replaced, and
 // would hand the messages out twice.
-func (b *Base) flashCookie() (string, bool) {
+//
+// A request that carries two cookies of the name takes the first that
+// verifies, the way [Base.SignedCookie] does. It falls back to the first of
+// them when none verifies, because the caller clears what it found and a
+// cookie that stays behind shadows every later flash.
+func (b *Base) flashCookie(cc *CookieCodec) (string, bool) {
 	lines := b.res.Header()[headerSetCookie]
 	// The last header of a name is the one that the browser keeps.
 	for _, line := range slices.Backward(lines) {
@@ -174,11 +180,16 @@ func (b *Base) flashCookie() (string, bool) {
 			return c.Value, true
 		}
 	}
-	c, err := b.req.Cookie(FlashCookieName)
-	if err != nil {
+	cookies := b.req.CookiesNamed(FlashCookieName)
+	if len(cookies) == 0 {
 		return "", false
 	}
-	return c.Value, true
+	for _, c := range cookies {
+		if _, err := cc.Decode(FlashCookieName, c.Value); err == nil {
+			return c.Value, true
+		}
+	}
+	return cookies[0].Value, true
 }
 
 // writeFlashCookie writes c in place of the flash cookie that an earlier call
