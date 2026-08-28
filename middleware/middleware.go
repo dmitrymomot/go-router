@@ -39,12 +39,6 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// statusOf returns the status that the client sees, whether the handler wrote
-// it or an error will produce it.
-func statusOf[C router.Context](c C, err error) int {
-	return router.ResolveStatus(c.Response(), err)
-}
-
 // skipped reports whether the config asks to pass this request through.
 func skipped[C router.Context](skip func(router.Context) bool, c C) bool {
 	return skip != nil && skip(c)
