@@ -1304,7 +1304,7 @@ One middleware per file, named after it:
 |---|---|---|
 | `Recover` | turns a panic into a 500, inside the chain | `Use` |
 | `RequestID` | reads or mints `X-Request-Id`, readable with `RequestIDFrom` | `Use` |
-| `RealIP` | rewrites `RemoteAddr` from the forwarding headers | `Use` |
+| `RealIP` | rewrites `RemoteAddr` from the forwarding header you name, and deletes the rest | `Use` |
 | `Logger` | one `log/slog` record per request | `Use` |
 | `Timeout` | a deadline on the request context | `Use` |
 | `CORS` | the cross-origin headers and the preflight answer | `Use` |
@@ -1469,11 +1469,29 @@ above it to cap both halves.
 It now walks the chain from the server outwards — the last entry first, the
 address of the connection past its end — and stops at the first hop outside the
 trust set. That hop is the nearest address the client could not forge. A
-connection no trusted proxy made keeps its own address, and the headers it carries
-go unread.
+connection no trusted proxy made keeps its own address, and every forwarding
+header it carries is deleted, `X-Forwarded-Proto` included, so nothing after the
+middleware reads one either.
 
-The default set trusts the loopback, private and link-local ranges, which is where
-a proxy sits in a deployment that has one. Name the range your load balancer
+`Headers` has **no default**. Name the forwarding header your own proxies write,
+and nothing else:
+
+```go
+middleware.RealIPWithConfig[Ctx](middleware.RealIPConfig{
+	Headers: []string{router.HeaderXForwardedFor},
+})
+```
+
+nginx, HAProxy, an AWS or GCP load balancer, Cloudflare and Envoy all append to
+`X-Forwarded-For`, and none of them writes or strips the `Forwarded` header of
+RFC 7239. Naming a header your proxy does not write makes that header
+client-controlled: the proxy relays it untouched and the client picks whatever
+address it likes. Every forwarding header you do not name is deleted from the
+request. `RealIP` with no config names none, so it reads none and the address of
+the connection stands.
+
+The default trust set holds the loopback, private and link-local ranges, which is
+where a proxy sits in a deployment that has one. Name the range your load balancer
 occupies instead:
 
 ```go
@@ -1490,9 +1508,10 @@ middleware.RealIPWithConfig[Ctx](middleware.RealIPConfig{
 Set `Leftmost: true` to bring the old reading back. Do that **only** where the
 proxy in front replaces the header outright rather than appending to it.
 
-It reads the `Forwarded` header of RFC 7239 first, then `X-Forwarded-For`, then
-`X-Real-Ip`. The `proto` of the hop it picked goes into `X-Forwarded-Proto`, where
-`Base.Scheme` and `Secure` read the scheme of the request.
+A named `Forwarded` header reports the protocol too, and the `proto` of the hop
+that stands goes into `X-Forwarded-Proto`, where `Base.Scheme` and `Secure` read
+the scheme of the request. No other `X-Forwarded-Proto` is read, so a deployment
+that terminates TLS at a proxy needs that proxy to set the header itself.
 
 ### Compression, rewrites and method override
 
