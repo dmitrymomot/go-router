@@ -635,8 +635,9 @@ The last two reach it only while `NotFound` and `MethodNotAllowed` are unset.
 **A handler set there wins** and answers the request itself.
 
 The default handler writes JSON unless the client asked for a text type, logs
-the internal cause with `log/slog`, and never puts an internal message in the
-body. An htmx request is the exception: it gets the message as escaped HTML,
+the internal cause with `log/slog` at the level the status names — error for a
+5xx, warning for a 4xx, which is the client and not the server — and never puts
+an internal message in the body. An htmx request is the exception: it gets the message as escaped HTML,
 because htmx swaps what it receives into a page and a JSON error would land
 there as text. Replace the handler wholesale when you need a different shape:
 
@@ -1257,8 +1258,8 @@ return c.Render(http.StatusOK, view.Signup(c.Flashes(codec)))
 
 `Flashes` reads and clears in one call, which is the contract that makes a flash a
 flash: a message reaches one page and no more. A second call answers with nothing.
-The answer carries `Vary: Cookie`, so a shared cache cannot hand one user the
-messages of another.
+Both it and `AddFlash` add `Vary: Cookie`, so a shared cache cannot hand one user
+the messages of another.
 
 The messages live in a signed cookie and nowhere else. This is not a session
 package: it keeps no server-side store, mints no session identifier and collects
@@ -1533,9 +1534,13 @@ the same token back in a header or a form field. A page on another origin makes
 the browser send the cookie, but the same-origin policy keeps it from reading the
 value.
 
+The token cookie is `Secure` on a request that arrived over TLS, so the defaults
+suit a server-rendered application behind TLS termination. Set `CookieSecure` to
+force the attribute on every answer, and `CookieHTTPOnly` for a page that renders
+the token into its forms rather than reading the cookie from a script:
+
 ```go
 r.Use(middleware.CSRFWithConfig[Ctx](middleware.CSRFConfig{
-	CookieSecure:   true,
 	CookieHTTPOnly: true,
 }))
 ```
@@ -1654,8 +1659,21 @@ proxy in front replaces the header outright rather than appending to it.
 
 A named `Forwarded` header reports the protocol too, and the `proto` of the hop
 that stands goes into `X-Forwarded-Proto`, where `Base.Scheme` and `Secure` read
-the scheme of the request. No other `X-Forwarded-Proto` is read, so a deployment
-that terminates TLS at a proxy needs that proxy to set the header itself.
+the scheme of the request.
+
+`X-Forwarded-Proto` is a forwarding header like the others: it survives only
+while `Headers` names it, on a trusted connection as on any other. A trusted peer
+says a proxy made the connection, not that the proxy wrote this header, and an
+ingress that appends an address without setting a protocol leaves it to the
+client. The scheme decides whether a cookie is `Secure`, whether the answer
+carries HSTS and what an absolute URL points at, so name the header for a
+deployment that terminates TLS at a proxy:
+
+```go
+middleware.RealIPWithConfig[Ctx](middleware.RealIPConfig{
+	Headers: []string{router.HeaderXForwardedFor, router.HeaderXForwardedProto},
+})
+```
 
 ### Compression, rewrites and method override
 
@@ -1956,22 +1974,23 @@ router's defaults for the limits a request obeys, because no router configured i
 no body limit, the multipart memory of `net/http`, and lenient binding. Parameters
 are ordered by name, since a map holds no order.
 
-`AssertGolden` compares against a file under `testdata`, and `-update` rewrites
-it, which is how the output of a template becomes the fixture later runs compare
-against:
+`AssertGolden` compares against a file under `testdata`, and
+`-routertest.update` rewrites it, which is how the output of a template becomes
+the fixture later runs compare against:
 
 ```go
 routertest.AssertGolden(t, "order.html", buf.Bytes())
 ```
 
 ```
-go test ./view -update
+go test ./view -routertest.update
 ```
 
-Read the rewritten file before you commit it: `-update` accepts whatever the code
-renders, including the change that broke it. The package registers the `-update`
-flag only when nothing else has; read that flag rather than declaring a second
-one, which the `flag` package refuses anyway.
+Read the rewritten file before you commit it: the flag accepts whatever the code
+renders, including the change that broke it. The flag carries the name of the
+package, because a flag name is global to the test binary and a plain `-update`
+would take the name a test package commonly declares for golden files of its own.
+A binary that declares one is read too, so the two spellings do the same thing.
 
 ## Performance
 
