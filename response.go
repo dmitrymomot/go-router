@@ -1,7 +1,11 @@
 package router
 
 import (
+	"bufio"
+	"context"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -39,15 +43,34 @@ func (r *Response) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 // written. Use it to set a header that depends on the status code.
 func (r *Response) Before(fn func()) { r.before = append(r.before, fn) }
 
-// WriteHeader writes the status line. A second call is a no-op.
+// WriteHeader writes the status line.
+//
+// An informational status, from 100 to 199, goes straight to the client and
+// leaves the response open, so a 103 Early Hints does not swallow the final
+// status. It runs no hook, because the hooks belong to the status that answers
+// the request.
+//
+// A second call to a committed response is a no-op that logs the dropped code
+// at debug level, which is what names the handler that wrote a body and then
+// returned an error.
 func (r *Response) WriteHeader(code int) {
-	if r.Committed {
+	if code >= 100 && code < 200 {
+		r.ResponseWriter.WriteHeader(code)
 		return
 	}
+	if r.Committed {
+		// The record costs an allocation to build, so ask the handler first.
+		if l := slog.Default(); l.Enabled(context.Background(), slog.LevelDebug) {
+			l.Debug("router: the response is already committed",
+				slog.Int("dropped", code), slog.Int("status", r.Status))
+		}
+		return
+	}
+	// The status comes first, so that a hook reads the one that goes out.
+	r.Status = code
 	for _, fn := range r.before {
 		fn()
 	}
-	r.Status = code
 	r.ResponseWriter.WriteHeader(code)
 	r.Committed = true
 }
@@ -77,6 +100,44 @@ func (r *Response) WriteString(s string) (int, error) {
 func (r *Response) Flush() {
 	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
 	http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+// Hijack takes the connection away from the server, so that the caller speaks
+// its own protocol on it. A WebSocket library that asserts [http.Hijacker]
+// against the response writer finds it here.
+//
+// It reaches the connection through [http.NewResponseController], so it works
+// through any writer that the server put underneath.
+func (r *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(r.ResponseWriter).Hijack()
+}
+
+// unwrapLimit bounds the walk of [UnwrapResponse]. A chain of wrappers is a
+// handful of writers deep, so a longer one is a cycle.
+const unwrapLimit = 16
+
+// UnwrapResponse returns the [Response] that w wraps, and reports whether it
+// found one. It follows the Unwrap method of every writer in between, in the
+// form that [http.NewResponseController] reads.
+//
+// A wrapper that a handler puts around the response reads the status and the
+// size of the request through it:
+//
+//	if res, ok := router.UnwrapResponse(w); ok && res.Status == http.StatusOK {
+//		// ...
+//	}
+func UnwrapResponse(w http.ResponseWriter) (*Response, bool) {
+	for range unwrapLimit {
+		switch v := w.(type) {
+		case *Response:
+			return v, true
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = v.Unwrap()
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 // headerContainsToken reports whether the named header holds the token, after
