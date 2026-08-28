@@ -52,26 +52,6 @@ const (
 	HeaderAccessControlRequestHeaders   = "Access-Control-Request-Headers"
 	HeaderAccessControlRequestMethod    = "Access-Control-Request-Method"
 	HeaderOrigin                        = "Origin"
-
-	// The htmx protocol. The first group reaches the server, the second one
-	// answers, and HX-Trigger does both: it names the element that fired the
-	// request, and it names the events that the answer fires.
-	HeaderHXBoosted        = "HX-Boosted"
-	HeaderHXCurrentURL     = "HX-Current-URL"
-	HeaderHXHistoryRestore = "HX-History-Restore-Request"
-	HeaderHXPrompt         = "HX-Prompt"
-	HeaderHXRequest        = "HX-Request"
-	HeaderHXTarget         = "HX-Target"
-	HeaderHXTrigger        = "HX-Trigger"
-	HeaderHXTriggerName    = "HX-Trigger-Name"
-
-	HeaderHXLocation   = "HX-Location"
-	HeaderHXPushURL    = "HX-Push-Url"
-	HeaderHXRedirect   = "HX-Redirect"
-	HeaderHXRefresh    = "HX-Refresh"
-	HeaderHXReplaceURL = "HX-Replace-Url"
-	HeaderHXReswap     = "HX-Reswap"
-	HeaderHXRetarget   = "HX-Retarget"
 )
 
 // Media types that the render helpers write.

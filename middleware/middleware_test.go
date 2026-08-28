@@ -60,6 +60,7 @@ func TestDefaultFactories(t *testing.T) {
 		middleware.Decompress[*appContext],
 		middleware.Gzip[*appContext],
 		middleware.Timeout[*appContext],
+		middleware.HTMXRedirect[*appContext],
 	)
 	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
 

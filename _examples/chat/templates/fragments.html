@@ -1,0 +1,21 @@
+{{define "join" -}}
+<form id="join" hx-post="/join" hx-swap="outerHTML" autocomplete="off">
+	<input name="name" value="{{.Name}}" placeholder="Your name" maxlength="24" required autofocus>
+	<button type="submit">Join the room</button>
+	{{- with .Error}}
+	<p class="error" role="alert">{{.}}</p>
+	{{- end}}
+</form>
+{{- end}}
+
+{{define "message" -}}
+<article class="msg{{if .Own}} own{{end}}">
+	<span class="who">{{.Author}}</span>
+	<span class="text">{{.Text}}</span>
+	<time datetime="{{.At.Format "2006-01-02T15:04:05Z07:00"}}">{{.At.Format "15:04"}}</time>
+</article>
+{{- end}}
+
+{{define "notice" -}}
+<p class="notice"><strong>{{.Author}}</strong> {{.Text}}</p>
+{{- end}}

@@ -344,3 +344,66 @@ func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
 		})
 	}
 }
+
+// TestDefaultErrorHandlerAnswersHTMXWithHTML pins the one exception to the
+// content negotiation: htmx sends "Accept: */*" and swaps what it receives
+// into a page, so a JSON error would land there as text.
+func TestDefaultErrorHandlerAnswersHTMXWithHTML(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/boom", func(*tctx) error {
+		return ErrForbidden.WithMessage("no <b>entry</b>")
+	})
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		contentType string
+		body        string
+	}{
+		{
+			name:        "a service gets JSON",
+			contentType: MIMEApplicationJSONCharsetUTF8,
+			body:        `{"status":403,"error":"no <b>entry</b>"}`,
+		},
+		{
+			name:        "a browser gets text",
+			headers:     map[string]string{HeaderAccept: "text/html"},
+			contentType: MIMETextPlainCharsetUTF8,
+			body:        "no <b>entry</b>",
+		},
+		{
+			name:        "htmx gets escaped HTML",
+			headers:     map[string]string{HeaderAccept: "*/*", HeaderHXRequest: "true"},
+			contentType: MIMETextHTMLCharsetUTF8,
+			body:        "no &lt;b&gt;entry&lt;/b&gt;",
+		},
+		{
+			name: "an htmx request that asks for JSON still gets JSON",
+			headers: map[string]string{
+				HeaderAccept:    MIMEApplicationJSON,
+				HeaderHXRequest: "true",
+			},
+			contentType: MIMEApplicationJSONCharsetUTF8,
+			body:        `{"status":403,"error":"no <b>entry</b>"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := hxDo(r, http.MethodGet, "/boom", tc.headers)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rec.Code)
+			}
+			if got := rec.Header().Get(HeaderContentType); got != tc.contentType {
+				t.Errorf("%s = %q, want %q", HeaderContentType, got, tc.contentType)
+			}
+			if got := rec.Body.String(); got != tc.body {
+				t.Errorf("body = %q, want %q", got, tc.body)
+			}
+			// Two answers for one URL, so a shared cache has to keep them
+			// apart.
+			if got := rec.Header().Get(HeaderVary); got != HeaderHXRequest {
+				t.Errorf("%s = %q, want %q", HeaderVary, got, HeaderHXRequest)
+			}
+		})
+	}
+}

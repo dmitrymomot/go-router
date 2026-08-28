@@ -636,7 +636,9 @@ The last two reach it only while `NotFound` and `MethodNotAllowed` are unset.
 
 The default handler writes JSON unless the client asked for a text type, logs
 the internal cause with `log/slog`, and never puts an internal message in the
-body. Replace it wholesale when you need a different shape:
+body. An htmx request is the exception: it gets the message as escaped HTML,
+because htmx swaps what it receives into a page and a JSON error would land
+there as text. Replace the handler wholesale when you need a different shape:
 
 ```go
 r.ErrorHandler(func(c *Context, err error) { ... })
@@ -985,45 +987,187 @@ scope; see [Mounting a subsystem with its own context](#mounting-a-subsystem-wit
 
 ## htmx
 
-`RenderPartial` writes the fragment for an htmx request and the full page for a
-normal one, so one route answers both a navigation and a swap:
+htmx turns a link or a form into a request that swaps a fragment of HTML into
+the page. The router reads the headers that it sends and writes the headers
+that steer it, so a handler never spells one out.
+
+[`_examples/chat`](_examples/chat) is a chat room built from `html/template`,
+htmx and one event stream. Run it with `go run .` in that directory.
+
+### Reading the request
 
 ```go
-r.GET("/orders", func(c *app.Context) error {
-	orders, err := c.Store.Orders(c)
-	if err != nil {
-		return err
-	}
-	return c.RenderPartial(http.StatusOK, view.Orders(orders), view.OrderRows(orders))
+c.IsHTMX()     // htmx made this request
+c.IsBoosted()  // it came from an element under hx-boost
+c.HTMX()       // every htmx header, as a struct
+```
+
+`HTMX` returns the whole set: `Request`, `Boosted`, `HistoryRestore`,
+`CurrentURL`, `Prompt`, `Target`, `Trigger` and `TriggerName`. Every field is
+empty for a request that htmx did not make.
+
+`HTMXPartial` gives one URL two answers, a fragment and the page around it:
+
+```go
+r.GET("/messages", router.HTMXPartial(messageList, messagePage))
+```
+
+A boosted request gets the page, not the fragment: htmx takes the body of that
+answer and swaps the whole of it, so a fragment would drop the rest of the
+document. A history restore request gets the page for the same reason. The
+handler also adds `HX-Request` and `HX-Boosted` to `Vary`, because the URL now
+has two answers and a shared cache has to keep them apart. Branching on
+`c.IsHTMX()` yourself means calling `c.Vary(router.HeaderHXRequest)` yourself.
+
+### Writing the response
+
+`c.HX()` opens a chain. Each method sets one header and returns the chain, and
+the last one writes the body:
+
+```go
+return c.HX().
+	Retarget("#row-7").
+	Reswap(router.HXSwapOuterHTML).
+	Trigger("row-saved").
+	Render(http.StatusOK, view.Row(row))
+```
+
+| Header method | Asks htmx to |
+| --- | --- |
+| `PushURL(url)` | push `url` onto the history stack |
+| `ReplaceURL(url)` | replace the entry in the address bar |
+| `Retarget(sel)` | swap into another element |
+| `Reselect(sel)` | swap only a part of this answer |
+| `Reswap(swap)` | swap another way, such as `router.HXSwapBeforeEnd` |
+| `Refresh()` | load the page again |
+| `Trigger(names...)` | fire client-side events |
+| `TriggerAfterSwap`, `TriggerAfterSettle` | fire them later |
+| `TriggerEvents(events...)` | fire events that carry a payload |
+
+| Body method | Writes |
+| --- | --- |
+| `Render`, `RenderStream`, `HTML`, `String`, `JSON`, `NoContent` | what `Base` writes |
+| `NoSwap()` | `204`, which leaves the page alone |
+| `Redirect(url)` | `HX-Redirect`, or a `303` for a client that is not htmx |
+| `Location(path)`, `LocationWith(loc)` | `HX-Location`, which navigates without a full load |
+
+A chain that fails carries the failure to the method that ends it, so the
+handler returns it like any other error. Read it with `Err()` when the chain
+ends on a header method instead.
+
+### The redirect
+
+htmx follows a `303` inside the request that it made, and swaps whatever the
+new location answers into the element that asked. That is almost never what a
+redirect after a form post means, so `Redirect` writes `HX-Redirect` for an
+htmx request and a plain `303` for anything else:
+
+```go
+r.POST("/join", func(c *app.Context) error {
+	...
+	return c.HX().Redirect("/chat")   // HX-Redirect for htmx, 303 for a browser
 })
 ```
 
-Two htmx requests read the whole page all the same, because both swap more of the
-document than a fragment covers: a boosted link or form, which replaces the body,
-and a request that restores a history entry. That leaves the fragment for the
-swap that asked for one.
+`Location` and `LocationWith` answer the same way, with the client-side
+navigation that keeps the page and its scripts alive.
 
-It adds a `Vary` naming those three request headers, so a shared cache keeps the
-answers apart. Both components go through `Render`, which buffers, so one that
-fails halfway answers 500 and leaves no partial page on the wire.
+To convert every redirect of a scope instead of writing `HX()` in each handler,
+mount `middleware.HTMXRedirect` on the pages:
 
-The headers are readable and writable one by one:
+```go
+pages.Use(middleware.HTMXRedirect[Ctx])   // a 3xx with a Location becomes HX-Redirect
 
-| reads the request | |
-|---|---|
-| `HXRequest()` `HXBoosted()` `HXHistoryRestore()` | which kind of request this is |
-| `HXTarget()` `HXTrigger()` `HXTriggerName()` | the element that fired it |
-| `HXPrompt()` `HXCurrentURL()` | what the user typed, and where from |
+pages.POST("/join", func(c *app.Context) error {
+	...
+	return c.Redirect(http.StatusSeeOther, "/chat")   // htmx gets HX-Redirect
+})
+```
 
-| writes the answer | |
-|---|---|
-| `HXRedirect(url)` `HXLocation(url)` `HXRefresh()` | send the browser elsewhere |
-| `HXPushURL(url)` `HXReplaceURL(url)` | change the address bar |
-| `HXRetarget(sel)` `HXReswap(spec)` | change what is swapped, and how |
-| `HXTriggerEvent(name)` | fire a client-side event |
+Three kinds of request pass through untouched, because each one wants the
+redirect that the handler wrote: a request htmx did not make, a boosted
+request, which htmx follows itself and swaps as the new page, and a history
+restore request. Mount it on the scope that serves pages and never on an API
+scope, where a `3xx` still has to mean "the resource is elsewhere".
 
-A setter refuses a value carrying a line break, because a header that carries one
-splits into a header of its own.
+`HTMXRedirectConfig{Location: true}` writes `HX-Location` instead, which
+navigates without a full page load. The middleware and `HX()` compose: a
+handler that calls `c.HX().Redirect` writes no `Location`, so there is nothing
+left to rewrite.
+
+### An answer that swaps nothing
+
+`NoSwap` writes a `204`, which tells htmx to leave the page alone. The headers
+of the chain still apply, so it is the answer for a request whose result
+reaches the page by another road:
+
+```go
+return c.HX().Trigger("message-sent").NoSwap()
+```
+
+```html
+<form hx-post="/messages" hx-on:message-sent="this.reset()">
+```
+
+### Events with a payload
+
+`TriggerEvents` writes the JSON form of the trigger header, which reaches a
+listener as `event.detail`:
+
+```go
+c.HX().TriggerEvents(
+	router.HXEvent{Name: "toast", Detail: "Saved"},
+	router.HXEvent{Name: "rows-changed", Detail: map[string]int{"total": 7}},
+)
+```
+
+A browser reads a header one byte per character, so the header escapes every
+character outside ASCII. `Trigger` writes the plain comma separated form and
+reports a name that the header cannot carry.
+
+### Fragments over a stream
+
+`SendComponent` renders a template into an event, which is what the sse
+extension of htmx swaps:
+
+```go
+r.GET("/events", func(c *app.Context) error {
+	ch, unsubscribe := c.Room.Join()
+	defer unsubscribe()
+
+	return router.ServeSSE(c, ch, router.SSEComponent("message", view.Message),
+		router.SSEHeartbeat(20*time.Second))
+})
+```
+
+```html
+<div hx-ext="sse" sse-connect="/events">
+	<div id="log" sse-swap="message" hx-swap="beforeend"></div>
+</div>
+```
+
+See [Server-sent events](#server-sent-events) for the rest of the stream API.
+
+### Errors
+
+`DefaultErrorHandler` answers an htmx request with the message as escaped HTML
+rather than as JSON, because htmx sends `Accept: */*` and swaps what it
+receives into a page. A request that names JSON in its `Accept` header still
+gets JSON.
+
+htmx swaps no `4xx` or `5xx` by default, so the body only shows on a page that
+configures `responseHandling` or uses the response-targets extension. Render a
+real error fragment with an error handler of your own; see
+[An HTML error page](#an-html-error-page).
+
+### Testing
+
+`routertest.HTMX()` marks a request as one that htmx made:
+
+```go
+routertest.Get(r, "/messages", routertest.HTMX()).AssertBody(t, "fragment")
+routertest.Get(r, "/messages").AssertBody(t, "the whole page")
+```
 
 ## Files and downloads
 
@@ -1126,7 +1270,6 @@ a form.
 
 Call both before the handler writes the body. A header that a committed response
 gains never reaches the client.
-
 ## Server-sent events
 
 `ServeSSE` streams the values of a channel to the client. A sender turns each
@@ -1324,7 +1467,8 @@ changing them there changes nothing.
 
 Two defaults are worth knowing: `CORS[Ctx]` allows every origin without
 credentials, and `Timeout[Ctx]` applies a deadline of `DefaultTimeout`, 30
-seconds.
+seconds. `HTMXRedirect[Ctx]` belongs on a page scope only; see
+[the redirect](#the-redirect).
 
 Standard `func(http.Handler) http.Handler` middleware works through an adapter:
 
@@ -1916,7 +2060,7 @@ you.
 ```bash
 just check          # fmt, lint, analyze, golangci-lint, test
 just fmt            # go fmt, gofumpt, goimports, betteralign
-just lint           # vet, build, format check, go fix modernizers, benchmarks module
+just lint           # vet, build, format check, go fix modernizers, benchmarks and examples
 just analyze        # x/tools modernize, betteralign
 just golangci       # golangci-lint
 just test           # go test -race -cover ./...
@@ -1925,15 +2069,20 @@ just bench-compare  # against chi, echo and http.ServeMux
 just vuln           # govulncheck
 ```
 
+`_examples` and `benchmarks` are modules of their own, and the go tool skips a
+directory whose name starts with an underscore, so `./...` reaches neither.
+`just lint` builds and vets both.
+
 CI runs the same recipes. Tool versions are pinned at the top of the
 [justfile](justfile) and run through `go run tool@version`, not declared as
 go.mod tools: a tool directive would put the whole linter dependency tree into
 the module graph of everyone who imports this router.
 
 `betteralign` runs in opt-in mode. Only structs marked `betteralign:check` are
-reordered, which today is `Base` and `Response` — the two the router allocates
-per request. Field order is load-bearing elsewhere: reordering the JSON error
-body would change the wire format.
+reordered, which today is `Base` and `Response`, the two the router allocates
+per request, and `HTMXRequest`, which a handler builds per call. Field order is
+load-bearing elsewhere: reordering the JSON error body would change the wire
+format.
 
 `router.Version` is the version of the router itself, for a build that would
 otherwise take a walk through `runtime/debug.ReadBuildInfo` to log it:
