@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
@@ -217,5 +219,64 @@ func TestDecompressSkip(t *testing.T) {
 	if rec.Body.String() != strconv.Itoa(len(body)) {
 		t.Errorf("the handler read %q bytes, want the %d compressed ones",
 			rec.Body.String(), len(body))
+	}
+}
+
+// decompressFailingRouter answers every request with an error and hands the
+// body that the chain left behind to read. The router runs the error handler
+// after the middleware chain unwinds, so read is the reader of a request that
+// this middleware has already finished with.
+func decompressFailingRouter(read func(body []byte, err error)) *router.Router[*appContext] {
+	r := newRouter()
+	r.ErrorHandler(func(c *appContext, _ error) {
+		body, err := io.ReadAll(c.Request().Body)
+		read(body, err)
+	})
+	r.Use(middleware.DecompressWithConfig[*appContext](middleware.DecompressConfig{}))
+	r.POST("/fail", func(*appContext) error {
+		return router.ErrBadRequest.WithMessage("validation failed")
+	})
+	return r
+}
+
+func TestDecompressBodyStopsAnsweringWhenTheChainReturns(t *testing.T) {
+	var body []byte
+	var err error
+	r := decompressFailingRouter(func(b []byte, e error) { body, err = b, e })
+
+	do(r, decompressPost("/fail", gzipped(t, `{"name":"ada"}`)))
+
+	if err == nil {
+		t.Fatalf("the read after the chain answered %q from a reader that went back to the pool", body)
+	}
+	if len(body) != 0 {
+		t.Errorf("the read after the chain answered %q, want no bytes", body)
+	}
+}
+
+func TestDecompressDoesNotHandOneReaderToTwoRequests(t *testing.T) {
+	// Long enough that a read takes several turns of the window, which is what
+	// leaves room for another request to reset the reader in the middle of one.
+	payload := gzipped(t, strings.Repeat("the quick brown fox\n", 2048))
+
+	var leaked atomic.Int64
+	r := decompressFailingRouter(func(body []byte, err error) {
+		if err == nil || len(body) != 0 {
+			leaked.Add(1)
+		}
+	})
+
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			for range 32 {
+				do(r, decompressPost("/fail", payload))
+			}
+		})
+	}
+	wg.Wait()
+
+	if n := leaked.Load(); n != 0 {
+		t.Errorf("%d reads after the chain reached a reader that another request holds", n)
 	}
 }

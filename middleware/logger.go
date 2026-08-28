@@ -8,6 +8,13 @@ import (
 )
 
 // LoggerConfig configures [LoggerWithConfig].
+//
+// The three level fields take a [slog.Leveler], and nil is what reads as
+// unset. A [slog.Level] is one, so slog.LevelWarn goes in as it is, and
+// [slog.LevelInfo] selects Info. A field of type slog.Level could not tell
+// that choice from the zero value it starts at, which left Info the one level
+// of the four that the two error fields could not name. A [slog.LevelVar] in
+// any of the three moves that level while the server runs.
 type LoggerConfig struct {
 	// Skip passes a request straight to the next handler when it returns true.
 	// Use it to keep a health check out of the log.
@@ -25,16 +32,17 @@ type LoggerConfig struct {
 	//	}
 	Attrs func(c router.Context, err error) []slog.Attr
 
-	// Level is the level of a record for a status below 400.
-	Level slog.Level
+	// Level is the level of a record for a status below 400. It defaults to
+	// [slog.LevelInfo].
+	Level slog.Leveler
 
 	// ClientErrorLevel is the level for a status from 400 to 499. It defaults
 	// to [slog.LevelWarn].
-	ClientErrorLevel slog.Level
+	ClientErrorLevel slog.Leveler
 
 	// ServerErrorLevel is the level for a status of 500 and above. It defaults
 	// to [slog.LevelError].
-	ServerErrorLevel slog.Level
+	ServerErrorLevel slog.Leveler
 
 	// Message is the text of the record. It defaults to "request".
 	Message string
@@ -80,10 +88,13 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.ClientErrorLevel == 0 {
+	if cfg.Level == nil {
+		cfg.Level = slog.LevelInfo
+	}
+	if cfg.ClientErrorLevel == nil {
 		cfg.ClientErrorLevel = slog.LevelWarn
 	}
-	if cfg.ServerErrorLevel == 0 {
+	if cfg.ServerErrorLevel == nil {
 		cfg.ServerErrorLevel = slog.LevelError
 	}
 	if cfg.Message == "" {
@@ -142,7 +153,9 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
 			if cfg.Attrs != nil {
 				attrs = append(attrs, cfg.Attrs(c, err)...)
 			}
-			cfg.Logger.LogAttrs(req.Context(), level, cfg.Message, attrs...)
+			// The level is read here rather than at the call above, so a
+			// [slog.LevelVar] answers with the level it holds now.
+			cfg.Logger.LogAttrs(req.Context(), level.Level(), cfg.Message, attrs...)
 			return err
 		}
 	}

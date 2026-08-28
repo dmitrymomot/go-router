@@ -116,8 +116,9 @@ func denyTooManyRequests[C router.Context](c C, _ string, retryAfter time.Durati
 // NewMemoryStore returns a [RateLimitStore] that keeps one token bucket per
 // identity in this process. It allows rate requests per second and burst
 // requests at once, and it forgets an identity that sends nothing for
-// expiresIn. A rate of zero or less panics, a burst below one reads as one,
-// and an expiry of zero or less uses [DefaultRateLimitExpiry].
+// expiresIn once the bucket of that identity has refilled. A rate of zero or
+// less panics, a burst below one reads as one, and an expiry of zero or less
+// uses [DefaultRateLimitExpiry].
 //
 //	middleware.NewMemoryStore[Ctx](10, 30, time.Minute)   // 10/s, 30 at once
 //
@@ -125,6 +126,13 @@ func denyTooManyRequests[C router.Context](c C, _ string, retryAfter time.Durati
 // which is what leaves it with no background goroutine and nothing to close.
 // The price is one walk of the map: with n identities it is O(n) once every
 // expiresIn, and every other call is O(1).
+//
+// An identity that spent its burst stays in the map until the burst refills,
+// which is burst/rate seconds, however short expiresIn is. A bucket comes back
+// full, so forgetting one that still owes the client tokens would hand the
+// client a burst that the wait had not earned: with a thousand requests an
+// hour and the three-minute default, a client that paused for three minutes
+// would start over twenty times an hour.
 //
 // The buckets live in this process, so two instances of a service hold two
 // limits and a client reaches the sum of them. Write a store over a shared
@@ -200,12 +208,20 @@ func (s *memoryStore[C]) Allow(_ C, id string) (bool, time.Duration, error) {
 
 // sweep drops the identities that stopped sending requests. It runs once per
 // expiry window, inside the lock that Allow already holds.
+//
+// It keeps a bucket that has not refilled to the burst. Allow starts an
+// identity it does not find at a full burst, so dropping a bucket that still
+// owes the client tokens would hand the client those tokens, and the sweep of
+// the store would be the way around the limit that the store keeps. What it
+// drops is a bucket that refilled, which answers exactly as the one that Allow
+// makes in its place.
 func (s *memoryStore[C]) sweep(now time.Time) {
 	if now.Sub(s.swept) < s.expiresIn {
 		return
 	}
 	s.swept = now
 	maps.DeleteFunc(s.visitors, func(_ string, b bucket) bool {
-		return now.Sub(b.seen) > s.expiresIn
+		idle := now.Sub(b.seen)
+		return idle > s.expiresIn && b.tokens+idle.Seconds()*s.rate >= s.burst
 	})
 }

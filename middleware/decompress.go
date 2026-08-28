@@ -58,6 +58,12 @@ func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc
 // A body that is empty, that names another encoding, or that names several,
 // passes through untouched. A body that names gzip and is not gzip produces a
 // 400.
+//
+// The expanded body lasts as long as the chain. The reader that expands it
+// goes back to a pool when this middleware returns, so a read from the error
+// handler, from an observer or from a middleware above this one reports
+// [http.ErrBodyReadAfterClose]. Read the body while the chain still runs and
+// keep what you need of it.
 func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middleware[C] {
 	limit := cfg.MaxDecompressedSize
 	if limit == 0 {
@@ -86,18 +92,26 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 			// A panic leaves the reader in the middle of a stream, and a
 			// poisoned reader in the pool would follow the next request around.
 			done := false
+			body := &decompressedBody{zr: zr, src: req.Body}
 			defer func() {
+				// The request that this middleware installs outlives the chain:
+				// the error handler, an observer and a middleware above this one
+				// all run after it returns, and any of them may read the body.
+				// Cut the link first, so a read after the reader went back to
+				// the pool reports a closed body instead of the stream of
+				// whichever request holds the reader by then.
+				body.zr = nil
 				if done {
 					gzipReaders.Put(zr)
 				}
 			}()
 
 			expanded := *req
-			var body io.ReadCloser = &decompressedBody{zr: zr, src: req.Body}
+			var rc io.ReadCloser = body
 			if limit > 0 {
-				body = http.MaxBytesReader(c.Response(), body, limit)
+				rc = http.MaxBytesReader(c.Response(), rc, limit)
 			}
-			expanded.Body = body
+			expanded.Body = rc
 			expanded.ContentLength = -1
 			// The shallow copy shares the header map with the request that came
 			// in, which belongs to the server, so the two headers that no longer
@@ -116,14 +130,23 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 
 // decompressedBody is the expanded request body. Close closes the compressed
 // body underneath, which is the one that holds the connection; the reader
-// itself goes back to the pool when the request ends.
+// itself goes back to the pool when the chain returns, and zr is nil from then
+// on. The server closes the body it made rather than this one, so Close cannot
+// carry either of those.
 type decompressedBody struct {
 	zr  *gzip.Reader
 	src io.ReadCloser
 }
 
-// Read implements [io.Reader].
-func (b *decompressedBody) Read(p []byte) (int, error) { return b.zr.Read(p) }
+// Read implements [io.Reader]. It reports a closed body once the chain that
+// expanded it has returned, because the reader belongs to another request by
+// then.
+func (b *decompressedBody) Read(p []byte) (int, error) {
+	if b.zr == nil {
+		return 0, http.ErrBodyReadAfterClose
+	}
+	return b.zr.Read(p)
+}
 
 // Close implements [io.Closer].
 func (b *decompressedBody) Close() error { return b.src.Close() }

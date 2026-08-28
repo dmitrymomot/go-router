@@ -93,7 +93,7 @@ func GzipWithConfig[C router.Context](cfg GzipConfig) router.Middleware[C] {
 				return next(c)
 			}
 
-			w := &gzipWriter{ResponseWriter: res.ResponseWriter, pool: pool, min: minLength}
+			w := &gzipWriter{ResponseWriter: res.ResponseWriter, res: res, pool: pool, min: minLength}
 			before := res.Size
 			res.ResponseWriter = w
 
@@ -131,6 +131,11 @@ const (
 type gzipWriter struct {
 	http.ResponseWriter
 
+	// res is the response that this wrapper sits under. A flush reaches the
+	// wrapper directly, so the header of a stream that flushes before it
+	// writes goes back out through the response.
+	res *router.Response
+
 	pool *sync.Pool
 	gz   *gzip.Writer
 
@@ -155,8 +160,12 @@ func (w *gzipWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // WriteHeader records the status and settles the encoding as soon as the
 // headers answer the question. It holds the status line back while the answer
 // depends on the length of a body that has not arrived.
+//
+// A 101 Switching Protocols settles it the same way [router.Response] does: it
+// is the answer to the request, and what follows it belongs to the protocol
+// that took the connection over, so it commits the response uncompressed.
 func (w *gzipWriter) WriteHeader(code int) {
-	if code >= 100 && code < 200 {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		// An informational status leaves the response open, so it goes
 		// straight out and decides nothing.
 		w.ResponseWriter.WriteHeader(code)
@@ -211,6 +220,21 @@ func (w *gzipWriter) Write(p []byte) (int, error) {
 // because a wrapper that buffered until the end of the response would hold
 // every event of a stream that never ends.
 func (w *gzipWriter) Flush() {
+	if w.code == 0 {
+		// The flush asks for a header that no write has answered yet, so the
+		// status goes out now, through the checks that settle the encoding: a
+		// stream of events, a body that names an encoding of its own and a 204
+		// opt out here as they do on a write.
+		if w.res.Status == 0 {
+			// Through the response, so its Before hooks run and it records
+			// the status. The error handler then finds a committed response
+			// and writes no second answer into the stream.
+			w.res.WriteHeader(http.StatusOK)
+		} else {
+			// The response holds a status that never reached this wrapper.
+			w.WriteHeader(w.res.Status)
+		}
+	}
 	switch w.state {
 	case gzipUndecided:
 		// The handler is streaming, so the rest of the body is worth
@@ -234,6 +258,10 @@ func (w *gzipWriter) commit(compress bool) error {
 	if code == 0 {
 		code = http.StatusOK
 	}
+	// Record what this settles. A write that found no status here would run
+	// WriteHeader again, read the Content-Encoding that this call sets and
+	// answer the same question a second time, the other way.
+	w.code = code
 
 	if !compress {
 		w.state = gzipPlain
@@ -323,11 +351,13 @@ func gzipLevel(level int) int {
 }
 
 // compressibleStatus reports whether a body of this status is worth
-// compressing. A 204 and a 304 carry no body, and the range of a 206 names
-// bytes of a body that the client already has in another encoding.
+// compressing. A 204 and a 304 carry no body, the range of a 206 names bytes
+// of a body that the client already has in another encoding, and what follows
+// a 101 is the protocol that took the connection over.
 func compressibleStatus(code int) bool {
 	switch code {
-	case http.StatusNoContent, http.StatusNotModified, http.StatusPartialContent:
+	case http.StatusSwitchingProtocols,
+		http.StatusNoContent, http.StatusNotModified, http.StatusPartialContent:
 		return false
 	default:
 		return true

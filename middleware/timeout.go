@@ -62,6 +62,12 @@ func Timeout[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C]
 // handler that ignores the context still runs to the end, and the client then
 // sees the answer of that handler and not a timeout.
 //
+// The deadline lasts as long as the chain. The request goes back on the
+// context it came with as this middleware returns, because that context is
+// dead from there on and the error handler of the router runs later. A
+// timeout reaches OnTimeout and the error handler inside the error instead,
+// joined with [context.DeadlineExceeded].
+//
 // It panics on a Duration of zero or less. Use [Timeout] for the default
 // deadline, and Skip to leave a route out of it: a middleware that reads a
 // zero as "no deadline" answers a misconfigured server with a server that
@@ -87,7 +93,25 @@ func TimeoutWithConfig[C router.Context](cfg TimeoutConfig) router.Middleware[C]
 			ctx, cancel := context.WithTimeout(req.Context(), cfg.Duration)
 			defer cancel()
 
-			c.SetRequest(req.WithContext(ctx))
+			timed := req.WithContext(ctx)
+			c.SetRequest(timed)
+			// cancel kills that context as this middleware returns, and the
+			// error handler of the router runs after the whole chain has. Put
+			// the request back on the context that came in, so what runs then
+			// reads a live one: a handler that answers a 500 of its own is a
+			// server fault, and a log that finds a cancelled context there
+			// reads it as a client that went away instead. This defer runs
+			// before cancel, which is the order that LIFO gives it.
+			defer func() {
+				if cur := c.Request(); cur != timed {
+					// Something below installed a request of its own. Keep it,
+					// on the context that came in.
+					c.SetRequest(cur.WithContext(req.Context()))
+					return
+				}
+				c.SetRequest(req)
+			}()
+
 			err := next(c)
 
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) && !c.Response().Committed {

@@ -125,11 +125,12 @@ func TestRateLimitCountsEachClientOnItsOwn(t *testing.T) {
 
 func TestMemoryStoreForgetsAClientThatWentQuiet(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// A rate this low refills a thousandth of a request per second, so a
-		// request that passes after the window can only come from a bucket
-		// that the store dropped.
+		// Two requests a second and two at once, so the wait refills the whole
+		// burst and the store may drop the bucket. Whether it dropped it is
+		// not visible from here, by design: a bucket that refilled holds what
+		// a new one starts with, so the answer reads the same either way.
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-			Store: middleware.NewMemoryStore[*appContext](0.001, 2, time.Second),
+			Store: middleware.NewMemoryStore[*appContext](2, 2, time.Second),
 		})
 
 		get(r, "/")
@@ -255,4 +256,39 @@ func TestNewMemoryStoreNeedsARate(t *testing.T) {
 		}
 	}()
 	middleware.NewMemoryStore[*appContext](0, 1, time.Minute)
+}
+
+// TestMemoryStoreKeepsTheLimitPastTheExpiryWindow walks the shape that a
+// per-hour quota has: a burst that takes far longer to refill than the window
+// the store forgets an idle identity after. A sweep that drops such a bucket
+// hands the client a fresh burst every window, which is the limit itself
+// handing out the requests it exists to refuse.
+func TestMemoryStoreKeepsTheLimitPastTheExpiryWindow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// A thousand requests an hour, a thousand at once. The bucket needs the
+		// whole hour to refill, twenty times the three minutes of the default
+		// expiry.
+		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
+			Store: middleware.NewMemoryStore[*appContext](1000.0/3600, 1000, 0),
+		})
+
+		const rounds = 20
+		allowed := 0
+		for range rounds {
+			for range 1050 {
+				if rateLimitGet(r, "192.0.2.1:1111").Code == http.StatusOK {
+					allowed++
+				}
+			}
+			// Past the window, so the sweep of the next request sees the
+			// bucket as idle.
+			time.Sleep(middleware.DefaultRateLimitExpiry + time.Second)
+		}
+
+		// The burst it started with, plus the requests that the hour of
+		// sleeping refilled.
+		if want := 1000 + rounds*51; allowed > want {
+			t.Errorf("%d requests passed a limit of 1000 an hour, want at most %d", allowed, want)
+		}
+	})
 }

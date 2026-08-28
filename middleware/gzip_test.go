@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -461,5 +462,131 @@ func TestGzipSkip(t *testing.T) {
 	}
 	if got := rec.Header().Get(router.HeaderVary); got != "" {
 		t.Errorf("vary = %q, want none: a skipped request never reached the middleware", got)
+	}
+}
+
+// gzipFlushRouter answers one route whose handler flushes before it writes a
+// byte and never names a status of its own, which is the shape that leaves the
+// wrapper to answer the header on its own.
+func gzipFlushRouter(t *testing.T, cfg middleware.GzipConfig, h router.HandlerFunc[*appContext]) *flushWatcher {
+	t.Helper()
+	r := newRouter()
+	r.Use(middleware.GzipWithConfig[*appContext](cfg))
+	r.GET("/early", h)
+
+	w := &flushWatcher{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequest(http.MethodGet, "/early", nil)
+	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func TestGzipFlushWithoutAStatusCompressesTheBodyItAnnounces(t *testing.T) {
+	w := gzipFlushRouter(t, middleware.GzipConfig{}, func(c *appContext) error {
+		res := c.Response()
+		res.Flush()
+		_, err := res.Write([]byte(gzipLongBody))
+		return err
+	})
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get(router.HeaderContentEncoding); got != "gzip" {
+		t.Fatalf("content encoding = %q, want gzip", got)
+	}
+	if body := ungzip(t, w.ResponseRecorder); body != gzipLongBody {
+		t.Errorf("the body reads back as %d bytes, want %d", len(body), len(gzipLongBody))
+	}
+}
+
+func TestGzipFlushWithoutAStatusCommitsTheResponse(t *testing.T) {
+	w := gzipFlushRouter(t, middleware.GzipConfig{}, func(c *appContext) error {
+		c.Response().Flush()
+		return errors.New("the render failed halfway")
+	})
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200: the flush answered the header already", w.Code)
+	}
+	// The stream is committed and compressed, so the error handler has no body
+	// to add. One that added it would append plain bytes past the gzip trailer.
+	if body := ungzip(t, w.ResponseRecorder); body != "" {
+		t.Errorf("body = %q, want none", body)
+	}
+}
+
+func TestGzipFlushWithoutAStatusLeavesAnEventStreamAlone(t *testing.T) {
+	w := gzipFlushRouter(t, middleware.GzipConfig{MinLength: 1}, func(c *appContext) error {
+		res := c.Response()
+		res.Header().Set(router.HeaderContentType, router.MIMETextEventStream)
+		res.Flush()
+		_, err := res.WriteString("data: one\n\n")
+		return err
+	})
+
+	if got := w.Header().Get(router.HeaderContentEncoding); got != "" {
+		t.Errorf("content encoding = %q, want none: an event stream in a compression buffer arrives at the end", got)
+	}
+	if got := w.Body.String(); got != "data: one\n\n" {
+		t.Errorf("body = %q, want the event as it was written", got)
+	}
+}
+
+// statusRecorder records every status line rather than the first, which is
+// what names a wrapper that wrote a second one.
+type statusRecorder struct {
+	http.ResponseWriter
+	codes []int
+}
+
+func (s *statusRecorder) WriteHeader(code int) { s.codes = append(s.codes, code) }
+
+func (s *statusRecorder) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *statusRecorder) Flush() {}
+
+// TestGzipCommitsASwitchingProtocols pins that a 101 settles the response here
+// as it does in [router.Response]. It is the answer to the request and nothing
+// compressible follows it, so it goes out once and the connection it hands
+// over carries the bytes of the upgraded protocol, not a gzip member.
+func TestGzipCommitsASwitchingProtocols(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler func(*appContext) error
+	}{
+		{"the handler writes the status alone", func(c *appContext) error {
+			c.Response().WriteHeader(http.StatusSwitchingProtocols)
+			return nil
+		}},
+		{"the handler flushes after it", func(c *appContext) error {
+			c.Response().WriteHeader(http.StatusSwitchingProtocols)
+			c.Response().Flush()
+			return nil
+		}},
+		{"the handler writes to the upgraded connection", func(c *appContext) error {
+			c.Response().WriteHeader(http.StatusSwitchingProtocols)
+			_, err := c.Response().Write([]byte(gzipLongBody))
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRouter()
+			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
+			r.GET("/upgrade", tt.handler)
+
+			rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+			req := httptest.NewRequest(http.MethodGet, "/upgrade", nil)
+			req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+			r.ServeHTTP(rec, req)
+
+			if len(rec.codes) != 1 || rec.codes[0] != http.StatusSwitchingProtocols {
+				t.Errorf("status lines = %v, want one 101", rec.codes)
+			}
+			if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
+				t.Errorf("content encoding = %q, want none on an upgraded connection", got)
+			}
+		})
 	}
 }

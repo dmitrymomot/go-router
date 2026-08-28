@@ -20,6 +20,7 @@ func loggerRouter(cfg middleware.LoggerConfig) (*router.Router[*appContext], *by
 	r := newRouter()
 	r.Use(middleware.LoggerWithConfig[*appContext](cfg))
 	r.GET("/gone", func(*appContext) error { return router.ErrGone })
+	r.GET("/boom", func(*appContext) error { return router.ErrInternalServerError })
 	r.GET("/ok", func(c *appContext) error { return c.String(http.StatusOK, "fine") })
 	r.GET("/health", func(c *appContext) error { return c.NoContent(http.StatusNoContent) })
 	return r, &buf
@@ -166,5 +167,44 @@ func TestLoggerAttrs(t *testing.T) {
 	get(r, "/ok")
 	if !strings.Contains(buf.String(), "failed=false") {
 		t.Errorf("record = %q, want a nil error for a request that succeeded", buf.String())
+	}
+}
+
+// TestLoggerLevelsSelectInfo pins that Info is reachable in the two fields
+// whose default is louder than it. A service that reads a 4xx as a client
+// fault rather than an incident logs it at Info and wants that level kept.
+func TestLoggerLevelsSelectInfo(t *testing.T) {
+	r, buf := loggerRouter(middleware.LoggerConfig{
+		ClientErrorLevel: slog.LevelInfo,
+		ServerErrorLevel: slog.LevelInfo,
+	})
+
+	for _, path := range []string{"/gone", "/boom"} {
+		buf.Reset()
+		get(r, path)
+		if !strings.Contains(buf.String(), "level=INFO") {
+			t.Errorf("%s logged as %q, want level=INFO", path, buf.String())
+		}
+	}
+}
+
+// TestLoggerLevelsMoveAtRunTime pins the other half of taking a [slog.Leveler]:
+// a level that an operator turns down without building the middleware again.
+func TestLoggerLevelsMoveAtRunTime(t *testing.T) {
+	var serverErrors slog.LevelVar
+	serverErrors.Set(slog.LevelError)
+
+	r, buf := loggerRouter(middleware.LoggerConfig{ServerErrorLevel: &serverErrors})
+
+	get(r, "/boom")
+	if !strings.Contains(buf.String(), "level=ERROR") {
+		t.Fatalf("record = %q, want level=ERROR", buf.String())
+	}
+
+	serverErrors.Set(slog.LevelDebug)
+	buf.Reset()
+	get(r, "/boom")
+	if !strings.Contains(buf.String(), "level=DEBUG") {
+		t.Errorf("record = %q, want level=DEBUG after the level moved", buf.String())
 	}
 }
