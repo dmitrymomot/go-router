@@ -97,15 +97,9 @@ func TestTimeoutPassesTheDeadlineToTheHandler(t *testing.T) {
 
 func TestTimeoutWithConfigNeedsADuration(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
-		func() {
-			defer func() {
-				msg, ok := recover().(string)
-				if !ok || !strings.Contains(msg, "Duration") {
-					t.Errorf("recovered %v for a duration of %s, want a panic that names it", msg, d)
-				}
-			}()
+		mustPanicContaining(t, "Duration", func() {
 			middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: d})
-		}()
+		})
 	}
 }
 

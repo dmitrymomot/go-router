@@ -2,7 +2,6 @@ package middleware_test
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
@@ -116,12 +115,7 @@ func TestRewriteLeavesTheQueryAlone(t *testing.T) {
 }
 
 func TestRewritePanicsOnARuleWithoutAMatch(t *testing.T) {
-	defer func() {
-		rec := recover()
-		msg, ok := rec.(string)
-		if !ok || !strings.Contains(msg, "Match") {
-			t.Errorf("recovered %v, want a panic that names the missing Match", rec)
-		}
-	}()
-	middleware.Rewrite[*appContext](middleware.RewriteRule{To: "/new"})
+	mustPanicContaining(t, "Match", func() {
+		middleware.Rewrite[*appContext](middleware.RewriteRule{To: "/new"})
+	})
 }
