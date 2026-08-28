@@ -561,11 +561,13 @@ func TestRealIPDeletesTheForwardedProtoOfAnUntrustedPeer(t *testing.T) {
 }
 
 // TestRealIPKeepsTheForwardedProtoOfATrustedProxy pins the other side: the
-// proxy of the deployment writes X-Forwarded-Proto itself, this middleware
-// reads and writes no other one, and deleting it would tell every deployment
-// that terminates TLS at a proxy that its requests arrived in plaintext.
+// deployment names X-Forwarded-Proto as a header its proxy writes, so the
+// middleware leaves it alone and a deployment that terminates TLS at a proxy
+// is not told that its requests arrived in plaintext.
 func TestRealIPKeepsTheForwardedProtoOfATrustedProxy(t *testing.T) {
-	cfg := middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor}}
+	cfg := middleware.RealIPConfig{Headers: []string{
+		router.HeaderXForwardedFor, router.HeaderXForwardedProto,
+	}}
 	r := headerEchoRouter(cfg, router.HeaderXForwardedProto)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -574,5 +576,38 @@ func TestRealIPKeepsTheForwardedProtoOfATrustedProxy(t *testing.T) {
 	if got := do(r, fromProxy(req, "10.0.0.1:9000")).Body.String(); got != "198.51.100.5 https https" {
 		t.Errorf("client ip, scheme and %s = %q, want %q",
 			router.HeaderXForwardedProto, got, "198.51.100.5 https https")
+	}
+}
+
+// TestRealIPDropsAnUnnamedForwardedProtoFromATrustedPeer pins that a trusted
+// peer is no proof that a proxy wrote the protocol. An ingress that appends an
+// address and sets no protocol leaves X-Forwarded-Proto to the client, so a
+// config that does not name it loses it, the way it loses every other header
+// it does not name.
+func TestRealIPDropsAnUnnamedForwardedProtoFromATrustedPeer(t *testing.T) {
+	cfg := middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor}}
+	r := headerEchoRouter(cfg, router.HeaderXForwardedProto)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderXForwardedFor, "198.51.100.5")
+	req.Header.Set(router.HeaderXForwardedProto, "https")
+	if got := do(r, fromProxy(req, "10.0.0.1:9000")).Body.String(); got != "198.51.100.5 http " {
+		t.Errorf("client ip, scheme and %s = %q, want %q",
+			router.HeaderXForwardedProto, got, "198.51.100.5 http ")
+	}
+}
+
+// TestRealIPDropsTheForwardedProtoItDoesNotRead pins the default: a config
+// that names no header deletes X-Forwarded-Proto too, whoever made the
+// connection, so a client inside the trust set cannot name the scheme that
+// decides a Secure cookie and an HSTS header.
+func TestRealIPDropsTheForwardedProtoItDoesNotRead(t *testing.T) {
+	r := headerEchoRouter(middleware.RealIPConfig{}, router.HeaderXForwardedProto)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderXForwardedProto, "https")
+	if got := do(r, fromProxy(req, "10.0.0.5:1234")).Body.String(); got != "10.0.0.5 http " {
+		t.Errorf("client ip, scheme and %s = %q, want %q",
+			router.HeaderXForwardedProto, got, "10.0.0.5 http ")
 	}
 }

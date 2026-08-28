@@ -37,6 +37,15 @@ type RealIPConfig struct {
 	// Every forwarding header this list does not name is deleted from the
 	// request, so a header that a proxy relayed rather than wrote reaches
 	// neither a later middleware nor the handler.
+	//
+	// X-Forwarded-Proto is one of those headers, and it is the one that
+	// [router.Base.Scheme] and [SecureWithConfig] read. Name it as well for a
+	// deployment whose proxy terminates TLS and writes it:
+	//
+	//	Headers: []string{router.HeaderXForwardedFor, router.HeaderXForwardedProto}
+	//
+	// Leave it out and the header goes, whoever made the connection, because a
+	// proxy that only appends an address leaves the protocol to the client.
 	Headers []string
 
 	// Leftmost takes the first entry of the header and reads no trust set at
@@ -50,22 +59,20 @@ type RealIPConfig struct {
 	Leftmost bool
 }
 
-// forwardingHeaders are the headers that carry the address of a client past a
-// proxy. [RealIPWithConfig] reads the ones its config names and deletes the
-// rest, because a proxy relays the ones it does not write and a relayed header
-// says what the client wrote in it.
+// forwardingHeaders are the headers that carry the address or the protocol of
+// a client past a proxy. [RealIPWithConfig] reads the ones its config names
+// and deletes the rest, because a proxy relays the ones it does not write and
+// a relayed header says what the client wrote in it.
+//
+// X-Forwarded-Proto is one of them. A trusted peer is no proof that a proxy
+// wrote it: an ingress that appends to X-Forwarded-For and sets no protocol
+// leaves the header to the client, and [router.Base.Scheme] then answers with
+// what the client chose. Name it in RealIPConfig.Headers for a deployment
+// whose proxy writes it.
 var forwardingHeaders = []string{
 	router.HeaderForwarded, router.HeaderXForwardedFor, router.HeaderXRealIP,
+	router.HeaderXForwardedProto,
 }
-
-// untrustedHeaders are the headers that go when no trusted proxy made the
-// connection. It adds X-Forwarded-Proto, which no config names and which a
-// trusted proxy writes itself: on a connection that reached the server direct
-// the header is the client saying which protocol it used, and [router.Base.Scheme]
-// answers with it.
-var untrustedHeaders = append(
-	slices.Clone(forwardingHeaders), router.HeaderXForwardedProto,
-)
 
 // RealIP is [RealIPWithConfig] with its default config: the standard trust set
 // and no header. It reads no forwarding header, so the address of the
@@ -113,11 +120,15 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // A named Forwarded header reports the protocol as well, and the proto
 // parameter of the hop that stands goes into X-Forwarded-Proto, where
 // [router.Base.Scheme] and [SecureWithConfig] read the scheme of the request.
-// No other X-Forwarded-Proto is read here, so a deployment that terminates TLS
-// at a proxy needs that proxy to set the header itself. The header of an
-// untrusted connection is deleted with the rest: no proxy wrote it, so it is
-// the client naming the protocol of its own request, and the scheme decides
-// whether a cookie is marked Secure and what an absolute URL points at.
+//
+// X-Forwarded-Proto itself is a forwarding header like the others: it survives
+// only while Headers names it, and it is deleted otherwise, on a trusted
+// connection as on any other. A trusted peer says that a proxy made the
+// connection and not that the proxy wrote this header, and an ingress that
+// appends an address without setting a protocol leaves it to the client. The
+// scheme decides whether a cookie is marked Secure, whether the answer carries
+// HSTS and what an absolute URL points at, so it is the client's to choose
+// only where the deployment says a proxy writes it.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 	if cfg.Trust == nil {
 		cfg.Trust = NewTrustSet()
@@ -139,11 +150,11 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 			h, vouched := cfg.client(req)
 
 			// Nothing vouches for the forwarding headers of a connection that
-			// no trusted proxy made, so all of them go, the named ones and the
-			// protocol too.
+			// no trusted proxy made, so all of them go, the named ones
+			// included.
 			del := unnamed
 			if !vouched {
-				del = untrustedHeaders
+				del = forwardingHeaders
 			}
 			carries := slices.ContainsFunc(del, func(name string) bool {
 				return len(req.Header.Values(name)) > 0
