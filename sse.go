@@ -14,32 +14,25 @@ import (
 
 // Event is one server-sent event.
 //
-// The writer always writes a data field, so an event whose data is empty still
-// reaches its listener, carrying an empty string. A frame that holds no data
-// field at all is the one that a client drops, and only a comment and the
-// retry frame are shaped that way.
+// The writer always writes a data field, so an event with empty data still
+// reaches its listener. A client drops a frame without one, which only a
+// comment and a retry frame are.
 type Event struct {
-	// ID is the "id" field. The client sends the last ID that it saw back in
-	// the Last-Event-ID header of its next connection, which
-	// [Base.LastEventID] reads.
-	//
-	// An empty ID leaves the field out, so the client keeps the ID of the
-	// event before it. A stream cannot clear that ID again, which would take
-	// an id field with an empty value.
+	// ID is the "id" field, which the client sends back in Last-Event-ID on
+	// its next connection. An empty ID leaves the field out, so the client
+	// keeps the ID before it; a stream cannot clear that ID again.
 	ID string
 
-	// Name is the "event" field, the name that addEventListener takes. An
-	// empty name leaves the field out, and the browser then delivers the event
-	// to an onmessage listener.
+	// Name is the "event" field, the name addEventListener takes. An empty
+	// name leaves the field out, and the event reaches onmessage.
 	Name string
 
-	// Data is the "data" field. The writer turns every line break in it into a
-	// data line of its own, so a multiline payload stays one event.
+	// Data is the "data" field. Every line break becomes a data line of its
+	// own, so a multiline payload stays one event.
 	Data string
 
-	// Retry is the "retry" field, the delay after which a client that lost the
-	// connection reconnects. The writer rounds it down to whole milliseconds
-	// and leaves the field out when that rounds to zero.
+	// Retry is the "retry" field, the reconnect delay. The writer rounds it
+	// down to whole milliseconds and drops the field when that is zero.
 	Retry time.Duration
 }
 
@@ -56,14 +49,12 @@ type sseConfig struct {
 // [NewSSEStream].
 type SSEOption func(*sseConfig)
 
-// SSEHeartbeat sends a comment every d, which keeps a proxy from closing a
-// connection that carries no event for a while. Zero, the default, sends none.
+// SSEHeartbeat sends a comment every d, which keeps a proxy from closing an
+// idle connection. Zero, the default, sends none. The beat is a plain ticker,
+// and a client ignores every comment.
 //
-// The beat is a plain ticker: an event does not put it off, and a client
-// ignores every comment, so the extra frames only cost their bytes.
-//
-// Only a driver honours it, because only a driver owns the loop: [ServeSSE]
-// and [SSEStream.Serve] do, a hand written loop over [Base.SSE] does not.
+// Only a driver honours it: [ServeSSE] and [SSEStream.Serve] own the loop, a
+// hand written loop over [Base.SSE] does not.
 func SSEHeartbeat(d time.Duration) SSEOption {
 	return func(c *sseConfig) { c.heartbeat = d }
 }
@@ -74,14 +65,10 @@ func SSERetry(d time.Duration) SSEOption {
 	return func(c *sseConfig) { c.retry = d }
 }
 
-// SSEClose sends e as the last event of a stream whose channel closed. Use it
-// to tell the client that the stream is over, because a browser reconnects
-// after any other end:
-//
-//	router.SSEClose(router.Event{Name: "close", Data: "done"})
-//
-// Only a driver honours it. The client still has to close its EventSource
-// when it sees the event; nothing on the wire stops the reconnect by itself.
+// SSEClose sends e as the last event of a stream whose channel closed, which is
+// how a client learns the stream is over: a browser reconnects after any other
+// end. Only a driver honours it, and the client still has to close its
+// EventSource when it sees the event.
 func SSEClose(e Event) SSEOption {
 	return func(c *sseConfig) { c.closeEvent = &e }
 }
@@ -92,28 +79,23 @@ const sseHeartbeatText = "ping"
 // SSEWriter writes server-sent events to one client. [Base.SSE] returns one
 // after it commits the response.
 //
-// Every send writes a whole frame and then flushes it, so an event reaches the
-// client as soon as the handler produces it. A send that fails leaves nothing
-// half written on the wire.
+// Every send writes a whole frame and flushes it, and a send that fails leaves
+// nothing half written. A failed write or flush closes the stream, and every
+// later send reports that same failure, so a loop that watches its errors
+// ends. An event the writer rejects before it writes leaves the stream open: a
+// line break in the ID or the name, a value that fails to encode, a component
+// that fails.
 //
-// A write or a flush that fails closes the stream, and every later send
-// reports that same failure, so a loop that watches its errors ends. An event
-// that the writer rejects before it writes anything leaves the stream open,
-// because nothing reached the client: a line break in the ID or the name, a
-// value that fails to encode, and a component that fails are all of that
-// kind.
-//
-// One request owns one writer, and a writer is not safe for concurrent use.
-// It also points at the [Base] of that request, which [NewPooled] hands to the
-// next request as soon as the handler returns, so never keep a writer past the
-// handler.
+// A writer belongs to one request and is not safe for concurrent use. It
+// points at the [Base] of that request, which [NewPooled] hands on as soon as
+// the handler returns, so never keep a writer past the handler.
 type SSEWriter struct {
 	b   *Base
 	rc  *http.ResponseController
 	err error
 
-	// buf holds the frame that a send is building. The writer keeps it between
-	// sends, so a stream allocates the room for its largest frame once.
+	// The frame a send is building, kept between sends so a stream allocates
+	// the room for its largest frame once.
 	buf bytes.Buffer
 
 	// lines writes the data lines of the frame that buf holds.
@@ -121,53 +103,30 @@ type SSEWriter struct {
 
 	cfg sseConfig
 
-	// head reports that the request was a HEAD, which gets the headers alone.
+	// A HEAD request, which gets the headers alone.
 	head bool
 }
 
-// SSE commits the response as a server-sent event stream and returns the
-// writer for it.
+// SSE commits the response as a server-sent event stream and returns the writer
+// for it.
 //
 // It sets the media type, turns off caching and proxy buffering, and clears
-// the write deadline of the connection, because a stream outlives any
-// [http.Server.WriteTimeout]. Then it writes the header and flushes it, so
-// that the EventSource of a browser fires its open event at once.
+// the write deadline, because a stream outlives any [http.Server.WriteTimeout].
+// Then it writes and flushes the header, so the EventSource of a browser fires
+// its open event at once. The stream owns Cache-Control, X-Accel-Buffering and
+// Connection and overwrites what the handler set; the media type stays the
+// handler's, as in [Base.Render].
 //
-// The stream owns Cache-Control, X-Accel-Buffering and Connection, and
-// overwrites what the handler set on them, because a stream that a proxy
-// buffers or a client caches is not a stream. The media type is the handler's
-// to keep, as it is in [Base.Render].
+// The status belongs to the whole stream, and a browser accepts only 200. A
+// response writer that cannot flush reports an error before anything commits,
+// which the error handler answers with 500.
 //
-// The status belongs to the whole stream. A browser only accepts 200; any
-// other code makes its EventSource fail instead of read.
-//
-// It reports an error, before it commits anything, when the response writer
-// cannot flush. The handler returns that error and the error handler answers
-// 500, as it does for any other failure of an uncommitted response.
-//
-// The handler owns the loop and returns only when the stream is over:
-//
-//	s, err := c.SSE(http.StatusOK)
-//	if err != nil {
-//		return err
-//	}
-//	for {
-//		select {
-//		case <-c.Done():
-//			return nil
-//		case msg := <-sub.C:
-//			if err := s.SendJSON("message", msg); err != nil {
-//				return err
-//			}
-//		}
-//	}
-//
+// The handler owns the loop and returns only when the stream is over;
 // [ServeSSE] and [SSEStream.Serve] write that loop for you.
 //
-// A HEAD request gets the headers alone. Every send is then a no-op that
-// reports no error, and [SSEWriter.Closed] reports it, so a hand written loop
-// has to watch [SSEWriter.Closed] or the request context to stop. Both drivers
-// stop by themselves.
+// A HEAD request gets the headers alone. Every send is then a no-op, so a hand
+// written loop watches [SSEWriter.Closed] or the request context to stop. Both
+// drivers stop by themselves.
 func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {
 	if !canFlush(b.res.ResponseWriter) {
 		return nil, ErrInternalServerError.WithError(
@@ -188,8 +147,7 @@ func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {
 	}
 
 	// A stream lives for minutes or hours, so the per-request write deadline
-	// of the server has to go. A writer that keeps no deadline reports
-	// ErrNotSupported, which says the same thing.
+	// has to go. A writer that keeps none reports ErrNotSupported.
 	if err := s.rc.SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return nil, ErrInternalServerError.WithError(fmt.Errorf("router: clear the write deadline: %w", err))
 	}
@@ -210,26 +168,16 @@ func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {
 	return s, nil
 }
 
-// LastEventID returns the ID of the last event that the client saw, which it
-// sends in the Last-Event-ID header when it reconnects. It is empty on a first
-// connection.
-//
-// Read it to replay what the client missed:
-//
-//	for _, e := range log.Since(c.LastEventID()) {
-//		if err := s.Send(e); err != nil {
-//			return err
-//		}
-//	}
+// LastEventID returns the ID of the last event the client saw, from the
+// Last-Event-ID header it sends on a reconnect. It is empty on a first
+// connection. Read it to replay what the client missed.
 func (b *Base) LastEventID() string { return b.req.Header.Get(HeaderLastEventID) }
 
-// Request returns the request that the stream answers. A sender reads the
-// headers of the client through it, and the request context through
-// [http.Request.Context].
+// Request returns the request the stream answers, which is how a sender reads
+// the client headers and the request context.
 func (s *SSEWriter) Request() *http.Request { return s.b.req }
 
-// LastEventID returns the ID of the last event that the client saw. It is the
-// same answer as [Base.LastEventID].
+// LastEventID is [Base.LastEventID] for the request the stream answers.
 func (s *SSEWriter) LastEventID() string { return s.b.LastEventID() }
 
 // Closed reports whether the stream is over: a HEAD request opens it closed,
@@ -251,11 +199,9 @@ func (s *SSEWriter) Send(e Event) error {
 // listener in the browser.
 func (s *SSEWriter) SendData(data string) error { return s.Send(Event{Data: data}) }
 
-// SendJSON writes v as the data of an event named name.
-//
-// It encodes straight into the frame, so a value that fails to encode leaves
-// nothing on the wire. The router options of [Router.JSONOptions] apply, and
-// opts overrides them.
+// SendJSON writes v as the data of an event named name. It encodes straight
+// into the frame, so a value that fails to encode leaves nothing on the wire.
+// [Router.JSONOptions] applies, and opts overrides it.
 func (s *SSEWriter) SendJSON(name string, v any, opts ...json.Options) error {
 	ok, err := s.begin(Event{Name: name})
 	if !ok {
@@ -270,10 +216,9 @@ func (s *SSEWriter) SendJSON(name string, v any, opts ...json.Options) error {
 // SendComponent renders c as the data of an event named name, which is how an
 // htmx or a Datastar page takes a fragment over a stream.
 //
-// The component receives the [Base] as its context, as it does in
-// [Base.Render], and its line breaks become data lines. A component that fails
-// halfway leaves nothing on the wire, because the frame reaches the client
-// only after the component returns.
+// The component receives the [Base] as its context, as in [Base.Render], and
+// its line breaks become data lines. The frame reaches the client only after
+// the component returns, so one that fails halfway writes nothing.
 func (s *SSEWriter) SendComponent(name string, c Component) error {
 	ok, err := s.begin(Event{Name: name})
 	if !ok {
@@ -299,9 +244,8 @@ func (s *SSEWriter) Comment(text string) error {
 
 // begin starts a frame and writes the single line fields of e. It reports
 // whether the frame started, which a closed stream and a rejected field both
-// stop. The answer cannot be the error alone, because a HEAD request closes a
-// stream without a failure to report, and a caller that read that nil as
-// "carry on" would write into a frame that never started.
+// stop. A nil error is not enough on its own: a HEAD request closes a stream
+// with no failure to report.
 func (s *SSEWriter) begin(e Event) (bool, error) {
 	if s.Closed() {
 		return false, s.err
@@ -318,9 +262,8 @@ func (s *SSEWriter) begin(e Event) (bool, error) {
 	return true, nil
 }
 
-// resetBuf empties the frame buffer. It drops one that a large event grew past
-// the ceiling that [Base.Render] uses for its pool, so that a stream which
-// sends one huge event does not hold that room for the hours it then runs.
+// resetBuf empties the frame buffer, and drops one that grew past the ceiling
+// [Base.Render] pools at, so one huge event does not hold that room for hours.
 func (s *SSEWriter) resetBuf() {
 	if s.buf.Cap() > maxPooledRenderBuf {
 		s.buf = bytes.Buffer{}
@@ -329,8 +272,8 @@ func (s *SSEWriter) resetBuf() {
 	s.buf.Reset()
 }
 
-// retryField writes the retry field, and reports whether the delay reached a
-// whole millisecond, which is the unit that the field carries.
+// retryField writes the retry field, and reports whether the delay reached the
+// whole millisecond the field carries.
 func (s *SSEWriter) retryField(d time.Duration) bool {
 	ms := d.Milliseconds()
 	if ms <= 0 {
@@ -342,12 +285,9 @@ func (s *SSEWriter) retryField(d time.Duration) bool {
 	return true
 }
 
-// field writes one single line field, and skips an empty value.
-//
-// It reports an error for a value that holds a line break, because such a
-// value would end the field and let the rest of it forge fields, or whole
-// events, of its own. The frame stays unwritten, so nothing reaches the
-// client.
+// field writes one single line field, and skips an empty value. It rejects a
+// line break, which would end the field and let the rest forge fields, or
+// whole events, of its own. The frame stays unwritten.
 func (s *SSEWriter) field(name, value string) error {
 	if value == "" {
 		return nil
@@ -396,9 +336,8 @@ func (s *SSEWriter) finish() error {
 	return s.Send(*s.cfg.closeEvent)
 }
 
-// canFlush reports whether w, or a writer that it wraps, can flush. It walks
-// the same chain as [http.ResponseController], so that the answer holds for
-// the controller that the stream uses.
+// canFlush reports whether w, or a writer it wraps, can flush. It walks the
+// same chain as [http.ResponseController], which is what the stream uses.
 func canFlush(w http.ResponseWriter) bool {
 	for {
 		switch w.(type) {
@@ -413,21 +352,21 @@ func canFlush(w http.ResponseWriter) bool {
 	}
 }
 
-// sseLines writes text as one prefixed line per line of that text. It keeps
-// its state between calls, so a component that ends a line in one write and
-// starts the next line in another still produces two lines.
+// sseLines writes text as one prefixed line per line. It keeps its state
+// between calls, so a component that splits a line break over two writes still
+// produces two lines.
 type sseLines struct {
 	buf    *bytes.Buffer
 	prefix string
 
-	// open reports that a line is started and still needs its terminator.
+	// A line is started and still needs its terminator.
 	open bool
 
-	// cr reports that the last byte was a carriage return, so that a line feed
-	// now belongs to the same break.
+	// The last byte was a carriage return, so a line feed now belongs to the
+	// same break.
 	cr bool
 
-	// wrote reports that at least one line started.
+	// At least one line started.
 	wrote bool
 }
 
@@ -449,9 +388,9 @@ func (w *sseLines) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// WriteString is [sseLines.Write] for a string, which spares the copy that a
-// conversion to a byte slice costs. It reports nothing, because a write into a
-// buffer cannot fail; only [io.Writer] forces the pair on Write.
+// WriteString is [sseLines.Write] for a string, which spares a copy. It reports
+// nothing: a write into a buffer cannot fail, and only [io.Writer] forces the
+// pair on Write.
 func (w *sseLines) WriteString(p string) {
 	for i := 0; i < len(p); {
 		j := nextBreak(p, i)
@@ -499,9 +438,8 @@ func (w *sseLines) start() {
 	}
 }
 
-// end terminates the last line. Text that ends with a line break needs
-// nothing, and text that wrote no line at all still needs one empty line, so
-// that the frame carries the field.
+// end terminates the last line. Text that ends with a line break needs nothing;
+// text that wrote no line needs one empty line, so the frame carries the field.
 func (w *sseLines) end() {
 	if w.open || !w.wrote {
 		w.start()
@@ -511,17 +449,9 @@ func (w *sseLines) end() {
 }
 
 // SSESender turns one value of an application channel into events on the
-// stream. Write one for a payload that the senders of this package do not
-// cover, or to send several events for one value:
-//
-//	func send(s *router.SSEWriter, p Post) error {
-//		if err := s.SendComponent("post", view.PostCard(p)); err != nil {
-//			return err
-//		}
-//		return s.SendJSON("count", p.Comments)
-//	}
-//
-// A sender that reports an error ends the stream.
+// stream. Write one for a payload the senders of this package do not cover, or
+// to send several events for one value. A sender that reports an error ends
+// the stream.
 type SSESender[T any] func(s *SSEWriter, v T) error
 
 // SSEJSON returns a sender that writes each value as JSON, under the given
@@ -531,11 +461,8 @@ func SSEJSON[T any](name string) SSESender[T] {
 }
 
 // SSEText returns a sender that writes the text of each value, under the given
-// event name.
-//
-// It formats the value with [fmt.Sprint], so a string passes through and a
-// [fmt.Stringer] renders itself. Write a sender of your own for any other
-// format.
+// event name. It formats with [fmt.Sprint], so a string passes through and a
+// [fmt.Stringer] renders itself.
 func SSEText[T any](name string) SSESender[T] {
 	return func(s *SSEWriter, v T) error {
 		return s.Send(Event{Name: name, Data: fmt.Sprint(v)})
@@ -543,15 +470,12 @@ func SSEText[T any](name string) SSESender[T] {
 }
 
 // SSEComponent returns a sender that renders each value as HTML, under the
-// given event name:
+// given event name.
 //
-//	router.SSEComponent[Post]("post", view.PostCard)
-//
-// C is the component type that the view returns, which the compiler infers.
-// The parameter is there because a function type is invariant: a
-// func(Post) templ.Component, which is what the templ generator writes, is not
-// a func(Post) [Component], however well a templ.Component value satisfies the
-// interface.
+// C is the component type the view returns, which the compiler infers. The
+// parameter is there because a function type is invariant: the
+// func(Post) templ.Component that the templ generator writes is not a
+// func(Post) [Component].
 func SSEComponent[T any, C Component](name string, view func(T) C) SSESender[T] {
 	return func(s *SSEWriter, v T) error { return s.SendComponent(name, view(v)) }
 }
@@ -564,35 +488,22 @@ func SSEEvents() SSESender[Event] {
 
 // ServeSSE opens a server-sent event stream and feeds it from ch until the
 // channel closes or the client goes away. It writes the loop that [Base.SSE]
-// leaves to the handler:
+// leaves to the handler.
 //
-//	r.GET("/notifications", func(c *app.Context) error {
-//		ch, unsubscribe := c.Bus.Subscribe(c.User.ID)
-//		defer unsubscribe()
+// The sender turns each value into events: [SSEJSON], [SSEText],
+// [SSEComponent] and [SSEEvents] cover the common shapes. The stream answers
+// 200, the only status an EventSource takes.
 //
-//		return router.ServeSSE(c, ch, router.SSEJSON[Notification]("notification"),
-//			router.SSEHeartbeat(15*time.Second))
-//	})
+// It returns nil when the channel closes and when the client goes away, which
+// are both not server failures. A busy stream usually learns of a disconnect
+// through the send that fails first, and returns that write error, which the
+// error handler logs at debug level. It returns the error of a send or of the
+// sender too; the response is committed by then, so nothing more reaches the
+// client.
 //
-// The sender turns each value into events. [SSEJSON], [SSEText],
-// [SSEComponent] and [SSEEvents] cover the common shapes, and [SSESender]
-// shows how to write another.
-//
-// The stream answers 200, which is the only status that an EventSource takes.
-//
-// It returns nil when the channel closes, and nil when it sees that the client
-// went away, because neither is a failure of the server. A busy stream usually
-// learns of the disconnect through the send that fails first, and then it
-// returns that write error, as [Base.RenderStream] does; the error handler
-// logs such an error at debug level, not as a server fault.
-//
-// It returns the error of a send or of the sender too. The response is already
-// committed by then, so nothing more reaches the client.
-//
-// It starts no goroutine of its own, so nothing touches the context after the
-// handler returns and a pooled context stays safe. The producer that fills ch
-// has to watch the request context itself, or the send that follows a
-// disconnect blocks it forever.
+// It starts no goroutine, so nothing touches the context after the handler
+// returns and a pooled context stays safe. The producer that fills ch has to
+// watch the request context itself, or a send after a disconnect blocks it.
 func ServeSSE[T any](c Context, ch <-chan T, send SSESender[T], opts ...SSEOption) error {
 	if send == nil {
 		return ErrInternalServerError.WithError(errors.New("router: ServeSSE needs a sender"))
@@ -633,23 +544,9 @@ func ServeSSE[T any](c Context, ch <-chan T, send SSESender[T], opts ...SSEOptio
 	}
 }
 
-// SSEStream holds the sender and the options of a stream, so that a route
-// declares the shape of its events once and every request reuses it:
-//
-//	var feed = router.NewSSEStream(
-//		router.SSEComponent[Post]("post", view.PostCard),
-//		router.SSEHeartbeat(15*time.Second),
-//		router.SSERetry(3*time.Second),
-//	)
-//
-//	r.GET("/feed", func(c *app.Context) error {
-//		ch, unsubscribe := c.Bus.Posts(c.User.ID)
-//		defer unsubscribe()
-//		return feed.Serve(c, ch)
-//	})
-//
-// A stream holds no request state, so one value serves every request of the
-// route, and several routes share one value.
+// SSEStream holds the sender and the options of a stream, so a route declares
+// the shape of its events once and every request reuses it. A stream holds no
+// request state, so several routes share one value.
 //
 // It is [ServeSSE] with a configuration that outlives the request. Reach for
 // ServeSSE for a stream that one route owns.
