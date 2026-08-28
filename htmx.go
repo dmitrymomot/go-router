@@ -595,8 +595,8 @@ func writeUnicodeEscape(sb *strings.Builder, r rune) {
 
 // Render writes an HTML body from a [Component], as [Base.Render] does.
 func (h HXResponse) Render(status int, c Component) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.Render(status, c)
 }
@@ -604,24 +604,24 @@ func (h HXResponse) Render(status int, c Component) error {
 // RenderStream writes an HTML body straight to the client, as
 // [Base.RenderStream] does.
 func (h HXResponse) RenderStream(status int, c Component) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.RenderStream(status, c)
 }
 
 // HTML writes an HTML body, as [Base.HTML] does.
 func (h HXResponse) HTML(status int, html string) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.HTML(status, html)
 }
 
 // String writes a plain text body, as [Base.String] does.
 func (h HXResponse) String(status int, s string) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.String(status, s)
 }
@@ -630,16 +630,16 @@ func (h HXResponse) String(status int, s string) error {
 // like any other, so reach for it only when a listener of a triggered event
 // reads the answer.
 func (h HXResponse) JSON(status int, v any, opts ...json.Options) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.JSON(status, v, opts...)
 }
 
 // NoContent writes the status line alone, as [Base.NoContent] does.
 func (h HXResponse) NoContent(status int) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.NoContent(status)
 }
@@ -663,15 +663,15 @@ func (h HXResponse) NoSwap() error { return h.NoContent(http.StatusNoContent) }
 // A request that htmx did not make gets a plain 303 See Other, so the same
 // handler still serves a browser that runs no JavaScript.
 func (h HXResponse) Redirect(url string) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, url)
 	}
 	h = h.set(HeaderHXRedirect, url)
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.NoContent(http.StatusOK)
 }
@@ -683,15 +683,15 @@ func (h HXResponse) Redirect(url string) error {
 // A request that htmx did not make gets a plain 303 See Other, as
 // [HXResponse.Redirect] explains.
 func (h HXResponse) Location(path string) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, path)
 	}
 	h = h.set(HeaderHXLocation, path)
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.NoContent(http.StatusOK)
 }
@@ -703,8 +703,8 @@ func (h HXResponse) Location(path string) error {
 //
 // It reports an error when loc names no path.
 func (h HXResponse) LocationWith(loc HXLocation) error {
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	if loc.Path == "" {
 		return h.fail(errors.New("router: an HX-Location needs a path")).b.hxError()
@@ -722,8 +722,8 @@ func (h HXResponse) LocationWith(loc HXLocation) error {
 		return h.fail(fmt.Errorf("router: encode the HX-Location header: %w", err)).b.hxError()
 	}
 	h = h.set(HeaderHXLocation, escapeNonASCII(string(data)))
-	if h.b.hxError() != nil {
-		return h.b.hxError()
+	if err := h.b.hxError(); err != nil {
+		return err
 	}
 	return h.b.NoContent(http.StatusOK)
 }

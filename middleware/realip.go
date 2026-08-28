@@ -69,9 +69,25 @@ type RealIPConfig struct {
 // leaves the header to the client, and [router.Base.Scheme] then answers with
 // what the client chose. Name it in RealIPConfig.Headers for a deployment
 // whose proxy writes it.
-var forwardingHeaders = []string{
+//
+// The names are canonical, because [http.Header] keys by the canonical form
+// and rewrites any other spelling on every lookup. X-Real-IP is the one that
+// needs it: the constant spells the name as the wire does, which is not the
+// form that the map holds.
+var forwardingHeaders = canonicalHeaders(
 	router.HeaderForwarded, router.HeaderXForwardedFor, router.HeaderXRealIP,
 	router.HeaderXForwardedProto,
+)
+
+// canonicalHeaders returns the names in the form that [http.Header] keys by,
+// so that a lookup made once per request does not rewrite the name each time.
+// It returns a new slice, because the caller may keep the one it passed.
+func canonicalHeaders(names ...string) []string {
+	out := make([]string, len(names))
+	for i, name := range names {
+		out[i] = http.CanonicalHeaderKey(name)
+	}
+	return out
 }
 
 // RealIP is [RealIPWithConfig] with its default config: the standard trust set
@@ -133,6 +149,11 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 	if cfg.Trust == nil {
 		cfg.Trust = NewTrustSet()
 	}
+	// The config names its headers as the wire spells them, and the per-request
+	// read looks them up in a map that keys by the canonical form. The rewrite
+	// happens once here rather than on every lookup. The new slice leaves the
+	// slice that the caller holds alone.
+	cfg.Headers = canonicalHeaders(cfg.Headers...)
 	// The headers to delete are the ones the config does not name, and neither
 	// list changes per request, so the difference is taken once.
 	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {

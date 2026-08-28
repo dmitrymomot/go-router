@@ -169,6 +169,11 @@ type Router[C Context] struct {
 	// the innermost scope that owns its path.
 	scopes []*scopeFallback[C]
 
+	// allowCache holds the Allow header of every node that carries routes,
+	// joined by the build. A 405 and an auto-OPTIONS answer read it rather
+	// than sorting and joining the method list again per request.
+	allowCache map[*node[C]]string
+
 	// errScopes holds the scopes above that set an error handler, in the same
 	// order. It is empty for a router that sets none, which is the one check
 	// that a failed request pays for the stage.
@@ -906,8 +911,6 @@ func (r *Router[C]) buildErr() error {
 	// set. Both are resolved after the walk, because a scope below may still
 	// replace the fallback of the root that they fall back to.
 	var pending []pendingScope[C]
-	rawNotFound := map[*hostEntry[C]]HandlerFunc[C]{}
-	rawNotAllowed := map[*hostEntry[C]]HandlerFunc[C]{}
 
 	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error
 	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error {
@@ -974,16 +977,18 @@ func (r *Router[C]) buildErr() error {
 				notFound, notAllowed, errh := r.fallbacks(e)
 				if rt.notFound != nil {
 					*notFound = chain(rt.notFound, m)
-					rawNotFound[e] = rt.notFound
 					if e == nil {
 						r.notFound = rt.notFound // what a host inherits
+					} else {
+						e.rawNotFound = rt.notFound
 					}
 				}
 				if rt.methodNotAllowed != nil {
 					*notAllowed = chain(rt.methodNotAllowed, m)
-					rawNotAllowed[e] = rt.methodNotAllowed
 					if e == nil {
 						r.methodNotAllowed = rt.methodNotAllowed
+					} else {
+						e.rawNotAllowed = rt.methodNotAllowed
 					}
 				}
 				if rt.errHandler != nil {
@@ -1023,18 +1028,20 @@ func (r *Router[C]) buildErr() error {
 	}
 
 	r.collectRoutes()
+	// Every route is in a tree now, so the Allow header of a node is fixed.
+	r.allowCache = map[*node[C]]string{}
+	r.tree.cacheAllow(r.allowCache)
+	if r.hostSet != nil {
+		for _, e := range r.hostSet.all {
+			e.tree.cacheAllow(r.allowCache)
+		}
+	}
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
 	}
 	// r.notFound and r.methodNotAllowed are final now, so a host and a path
 	// scope that set no fallback of their own inherit the one the application
 	// chose, wherever the scope that chose it sat.
-	resolve := func(raw map[*hostEntry[C]]HandlerFunc[C], e *hostEntry[C], root HandlerFunc[C]) HandlerFunc[C] {
-		if h, ok := raw[e]; ok {
-			return h
-		}
-		return root
-	}
 	if r.hostSet != nil {
 		for _, e := range r.hostSet.all {
 			if e.optionsChain == nil {
@@ -1061,10 +1068,16 @@ func (r *Router[C]) buildErr() error {
 		// that encloses it, or with the one of its host or of the root.
 		notFound, notAllowed := ps.fb.notFound, ps.fb.notAllowed
 		if notFound == nil {
-			notFound = resolve(rawNotFound, ps.host, r.notFound)
+			notFound = r.notFound
+			if ps.host != nil && ps.host.rawNotFound != nil {
+				notFound = ps.host.rawNotFound
+			}
 		}
 		if notAllowed == nil {
-			notAllowed = resolve(rawNotAllowed, ps.host, r.methodNotAllowed)
+			notAllowed = r.methodNotAllowed
+			if ps.host != nil && ps.host.rawNotAllowed != nil {
+				notAllowed = ps.host.rawNotAllowed
+			}
 		}
 		s.notFoundChain = chain(notFound, ps.mws)
 		s.notAllowedChain = chain(notAllowed, ps.mws)
@@ -1254,17 +1267,19 @@ func countSegments(p string) (segs, statics int) {
 	return segs, statics
 }
 
-// scopeFor returns the innermost path scope that owns the path, or nil when no
-// scope claims it.
-func (r *Router[C]) scopeFor(host *hostEntry[C], path string) *scopeFallback[C] {
-	if len(r.scopes) == 0 {
+// scopeFor returns the innermost scope of the list that owns the path, or nil
+// when no scope claims it. The router keeps one list for the fallbacks and one
+// for the error handlers, and both are searched by the same rule: the scope
+// sits in the matched host, and its prefix covers the path.
+func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path string) *scopeFallback[C] {
+	if len(scopes) == 0 {
 		return nil
 	}
 	idx := int32(-1)
 	if host != nil {
 		idx = host.idx
 	}
-	for _, s := range r.scopes {
+	for _, s := range scopes {
 		if s.hostIdx == idx && s.covers(path) {
 			return s
 		}
@@ -1276,7 +1291,7 @@ func (r *Router[C]) scopeFor(host *hostEntry[C], path string) *scopeFallback[C] 
 // the ones of the innermost path scope that owns the path, else the ones of
 // the matched host, else the ones of the root.
 func (r *Router[C]) fallbackChains(host *hostEntry[C], path string) (notFound, notAllowed, options HandlerFunc[C]) {
-	if s := r.scopeFor(host, path); s != nil {
+	if s := scopeFor(r.scopes, host, path); s != nil {
 		return s.notFoundChain, s.notAllowedChain, s.optionsChain
 	}
 	if host != nil {
@@ -1507,6 +1522,11 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 	if path == "" || path[0] != '/' {
 		path = "/" + path
 	}
+	// The scope prefixes went through normalizePattern, so the path that they
+	// are compared against is trimmed by the same rule. The loop is written
+	// out rather than calling it: route is too large for the inliner to fold
+	// the call in, and paying a call on every request costs more than the
+	// three lines save. scopeErrorHandler, on the error path, does call it.
 	trimmed := path
 	for len(trimmed) > 1 && trimmed[len(trimmed)-1] == '/' {
 		trimmed = trimmed[:len(trimmed)-1]
@@ -1591,7 +1611,7 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 		}
 		b.setRoute(match.pattern, match.names, matched)
 		req.Pattern = match.pattern
-		b.res.Header().Set(HeaderAllow, allowHeader(&hostSt, &anySt))
+		b.res.Header().Set(HeaderAllow, r.allowHeader(&hostSt, &anySt))
 
 		_, notAllowed, options := r.fallbackChains(host, trimmed)
 		if req.Method == http.MethodOptions && r.autoOptions {
@@ -1610,7 +1630,26 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 // allowHeader joins the methods that every node whose pattern matched the path
 // answers: the ones of the walk over the tree of the matched host, and the ones
 // of the walk over the tree that answers every host.
-func allowHeader[C Context](host, anyHost *matchState[C]) string {
+func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
+	// One node answered for the path, which is the usual shape, and the build
+	// joined its header already. Every other shape merges the methods of two
+	// trees or of the siblings that the walk backtracked into, so it is built
+	// here. A cache that holds nothing for the node reads as a miss and takes
+	// the same road.
+	if host.rest == nil && anyHost.rest == nil {
+		var only *node[C]
+		switch {
+		case host.pathMatch != nil && anyHost.pathMatch == nil:
+			only = host.pathMatch
+		case anyHost.pathMatch != nil && host.pathMatch == nil:
+			only = anyHost.pathMatch
+		}
+		if only != nil {
+			if s, ok := r.allowCache[only]; ok {
+				return s
+			}
+		}
+	}
 	out := host.allowedMethods(nil)
 	out = anyHost.allowedMethods(out)
 	slices.Sort(out)
@@ -1694,20 +1733,8 @@ func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 // the path and carries one, or nil when no such scope claims it.
 func (r *Router[C]) scopeErrorHandler(host *hostEntry[C], u *url.URL) ErrorHandlerFunc[C] {
 	path, _ := requestPath(u)
-	if path == "" || path[0] != '/' {
-		path = "/" + path
-	}
-	for len(path) > 1 && path[len(path)-1] == '/' {
-		path = path[:len(path)-1]
-	}
-	idx := int32(-1)
-	if host != nil {
-		idx = host.idx
-	}
-	for _, s := range r.errScopes {
-		if s.hostIdx == idx && s.covers(path) {
-			return s.errHandler
-		}
+	if s := scopeFor(r.errScopes, host, normalizePattern(path)); s != nil {
+		return s.errHandler
 	}
 	return nil
 }

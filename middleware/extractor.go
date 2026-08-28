@@ -72,7 +72,11 @@ func FromHeader(name, cutPrefix string) TokenSource {
 // the Referer header of the next page.
 func FromQuery(name string) TokenSource {
 	return func(c router.Context) []string {
-		return nonEmpty(c.Request().URL.Query()[name])
+		b, ok := router.FromContext(c)
+		if !ok {
+			return nil
+		}
+		return nonEmpty(b.QueryValues()[name])
 	}
 }
 

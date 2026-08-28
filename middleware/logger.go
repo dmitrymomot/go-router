@@ -117,7 +117,7 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
 			// middleware below this one that replaced it, a method override or
 			// a rewrite among them, is what the record describes.
 			req := c.Request()
-			status := statusOf(c, err)
+			status := router.ResolveStatus(c.Response(), err)
 
 			level := cfg.Level
 			switch {

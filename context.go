@@ -120,7 +120,12 @@ type Base struct {
 
 	// deferred holds the failures that the context reports later than it met
 	// them. Both are rare, so they sit behind one word rather than two
-	// interface fields, which keeps Base inside its size class.
+	// interface fields. Base is 360 bytes and two error fields would make it
+	// 384, which allocates the same 384 byte class on its own. The router
+	// allocates the context that embeds Base, though, and the extra 24 bytes
+	// push that allocation into the next class for every embedder whose own
+	// fields are not a multiple of 32: the two pointer example in the package
+	// doc goes from 384 to 416.
 	deferred *deferredErrors
 	// resStorage backs res, so that a context needs one allocation and not two.
 	resStorage Response
@@ -133,11 +138,6 @@ type Base struct {
 	// hostKnown reports that host holds the answer of normalizeHost. An empty
 	// host is a legitimate answer, so it cannot mark the field as unset.
 	hostKnown bool
-
-	// queryParsed reports that queryCache holds the query of the request. A
-	// request without a query string parses to an empty map, which is a
-	// legitimate answer, so it cannot mark the field as unset.
-	queryParsed bool
 
 	// pathEscaped reports whether the matched path was still percent encoded.
 	pathEscaped bool
@@ -197,7 +197,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
 	b.hostIdx, b.pathEscaped = -1, false
-	b.queryCache, b.queryParsed = nil, false
+	b.queryCache = nil
 	b.deferred = nil
 	clear(b.store)
 }
@@ -280,7 +280,7 @@ func (b *Base) Request() *http.Request { return b.req }
 // the URL changes what [Base.Query] answers.
 func (b *Base) SetRequest(r *http.Request) {
 	b.req = r
-	b.queryCache, b.queryParsed = nil, false
+	b.queryCache = nil
 }
 
 // Logger returns the logger that [Router.Logger] set, or [slog.Default] while
@@ -409,11 +409,20 @@ func (b *Base) IsTLS() bool { return b.req.TLS != nil }
 // Trust the header only as far as you trust the proxy in front of the server. A
 // server that clients reach directly must not read it at all, because the
 // client sends it just as easily.
-func (b *Base) Scheme() string {
-	if b.req.TLS != nil {
+func (b *Base) Scheme() string { return SchemeOf(b.req) }
+
+// SchemeOf returns the scheme that r reached the server over, "http" or
+// "https". [Base.Scheme] is this for the request in flight.
+//
+// Every reader of the scheme goes through it, in this package and in the
+// middleware, so that a change to how a forwarded scheme is read reaches the
+// absolute redirect, the HSTS header and the Secure flag of a cookie in one
+// step.
+func SchemeOf(r *http.Request) string {
+	if r.TLS != nil {
 		return "https"
 	}
-	proto, _, _ := strings.Cut(b.req.Header.Get(HeaderXForwardedProto), ",")
+	proto, _, _ := strings.Cut(r.Header.Get(HeaderXForwardedProto), ",")
 	if strings.EqualFold(strings.TrimSpace(proto), "https") {
 		return "https"
 	}
@@ -518,8 +527,10 @@ func AddVary(h http.Header, names ...string) {
 // parses it again and allocates a new map on every call, which a handler that
 // reads three parameters would pay for three times.
 func (b *Base) queryValues() url.Values {
-	if !b.queryParsed {
-		b.queryCache, b.queryParsed = b.req.URL.Query(), true
+	// [url.URL.Query] answers a map that it made, never nil, even for a query
+	// that does not parse, so a nil field is one that nothing has read yet.
+	if b.queryCache == nil {
+		b.queryCache = b.req.URL.Query()
 	}
 	return b.queryCache
 }

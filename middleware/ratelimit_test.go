@@ -239,23 +239,15 @@ func TestRateLimitSkip(t *testing.T) {
 }
 
 func TestRateLimitNeedsAStore(t *testing.T) {
-	defer func() {
-		msg, ok := recover().(string)
-		if !ok || !strings.Contains(msg, "Store") {
-			t.Errorf("recovered %v, want a panic that names the missing store", msg)
-		}
-	}()
-	middleware.RateLimitWithConfig[*appContext](middleware.RateLimitConfig[*appContext]{})
+	mustPanicContaining(t, "Store", func() {
+		middleware.RateLimitWithConfig[*appContext](middleware.RateLimitConfig[*appContext]{})
+	})
 }
 
 func TestNewMemoryStoreNeedsARate(t *testing.T) {
-	defer func() {
-		msg, ok := recover().(string)
-		if !ok || !strings.Contains(msg, "rate") {
-			t.Errorf("recovered %v, want a panic that names the rate", msg)
-		}
-	}()
-	middleware.NewMemoryStore[*appContext](0, 1, time.Minute)
+	mustPanicContaining(t, "rate", func() {
+		middleware.NewMemoryStore[*appContext](0, 1, time.Minute)
+	})
 }
 
 // TestMemoryStoreKeepsTheLimitPastTheExpiryWindow walks the shape that a

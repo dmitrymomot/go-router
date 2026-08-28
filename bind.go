@@ -448,72 +448,44 @@ func removeSpilledParts(req *http.Request) {
 // A parameter that the route does not declare, or a value that does not parse,
 // produces a 400.
 func (b *Base) ParamAs[T any](name string) (T, error) {
-	var v T
 	raw, ok := b.ParamOK(name)
 	if !ok {
+		var v T
 		return v, ErrBadRequest.WithMessage("the route has no parameter %q", name)
 	}
-	if err := setScalar(reflect.ValueOf(&v).Elem(), raw, ""); err != nil {
-		return v, ErrBadRequest.WithMessage("route parameter %s: %s", name, err).WithError(err)
-	}
-	return v, nil
+	return parseAs[T](raw, "route parameter", name)
 }
 
 // ParamAsDefault returns a route parameter parsed into T, or def when the
 // route does not declare it, when it is empty, and when it does not parse.
 func (b *Base) ParamAsDefault[T any](name string, def T) T {
-	raw, ok := b.ParamOK(name)
-	if !ok || raw == "" {
-		return def
-	}
-	v, err := b.ParamAs[T](name)
-	if err != nil {
-		return def
-	}
-	return v
+	return ParseValueDefault(b.Param(name), def)
 }
 
 // QueryAs returns a query parameter parsed into T. A missing or empty
 // parameter yields the zero value of T and no error; use [Base.QueryValues] to
 // tell an absent parameter from an empty one.
 func (b *Base) QueryAs[T any](name string) (T, error) {
-	var v T
-	raw := b.Query(name)
-	if raw == "" {
-		return v, nil
-	}
-	if err := setScalar(reflect.ValueOf(&v).Elem(), raw, ""); err != nil {
-		return v, ErrBadRequest.WithMessage("query parameter %s: %s", name, err).WithError(err)
-	}
-	return v, nil
+	return parseAs[T](b.Query(name), "query parameter", name)
 }
 
 // QueryAsDefault returns a query parameter parsed into T, or def when the
 // parameter is absent, empty, or does not parse.
 func (b *Base) QueryAsDefault[T any](name string, def T) T {
-	if b.Query(name) == "" {
-		return def
-	}
-	v, err := b.QueryAs[T](name)
-	if err != nil {
-		return def
-	}
-	return v
+	return ParseValueDefault(b.Query(name), def)
 }
 
 // QueryAsOK returns a query parameter parsed into T and reports whether the
 // query holds it. An empty value is a value: "?page=" answers the zero value
 // of T, true and no error.
 func (b *Base) QueryAsOK[T any](name string) (T, bool, error) {
-	var v T
 	raw, ok := b.QueryOK(name)
 	if !ok {
+		var v T
 		return v, false, nil
 	}
-	if err := setScalar(reflect.ValueOf(&v).Elem(), raw, ""); err != nil {
-		return v, true, ErrBadRequest.WithMessage("query parameter %s: %s", name, err).WithError(err)
-	}
-	return v, true, nil
+	v, err := parseAs[T](raw, "query parameter", name)
+	return v, true, err
 }
 
 // QueryAllAs returns every value of a repeated query parameter, parsed into T:
@@ -545,6 +517,17 @@ func ParseValue[T any](s string) (T, error) {
 	var v T
 	if err := setScalar(reflect.ValueOf(&v).Elem(), s, ""); err != nil {
 		return v, err
+	}
+	return v, nil
+}
+
+// parseAs parses raw into T and names the value that failed, so the client
+// reads which parameter it got wrong. kind names the place the value came
+// from, such as "query parameter".
+func parseAs[T any](raw, kind, name string) (T, error) {
+	v, err := ParseValue[T](raw)
+	if err != nil {
+		return v, ErrBadRequest.WithMessage("%s %s: %s", kind, name, err).WithError(err)
 	}
 	return v, nil
 }
@@ -608,14 +591,7 @@ func (b *Base) FormAs[T any](name string) (T, error) {
 	if err := b.parseForm(); err != nil {
 		return v, err
 	}
-	raw := b.req.PostForm.Get(name)
-	if raw == "" {
-		return v, nil
-	}
-	if err := setScalar(reflect.ValueOf(&v).Elem(), raw, ""); err != nil {
-		return v, ErrBadRequest.WithMessage("form field %s: %s", name, err).WithError(err)
-	}
-	return v, nil
+	return parseAs[T](b.req.PostForm.Get(name), "form field", name)
 }
 
 // FormFile returns an uploaded file from a multipart body. The caller closes

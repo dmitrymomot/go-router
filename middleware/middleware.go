@@ -33,16 +33,11 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/dmitrymomot/go-router"
 )
-
-// statusOf returns the status that the client sees, whether the handler wrote
-// it or an error will produce it.
-func statusOf[C router.Context](c C, err error) int {
-	return router.ResolveStatus(c.Response(), err)
-}
 
 // skipped reports whether the config asks to pass this request through.
 func skipped[C router.Context](skip func(router.Context) bool, c C) bool {
@@ -66,6 +61,23 @@ func originOf(s string) (string, bool) {
 		return "", false
 	}
 	return strings.ToLower(u.Scheme + "://" + u.Host), true
+}
+
+// checkOrigin returns s as a bare origin, and panics when it is not one.
+// setting names the config field that holds it and hint names the way out that
+// the field offers, so the message says which entry to fix and what to reach
+// for instead.
+//
+// Every config that takes an origin goes through it, so that a typo reads the
+// same wherever it sits, and so that the canonical form the check produces is
+// the form the comparison later reads.
+func checkOrigin(setting, s, hint string) string {
+	canonical, ok := originOf(s)
+	if !ok {
+		panic("middleware: " + setting + " got " + strconv.Quote(s) +
+			`, which is not an origin; write a scheme and a host, as in "https://app.example"` + hint)
+	}
+	return canonical
 }
 
 // tooLarge maps an [http.MaxBytesError] that reached a middleware from a

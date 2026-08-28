@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -149,7 +148,7 @@ func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
 			// HSTS over plaintext says nothing: a client that reads it there
 			// reached the server over the very protocol the header forbids,
 			// and an attacker who can read it can strip it.
-			if hsts != "" && overTLS(c.Request()) {
+			if hsts != "" && router.SchemeOf(c.Request()) == "https" {
 				h.Set(router.HeaderStrictTransportSecurity, hsts)
 			}
 			return next(c)
@@ -167,17 +166,4 @@ func setting(v, fallback string) string {
 		return ""
 	}
 	return v
-}
-
-// overTLS reports whether the request reached the server over HTTPS. It reads
-// the request the way [router.Base.Scheme] does: the TLS state of the
-// connection first, then the X-Forwarded-Proto header that a proxy sets in
-// front of a plain connection, which [RealIPWithConfig] fills in from a
-// Forwarded header as well.
-func overTLS(req *http.Request) bool {
-	if req.TLS != nil {
-		return true
-	}
-	proto, _, _ := strings.Cut(req.Header.Get(router.HeaderXForwardedProto), ",")
-	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }

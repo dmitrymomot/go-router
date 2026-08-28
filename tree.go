@@ -248,6 +248,36 @@ func (n *node[C]) allowed() []string {
 	return out
 }
 
+// cacheAllow records the Allow header of every node that carries routes in
+// dst. The build calls it once the trie is whole, so that nothing writes to
+// the map after a request can reach it: the serving goroutines read it without
+// a lock, and a lazy fill on the first 405 would race them.
+//
+// The header lives here rather than on the node because every matched request
+// walks the trie and only a 405 and an auto-OPTIONS answer read it. A string
+// field on the node widens every node the walk touches, which costs the whole
+// hot path about two percent to spare the two cold ones.
+func (n *node[C]) cacheAllow(dst map[*node[C]]string) {
+	if len(n.routes) > 0 {
+		dst[n] = strings.Join(n.allowed(), ", ")
+	}
+	for _, c := range n.statics {
+		c.cacheAllow(dst)
+	}
+	for _, c := range n.templates {
+		c.cacheAllow(dst)
+	}
+	for _, c := range n.regexes {
+		c.cacheAllow(dst)
+	}
+	if n.param != nil {
+		n.param.cacheAllow(dst)
+	}
+	if n.wildcard != nil {
+		n.wildcard.cacheAllow(dst)
+	}
+}
+
 // matchState carries the information that a failed method lookup needs, so
 // that the router can answer 405 instead of 404.
 type matchState[C Context] struct {

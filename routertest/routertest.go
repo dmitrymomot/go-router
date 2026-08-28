@@ -69,12 +69,10 @@ func Host(host string) RequestOption {
 //
 //	res := routertest.Get(r, "/messages", routertest.HTMX())
 //
-// Pass [Header] for the other htmx request headers, such as HX-Target.
-//
-// The name is written out rather than taken from the router, because every
-// helper here works with any [http.Handler] and the package imports no router.
+// Pass [Header] for the other htmx request headers, such as
+// [router.HeaderHXTarget].
 func HTMX() RequestOption {
-	return Header("HX-Request", "true")
+	return Header(router.HeaderHXRequest, "true")
 }
 
 // Cookie adds a cookie to the request.
@@ -96,14 +94,14 @@ func JSONBody(v any, opts ...json.Options) RequestOption {
 		if err != nil {
 			panic("routertest: encode JSON body: " + err.Error())
 		}
-		setBody(req, "application/json", bytes.NewReader(data))
+		setBody(req, router.MIMEApplicationJSON, bytes.NewReader(data))
 	}
 }
 
 // FormBody encodes values as an HTML form body.
 func FormBody(values url.Values) RequestOption {
 	return func(req *http.Request) {
-		setBody(req, "application/x-www-form-urlencoded", strings.NewReader(values.Encode()))
+		setBody(req, router.MIMEApplicationForm, strings.NewReader(values.Encode()))
 	}
 }
 
@@ -197,7 +195,7 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 		rc = io.NopCloser(r)
 	}
 	req.Body = rc
-	req.Header.Set("Content-Type", contentType)
+	req.Header.Set(router.HeaderContentType, contentType)
 	if l, ok := r.(interface{ Len() int }); ok {
 		req.ContentLength = int64(l.Len())
 	}
