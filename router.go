@@ -1254,17 +1254,19 @@ func countSegments(p string) (segs, statics int) {
 	return segs, statics
 }
 
-// scopeFor returns the innermost path scope that owns the path, or nil when no
-// scope claims it.
-func (r *Router[C]) scopeFor(host *hostEntry[C], path string) *scopeFallback[C] {
-	if len(r.scopes) == 0 {
+// scopeFor returns the innermost scope of the list that owns the path, or nil
+// when no scope claims it. The router keeps one list for the fallbacks and one
+// for the error handlers, and both are searched by the same rule: the scope
+// sits in the matched host, and its prefix covers the path.
+func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path string) *scopeFallback[C] {
+	if len(scopes) == 0 {
 		return nil
 	}
 	idx := int32(-1)
 	if host != nil {
 		idx = host.idx
 	}
-	for _, s := range r.scopes {
+	for _, s := range scopes {
 		if s.hostIdx == idx && s.covers(path) {
 			return s
 		}
@@ -1276,7 +1278,7 @@ func (r *Router[C]) scopeFor(host *hostEntry[C], path string) *scopeFallback[C] 
 // the ones of the innermost path scope that owns the path, else the ones of
 // the matched host, else the ones of the root.
 func (r *Router[C]) fallbackChains(host *hostEntry[C], path string) (notFound, notAllowed, options HandlerFunc[C]) {
-	if s := r.scopeFor(host, path); s != nil {
+	if s := scopeFor(r.scopes, host, path); s != nil {
 		return s.notFoundChain, s.notAllowedChain, s.optionsChain
 	}
 	if host != nil {
@@ -1507,6 +1509,11 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 	if path == "" || path[0] != '/' {
 		path = "/" + path
 	}
+	// The scope prefixes went through normalizePattern, so the path that they
+	// are compared against is trimmed by the same rule. The loop is written
+	// out rather than calling it: route is too large for the inliner to fold
+	// the call in, and paying a call on every request costs more than the
+	// three lines save. scopeErrorHandler, on the error path, does call it.
 	trimmed := path
 	for len(trimmed) > 1 && trimmed[len(trimmed)-1] == '/' {
 		trimmed = trimmed[:len(trimmed)-1]
@@ -1694,20 +1701,8 @@ func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 // the path and carries one, or nil when no such scope claims it.
 func (r *Router[C]) scopeErrorHandler(host *hostEntry[C], u *url.URL) ErrorHandlerFunc[C] {
 	path, _ := requestPath(u)
-	if path == "" || path[0] != '/' {
-		path = "/" + path
-	}
-	for len(path) > 1 && path[len(path)-1] == '/' {
-		path = path[:len(path)-1]
-	}
-	idx := int32(-1)
-	if host != nil {
-		idx = host.idx
-	}
-	for _, s := range r.errScopes {
-		if s.hostIdx == idx && s.covers(path) {
-			return s.errHandler
-		}
+	if s := scopeFor(r.errScopes, host, normalizePattern(path)); s != nil {
+		return s.errHandler
 	}
 	return nil
 }
