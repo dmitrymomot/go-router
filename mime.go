@@ -1,24 +1,47 @@
 package router
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Header names that the router and the middleware set or read.
 const (
-	HeaderAccept             = "Accept"
-	HeaderAllow              = "Allow"
-	HeaderAuthorization      = "Authorization"
-	HeaderCacheControl       = "Cache-Control"
-	HeaderConnection         = "Connection"
-	HeaderContentDisposition = "Content-Disposition"
-	HeaderContentLength      = "Content-Length"
-	HeaderContentType        = "Content-Type"
-	HeaderLastEventID        = "Last-Event-Id"
-	HeaderLocation           = "Location"
-	HeaderRetryAfter         = "Retry-After"
-	HeaderVary               = "Vary"
-	HeaderXAccelBuffering    = "X-Accel-Buffering"
-	HeaderXForwardedFor      = "X-Forwarded-For"
-	HeaderXForwardedProto    = "X-Forwarded-Proto"
-	HeaderXRealIP            = "X-Real-IP"
-	HeaderXRequestID         = "X-Request-Id"
+	HeaderAccept                          = "Accept"
+	HeaderAcceptEncoding                  = "Accept-Encoding"
+	HeaderAllow                           = "Allow"
+	HeaderAuthorization                   = "Authorization"
+	HeaderCacheControl                    = "Cache-Control"
+	HeaderConnection                      = "Connection"
+	HeaderContentDisposition              = "Content-Disposition"
+	HeaderContentEncoding                 = "Content-Encoding"
+	HeaderContentLength                   = "Content-Length"
+	HeaderContentSecurityPolicy           = "Content-Security-Policy"
+	HeaderContentSecurityPolicyReportOnly = "Content-Security-Policy-Report-Only"
+	HeaderContentType                     = "Content-Type"
+	HeaderCookie                          = "Cookie"
+	HeaderETag                            = "ETag"
+	HeaderForwarded                       = "Forwarded"
+	HeaderIfNoneMatch                     = "If-None-Match"
+	HeaderLastEventID                     = "Last-Event-Id"
+	HeaderLocation                        = "Location"
+	HeaderReferer                         = "Referer"
+	HeaderReferrerPolicy                  = "Referrer-Policy"
+	HeaderRetryAfter                      = "Retry-After"
+	HeaderSecFetchSite                    = "Sec-Fetch-Site"
+	HeaderStrictTransportSecurity         = "Strict-Transport-Security"
+	HeaderUserAgent                       = "User-Agent"
+	HeaderVary                            = "Vary"
+	HeaderWWWAuthenticate                 = "WWW-Authenticate"
+	HeaderXAccelBuffering                 = "X-Accel-Buffering"
+	HeaderXCSRFToken                      = "X-CSRF-Token"
+	HeaderXContentTypeOptions             = "X-Content-Type-Options"
+	HeaderXForwardedFor                   = "X-Forwarded-For"
+	HeaderXForwardedProto                 = "X-Forwarded-Proto"
+	HeaderXFrameOptions                   = "X-Frame-Options"
+	HeaderXHTTPMethodOverride             = "X-HTTP-Method-Override"
+	HeaderXRealIP                         = "X-Real-IP"
+	HeaderXRequestID                      = "X-Request-Id"
 
 	HeaderAccessControlAllowCredentials = "Access-Control-Allow-Credentials"
 	HeaderAccessControlAllowHeaders     = "Access-Control-Allow-Headers"
@@ -29,12 +52,33 @@ const (
 	HeaderAccessControlRequestHeaders   = "Access-Control-Request-Headers"
 	HeaderAccessControlRequestMethod    = "Access-Control-Request-Method"
 	HeaderOrigin                        = "Origin"
+
+	// The htmx protocol. The first group reaches the server, the second one
+	// answers, and HX-Trigger does both: it names the element that fired the
+	// request, and it names the events that the answer fires.
+	HeaderHXBoosted        = "HX-Boosted"
+	HeaderHXCurrentURL     = "HX-Current-URL"
+	HeaderHXHistoryRestore = "HX-History-Restore-Request"
+	HeaderHXPrompt         = "HX-Prompt"
+	HeaderHXRequest        = "HX-Request"
+	HeaderHXTarget         = "HX-Target"
+	HeaderHXTrigger        = "HX-Trigger"
+	HeaderHXTriggerName    = "HX-Trigger-Name"
+
+	HeaderHXLocation   = "HX-Location"
+	HeaderHXPushURL    = "HX-Push-Url"
+	HeaderHXRedirect   = "HX-Redirect"
+	HeaderHXRefresh    = "HX-Refresh"
+	HeaderHXReplaceURL = "HX-Replace-Url"
+	HeaderHXReswap     = "HX-Reswap"
+	HeaderHXRetarget   = "HX-Retarget"
 )
 
 // Media types that the render helpers write.
 const (
 	MIMEApplicationJSON            = "application/json"
 	MIMEApplicationJSONCharsetUTF8 = "application/json; charset=utf-8"
+	MIMEApplicationProblemJSON     = "application/problem+json"
 	MIMEApplicationForm            = "application/x-www-form-urlencoded"
 	MIMEMultipartForm              = "multipart/form-data"
 	MIMEOctetStream                = "application/octet-stream"
@@ -44,3 +88,85 @@ const (
 	MIMETextPlainCharsetUTF8       = "text/plain; charset=utf-8"
 	MIMETextEventStream            = "text/event-stream"
 )
+
+// negotiate returns the offer that the Accept header prefers, or an empty
+// string when the header takes none of them. The offers are in the order that
+// the server prefers, which settles a tie between two of the same quality.
+//
+// A client that sends no Accept header takes anything, so the first offer wins.
+func negotiate(accept string, offers []string) string {
+	if len(offers) == 0 {
+		return ""
+	}
+	if strings.TrimSpace(accept) == "" {
+		return offers[0]
+	}
+	best, bestQ := "", 0.0
+	for _, offer := range offers {
+		if q := acceptQuality(accept, offer); q > bestQ {
+			best, bestQ = offer, q
+		}
+	}
+	return best
+}
+
+// acceptQuality returns the quality that the Accept header gives one media
+// type, which is 0 for a type it refuses.
+//
+// The most specific range that fits the type decides, so
+// "text/*;q=0.9, text/plain;q=0" refuses plain text and still takes HTML.
+func acceptQuality(accept, offer string) float64 {
+	media, _, _ := strings.Cut(offer, ";")
+	typ, sub, ok := strings.Cut(strings.TrimSpace(media), "/")
+	if !ok {
+		return 0
+	}
+	q, rank := 0.0, -1
+	for part := range strings.SplitSeq(accept, ",") {
+		rng, params, _ := strings.Cut(part, ";")
+		rt, rs, ok := strings.Cut(strings.TrimSpace(rng), "/")
+		if !ok {
+			continue
+		}
+		switch r := matchRank(typ, sub, rt, rs); {
+		case r > rank:
+			rank, q = r, quality(params)
+		case r == rank && r >= 0:
+			q = max(q, quality(params))
+		}
+	}
+	return q
+}
+
+// matchRank reports how closely the media range rt/rs fits the type typ/sub: 2
+// for a match of both parts, 1 for a range of "type/*", 0 for "*/*" and -1 for
+// a range that does not fit at all.
+func matchRank(typ, sub, rt, rs string) int {
+	switch {
+	case rt == "*" && rs == "*":
+		return 0
+	case rs == "*" && strings.EqualFold(rt, typ):
+		return 1
+	case strings.EqualFold(rt, typ) && strings.EqualFold(rs, sub):
+		return 2
+	default:
+		return -1
+	}
+}
+
+// quality returns the q value of the parameters of a media range. A range
+// without one has quality 1, and one whose q does not parse has quality 0.
+func quality(params string) float64 {
+	for p := range strings.SplitSeq(params, ";") {
+		k, v, ok := strings.Cut(p, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+			continue
+		}
+		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || q < 0 {
+			return 0
+		}
+		return min(q, 1)
+	}
+	return 1
+}
