@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -70,6 +71,35 @@ func TestBindJSONRejectsMalformedBody(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestBindJSONTellsAnEmptyBodyFromAMalformedOne(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/users", func(c *tctx) error {
+		_, err := c.BindJSON[createUser]()
+		return err
+	})
+
+	// encoding/json/v2 reports an empty input and a truncated one as the same
+	// syntax error, so only the bytes that the decoder read tell them apart.
+	for _, tt := range []struct {
+		name  string
+		body  string
+		empty bool
+	}{
+		{name: "an empty body", body: "", empty: true},
+		{name: "a truncated body", body: `{"name":`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := post(r, "/users", MIMEApplicationJSON, tt.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			if got := strings.Contains(rec.Body.String(), "the request body is empty"); got != tt.empty {
+				t.Errorf("body = %s, want the empty body message: %v", rec.Body, tt.empty)
+			}
+		})
 	}
 }
 
@@ -178,6 +208,72 @@ func TestBindQueryReportsAParseError(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "cannot parse") {
 		t.Errorf("body does not say what went wrong: %q", rec.Body.String())
+	}
+}
+
+func TestBindQueryKeepsADecoderFaultOffTheWire(t *testing.T) {
+	// A target that is not a pointer to a struct is a fault of the handler.
+	// The client still sees a 400, because Bind falls through to the query
+	// string for a body that names no media type, but the text of the decoder
+	// belongs in the log and not in the answer.
+	r := newTestRouter()
+	r.GET("/s", func(c *tctx) error {
+		_, err := c.BindQuery[[]string]()
+		return err
+	})
+
+	rec := do(r, http.MethodGet, "/s?a=1")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "decode target") {
+		t.Errorf("body = %s, want no word of the decoder in it", rec.Body)
+	}
+
+	// The cause still reaches the error handler, which logs it.
+	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/s", nil))
+	var target []string
+	err := b.decodeInto(url.Values{"a": {"1"}}, &target, "query")
+	he, ok := errors.AsType[*HTTPError](err)
+	if !ok {
+		t.Fatalf("decodeInto = %v, want an HTTPError", err)
+	}
+	if he.Message != http.StatusText(http.StatusBadRequest) {
+		t.Errorf("Message = %q, want the standard text of the status", he.Message)
+	}
+	if he.Err == nil || !strings.Contains(he.Err.Error(), "decode target") {
+		t.Errorf("Err = %v, want the decoder fault as the internal cause", he.Err)
+	}
+}
+
+func TestBindQueryLeavesAnOptionalFieldNilForAnEmptyValue(t *testing.T) {
+	// A pointer is how a handler tells "the client did not send this" from a
+	// zero that it did send, and a cleared input posts an empty value.
+	type filter struct {
+		Page *int `query:"page"`
+	}
+	r := newTestRouter()
+	r.GET("/search", func(c *tctx) error {
+		in, err := c.BindQuery[filter]()
+		if err != nil {
+			return err
+		}
+		if in.Page == nil {
+			return c.String(http.StatusOK, "unset")
+		}
+		return c.Stringf(http.StatusOK, "%d", *in.Page)
+	})
+
+	for _, tt := range []struct{ target, want string }{
+		{target: "/search", want: "unset"},
+		{target: "/search?page=", want: "unset"},
+		{target: "/search?page=3", want: "3"},
+	} {
+		t.Run(tt.target, func(t *testing.T) {
+			if got := do(r, http.MethodGet, tt.target).Body.String(); got != tt.want {
+				t.Errorf("body = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -498,6 +594,102 @@ func TestBindFormUsesTheMultipartMemoryOfTheRouter(t *testing.T) {
 				t.Errorf("body = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestMultipartTempFilesGoAwayWithTheRequest(t *testing.T) {
+	// Every shipped middleware hands the context a copy of the request, and
+	// net/http removes the temporary files of the request that it holds
+	// itself, so nothing removed the ones that the binder parsed into a copy.
+	// The request that carries no copy still parses into the one the server
+	// holds, and the two cleanups then meet on the same files.
+	copyRequest := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			c.SetRequest(c.Request().WithContext(c.Request().Context()))
+			return next(c)
+		}
+	}
+	// uploads answers the upload on a router that spills every part to disk.
+	uploads := func(mw ...Middleware[*tctx]) *Router[*tctx] {
+		r := newTestRouter()
+		r.MaxMultipartMemory(1)
+		r.Use(mw...)
+		r.POST("/avatars", func(c *tctx) error {
+			f, _, err := c.FormFile("avatar")
+			if err != nil {
+				return err
+			}
+			//nolint:errcheck // The test is done with it.
+			defer f.Close()
+			return c.String(http.StatusOK, "ok")
+		})
+		return r
+	}
+	mounted := func() http.Handler {
+		outer := newTestRouter()
+		outer.MountRouter("/api", uploads())
+		return outer
+	}
+
+	for _, tt := range []struct {
+		name   string
+		target string
+		build  func() http.Handler
+	}{
+		{
+			name:   "a middleware that replaced the request",
+			target: "/avatars",
+			build:  func() http.Handler { return uploads(copyRequest) },
+		},
+		{
+			// The router copies the request itself to strip the prefix.
+			name:   "a mounted router",
+			target: "/api/avatars",
+			build:  mounted,
+		},
+		{
+			name:   "no middleware at all",
+			target: "/avatars",
+			build:  func() http.Handler { return uploads() },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("TMPDIR", dir) // Where a part that spills lands.
+
+			srv := httptest.NewServer(tt.build())
+			defer srv.Close()
+
+			body, ct := multipartBody(t, nil, upload{field: "avatar", name: "a.png", content: strings.Repeat("x", 2048)})
+			res, err := srv.Client().Post(srv.URL+tt.target, ct, strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			//nolint:errcheck // The status is what the test reads.
+			res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", res.StatusCode)
+			}
+			srv.Close()
+
+			if n := waitForTempFiles(dir, 0); n != 0 {
+				t.Errorf("%d temporary file(s) left behind in %s", n, dir)
+			}
+		})
+	}
+}
+
+// waitForTempFiles waits for the multipart temporary files under dir to reach
+// want, and answers with the count that it saw last. The request removes them
+// once its context ends, which the server does after the handler returns.
+func waitForTempFiles(dir string, want int) int {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		names, _ := filepath.Glob(filepath.Join(dir, "multipart-*"))
+		if len(names) == want || time.Now().After(deadline) {
+			return len(names)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -840,6 +1032,109 @@ func TestStrictBindFillsOnlyTaggedFields(t *testing.T) {
 	}
 }
 
+func TestStrictBindFillsOnlyTaggedFieldsOfAJSONBody(t *testing.T) {
+	type profile struct {
+		City  string `json:"city"`
+		Level int
+	}
+	type user struct {
+		Name    string    `json:"name"`
+		Profile profile   `json:"profile"`
+		Friends []profile `json:"friends"`
+		Since   time.Time `json:"since"`
+		IsAdmin bool
+	}
+	handler := func(c *tctx) error {
+		in, err := c.Bind[user]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%s/%v/%s/%d/%d/%d",
+			in.Name, in.IsAdmin, in.Profile.City, in.Profile.Level,
+			len(in.Friends), in.Since.Year())
+	}
+	// json/v2 matches an untagged exported field under its exact Go name, so
+	// that name is what the request spells to reach a field no tag exposes.
+	body := `{"name":"bo","IsAdmin":true,"since":"2026-01-02T03:04:05Z",
+		"profile":{"city":"lviv","Level":9},"friends":[{"city":"kyiv","Level":8}]}`
+
+	loose := newTestRouter()
+	loose.POST("/users", handler)
+	if got, want := post(loose, "/users", MIMEApplicationJSON, body).Body.String(), "bo/true/lviv/9/1/2026"; got != want {
+		t.Errorf("loose body = %q, want %q", got, want)
+	}
+
+	// Strict binding blanks the untagged field of the value and of every
+	// struct it holds, and leaves a type that decodes itself alone.
+	strict := newTestRouter()
+	strict.StrictBind(true)
+	strict.POST("/users", handler)
+	if got, want := post(strict, "/users", MIMEApplicationJSON, body).Body.String(), "bo/false/lviv/0/1/2026"; got != want {
+		t.Errorf("strict body = %q, want %q", got, want)
+	}
+}
+
+// strictNode nests into itself, which is what makes the walk of the strict
+// binder follow the values it holds rather than the types it reads.
+type strictNode struct {
+	Label string      `json:"label"`
+	Next  *strictNode `json:"next"`
+	Depth int
+}
+
+// strictCoin reads its own JSON, so its own code decides which of its fields a
+// request reaches and the strict binder leaves them alone.
+type strictCoin struct {
+	Amount int
+	Code   string
+}
+
+func (c *strictCoin) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	_, err := fmt.Sscanf(s, "%d %s", &c.Amount, &c.Code)
+	return err
+}
+
+func TestStripUntaggedWalksTheValuesItHolds(t *testing.T) {
+	type in struct {
+		Node  *strictNode           `json:"node"`
+		Items map[string]strictNode `json:"items"`
+		Names map[string]string     `json:"names"`
+		Price strictCoin            `json:"price"`
+		Loose string
+	}
+	v := in{
+		Node:  &strictNode{Label: "a", Depth: 3, Next: &strictNode{Label: "b", Depth: 4}},
+		Items: map[string]strictNode{"x": {Label: "c", Depth: 5}},
+		Names: map[string]string{"k": "v"},
+		Price: strictCoin{Amount: 12, Code: "EUR"},
+		Loose: "reached",
+	}
+	stripUntagged(reflect.ValueOf(&v).Elem())
+
+	if v.Loose != "" {
+		t.Errorf("Loose = %q, want the untagged field blanked", v.Loose)
+	}
+	if v.Node.Label != "a" || v.Node.Depth != 0 {
+		t.Errorf("Node = %+v, want the label kept and the depth blanked", *v.Node)
+	}
+	if v.Node.Next.Depth != 0 {
+		t.Errorf("Node.Next = %+v, want the walk to reach through a pointer", *v.Node.Next)
+	}
+	if got := v.Items["x"]; got.Label != "c" || got.Depth != 0 {
+		t.Errorf("Items[x] = %+v, want the walk to reach a map value", got)
+	}
+	if v.Names["k"] != "v" {
+		t.Errorf("Names = %v, want a map of strings left alone", v.Names)
+	}
+	if want := (strictCoin{Amount: 12, Code: "EUR"}); v.Price != want {
+		t.Errorf("Price = %+v, want %+v: a type that decodes itself keeps what it read", v.Price, want)
+	}
+}
+
 func TestStrictBindKeepsEmbeddedTaggedFields(t *testing.T) {
 	type page struct {
 		Offset int `query:"offset"`
@@ -946,6 +1241,12 @@ func TestParseValue(t *testing.T) {
 	empty, err := ParseValue[int]("")
 	if err != nil || empty != 0 {
 		t.Errorf("ParseValue of an empty string = %d, %v", empty, err)
+	}
+	// The zero value of a pointer is nil, so an empty string yields nil and
+	// not a pointer to a zero.
+	unset, err := ParseValue[*int]("")
+	if err != nil || unset != nil {
+		t.Errorf("ParseValue[*int] of an empty string = %v, %v", unset, err)
 	}
 	when, err := ParseValue[time.Time]("2026-01-02T03:04:05Z")
 	if err != nil || when.Year() != 2026 {

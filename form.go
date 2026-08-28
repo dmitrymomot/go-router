@@ -22,7 +22,8 @@ import (
 // It handles strings, booleans, the integer and float kinds, [time.Duration],
 // any type that implements [encoding.TextUnmarshaler] such as [time.Time],
 // pointers to those, slices of those, and embedded structs. A time.Time field
-// that carries a format tag reads that layout instead.
+// that carries a format tag reads that layout instead, and a byte slice takes
+// the bytes of the value as they arrived.
 //
 // It keeps decoding after a value that does not fit and returns one
 // [FieldError] per such value, so a form with three bad fields reports three.
@@ -210,9 +211,11 @@ func lookupValues(vals url.Values, keys []string) (string, []string, bool) {
 	return "", nil, false
 }
 
+// indirectType returns the type that t holds, through as many pointers as it
+// takes to reach a value.
 func indirectType(t reflect.Type) reflect.Type {
-	if t.Kind() == reflect.Pointer {
-		return t.Elem()
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
 	}
 	return t
 }
@@ -239,17 +242,19 @@ func setField(fv reflect.Value, raw []string, layout string) error {
 // setScalar parses s into a single value. layout is the format tag of the
 // field, empty for a field that carries none.
 func setScalar(fv reflect.Value, s, layout string) error {
+	// An empty value leaves a non-string field at its zero value, so that
+	// "?limit=" does not fail. It comes before the pointer branch, because the
+	// zero value of a pointer is nil: a cleared input leaves the field nil,
+	// which is how a handler tells it from a zero that the client sent.
+	if s == "" && indirectType(fv.Type()).Kind() != reflect.String {
+		return nil
+	}
+
 	if fv.Kind() == reflect.Pointer {
 		if fv.IsNil() {
 			fv.Set(reflect.New(fv.Type().Elem()))
 		}
 		return setScalar(fv.Elem(), s, layout)
-	}
-
-	// An empty value leaves a non-string field at its zero value, so that
-	// "?limit=" does not fail.
-	if s == "" && fv.Kind() != reflect.String {
-		return nil
 	}
 
 	// A layout beats the TextUnmarshaler of time.Time, which reads RFC 3339 and
@@ -265,6 +270,14 @@ func setScalar(fv reflect.Value, s, layout string) error {
 			}
 			return nil
 		}
+	}
+
+	// A byte slice takes the bytes of the value itself. setField keeps such a
+	// field out of the per-element path, because a request that names it once
+	// sends one string and not a list of numbers.
+	if fv.Kind() == reflect.Slice && fv.Type().Elem().Kind() == reflect.Uint8 {
+		fv.SetBytes([]byte(s))
+		return nil
 	}
 
 	switch fv.Kind() {

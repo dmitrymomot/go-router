@@ -75,6 +75,65 @@ func TestSetScalarFillsAPointer(t *testing.T) {
 	}
 }
 
+func TestSetScalarLeavesAPointerNilForAnEmptyValue(t *testing.T) {
+	var dst struct {
+		Page *int
+		Name *string
+	}
+	rv := reflect.ValueOf(&dst).Elem()
+
+	if err := setScalar(rv.Field(0), "", ""); err != nil {
+		t.Fatalf("setScalar: %v", err)
+	}
+	if dst.Page != nil {
+		t.Errorf("Page = %d, want nil for an empty value", *dst.Page)
+	}
+
+	// A string field takes an empty value, so a pointer to one still fills.
+	if err := setScalar(rv.Field(1), "", ""); err != nil {
+		t.Fatalf("setScalar: %v", err)
+	}
+	if dst.Name == nil || *dst.Name != "" {
+		t.Errorf("Name = %v, want a pointer to an empty string", dst.Name)
+	}
+}
+
+func TestSetScalarFillsAByteSlice(t *testing.T) {
+	var dst struct {
+		Data  []byte
+		Extra *[]byte
+	}
+	rv := reflect.ValueOf(&dst).Elem()
+	if err := setScalar(rv.Field(0), "abc", ""); err != nil {
+		t.Fatalf("setScalar: %v", err)
+	}
+	if string(dst.Data) != "abc" {
+		t.Errorf("Data = %q, want %q", dst.Data, "abc")
+	}
+	if err := setScalar(rv.Field(1), "xyz", ""); err != nil {
+		t.Fatalf("setScalar: %v", err)
+	}
+	if dst.Extra == nil || string(*dst.Extra) != "xyz" {
+		t.Errorf("Extra = %v, want a pointer to %q", dst.Extra, "xyz")
+	}
+}
+
+func TestDecodeValuesFillsAByteSlice(t *testing.T) {
+	var got struct {
+		Data []byte `query:"data"`
+	}
+	fields, err := decodeValues(url.Values{"data": {"abc"}}, &got, "query", false)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(fields) != 0 {
+		t.Fatalf("field errors = %v, want none", fields)
+	}
+	if string(got.Data) != "abc" {
+		t.Errorf("Data = %q, want %q", got.Data, "abc")
+	}
+}
+
 func TestSetFieldFillsASlice(t *testing.T) {
 	var dst struct{ Tags []int }
 	fv := reflect.ValueOf(&dst).Elem().Field(0)

@@ -1,6 +1,8 @@
 package router
 
 import (
+	"context"
+	"encoding"
 	"encoding/json/v2"
 	"errors"
 	"io"
@@ -58,17 +60,29 @@ func (b *Base) Bind[T any]() (T, error) {
 
 // BindJSON decodes the JSON request body into a value of type T. It uses
 // encoding/json/v2, which rejects invalid UTF-8 and duplicate object names.
+//
+// A field that no json tag names reads the key that its own name spells, so a
+// body reaches a field that the type never meant to expose: a request that
+// spells IsAdmin fills an IsAdmin field. Tag every field the client sends, or
+// set [Router.StrictBind], which blanks the fields that no tag names, in the
+// value and in every struct it holds.
 func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 	var v T
-	body := b.limitedBody()
-	if err := json.UnmarshalRead(body, &v, b.jsonOptions(opts)...); err != nil {
-		if errors.Is(err, io.EOF) {
-			return v, ErrBadRequest.WithMessage("the request body is empty").WithError(err)
-		}
+	body := countingBody{r: b.limitedBody()}
+	if err := json.UnmarshalRead(&body, &v, b.jsonOptions(opts)...); err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return v, ErrPayloadTooLarge.WithError(err)
 		}
+		// encoding/json/v2 reports an empty body as a syntax error of its own,
+		// the same one that a truncated body reports, so the bytes that the
+		// decoder read are what tells the two apart.
+		if body.read == 0 {
+			return v, ErrBadRequest.WithMessage("the request body is empty").WithError(err)
+		}
 		return v, ErrBadRequest.WithMessage("malformed JSON body: %s", err).WithError(err)
+	}
+	if b.opts().strictBind {
+		stripUntagged(reflect.ValueOf(&v).Elem())
 	}
 	return v, validate(&v)
 }
@@ -212,13 +226,115 @@ func fieldErrors(err error) []FieldError {
 	return nil
 }
 
+// selfDecoders are the interfaces through which a type reads its own
+// representation. Such a type decides for itself which of its fields a request
+// reaches, which is why [stripUntagged] leaves it alone.
+var selfDecoders = [...]reflect.Type{
+	reflect.TypeFor[json.UnmarshalerFrom](),
+	reflect.TypeFor[json.Unmarshaler](),
+	reflect.TypeFor[encoding.TextUnmarshaler](),
+}
+
+// stripUntagged blanks every field that no json tag names, in rv and in the
+// values that rv holds. [Router.StrictBind] promises that a request fills only
+// the fields that a tag names, and the JSON decoder matches an untagged
+// exported field under the name that the field itself spells, so the promise
+// holds by clearing those fields once the decode is through.
+//
+// A type that reads its own JSON or its own text keeps what it read, as an
+// [encoding.TextUnmarshaler] does on the form path.
+func stripUntagged(rv reflect.Value) {
+	rt := rv.Type()
+	for _, it := range selfDecoders {
+		if rt.Implements(it) || reflect.PointerTo(rt).Implements(it) {
+			return
+		}
+	}
+
+	switch rv.Kind() {
+	case reflect.Pointer:
+		if !rv.IsNil() {
+			stripUntagged(rv.Elem())
+		}
+	case reflect.Slice, reflect.Array:
+		if !holdsFields(rt.Elem()) {
+			return
+		}
+		for i := range rv.Len() {
+			stripUntagged(rv.Index(i))
+		}
+	case reflect.Map:
+		if !holdsFields(rt.Elem()) {
+			return
+		}
+		// A map value is not addressable, so it comes out, loses the fields
+		// that no tag names, and goes back in.
+		for _, k := range rv.MapKeys() {
+			ev := reflect.New(rt.Elem()).Elem()
+			ev.Set(rv.MapIndex(k))
+			stripUntagged(ev)
+			rv.SetMapIndex(k, ev)
+		}
+	case reflect.Struct:
+		for _, f := range structFields(rt, "json") {
+			fv := rv.Field(f.index)
+			// An embedded struct promotes its fields, and each of them obeys
+			// the rule on its own. reflect sets those fields even when the
+			// type that carries them is unexported, which is why the check
+			// below belongs to the named fields alone.
+			if f.embedded {
+				stripUntagged(fv)
+				continue
+			}
+			if !fv.CanSet() {
+				continue
+			}
+			if f.tagged {
+				stripUntagged(fv)
+				continue
+			}
+			fv.SetZero()
+		}
+	}
+}
+
+// typeWalkLimit bounds the walk of [holdsFields]. A type that nests deeper
+// than this is one that no request describes, and the walk answers yes for it,
+// so that a strange type loses the fields that no tag names rather than
+// keeping them.
+const typeWalkLimit = 8
+
+// holdsFields reports whether a value of t can carry struct fields. It keeps
+// [stripUntagged] from walking a slice of bytes or a map of strings element by
+// element.
+func holdsFields(t reflect.Type) bool {
+	for range typeWalkLimit {
+		switch t.Kind() {
+		case reflect.Struct:
+			return true
+		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+			t = t.Elem()
+		default:
+			// An interface reads as a map and never as a struct of the
+			// application, so it holds no field that a tag could name.
+			return false
+		}
+	}
+	return true
+}
+
 // decodeInto runs the form decoder and turns its errors into a 400. It reports
 // every field that did not fit, in [HTTPError.Details], so that a form
 // re-renders with a message on each of them and not only on the first.
 func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {
 	fields, err := decodeValues(vals, dst, tag, b.opts().strictBind)
 	if err != nil {
-		return ErrBadRequest.WithMessage("%s", err).WithError(err)
+		// A target that is not a pointer to a struct is a fault of the handler
+		// and not of the request, so the text of the decoder goes to the log
+		// and the client reads the standard message of the status. The status
+		// stays a 400: [Base.Bind] reads the query string for a body that
+		// names no media type, which is the path a client reaches this on.
+		return ErrBadRequest.WithError(err)
 	}
 	if len(fields) == 0 {
 		return nil
@@ -230,6 +346,20 @@ func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {
 	return ErrBadRequest.WithMessage("invalid request").
 		WithDetails(fields).
 		WithError(errors.Join(errs...))
+}
+
+// countingBody counts the bytes that it handed out. [Base.BindJSON] reads
+// the count to tell an empty body from a malformed one, which the error of the
+// decoder does not say.
+type countingBody struct {
+	r    io.Reader
+	read int64
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	return n, err
 }
 
 // limitedBody caps the request body at the limit of the router.
@@ -270,7 +400,9 @@ func (b *Base) parseForm() error {
 		if memory <= 0 {
 			memory = defaultMaxMultipartMemory
 		}
-		err = b.req.ParseMultipartForm(memory)
+		if err = b.req.ParseMultipartForm(memory); err == nil {
+			removeSpilledParts(b.req)
+		}
 	} else {
 		err = b.req.ParseForm()
 	}
@@ -283,6 +415,30 @@ func (b *Base) parseForm() error {
 		b.formErr = ErrBadRequest.WithMessage("malformed form body").WithError(err)
 	}
 	return b.formErr
+}
+
+// removeSpilledParts hangs the temporary files of a multipart body on the
+// context of the request, which ends when the request does.
+//
+// net/http removes them itself, but from the request that the server holds,
+// and middleware hands the context a copy of that request. The binder parses
+// into the copy, so the server finds no form on the request it kept and
+// removes nothing, and the files sit on disk for the life of the process. The
+// context outlives the copy, so it is what the files hang on.
+//
+// It runs for a body that parsed. One that did not leaves no file behind,
+// because [multipart.Reader.ReadForm] removes its own on the way out.
+func removeSpilledParts(req *http.Request) {
+	form := req.MultipartForm
+	if form == nil || len(form.File) == 0 {
+		return
+	}
+	// The cleanup holds the form and never the [Base], which goes back to the
+	// pool and belongs to another request by the time this runs.
+	context.AfterFunc(req.Context(), func() {
+		//nolint:errcheck // A file that is gone already is the wanted outcome.
+		form.RemoveAll()
+	})
 }
 
 // ParamAs returns a route parameter parsed into T. T may be any type that
