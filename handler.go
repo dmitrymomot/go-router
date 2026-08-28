@@ -51,7 +51,9 @@ func WrapHandlerFunc[C Context](h http.HandlerFunc) HandlerFunc[C] {
 // The adapter keeps the request that the standard middleware passes down. When
 // that middleware also replaces the response writer, the adapter binds the
 // context to the replacement, then restores the outer [Response] and copies
-// the status back if the outer writer is still uncommitted.
+// the status back if the outer writer is still uncommitted. The
+// [Response.Before] hooks move to the replacement as well, so a hook that
+// writes a header from the status still runs, and runs once.
 //
 // The route parameters reach the request before the standard middleware runs,
 // so that it reads them with [http.Request.PathValue], next to the pattern
@@ -69,7 +71,11 @@ func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] 
 			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b.SetRequest(r)
 				if w != http.ResponseWriter(outer) {
-					b.res = &Response{ResponseWriter: w}
+					// The hooks come across, because the replacement is the
+					// response that commits from here on and the outer one
+					// then never runs them. Each still runs once: the restore
+					// below copies Committed rather than writing a header.
+					b.res = &Response{ResponseWriter: w, before: outer.before}
 				}
 				err = next(c)
 			})
