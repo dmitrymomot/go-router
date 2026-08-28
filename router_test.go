@@ -1832,3 +1832,39 @@ func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
 		})
 	}
 }
+
+// A route that Name, Meta or With registered is a route of the scope that
+// opened them, so Use on that scope refuses to arrive after it. The router
+// resolves the middleware of a scope when it compiles, so a Use that slipped
+// through would have wrapped the route above it.
+func TestUseAfterATaggedRoutePanics(t *testing.T) {
+	register := map[string]func(*Router[*tctx]){
+		"Name":  func(r *Router[*tctx]) { r.Name("u").GET("/u", echoRoute) },
+		"Meta":  func(r *Router[*tctx]) { r.Meta("op").GET("/u", echoRoute) },
+		"With":  func(r *Router[*tctx]) { r.With().GET("/u", echoRoute) },
+		"plain": func(r *Router[*tctx]) { r.GET("/u", echoRoute) },
+	}
+	for name, add := range register {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Use after a route that %s registered did not panic", name)
+				}
+			}()
+			r := newTestRouter()
+			add(r)
+			r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+		})
+	}
+}
+
+// A Group is a scope of its own, so the scope that opened it still takes
+// middleware afterwards.
+func TestUseAfterAGroupIsAllowed(t *testing.T) {
+	r := newTestRouter()
+	r.Group(func(g *Router[*tctx]) { g.GET("/a", echoRoute) })
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+	if err := r.Build(); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+}

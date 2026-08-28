@@ -179,6 +179,14 @@ type Router[C Context] struct {
 	// [Router.Routes]. Both stay nil until a route uses them.
 	named map[string]namedRoute
 	info  map[routeKey]routeInfo
+
+	// owner is the scope that opened this one as an extension of itself, which
+	// [Router.Name], [Router.Meta] and [Router.With] do. A route that such a
+	// scope registers is a route of the owner as the application reads it, so
+	// it marks the owner too and [Router.Use] still refuses to arrive after
+	// it. It is nil for the root and for a scope that [Router.Group],
+	// [Router.Route] or [Router.Host] opened, which are scopes of their own.
+	owner *Router[C]
 }
 
 // New returns a root router. newContext builds the application context for one
@@ -271,7 +279,12 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 		}
 		r.nameUsed = true
 	}
-	r.hasRoutes = true
+	// The scope that [Router.Name], [Router.Meta] or [Router.With] opened
+	// registers on behalf of the one above it, so the route counts for both
+	// and a later Use on either of them panics.
+	for s := r; s != nil; s = s.owner {
+		s.hasRoutes = true
+	}
 	r.regs = append(r.regs, registration[C]{
 		method:  method,
 		pattern: pattern,
@@ -348,8 +361,12 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 // Use adds middleware to this scope. It applies to every route that the scope
 // registers afterwards, and to every scope below it.
 //
-// Use panics after the scope registers its first route, because middleware that
-// arrives later would silently skip the routes above it.
+// Use panics after the scope registers its first route, because the router
+// resolves the middleware of a scope when it compiles, so middleware that
+// arrives later would silently wrap the routes above it as well. A route that
+// [Router.Name], [Router.Meta] or [Router.With] registered counts as a route of
+// the scope that opened them, so r.Name("u").GET(...) closes r to Use the way
+// r.GET(...) does. Open a [Router.Group] for middleware that comes later.
 func (r *Router[C]) Use(mws ...Middleware[C]) {
 	if r.hasRoutes {
 		panic("router: Use must come before the routes of a scope; open a Group for later middleware")
@@ -400,7 +417,9 @@ func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 //
 //	r.With(rateLimit).POST("/login", login)
 func (r *Router[C]) With(mws ...Middleware[C]) *Router[C] {
-	return r.newChild("", slices.Clone(mws))
+	c := r.newChild("", slices.Clone(mws))
+	c.owner = r
+	return c
 }
 
 // Pre adds middleware that runs before the router matches. It may replace the
@@ -484,7 +503,7 @@ func (r *Router[C]) tag() *Router[C] {
 		return r
 	}
 	c := r.newChild("", nil)
-	c.tagged = true
+	c.tagged, c.owner = true, r
 	return c
 }
 
