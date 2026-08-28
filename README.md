@@ -103,6 +103,10 @@ func createUser(c *Context) error {
 }
 ```
 
+`http.ListenAndServe` keeps the example short. Reach for
+[the `serve` package](#running-the-server) for a server that stops on a signal and
+drains what is in flight.
+
 ## The context
 
 `router.Context` is an interface with one unexported method, so the only way to
@@ -121,15 +125,43 @@ type Context struct {
 
 | | |
 |---|---|
-| `Request()` `SetRequest(r)` `Response()` | the request and the response wrapper |
-| `Param(name)` `ParamAs[T](name)` `ParamNames()` `RoutePattern()` | route parameters |
-| `Host()` `RouteHost()` | the request host, and the host pattern that matched |
-| `Query(name)` `QueryAs[T](name)` `QueryAsDefault(name, def)` | query parameters |
-| `Bind[T]()` `BindJSON[T]()` `BindForm[T]()` `BindQuery[T]()` | request decoding |
-| `JSON` `String` `Stringf` `HTML` `Blob` `Stream` `NoContent` `Redirect` `Attachment` | response rendering |
-| `Render` `RenderStream` | template components, such as [templ](https://templ.guide) |
+| `Request()` `SetRequest(r)` `Response()` `ResponseWriter()` | the request and the response wrapper |
+| `Method()` `Path()` `URL()` `Header()` `SetHeader(k, v)` | the request line and its headers |
+| `Param(name)` `ParamOK(name)` `ParamAs[T](name)` `ParamNames()` `RoutePattern()` | route parameters |
+| `Host()` `RouteHost()` `Scheme()` `IsTLS()` `IsWebSocket()` | the host, the scheme and the kind of connection |
+| `UserAgent()` `Referer()` `Accepts(offers...)` | what the client says about itself |
+| `Query(name)` `QueryOK(name)` `QueryAs[T](name)` `QueryAsDefault(name, def)` `QueryAllAs[T](name)` `QueryValues()` | query parameters |
+| `FormValue(name)` `FormDefault(name, def)` `FormAs[T](name)` `FormValues()` | fields of the posted body |
+| `FormFile(name)` `FormFiles(name)` `MultipartForm()` | uploaded files |
+| `Bind[T]()` `BindJSON[T]()` `BindForm[T]()` `BindQuery[T]()` `BindPath[T]()` `BindHeader[T]()` | [request decoding](#binding) |
+| `Cookie(name)` `SetCookie(c)` `SignedCookie` `SetSignedCookie` `AddFlash` `Flashes` | [cookies and flash messages](#signed-cookies-and-flash-messages) |
+| `JSON` `JSONPretty` `String` `Stringf` `HTML` `Blob` `Stream` `NoContent` `Redirect` | response rendering |
+| `File` `FileFS` `AttachmentFile` `InlineFile` `Attachment` `Inline` | [files and downloads](#files-and-downloads) |
+| `Render` `RenderStream` `RenderPartial` | template components, such as [templ](https://templ.guide) |
+| `HXRequest()` `HXTarget()` `HXRedirect(url)` and the rest | [htmx](#htmx) |
+| `SSE(status, opts...)` `LastEventID()` | [server-sent events](#server-sent-events) |
 | `Set(k, v)` `Get(k)` | per-request values |
+| `Logger()` | the logger of the router, or `slog.Default` |
 | `Deadline` `Done` `Err` `Value` | `Base` is a `context.Context` |
+
+`Scheme` reads the TLS state of the connection first, then `X-Forwarded-Proto`.
+It takes that header only when it names `http` or `https`, because the value
+goes back to the client in the `Location` of an absolute redirect. Trust it as
+far as you trust the proxy in front of the server, and not at all where clients
+connect directly.
+
+`Accepts` returns the offer the client prefers, or an empty string when it takes
+none. Name the offers in the order the server prefers, because that order
+settles a tie:
+
+```go
+switch c.Accepts(router.MIMETextHTML, router.MIMEApplicationJSON) {
+case router.MIMETextHTML:
+	return c.Render(http.StatusOK, view.Order(order))
+default:
+	return c.JSON(http.StatusOK, order)
+}
+```
 
 Because `Base` implements `context.Context`, you pass the context itself
 straight to anything that takes one:
@@ -149,9 +181,25 @@ func (c *Context) Admin() bool { return c.User != nil && c.User.Role == "admin" 
 ```go
 r.GET(pattern, handler, middleware...)     // and HEAD POST PUT PATCH DELETE OPTIONS
 r.Handle(method, pattern, handler, ...)
-r.Any(pattern, handler, ...)               // every standard method
+r.Any(pattern, handler, ...)               // any method no explicit route answers
 r.Match([]string{"GET", "POST"}, pattern, handler, ...)
 ```
+
+`Any` registers **one** entry that answers whatever arrives, rather than one
+route per standard method, so it also answers a method no list holds, such as
+`QUERY` or a WebDAV method. An explicit method always wins, whichever
+registration came first:
+
+```go
+r.Any("/webhooks/{id}", forward)
+r.POST("/webhooks/{id}", record)   // POST reaches record, everything else forward
+```
+
+Such a route answers every method, so it never produces a 405 and never adds to
+an `Allow` header. `r.Routes()` reports it once, under the method `*`.
+
+`router.MethodQuery` is the `QUERY` method of RFC 10008, which `net/http` has no
+constant for yet.
 
 Routes can also answer one host; see [Host routing](#host-routing).
 
@@ -196,6 +244,33 @@ r.With(rateLimit).POST("/login", login)
 
 `Use` panics once the scope has routes, because middleware added later would
 silently skip the routes above it. Open a `Group` for that.
+
+A scope that carries a prefix owns its own fallbacks, so an API branch answers a
+miss as JSON while the pages around it answer with a page:
+
+```go
+r.Route("/api", func(g *router.Router[*Context]) {
+	g.NotFound(func(c *Context) error { return c.JSON(404, apiError{}) })
+	g.GET("/users/{id}", getUser)
+})
+```
+
+The middleware of the scope runs around that 404 and 405, the way the middleware
+of a host does. The innermost scope covering the path wins, and a prefix segment
+that holds a parameter still covers it: the scope of `/t/{tenant}` owns the 404
+of `/t/acme/typo`.
+
+`Pre` is the stage before matching. Middleware there sees the request while the
+path still decides the route, which is what a rewrite and a method override
+need:
+
+```go
+r.Pre(middleware.MethodOverride[Ctx])
+```
+
+Only the root accepts `Pre`, because a scope cannot own a stage that runs before
+matching picks the scope. Inside it `RoutePattern()` and `Param()` are still
+empty, and an error goes to the error handler of the root.
 
 ### Mount
 
@@ -319,6 +394,61 @@ Two consequences worth knowing before you reach for it:
 
 Reach for `MountRouter` when the subsystem genuinely wants its own context, and
 for `Mount` when it is the same application split across files.
+
+### Named routes and URL building
+
+`Name` opens a scope whose **next** route carries the name. `URL` then builds a
+path from it, so a link survives a change of pattern:
+
+```go
+r.Name("post").GET("/blog/{year}/{slug}", showPost)
+
+r.URL("post", map[string]string{"year": "2026", "slug": "hello"})  // "/blog/2026/hello", error
+r.MustURL("post", "year", "2026", "slug", "hello")                 // "/blog/2026/hello", panics
+```
+
+`URL` takes named parameters, not positional ones, so the call reads the same
+whichever order the pattern declares them in. It reports an error for a name no
+route carries, for a parameter the pattern declares and the map leaves out, and
+for one the map holds and the pattern does not. Each value is percent-encoded; a
+`{rest...}` value keeps its separators and every segment between them is
+encoded.
+
+`MustURL` panics instead, which is what you want where a link is built from
+constants. Reach for `URL` where a name or a value comes from data.
+
+A second route on one `Name` scope, and a name another route already carries,
+are both registration errors. The result is a path and not an absolute URL: a
+named route inside a host scope resolves to its path alone, because the host
+pattern carries parameters the route knows nothing about.
+
+`Meta` attaches an arbitrary value to the next routes, which `r.Routes()` reports
+back. The router never reads it, so it carries whatever a generator outside this
+module puts on a route:
+
+```go
+r.Name("user").Meta(openapi.Op{Summary: "read a user"}).GET("/users/{id}", getUser)
+```
+
+`r.Routes()` returns every route with its method, pattern, host, name and meta.
+`r.Build()` compiles the trie now and returns a malformed or conflicting pattern
+as an error instead of panicking, which suits a table that comes from
+configuration and a test that asserts a conflict without `recover`.
+
+`r.Observe(fn)` calls `fn` once per request, after it is answered, with the
+status the client saw, the body size, the duration and the error that reached
+the error handler. It runs for a request that matched no route, one whose method
+no route answers, and one whose handler panicked, which is what a route-level
+metric needs and what wrapping each handler cannot give:
+
+```go
+r.Observe(func(c router.Context, status int, size int64, d time.Duration, err error) {
+	requests.WithLabelValues(c.RoutePattern(), strconv.Itoa(status)).Observe(d.Seconds())
+})
+```
+
+The observer runs after the error handler wrote the response, so it must not
+write to it. A router without one pays a single nil check per request.
 
 ## Host routing
 
@@ -514,13 +644,84 @@ r.NotFound(func(c *Context) error { ... })
 r.MethodNotAllowed(func(c *Context) error { ... })
 ```
 
+`router.ErrorHandler[C](exposeCause)` is that default handler with a switch. With
+`exposeCause` it writes the internal cause into the body as well, which is for
+development and nothing else; with false it is `DefaultErrorHandler` down to the
+bytes:
+
+```go
+if dev {
+	r.ErrorHandler(router.ErrorHandler[*app.Context](true))
+}
+```
+
 The router answers `405` with an `Allow` header on its own, answers `OPTIONS`
 with `204` and an `Allow` header, and serves `HEAD` from the `GET` handler.
+
+### Naming a status from outside the router
+
+`StatusCoder` lets a package that does not import the router choose the status of
+its own errors:
+
+```go
+func (e *NotFoundError) StatusCode() int { return http.StatusNotFound }
+```
+
+`StatusOf(err)` reads it after `HTTPError`. The message of such an error still
+never reaches the client, because only an `HTTPError` carries text meant for it.
+
+`ResolveStatus(res, err)` reports the status the client actually saw: the
+committed status when the handler already wrote one, otherwise the status `err`
+produces. Middleware needs both halves, because the error handler runs after the
+chain unwinds and the response is still uncommitted while the middleware reads
+it:
+
+```go
+err := next(c)
+status := router.ResolveStatus(c.Response(), err)
+```
+
+### Problem documents
+
+`ProblemError` carries the members of RFC 9457, and `ProblemErrorHandler` writes
+them as `application/problem+json`:
+
+```go
+r.ErrorHandler(router.ProblemErrorHandler[*app.Context](dev))
+
+return &router.ProblemError{
+	Type:   "https://example.com/probs/insufficient-funds",
+	Title:  "The account holds too little credit",
+	Status: http.StatusConflict,
+	Detail: "the balance is 30 and the transfer asks for 50",
+}
+```
+
+The handler answers every error, not only a `ProblemError`. An `HTTPError` brings
+its status, its message as the `detail` and its details as an `errors` member;
+any other error carries the standard text of its status alone. `ProblemError`
+also satisfies `StatusCoder`, so a router that keeps `DefaultErrorHandler`
+answers the same status in that handler's shape.
+
+### Panics
 
 A panic never kills the connection: the router recovers it and hands it to the
 error handler. `middleware.Recover` is still useful, because it catches the
 panic *inside* the chain, where a logger above it still records the request.
 `http.ErrAbortHandler` passes through both untouched.
+
+The internal cause of that 500 is a `*PanicValue`, so an error tracker reads the
+value and the stack as fields instead of cutting them out of a message:
+
+```go
+if pv, ok := errors.AsType[*router.PanicValue](err); ok {
+	tracker.Report(pv.Value, pv.Stack)
+}
+```
+
+The stack is capped at `DefaultStackSize`, 8 KiB, so a runaway recursion does not
+write megabytes into one log record. It reaches the error handler and never the
+client.
 
 ## Binding
 
@@ -534,6 +735,29 @@ id, err := c.ParamAs[uuid.UUID]("id")  // any type that parses from text
 page := c.QueryAsDefault("page", 1)
 ```
 
+Each source has a binder of its own, and each reads its own tag first:
+
+| | reads | tag |
+|---|---|---|
+| `Bind[T]()` | the media type decides | as below |
+| `BindJSON[T](opts...)` | the body as JSON | `json` |
+| `BindForm[T]()` | the posted body | `form`, then `json` |
+| `BindQuery[T]()` | the query string | `query`, then `json` |
+| `BindPath[T]()` | the parameters of the matched route | `param`, then `json` |
+| `BindHeader[T]()` | the request headers | `header`, then `json` |
+
+A tag that names nothing falls back to the field name itself. `net/http` stores
+a header under its canonical name, so a `header` tag matches in any case:
+`x-request-id` finds `X-Request-Id`. A path parameter the route does not declare
+leaves its field alone.
+
+```go
+type ref struct {
+	Org  string `param:"org"`
+	Repo string `param:"repo"`
+}
+```
+
 JSON uses `encoding/json/v2`, which rejects invalid UTF-8 and duplicate object
 names. Set options once per router:
 
@@ -541,12 +765,92 @@ names. Set options once per router:
 r.JSONOptions(json.RejectUnknownMembers(true))
 ```
 
-The form and query decoder reads the field name from the `form` or `query` tag,
-then the `json` tag, then the field name itself. It handles strings, booleans,
-numbers, `time.Duration`, anything that implements `encoding.TextUnmarshaler`
-(including `time.Time`), pointers, slices, and embedded structs.
+The form and query decoder handles strings, booleans, numbers, `time.Duration`,
+anything that implements `encoding.TextUnmarshaler` (including `time.Time`),
+pointers, slices, and embedded structs. A `format` tag names the layout of a
+time:
 
-Request bodies are capped at 4 MiB. Change it with `r.MaxBodyBytes(n)`.
+```go
+type report struct {
+	Day time.Time `query:"day" format:"2006-01-02"`
+}
+```
+
+Without one, a `time.Time` reads RFC 3339.
+
+### Field errors
+
+A request that does not fit reports **every** field that failed, not only the
+first, so a form re-renders with a message on each of them. The failures land in
+`HTTPError.Details` as a `[]FieldError`, and the default handler writes them
+under `details`:
+
+```json
+{"status":400,"error":"invalid request","details":[{"field":"age","message":"is not a number"}]}
+```
+
+`FieldError` is an ordinary error, so a type can report its own:
+
+```go
+func (in *CreateUser) Validate() error {
+	if !strings.Contains(in.Email, "@") {
+		return router.FieldError{Field: "email", Message: "is not an address"}
+	}
+	return nil
+}
+```
+
+Every `Bind` method calls `Validate` after it fills the value, so the check lives
+on the type it guards and nothing has to be registered. An error from it produces
+a 422. Return one `FieldError`, or several joined with `errors.Join`, and the
+client reads the failures field by field.
+
+### Strict binding
+
+By default a field no tag names still reads the key its own name spells, which is
+convenient and means a request can reach a field the type never meant to expose.
+`r.StrictBind(true)` fills only the fields a `form`, `query`, `json`, `param` or
+`header` tag names. It is opt-in, so the default behaviour is unchanged.
+
+### Values and forms
+
+`ParseValue[T]` is the binder's own scalar table, exposed on its own, for a
+string that came from somewhere else:
+
+```go
+d, err := router.ParseValue[time.Duration]("30s")
+port := router.ParseValueDefault(os.Getenv("PORT"), 8080)
+```
+
+An empty string yields the zero value of `T` and no error, as it does in a bound
+struct.
+
+`QueryAllAs[T]` reads a repeated query parameter:
+
+```go
+tags, err := c.QueryAllAs[string]("tag")   // ?tag=go&tag=http
+```
+
+The form accessors read the posted body **alone** and never the query string, so
+a parameter in the URL cannot forge a field of the form:
+
+```go
+name := c.FormValue("name")
+kind := c.FormDefault("kind", "note")
+age, err := c.FormAs[int]("age")
+vals, err := c.FormValues()
+
+f, fh, err := c.FormFile("avatar")       // the caller closes f
+files, err := c.FormFiles("attachment")  // one field, several files
+form, err := c.MultipartForm()
+```
+
+`FormValue` and `FormDefault` swallow the error of a body that does not parse,
+the way `Query` has none to report. Use `FormValues` to see it.
+
+Request bodies are capped at 4 MiB. Change it with `r.MaxBodyBytes(n)`, and the
+memory a multipart body may use before it spills to disk with
+`r.MaxMultipartMemory(n)`.
 
 > `encoding/json/v2` refuses to encode a `time.Duration` without a format tag.
 > Write `json:"ttl,format:nano"` or use a string.
@@ -678,6 +982,150 @@ gets an empty `200` for what was a 500.
 
 Keep the JSON handler for an API scope and mount the HTML one under the pages
 scope; see [Mounting a subsystem with its own context](#mounting-a-subsystem-with-its-own-context).
+
+## htmx
+
+`RenderPartial` writes the fragment for an htmx request and the full page for a
+normal one, so one route answers both a navigation and a swap:
+
+```go
+r.GET("/orders", func(c *app.Context) error {
+	orders, err := c.Store.Orders(c)
+	if err != nil {
+		return err
+	}
+	return c.RenderPartial(http.StatusOK, view.Orders(orders), view.OrderRows(orders))
+})
+```
+
+Two htmx requests read the whole page all the same, because both swap more of the
+document than a fragment covers: a boosted link or form, which replaces the body,
+and a request that restores a history entry. That leaves the fragment for the
+swap that asked for one.
+
+It adds a `Vary` naming those three request headers, so a shared cache keeps the
+answers apart. Both components go through `Render`, which buffers, so one that
+fails halfway answers 500 and leaves no partial page on the wire.
+
+The headers are readable and writable one by one:
+
+| reads the request | |
+|---|---|
+| `HXRequest()` `HXBoosted()` `HXHistoryRestore()` | which kind of request this is |
+| `HXTarget()` `HXTrigger()` `HXTriggerName()` | the element that fired it |
+| `HXPrompt()` `HXCurrentURL()` | what the user typed, and where from |
+
+| writes the answer | |
+|---|---|
+| `HXRedirect(url)` `HXLocation(url)` `HXRefresh()` | send the browser elsewhere |
+| `HXPushURL(url)` `HXReplaceURL(url)` | change the address bar |
+| `HXRetarget(sel)` `HXReswap(spec)` | change what is swapped, and how |
+| `HXTriggerEvent(name)` | fire a client-side event |
+
+A setter refuses a value carrying a line break, because a header that carries one
+splits into a header of its own.
+
+## Files and downloads
+
+```go
+c.File("invoices/2026-01.pdf")                       // from the working directory
+c.FileFS("dist/app.js", assets)                      // from an embed.FS
+c.AttachmentFile("exports/q1.csv", "q1-report.csv")  // the browser saves it
+c.InlineFile("invoices/7.pdf", "invoice-7.pdf")      // the browser opens it
+```
+
+The name is a slash-separated path inside the working directory. Every `..` comes
+out of it before the open and `os.Root` resolves what is left, so a name that came
+out of a request reaches no file outside that directory, not even through a
+symbolic link. A file the process cannot open answers `ErrNotFound`, and so does a
+directory; the reason reaches the log and never the client, because the layout of
+the disk is no answer to a request.
+
+```go
+r.GET("/invoices/{id}", func(c *app.Context) error {
+	if !c.User.Owns(c.Param("id")) {
+		return router.ErrForbidden
+	}
+	return c.File("invoices/" + c.Param("id") + ".pdf")
+})
+```
+
+The answer goes out through `http.ServeContent`, which sets the media type from
+the extension, answers a range request with 206 and a conditional one with 304.
+The disposition header goes out only once the file is open, so a miss answers a
+plain 404 that no browser saves to disk.
+
+`Attachment` and `Inline` take a body the process already holds in memory.
+`AttachmentFile` and `InlineFile` stream from disk instead, so a large export
+costs no copy per request and a download that lost the connection resumes.
+
+## Signed cookies and flash messages
+
+A `CookieCodec` signs a cookie value with HMAC-SHA256, so the server can tell that
+it wrote it:
+
+```go
+codec := router.NewCookieCodec(key)   // key from crypto/rand, 32 bytes or more
+
+c.SetSignedCookie(codec, &http.Cookie{
+	Name:     "uid",
+	Value:    user.ID,
+	Path:     "/",
+	MaxAge:   int(7 * 24 * time.Hour / time.Second),
+	Secure:   true,
+	HttpOnly: true,
+	SameSite: http.SameSiteLaxMode,
+})
+
+id, err := c.SignedCookie(codec, "uid")
+```
+
+The value **stays readable** by the client; the signature only proves the server
+wrote it. Encrypt anything the client must not read, or keep it on the server and
+put an identifier in the cookie.
+
+The signature covers the cookie name and an expiry as well as the value. A value
+therefore verifies under the name that signed it and under no other, which keeps
+it from moving out of one cookie into another, and a signature stops verifying
+once its expiry passes. `SetSignedCookie` takes that expiry from the cookie's own
+`MaxAge`, then `Expires`, then `CookieCodec.MaxAge`, so the browser never holds a
+cookie that stopped verifying.
+
+`NewCookieCodec` panics on a key shorter than `MinCookieKeyLen`, 32 bytes: a short
+key is almost always a password that reached the argument in place of a key, and a
+panic at start-up names that where a weak signature never does.
+
+### Flash messages
+
+A flash is a message a handler leaves for the next request, the way a POST that
+succeeds leaves "saved":
+
+```go
+if err := c.AddFlash(codec, router.Flash{Kind: "error", Message: "that name is taken"}); err != nil {
+	return err
+}
+return c.Redirect(http.StatusSeeOther, "/signup")
+```
+
+```go
+return c.Render(http.StatusOK, view.Signup(c.Flashes(codec)))
+```
+
+`Flashes` reads and clears in one call, which is the contract that makes a flash a
+flash: a message reaches one page and no more. A second call answers with nothing.
+The answer carries `Vary: Cookie`, so a shared cache cannot hand one user the
+messages of another.
+
+The messages live in a signed cookie and nowhere else. This is not a session
+package: it keeps no server-side store, mints no session identifier and collects
+nothing, and a message the browser drops is gone. That buys a server holding no
+state between two requests, and it costs room — `AddFlash` reports
+`ErrFlashTooLarge` once the cookie passes `MaxCookieSize`, 4096 bytes, and leaves
+the cookie already written in place. A flash carries a sentence and a kind, never
+a form.
+
+Call both before the handler writes the body. A header that a committed response
+gains never reaches the client.
 
 ## Server-sent events
 
@@ -850,12 +1298,33 @@ middleware.LoggerWithConfig[Ctx](middleware.LoggerConfig{
 function fits any router. It reaches the request through `c.Request()` and the
 matched route through `c.RoutePattern()`.
 
+One middleware per file, named after it:
+
+| | | stage |
+|---|---|---|
+| `Recover` | turns a panic into a 500, inside the chain | `Use` |
+| `RequestID` | reads or mints `X-Request-Id`, readable with `RequestIDFrom` | `Use` |
+| `RealIP` | rewrites `RemoteAddr` from the forwarding headers | `Use` |
+| `Logger` | one `log/slog` record per request | `Use` |
+| `Timeout` | a deadline on the request context | `Use` |
+| `CORS` | the cross-origin headers and the preflight answer | `Use` |
+| `Secure` | the security headers of an answer | `Use` |
+| `CSRF` | refuses a request another site made the browser send | `Use` |
+| `KeyAuth` `BasicAuth` | authentication, onto a typed field of your context | `Use` |
+| `RateLimit` | a token bucket per client | `Use` |
+| `BodyLimit` | caps the request body itself | `Use` |
+| `Decompress` | expands a `Content-Encoding: gzip` request body | `Use` |
+| `Gzip` | compresses the response body | `Use` |
+| `Rewrite` | rewrites the request path | `Pre` |
+| `MethodOverride` | turns a POST into the method the request names | `Pre` |
+
+`Rewrite` and `MethodOverride` belong in `Pre`, the stage that runs before
+matching. In `Use` the path and the method have already picked the route, and
+changing them there changes nothing.
+
 Two defaults are worth knowing: `CORS[Ctx]` allows every origin without
 credentials, and `Timeout[Ctx]` applies a deadline of `DefaultTimeout`, 30
 seconds.
-
-One middleware per file, named after it: `recover.go`, `requestid.go`,
-`realip.go`, `logger.go`, `cors.go`, `timeout.go`.
 
 Standard `func(http.Handler) http.Handler` middleware works through an adapter:
 
@@ -864,10 +1333,203 @@ r.Use(router.WrapMiddleware[*Context](gziphandler.GzipHandler))
 r.GET("/metrics", router.WrapHandler[*Context](promhttp.Handler()))
 ```
 
-`Timeout` puts a deadline on the request context and does not abandon a
-running handler, so your handler has to watch the context. Read `RealIP`
-before you trust it: use it only behind a proxy that rewrites the forwarding
-headers.
+`Timeout` puts a deadline on the request context and does not abandon a running
+handler, so your handler has to watch the context. `TimeoutWithConfig` **panics
+on a `Duration` of zero or less**: a middleware that reads a zero as "no
+deadline" answers a misconfigured server with a server that waits forever, which
+is the failure it exists to prevent. Use `Timeout` for the default, and `Skip` to
+leave a route out. `OnTimeout` replaces the status and the message, and receives
+the handler's error joined with `context.DeadlineExceeded`.
+
+`CORSWithConfig` **panics at construction** on an `AllowOrigins` entry that is not
+a bare scheme and host, and on `"*"` together with `AllowCredentials`. An origin
+with a path or a trailing slash matches no request that ever arrives, so it is a
+typo that would otherwise stay silent until a client hit it; `"*"` with
+credentials would let every site read the answers of a signed-in user. Reach
+anything else through `AllowOriginFunc`.
+
+## CSRF and security
+
+### The security headers
+
+`Secure` writes them before the handler runs, so an answer the handler wrote and
+an answer an error produced carry the same ones:
+
+| | default |
+|---|---|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `SAMEORIGIN` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Content-Security-Policy` | none, because a policy that fits every application does not exist |
+| `Strict-Transport-Security` | none |
+
+Assign `middleware.SecureOmit` to a field to turn one header off; a page that
+names its `frame-ancestors` in a policy has no use for `X-Frame-Options`.
+`CSPReportOnly` sends the policy as `Content-Security-Policy-Report-Only`, which
+reports what it would have blocked and blocks nothing, so a new policy can be
+measured before it takes effect.
+
+Set `HSTSMaxAge` only once the site is ready to serve every path over TLS
+forever: a browser that saw the header refuses plaintext until it expires, and no
+answer can take that back.
+
+It does not send `X-XSS-Protection`. Every current browser ignores it, and the
+filter it used to turn on introduced holes of its own.
+
+### CSRF
+
+`CSRF` reads `Sec-Fetch-Site` first. Every current browser sends that header,
+sets it from the request itself and lets no page touch it, so a request it labels
+`same-origin` or `none` passes. A request it labels anything else passes only when
+its `Origin` is one of `TrustedOrigins`.
+
+A client that sends no such header falls back to the double-submit cookie: the
+middleware writes a random token to a cookie, and an unsafe request has to send
+the same token back in a header or a form field. A page on another origin makes
+the browser send the cookie, but the same-origin policy keeps it from reading the
+value.
+
+```go
+r.Use(middleware.CSRFWithConfig[Ctx](middleware.CSRFConfig{
+	CookieSecure:   true,
+	CookieHTTPOnly: true,
+}))
+```
+
+A safe method gets the cookie and the token and skips both checks, which is what
+lets a page render the token into its forms:
+
+```go
+<input type="hidden" name="_csrf" value={ middleware.CSRFTokenFrom(c) }>
+```
+
+Every answer it handles carries `Vary: Cookie`, so a shared cache cannot hand one
+user the token of another. A malformed `TrustedOrigins` entry panics at
+construction, for the same reason `CORS` does.
+
+### Authentication
+
+Both validators run on **your** context type, so they write the caller they
+identified onto a typed field and the handler reads it without an assertion:
+
+```go
+r.Use(middleware.KeyAuth(func(c Ctx, key string) (bool, error) {
+	caller, err := app.Callers.ByKey(c, key)
+	if errors.Is(err, app.ErrNoCaller) {
+		return false, nil          // 401
+	}
+	if err != nil {
+		return false, err          // the status of that error
+	}
+	c.Caller = caller
+	return true, nil
+}))
+```
+
+The validator names the context type, so these two calls need no type argument.
+`KeyAuth` reads a bearer token from `Authorization` by default; point it at other
+places with `FromHeader`, `FromQuery`, `FromCookie` and `FromForm`. `BasicAuth`
+does RFC 7617 and sends the `WWW-Authenticate` challenge that makes a browser
+prompt. A config without a validator panics at construction.
+
+Compare a secret the application holds in memory with `middleware.SecureCompare`
+and never with `==`: a comparison that returns at the first byte that differs
+turns a search of the whole key space into a search of one byte at a time.
+
+### Rate limits and body limits
+
+```go
+r.Use(middleware.RateLimit(middleware.NewMemoryStore[Ctx](10, 30, time.Minute)))
+```
+
+`NewMemoryStore` is a token bucket per client: a rate per second, a burst, and how
+long an idle visitor is kept. `RateLimitStore` takes the application context, so a
+store backed by Redis reaches the connection as the type it is. It counts against
+`ClientIP` unless `KeyFunc` says otherwise, and a denial sets `Retry-After`. The
+wait is reported without taking a token, so a client that keeps knocking while it
+is denied does not push its own answer further away.
+
+`BodyLimit` caps the request body itself, which is what a handler that reads
+`Request.Body` or streams an upload needs; `r.MaxBodyBytes` caps only what `Bind`
+reads. Both fit together, and a body that runs past either reports
+`ErrPayloadTooLarge`.
+
+`Decompress` expands a `Content-Encoding: gzip` request body and caps the result
+at `DefaultMaxDecompressedSize`, 100 MiB. That cap is the one that counts once a
+body expands: a few hundred bytes of zeros become megabytes, so put `BodyLimit`
+above it to cap both halves.
+
+### RealIP and the trust set
+
+> **This is a change of behaviour.** `RealIP` used to take the **leftmost** entry
+> of the forwarding header. That entry is the one the client writes, so anyone
+> could send `X-Forwarded-For: 1.2.3.4` and become that address in the rate
+> limiter, the audit log and the geo check.
+
+It now walks the chain from the server outwards — the last entry first, the
+address of the connection past its end — and stops at the first hop outside the
+trust set. That hop is the nearest address the client could not forge. A
+connection no trusted proxy made keeps its own address, and the headers it carries
+go unread.
+
+The default set trusts the loopback, private and link-local ranges, which is where
+a proxy sits in a deployment that has one. Name the range your load balancer
+occupies instead:
+
+```go
+middleware.RealIPWithConfig[Ctx](middleware.RealIPConfig{
+	Trust: middleware.NewTrustSet(
+		middleware.TrustLoopback(false),
+		middleware.TrustPrivateNet(false),
+		middleware.TrustLinkLocal(false),
+		middleware.TrustPrefix(netip.MustParsePrefix("203.0.113.0/24")),
+	),
+})
+```
+
+Set `Leftmost: true` to bring the old reading back. Do that **only** where the
+proxy in front replaces the header outright rather than appending to it.
+
+It reads the `Forwarded` header of RFC 7239 first, then `X-Forwarded-For`, then
+`X-Real-Ip`. The `proto` of the hop it picked goes into `X-Forwarded-Proto`, where
+`Base.Scheme` and `Secure` read the scheme of the request.
+
+### Compression, rewrites and method override
+
+`Gzip` compresses the response body when the client accepts it, from
+`DefaultGzipMinLength`, 1024 bytes, up. It sends `Vary: Accept-Encoding` on every
+answer, compressed or not, because a cache that stores one answer under a key that
+does not name the encoding serves it to a client that cannot read it. A
+`text/event-stream` answer passes through uncompressed, because an event sitting in
+a compression buffer reaches the client at the end of the stream instead of at
+once.
+
+The wrapper sits **outside** `Response`, so `Response.Size` counts the compressed
+bytes that reached the client rather than the bytes the handler wrote. That is the
+number an access log wants; `Response.Status` is the status either way.
+
+`Rewrite` rewrites the path. `*` is the only wildcard, so a rule reads as the paths
+it rewrites, and `$1` to `$9` hold what each took:
+
+```go
+r.Pre(middleware.Rewrite[Ctx](
+	middleware.RewriteRule{Match: "/api/v1/*", To: "/v1/$1"},
+	middleware.RewriteRule{Match: "/legacy", To: "/"},
+))
+```
+
+The rules are an ordered slice and the first match wins; the path is rewritten
+once and never fed back through, so two rules cannot chain.
+
+`MethodOverride` is how an HTML form reaches `DELETE` without a line of
+JavaScript. It only ever upgrades a POST, and only to PUT, PATCH or DELETE: a POST
+that turned into a GET would leave a request a cache stores and a proxy repeats.
+
+```go
+r.Pre(middleware.MethodOverrideWithConfig[Ctx](middleware.MethodOverrideConfig{
+	Getter: middleware.MethodFromForm("_method"),
+}))
+```
 
 ## Static assets
 
@@ -966,6 +1628,85 @@ and `http.StripPrefix` serve it too. `Mount` differs in two ways: it registers
 `NotFound` handler or the error handler of the router renders. `MountHandler`
 answers a miss from `Config.NotFound` instead.
 
+`Config.RedirectDir` answers a request for a directory whose URL carries no
+trailing slash with a 301 to the same path and a slash. `/docs` and `/docs/` are
+different bases for a relative link, so an index writing `assets/app.css` reaches
+the wrong file under the unslashed one. The `Location` is relative, so it keeps
+the prefix that `StripPrefix` or `MountHandler` removed before this package saw
+the path. It answers only for a directory that holds the index, which is what
+keeps it clear of the SPA fallback. It is opt-in.
+
+## Running the server
+
+The `serve` package runs an `http.Server` that stops when its context does:
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+if err := serve.Run(ctx, r, serve.Config{Addr: ":8080"}); err != nil {
+	log.Fatal(err)
+}
+```
+
+`Run` binds the address, serves the handler, and drains the requests still in
+flight once the context is cancelled. It blocks for as long as the server runs and
+returns **nil** for the shutdown the context asked for; every other end is an
+error, be it an address in use, a certificate that does not load, or a drain that
+ran out of time. A context already done when `Run` is called serves nothing and
+returns nil, so a server starting inside a group whose context has failed reports
+no failure of its own.
+
+The package takes an `http.Handler`, so it never sees the context type of the
+router, and it serves a router, a mounted subsystem or any standard handler.
+
+| | |
+|---|---|
+| `Addr` `Network` | the address to bind; `Listener` replaces both |
+| `Listener` | a socket the process inherited, or one a test bound |
+| `TLSConfig` | used as it stands; the cert options only add to it |
+| `ReadHeaderTimeout` | the one deadline with a default, 10s; negative removes it |
+| `ReadTimeout` `WriteTimeout` `IdleTimeout` | no defaults |
+| `ShutdownTimeout` | how long the drain may take, 10s; negative closes at once |
+| `Logger` | what the server reports on its own, at error level |
+| `OnListen` | the bound address, once, before the first request |
+| `OnServer` | the `*http.Server` before it binds, for the rest of its fields |
+
+`ReadHeaderTimeout` is the one deadline the package sets for you, because it covers
+the header phase alone: no client needs seconds to write its headers, however long
+its body or the answer takes. `WriteTimeout` is the field to reach for last — it
+covers the whole response, so it cuts a long download, a slow report and an SSE
+stream off in the middle, and the client reads a truncated body rather than an
+error.
+
+The drain waits for the running handlers to return and **does not cancel their
+request contexts**, which is what makes it graceful: a request halfway through a
+transaction finishes it. A handler that runs until something tells it to stop, such
+as a stream or a long poll, therefore holds the drain until the timeout unless it
+has a signal of its own — `RegisterOnShutdown` from `OnServer` is that signal:
+
+```go
+serve.Config{
+	OnServer: func(s *http.Server) error {
+		s.RegisterOnShutdown(func() { close(stopStreams) })
+		return nil
+	},
+}
+```
+
+Serve HTTPS by passing a certificate. Several are allowed, and the handshake picks
+by name and key type:
+
+```go
+err := serve.Run(ctx, r, serve.Config{Addr: ":443"}, serve.CertFiles("cert.pem", "key.pem"))
+```
+
+`CertPEM` takes blocks the caller already holds, such as ones a secret store
+answered with, and `CertFS` reads them from an `embed.FS`. A certificate that fails
+to load stops `Run` before it binds. Passing one of these and no `TLSConfig` gets
+the defaults of the package: TLS 1.3 as the floor, and HTTP/2 offered ahead of
+HTTP/1.1.
+
 ## Context pooling
 
 `NewPooled` reuses contexts instead of allocating one per request, which
@@ -1017,18 +1758,71 @@ routertest.AssertEvents(t, res,
 )
 ```
 
+`MultipartBody` posts an upload, which is what exercises `FormFile`, `FormFiles`
+and `MultipartForm`. It writes the fields in name order, so one set of values
+always produces the same body:
+
+```go
+res := routertest.Do(r, http.MethodPost, "/avatars",
+	routertest.MultipartBody(
+		url.Values{"name": {"ann"}},
+		routertest.FilePart{Field: "avatar", Filename: "a.png", Content: png},
+	))
+```
+
+`NewContext` builds one context of your application, along with the recorder it
+answers into, so a handler runs under test without a router at all:
+
+```go
+c, rec := routertest.NewContext(t, newContext,
+	routertest.WithPattern("/users/{id}"),
+	routertest.WithParams(map[string]string{"id": "7"}))
+
+if err := getUser(c); err != nil {
+	t.Fatalf("getUser: %v", err)
+}
+if rec.Code != http.StatusOK {
+	t.Fatalf("status = %d", rec.Code)
+}
+```
+
+It takes the factory `router.New` takes, so the handler receives its own context
+type with its own fields filled in, and it seeds the route — the one thing a
+handler that reads a path parameter cannot do without. The context carries the
+router's defaults for the limits a request obeys, because no router configured it:
+no body limit, the multipart memory of `net/http`, and lenient binding. Parameters
+are ordered by name, since a map holds no order.
+
+`AssertGolden` compares against a file under `testdata`, and `-update` rewrites
+it, which is how the output of a template becomes the fixture later runs compare
+against:
+
+```go
+routertest.AssertGolden(t, "order.html", buf.Bytes())
+```
+
+```
+go test ./view -update
+```
+
+Read the rewritten file before you commit it: `-update` accepts whatever the code
+renders, including the change that broke it. The package registers the `-update`
+flag only when nothing else has; read that flag rather than declaring a second
+one, which the `flag` package refuses anyway.
+
 ## Performance
 
-Apple M3 Max, Go 1.27, one route set of 26 patterns. Run it yourself with
-`cd benchmarks && go test -bench . -benchmem`.
+Apple M3 Max, Go 1.27, one route set in the three pattern dialects. Run the
+comparison yourself with `just bench-compare`, and the benchmarks of this module
+alone, the host table below among them, with `just bench`.
 
 | | static | one parameter | eight segments, three parameters |
 |---|---|---|---|
-| **go-router**, pooled | 41 ns, 0 allocs | 47 ns, 0 allocs | 74 ns, 0 allocs |
-| **go-router** | 80 ns, 1 alloc | 84 ns, 1 alloc | 109 ns, 1 alloc |
-| chi | 117 ns, 2 allocs | 207 ns, 4 allocs | 294 ns, 4 allocs |
-| echo | 31 ns, 0 allocs | 39 ns, 0 allocs | 64 ns, 0 allocs |
-| `http.ServeMux` | 94 ns, 0 allocs | 97 ns, 1 alloc | 251 ns, 3 allocs |
+| **go-router**, pooled | 46 ns, 0 allocs | 52 ns, 0 allocs | 78 ns, 0 allocs |
+| **go-router** | 92 ns, 1 alloc | 97 ns, 1 alloc | 123 ns, 1 alloc |
+| chi | 122 ns, 2 allocs | 216 ns, 4 allocs | 312 ns, 4 allocs |
+| echo | 32 ns, 0 allocs | 39 ns, 0 allocs | 65 ns, 0 allocs |
+| `http.ServeMux` | 96 ns, 0 allocs | 98 ns, 1 alloc | 261 ns, 3 allocs |
 
 Without pooling, the one allocation is your context: route parameters land in
 an array inside `Base`, so matching itself allocates nothing for up to eight
@@ -1037,11 +1831,19 @@ context object at all — it looks the handler up and calls it with the request
 the server already allocated. `NewPooled` closes that gap; echo does the same
 thing by default and pays for it with the same caveats listed above.
 
+The unpooled row is about 7 percent slower than it was before the accessors on
+this page existed. `Base` grew from 368 to 408 bytes — a query cache, the parsed
+form error, the logger, the multipart limit and two mode flags — which pushes the
+per-request context from the 384-byte size class into the 416-byte one. That step
+is the whole of it: allocating 384 bytes costs 72 ns on this machine and 416 costs
+about 78. Pooling makes the size class free again, which is why the pooled row
+moved by 2 to 5 percent instead.
+
 Host routing costs the lookup that resolves it, and nothing else:
 
 | | fixed host | `{tenant}.example.com` | `*` | a host-free route |
 |---|---|---|---|---|
-| **go-router** | 89 ns, 1 alloc | 100 ns, 1 alloc | 92 ns, 1 alloc | 92 ns, 1 alloc |
+| **go-router** | 103 ns, 1 alloc | 105 ns, 1 alloc | 100 ns, 1 alloc | 99 ns, 1 alloc |
 
 Matching uses a compressed radix tree, the same structure echo uses, so a
 static route costs a few string comparisons rather than one lookup per
@@ -1072,8 +1874,23 @@ you.
   side inside one.
 - A host pattern carries no port, and an IP literal host is not routable.
 - Register every route before the first request. The router compiles its trie
-  once and refuses a later change.
+  once and refuses a later change. The same goes for the settings: `Use`, `Pre`,
+  `Name`, `Meta`, `Observe`, `Logger` and the limits all panic once the router has
+  served a request.
 - Pooling is opt-in, and it hands you the usual lifetime rules with it.
+- **Streaming multipart is not supported.** Every form accessor parses the whole
+  body first, so a handler that reads one field can no longer stream the rest.
+  `http.Request.MultipartReader` streams the parts instead, and the two are
+  mutually exclusive: a handler that takes the reader gets a 400 out of every
+  method here that reports an error.
+- **`Pre` belongs to the root router only**, because a scope cannot own a stage
+  that runs before matching picks the scope. It panics on a scope.
+- **`Gzip` counts compressed bytes.** The wrapper sits outside `Response`, so
+  `Response.Size` is what reached the client and not what the handler wrote.
+- A parameter of a `MountRouter` prefix does not cross the seam, and matching runs
+  once per router there. `Mount` avoids both.
+- The signed cookie is signed, not encrypted: the value stays readable by the
+  client.
 
 ## Development
 
@@ -1098,6 +1915,13 @@ the module graph of everyone who imports this router.
 reordered, which today is `Base` and `Response` — the two the router allocates
 per request. Field order is load-bearing elsewhere: reordering the JSON error
 body would change the wire format.
+
+`router.Version` is the version of the router itself, for a build that would
+otherwise take a walk through `runtime/debug.ReadBuildInfo` to log it:
+
+```go
+slog.Info("starting", slog.String("router", router.Version))
+```
 
 ## License
 
