@@ -356,3 +356,60 @@ func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
 		t.Errorf("the observer saw %d, want 101", got)
 	}
 }
+
+// A flush before the first write commits the response: the server writes a 200
+// status line as it flushes, so the wrapper has to record that status and run
+// its hooks, or an observer reports a status the client never saw and the error
+// handler writes a second answer into the stream.
+func TestFlushCommitsTheResponse(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	ran := false
+	res.Before(func() { ran = true })
+
+	res.Flush()
+
+	if res.Status != http.StatusOK || !res.Committed || !ran {
+		t.Errorf("after Flush: Status = %d, Committed = %v, hook ran = %v; want 200, true, true",
+			res.Status, res.Committed, ran)
+	}
+}
+
+// readFromWriter is a writer that copies a reader itself, the way the response
+// writer of net/http does for a file.
+type readFromWriter struct {
+	http.ResponseWriter
+	used bool
+}
+
+func (w *readFromWriter) ReadFrom(r io.Reader) (int64, error) {
+	w.used = true
+	return io.Copy(w.ResponseWriter, r)
+}
+
+// A copy into the response reaches the ReadFrom of the writer underneath,
+// which is the path that sends a file without copying it through user space,
+// and the bytes still reach Size.
+func TestReadFromReachesTheWriterUnderneath(t *testing.T) {
+	rec := httptest.NewRecorder()
+	// A plain reader: strings.Reader implements WriteTo, and io.Copy would
+	// take that path instead of the ReadFrom of the writer.
+	src := func() io.Reader { return io.LimitReader(strings.NewReader("hello"), 5) }
+
+	under := &readFromWriter{ResponseWriter: rec}
+	res := &Response{ResponseWriter: under}
+	n, err := io.Copy(res, src())
+	if err != nil || n != 5 || !under.used {
+		t.Fatalf("copy = %d, %v, delegated = %v; want 5, nil, true", n, err, under.used)
+	}
+	if res.Size != 5 || rec.Body.String() != "hello" {
+		t.Errorf("Size = %d, body = %q; want 5, %q", res.Size, rec.Body, "hello")
+	}
+
+	// A writer without one falls back to a copy, and counts the same bytes.
+	plain := httptest.NewRecorder()
+	res = &Response{ResponseWriter: plain}
+	if _, err := io.Copy(res, src()); err != nil || res.Size != 5 {
+		t.Errorf("fallback: Size = %d, err = %v; want 5, nil", res.Size, err)
+	}
+}

@@ -103,9 +103,42 @@ func (r *Response) WriteString(s string) (int, error) {
 }
 
 // Flush sends any buffered data to the client.
+//
+// A flush before the first write commits the response with status 200, because
+// the server writes that status line itself as it flushes. Committing it here
+// runs the [Response.Before] hooks and records the status, so that an observer
+// and a log line report the status the client saw and the error handler writes
+// no second answer into a stream that already carries one.
 func (r *Response) Flush() {
+	if !r.Committed {
+		r.WriteHeader(http.StatusOK)
+	}
 	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
 	http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+// ReadFrom implements [io.ReaderFrom], so that a copy into the response reaches
+// the ReadFrom of the writer underneath instead of running through a buffer of
+// its own. That is the path [http.ServeContent] takes for a file, where the
+// server sends the body without copying it through user space.
+//
+// A writer that has no ReadFrom of its own falls back to [io.Copy], which is
+// what the caller would have run anyway.
+func (r *Response) ReadFrom(src io.Reader) (int64, error) {
+	if !r.Committed {
+		r.WriteHeader(http.StatusOK)
+	}
+	var n int64
+	var err error
+	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		n, err = rf.ReadFrom(src)
+	} else {
+		// io.Copy on the writer itself, never on r: r.Write would count the
+		// same bytes a second time.
+		n, err = io.Copy(r.ResponseWriter, src)
+	}
+	r.Size += n
+	return n, err
 }
 
 // Hijack takes the connection away from the server, so that the caller speaks
