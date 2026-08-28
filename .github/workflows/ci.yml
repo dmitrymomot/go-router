@@ -23,8 +23,7 @@ on:
 permissions:
   contents: read
 
-# Ordered cheapest first: lint gates the tests, the tests gate the benchmarks,
-# so a failure skips the stages behind it.
+# Cheapest first: lint gates the tests, the tests gate the benchmarks.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -34,8 +33,7 @@ jobs:
         with:
           go-version: "1.27"
       - uses: extractions/setup-just@v3
-      # go vet, go build, gofmt, the go fix modernizers, and a vet of the
-      # benchmarks module, which is its own module and so invisible to ./...
+      # vet, build, gofmt, go fix, and the benchmarks module, which ./... misses.
       - run: just lint
 
   analyze:
@@ -46,8 +44,7 @@ jobs:
         with:
           go-version: "1.27"
       - uses: extractions/setup-just@v3
-      # modernize and betteralign, which compile from source; they run beside
-      # lint rather than after it so the slow build overlaps the fast checks.
+      # modernize and betteralign compile from source, so they run beside lint.
       - run: just analyze
 
   golangci:
@@ -58,9 +55,8 @@ jobs:
         with:
           go-version: "1.27"
       - uses: extractions/setup-just@v3
-      # The recipe compiles the linter from the version that the justfile pins,
-      # with the Go of this job. The prebuilt binary of the action is built
-      # with an older Go, which refuses a module that targets 1.27.
+      # The recipe compiles the pinned linter with the Go of this job. The action
+      # ships a binary built with an older Go, which refuses this module.
       - run: just golangci
 
   test:
@@ -93,6 +89,5 @@ jobs:
         with:
           go-version: "1.27"
       - uses: extractions/setup-just@v3
-      # A short run: the numbers from a shared runner mean nothing, but a
-      # benchmark that stops compiling has to fail the build.
+      # The numbers from a shared runner mean nothing; this proves they still run.
       - run: just bench-ci

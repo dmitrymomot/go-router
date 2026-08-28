@@ -1,26 +1,9 @@
-# golangci-lint v2.13.1 crashes on this module with
+# -SA4023 works around a crash in golangci-lint v2.13.1, not a finding: the
+# analyzer panics on a generic function with two type parameters, which
+# router.SSEComponent is. The rest of the list repeats the staticcheck checks
+# that golangci-lint excludes by default.
 #
-#	goanalysis_metalinter: SA4023: package "routertest_test": runtime error:
-#	index out of range [1] with length 1
-#
-# The crash is in the analyzer, not in the code that it reads. It appears when
-# a package under analysis reaches a generic function that declares two type
-# parameters: router.SSEComponent[T any, C Component] is the one here, and
-# giving it a single parameter again makes the whole run pass. The index in the
-# message is the tell, because it reads element [1] of a list that holds one.
-#
-# routertest_test is only where it surfaces: that package imports the router,
-# and it is the first one whose analysis loads those facts.
-#
-# v2.13.1 is the newest release as of 2026-08-27, so there is nothing to
-# upgrade to. Every other staticcheck check keeps its default state, which is
-# why the list repeats the ones that golangci-lint excludes by default.
-#
-# TODO: on the next bump of the golangci version in the justfile, delete the
-# -SA4023 line and run `just golangci`. Nothing else reports that the crash is
-# gone, so an exclusion that outlives its bug is the failure mode to watch for.
-# Reproduce the crash at any time by giving SSEComponent a single type
-# parameter again.
+# TODO: drop -SA4023 on the next golangci bump in the justfile and rerun.
 version: "2"
 
 linters:

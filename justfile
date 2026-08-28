@@ -1,8 +1,7 @@
 # go-router task runner
 
-# Tool versions are pinned here rather than in go.mod. A tool directive would
-# put the whole linter dependency tree into the module graph of everyone who
-# imports this router, and the library promises no dependencies.
+# Pinned here and not in go.mod: a tool directive would put the linter tree
+# into the module graph of every importer.
 gofumpt := "mvdan.cc/gofumpt@v0.11.0"
 goimports := "golang.org/x/tools/cmd/goimports@v0.49.0"
 modernize := "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@v0.49.0"
@@ -45,9 +44,7 @@ fmt path='./...':
     go run {{ gofumpt }} -w .
     go run {{ goimports }} -w -local {{ local }} .
     # betteralign exits non-zero when it rewrote something, and one pass can
-    # expose the next improvement, so run it until it reports nothing. Only
-    # opted-in structs are touched; see the betteralign:check comments on Base
-    # and Response.
+    # expose the next, so loop until it reports nothing.
     for _ in 1 2 3; do
         out="$(go run {{ betteralign }} -opt_in -apply ./... 2>&1 || true)"
         [ -n "$out" ] || break
@@ -60,12 +57,9 @@ lint:
     set -euo pipefail
     go vet ./...
     go build -o /dev/null ./...
-    # gofumpt, goimports and go fix all report on stdout and still exit 0, so
-    # turn a non-empty report into a failure.
-    #
-    # Only stdout counts. "go run tool@version" writes its download progress to
-    # stderr, which a cold module cache fills and which says nothing about the
-    # code. stderr still reaches the log, and a non-zero exit still fails.
+    # gofumpt, goimports and go fix report on stdout and still exit 0, so a
+    # non-empty report has to become a failure. Only stdout counts: "go run
+    # tool@version" writes download progress to stderr.
     fail_if_output() {
         local what="$1"; shift
         local out status=0
@@ -85,13 +79,10 @@ lint:
     fail_if_output "go fix has modernizations to apply" go fix -diff ./...
     # The benchmarks are their own module, so the walk above never reaches them.
     (cd benchmarks && go vet ./...)
-    # So is every example, and the go tool skips a directory named with a
-    # leading underscore as well, so ./... misses them twice over. The build
-    # writes to /dev/null: an example is a main package, so a plain "go build"
-    # would drop its binary in the working tree on every run.
+    # So is every example, and ./... skips a leading underscore too. The build
+    # writes to /dev/null so no binary lands in the working tree.
     for dir in _examples/*/; do
-        # An unmatched glob stays literal, and cd would then fail the recipe
-        # with a message about a directory that nobody asked for.
+        # An unmatched glob stays literal, and cd would fail the recipe.
         [ -d "$dir" ] || continue
         (
             cd "$dir"
@@ -105,19 +96,15 @@ lint:
 analyze:
     #!/usr/bin/env bash
     set -euo pipefail
-    # nilaway is deliberately absent. It reported four findings here and every
-    # one was a false positive: three slices that append before they index,
-    # and an http.Client.Get result that the caller reaches only after
-    # checking its error. Suppressing all four would leave nothing behind.
+    # nilaway is deliberately absent: all four of its findings here were false
+    # positives, and suppressing them would leave nothing behind.
     go run {{ modernize }} ./...
     go run {{ betteralign }} -opt_in ./...
 
 # Run golangci-lint
 golangci:
-    # CI runs this recipe rather than the golangci-lint action: the prebuilt
-    # binary of the action is built with an older Go, which refuses a module
-    # that targets 1.27. Compiling from the pinned version costs a minute and
-    # keeps CI and a local run on the same linter.
+    # CI runs this recipe and not the action: the prebuilt binary of the action
+    # is built with an older Go, which refuses a module targeting 1.27.
     go run {{ golangci }} run ./...
 
 # Report known vulnerabilities in the module and the toolchain
