@@ -223,3 +223,95 @@ func TestParseURLTemplateCutsAPattern(t *testing.T) {
 		})
 	}
 }
+
+// TestURLRefusesAValueThatReadsBackAsAnotherOne covers the link that points at
+// a different resource than the one the caller named. The builder writes a
+// value with url.PathEscape, which leaves the separators of a template segment
+// alone, and the matcher then splits the segment somewhere else.
+func TestURLRefusesAValueThatReadsBackAsAnotherOne(t *testing.T) {
+	r := newTestRouter()
+	r.Name("rep").GET("/r/{env}-{name}", echoRoute)
+	r.Name("rest").GET("/f/{p...}", echoRoute)
+
+	tests := []struct {
+		name   string
+		route  string
+		params map[string]string
+	}{
+		{"a value that carries the literal of its segment", "rep", map[string]string{"env": "prod", "name": "web-api"}},
+		{"a catch-all that is nothing but a separator", "rest", map[string]string{"p": "/"}},
+		{"a catch-all with a trailing separator", "rest", map[string]string{"p": "x/"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := r.URL(tc.route, tc.params)
+			if err == nil {
+				t.Fatalf("URL(%q) = %q, want an error; the path reads back as other values", tc.route, got)
+			}
+		})
+	}
+}
+
+// TestURLRefusesAValueThePatternRejects covers the one mistake that a pattern
+// can detect on its own: a value that its regular expression does not accept
+// used to build a path that answers 404.
+func TestURLRefusesAValueThePatternRejects(t *testing.T) {
+	r := namedRouter()
+	r.Name("tmpl").GET("/reports/rep-{date:[0-9]{8}}.csv", echoRoute)
+
+	tests := []struct {
+		name   string
+		route  string
+		params map[string]string
+	}{
+		{"a whole segment", "order", map[string]string{"id": "abc"}},
+		{"a template segment", "tmpl", map[string]string{"date": "nope"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := r.URL(tc.route, tc.params)
+			if err == nil {
+				t.Fatalf("URL(%q) = %q, want an error; the pattern rejects the value", tc.route, got)
+			}
+		})
+	}
+}
+
+// TestURLBuildsAPathThatRoutesBackForEveryShape is the round trip that the
+// builder promises, over the shapes whose values carry a separator of their
+// own segment. Whatever URL returns either reaches the route it was built from
+// with the values it was given, or reports an error.
+func TestURLBuildsAPathThatRoutesBackForEveryShape(t *testing.T) {
+	r := newTestRouter()
+	r.Name("rep").GET("/r/{env}-{name}", echoRoute)
+	r.Name("rest").GET("/f/{p...}", echoRoute)
+	r.Name("split").GET("/s/{name}.{ext}", echoRoute)
+
+	tests := []struct {
+		route  string
+		params map[string]string
+		want   string
+	}{
+		{"rep", map[string]string{"env": "prod", "name": "web"}, "/r/{env}-{name} env=prod name=web"},
+		{"rep", map[string]string{"env": "pre-prod", "name": "web"}, "/r/{env}-{name} env=pre-prod name=web"},
+		{"split", map[string]string{"name": "a.b", "ext": "txt"}, "/s/{name}.{ext} name=a.b ext=txt"},
+		{"rest", map[string]string{"p": "a/b.txt"}, "/f/{p...} p=a/b.txt"},
+		{"rest", map[string]string{"p": "/x"}, "/f/{p...} p=/x"},
+		{"rest", map[string]string{"p": ""}, "/f/{p...} p="},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprint(tc.route, tc.params), func(t *testing.T) {
+			path, err := r.URL(tc.route, tc.params)
+			if err != nil {
+				t.Fatalf("URL(%q) = %v", tc.route, err)
+			}
+			rec := do(r, http.MethodGet, path)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %q: status = %d, want 200", path, rec.Code)
+			}
+			if got := rec.Body.String(); got != tc.want {
+				t.Errorf("GET %q reached %q, want %q", path, got, tc.want)
+			}
+		})
+	}
+}

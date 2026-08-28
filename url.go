@@ -16,6 +16,17 @@ type namedRoute struct {
 	// parts is that pattern cut into literal text and parameters, so that
 	// building a path costs no parsing.
 	parts []urlPart
+
+	// segs is the pattern as the matcher reads it. The builder walks it once
+	// more over the path that it produced, which is what refuses a value that
+	// reaches another route than the one the caller named.
+	segs []segment
+
+	// recheck reports that the pattern holds a segment whose value the matcher
+	// may read back differently: a template, a regular expression or a
+	// catch-all. A path of static text and whole parameters always reads back,
+	// because url.PathEscape escapes the separator.
+	recheck bool
 }
 
 // urlPart is one piece of a named pattern: literal text to copy, or a
@@ -39,8 +50,12 @@ type urlPart struct {
 //
 // It reports an error for a name that no route carries, for a parameter that
 // the pattern declares and params leaves out, and for one that params holds
-// and the pattern does not. Each value is percent-encoded; a "{rest...}" value
-// keeps its separators, and every segment between them is encoded.
+// and the pattern does not. It reports one for a value that the pattern reads
+// back as another value too, such as one that carries the separator of its own
+// segment or one that the regular expression of the segment rejects, because
+// the path that such a value builds names a different resource or none at all.
+// Each value is percent-encoded; a "{rest...}" value keeps its separators, and
+// every segment between them is encoded.
 //
 // The result is a path, not an absolute URL. A named route inside a host scope
 // resolves to its path alone, because a host pattern carries parameters of its
@@ -65,10 +80,11 @@ func (r *Router[C]) URL(name string, params map[string]string) (string, error) {
 //
 //	r.MustURL("post", "year", "2026", "slug", "hello")   // "/blog/2026/hello"
 //
-// The router compiles its routes once, so an unknown name, a missing parameter
-// and a spare one are all mistakes in the code and not in the request. Reach
-// for it where a link is built from constants, and for [Router.URL] where a
-// name or a value comes from data.
+// The router compiles its routes once, so an unknown name, a missing
+// parameter, a spare one and a value that the pattern reads back differently
+// are all mistakes in the code and not in the request. Reach for it where a
+// link is built from constants, and for [Router.URL] where a name or a value
+// comes from data.
 func (r *Router[C]) MustURL(name string, kv ...string) string {
 	if len(kv)%2 != 0 {
 		panic(fmt.Sprintf("router: MustURL(%q) needs alternating keys and values, but got %d arguments", name, len(kv)))
@@ -131,7 +147,113 @@ func expandURL(name string, nr namedRoute, params map[string]string) (string, er
 			out = "/"
 		}
 	}
+	if nr.recheck {
+		if err := checkRoundTrip(name, nr, out, params); err != nil {
+			return "", err
+		}
+	}
 	return out, nil
+}
+
+// needsRoundTrip reports whether the values of a pattern have to be read back
+// after they are written. A static segment carries no value, and a whole
+// parameter always reads back, because url.PathEscape escapes the separator
+// and the segment holds nothing else. The other three kinds share the segment
+// with literal text, a regular expression or the rest of the path, and each of
+// those can read a value back as another one.
+func needsRoundTrip(segs []segment) bool {
+	return slices.ContainsFunc(segs, func(s segment) bool {
+		return s.kind == segTemplate || s.kind == segRegex || s.kind == segWildcard
+	})
+}
+
+// checkRoundTrip matches path against the pattern that built it and reports a
+// value that does not come back.
+//
+// The builder writes the values and the matcher reads them out again, and the
+// two are separate walks. A value that carries the separator of its own
+// segment, such as "web-api" in "/r/{env}-{name}", splits the segment
+// somewhere else, and a link built from constants then names a different
+// resource. A value that the regular expression of its segment rejects builds
+// a path that answers 404.
+func checkRoundTrip(name string, nr namedRoute, path string, params map[string]string) error {
+	bad := func() error {
+		return fmt.Errorf("router: the route %q builds %q, which %q does not match with those values", name, path, nr.pattern)
+	}
+
+	u, err := url.ParseRequestURI(path)
+	if err != nil {
+		return bad()
+	}
+	// The matcher walks the path the way a request delivers it: percent
+	// encoded only where net/url kept the raw form, and with the trailing
+	// separators already removed.
+	p, escaped := requestPath(u)
+	for len(p) > 1 && p[len(p)-1] == '/' {
+		p = p[:len(p)-1]
+	}
+	if p == "/" {
+		p = ""
+	}
+
+	for _, sg := range nr.segs {
+		if sg.kind == segWildcard {
+			rest := ""
+			if p != "" {
+				rest = p[1:]
+			}
+			if !sameValue(rest, params[sg.value], escaped) {
+				return bad()
+			}
+			return nil
+		}
+		if p == "" {
+			return bad()
+		}
+		seg, tail := cutSegment(p)
+		p = tail
+
+		switch sg.kind {
+		case segStatic:
+			if seg != sg.value {
+				return bad()
+			}
+		case segTemplate:
+			got := make([]string, templateArity(sg.parts))
+			if !matchTemplate(got, sg.parts, seg) {
+				return bad()
+			}
+			for i, n := range templateNames(sg.parts) {
+				if !sameValue(got[i], params[n], escaped) {
+					return bad()
+				}
+			}
+		case segRegex:
+			if !sg.re.MatchString(seg) || !sameValue(seg, params[sg.value], escaped) {
+				return bad()
+			}
+		default:
+			if !sameValue(seg, params[sg.value], escaped) {
+				return bad()
+			}
+		}
+	}
+	if p != "" {
+		return bad()
+	}
+	return nil
+}
+
+// sameValue reports whether the matcher read want back out of the path. It
+// decodes the value the way the router does, which is only where the path
+// reached the matcher percent encoded.
+func sameValue(got, want string, escaped bool) bool {
+	if escaped {
+		if v, err := url.PathUnescape(got); err == nil {
+			got = v
+		}
+	}
+	return got == want
 }
 
 // escapeRest encodes the value of a catch-all. The separators are the ones

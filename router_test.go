@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1569,5 +1570,265 @@ func TestObserveReportsARequestThatThePreStageAnswered(t *testing.T) {
 	}
 	if g := (*got)[1]; g.route != "" || g.status != http.StatusForbidden || g.err == "" {
 		t.Errorf("the blocked request = %+v, want no route, a 403 and the error", g)
+	}
+}
+
+// TestScopeFallbacksAnswerTheirScopeAlone pins the fallbacks of a path scope to
+// the paths of that scope. They used to be written into the slots of the root,
+// so the last scope registered answered every miss of the router and the
+// handler of the root was lost.
+func TestScopeFallbacksAnswerTheirScopeAlone(t *testing.T) {
+	text := func(status int, body string) HandlerFunc[*tctx] {
+		return func(c *tctx) error { return c.String(status, body) }
+	}
+
+	r := newTestRouter()
+	r.NotFound(text(http.StatusNotFound, "root 404"))
+	r.MethodNotAllowed(text(http.StatusMethodNotAllowed, "root 405"))
+	r.Route("/api", func(g *Router[*tctx]) {
+		g.NotFound(text(http.StatusNotFound, "api 404"))
+		g.MethodNotAllowed(text(http.StatusMethodNotAllowed, "api 405"))
+		g.GET("/users", echoRoute)
+	})
+	r.Route("/admin", func(g *Router[*tctx]) {
+		g.NotFound(text(http.StatusNotFound, "admin 404"))
+		g.MethodNotAllowed(text(http.StatusMethodNotAllowed, "admin 405"))
+		g.GET("/panel", echoRoute)
+	})
+	r.GET("/health", echoRoute)
+
+	tests := []struct {
+		method string
+		path   string
+		want   string
+	}{
+		{http.MethodGet, "/api/typo", "api 404"},
+		{http.MethodGet, "/admin/typo", "admin 404"},
+		{http.MethodGet, "/typo", "root 404"},
+		{http.MethodPost, "/api/users", "api 405"},
+		{http.MethodPost, "/admin/panel", "admin 405"},
+		{http.MethodPost, "/health", "root 405"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			if got := do(r, tc.method, tc.path).Body.String(); got != tc.want {
+				t.Errorf("body = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone is the same defect in
+// the shape that needs no second scope: one scope handler used to escape to
+// every path of the router.
+func TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/api", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+		g.GET("/users", echoRoute)
+	})
+	r.GET("/health", echoRoute)
+
+	if got := do(r, http.MethodGet, "/api/typo").Body.String(); got != "api 404" {
+		t.Errorf("GET /api/typo = %q, want %q", got, "api 404")
+	}
+	if got := do(r, http.MethodGet, "/typo").Body.String(); got == "api 404" {
+		t.Errorf("GET /typo = %q, want the fallback of the root", got)
+	}
+}
+
+// TestAScopeFallbackReachesTheScopesBelowIt pins that a scope inside another
+// one inherits the fallback of the scope that encloses it, rather than falling
+// straight back to the root.
+func TestAScopeFallbackReachesTheScopesBelowIt(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/api", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+		g.Route("/v1", func(v *Router[*tctx]) { v.GET("/users", echoRoute) })
+	})
+
+	if got := do(r, http.MethodGet, "/api/v1/typo").Body.String(); got != "api 404" {
+		t.Errorf("GET /api/v1/typo = %q, want %q", got, "api 404")
+	}
+}
+
+// TestScopeErrorHandlerAnswersItsScopeAlone pins the error handler of a path
+// scope to that scope. It used to replace the one of the root, so a handler
+// that a debug branch installed rendered the failures of every route, and the
+// internal cause of an unrelated request reached the client with it.
+func TestScopeErrorHandlerAnswersItsScopeAlone(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/debug", func(g *Router[*tctx]) {
+		g.ErrorHandler(ErrorHandler[*tctx](true))
+		g.GET("/dump", func(*tctx) error {
+			return ErrInternalServerError.WithError(errors.New("debug cause"))
+		})
+	})
+	r.GET("/checkout", func(*tctx) error {
+		return ErrInternalServerError.WithError(errors.New("billing password"))
+	})
+
+	if got := do(r, http.MethodGet, "/debug/dump").Body.String(); !strings.Contains(got, "debug cause") {
+		t.Errorf("GET /debug/dump = %q, want the cause that the scope exposes", got)
+	}
+	if got := do(r, http.MethodGet, "/checkout").Body.String(); strings.Contains(got, "billing password") {
+		t.Errorf("GET /checkout = %q, want no internal cause outside the scope that exposes one", got)
+	}
+}
+
+// TestRedirectTrailingSlashNeverPointsAtAnotherHost covers the open redirect
+// that a path of "//evil.com/" produced: a Location that begins with "//" is a
+// network-path reference, which a browser resolves against the current scheme
+// and follows to another origin.
+func TestRedirectTrailingSlashNeverPointsAtAnotherHost(t *testing.T) {
+	r := newTestRouter()
+	r.RedirectTrailingSlash(true)
+	r.GET("/{path...}", echoRoute)
+
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			for _, target := range []string{"//evil.com/", "///evil.com/"} {
+				rec := do(r, method, target)
+				loc := rec.Header().Get("Location")
+				if strings.HasPrefix(loc, "//") {
+					t.Errorf("%s %q: Location = %q, which points at another origin", method, target, loc)
+				}
+			}
+		})
+	}
+}
+
+// TestAllowHeaderNamesTheMethodsOfEveryMatchingRoute covers the methods that
+// backtracking would have served. A literal sibling used to hide the catch-all
+// or the parameter route underneath it, so the header left out methods that
+// the router answers, and a CORS preflight blocked a request that returns 200.
+func TestAllowHeaderNamesTheMethodsOfEveryMatchingRoute(t *testing.T) {
+	tests := []struct {
+		name     string
+		register func(r *Router[*tctx])
+		path     string
+	}{
+		{
+			name: "a catch-all under a literal",
+			register: func(r *Router[*tctx]) {
+				r.GET("/files/{path...}", echoRoute)
+				r.POST("/files/a", echoRoute)
+			},
+			path: "/files/a",
+		},
+		{
+			name: "a parameter under a literal",
+			register: func(r *Router[*tctx]) {
+				r.GET("/a/{id}", echoRoute)
+				r.POST("/a/b", echoRoute)
+			},
+			path: "/a/b",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			tc.register(r)
+
+			rec := do(r, http.MethodDelete, tc.path)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405", rec.Code)
+			}
+			allow := rec.Header().Get(HeaderAllow)
+			named := strings.Split(allow, ", ")
+			if want := []string{"GET", "HEAD", "OPTIONS", "POST"}; !slices.Equal(named, want) {
+				t.Fatalf("Allow = %q, want %q", allow, strings.Join(want, ", "))
+			}
+			for _, m := range named {
+				if got := do(r, m, tc.path).Code; got == http.StatusMethodNotAllowed {
+					t.Errorf("Allow names %s, but the router answers 405 to it", m)
+				}
+			}
+		})
+	}
+}
+
+// TestAMountedRouterKeepsTheFallbacksOfTheRoot pins the documented rule that
+// the root supplies the fallbacks of a mounted router. The defaults that New
+// left on the mounted router used to be written over the ones the application
+// chose, so mounting silently replaced them.
+func TestAMountedRouterKeepsTheFallbacksOfTheRoot(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/users", echoRoute)
+
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root: "+err.Error()) })
+	r.Mount("/api", sub)
+	r.GET("/boom", func(*tctx) error { return errors.New("kettle") })
+
+	if got := do(r, http.MethodGet, "/api/typo").Body.String(); got != "root 404" {
+		t.Errorf("GET /api/typo = %q, want %q", got, "root 404")
+	}
+	if got := do(r, http.MethodGet, "/typo").Body.String(); got != "root 404" {
+		t.Errorf("GET /typo = %q, want %q", got, "root 404")
+	}
+	rec := do(r, http.MethodGet, "/boom")
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("GET /boom: status = %d, want %d", rec.Code, http.StatusTeapot)
+	}
+}
+
+// TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix covers the scope that
+// carries no prefix of its own: its fallback answers the prefix it sits under,
+// and no path outside it.
+func TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/api", func(g *Router[*tctx]) {
+		g.Group(func(h *Router[*tctx]) {
+			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+			h.GET("/users", echoRoute)
+		})
+	})
+	r.GET("/health", echoRoute)
+
+	if got := do(r, http.MethodGet, "/api/typo").Body.String(); got != "api 404" {
+		t.Errorf("GET /api/typo = %q, want %q", got, "api 404")
+	}
+	if got := do(r, http.MethodGet, "/typo").Body.String(); got == "api 404" {
+		t.Errorf("GET /typo = %q, want the fallback of the root", got)
+	}
+}
+
+// TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone pins that a path scope
+// of one host does not render the failures of another host.
+func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
+	boom := func(*tctx) error { return errors.New("boom") }
+
+	r := newTestRouter()
+	r.Host("api.example.com", func(h *Router[*tctx]) {
+		h.Route("/debug", func(g *Router[*tctx]) {
+			g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "debug") })
+			g.GET("/dump", boom)
+		})
+		h.GET("/other", boom)
+	})
+	r.Host("www.example.com", func(h *Router[*tctx]) {
+		h.GET("/debug/dump", boom)
+	})
+
+	tests := []struct {
+		host string
+		path string
+		want int
+	}{
+		{"api.example.com", "/debug/dump", http.StatusTeapot},
+		{"api.example.com", "/other", http.StatusInternalServerError},
+		{"www.example.com", "/debug/dump", http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "http://"+tc.host+tc.path, nil)
+			r.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Errorf("status = %d, want %d", rec.Code, tc.want)
+			}
+		})
 	}
 }

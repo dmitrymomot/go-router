@@ -12,6 +12,7 @@ import (
 	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A WebSocket library asserts these interfaces against the response writer that
@@ -309,5 +310,49 @@ func TestUnwrapResponseReadsTheStatusAndTheSize(t *testing.T) {
 	}
 	if got.Status != http.StatusCreated || got.Size != 4 {
 		t.Errorf("Status/Size = %d/%d, want 201/4", got.Status, got.Size)
+	}
+}
+
+// TestWriteHeaderCommitsASwitchingProtocols pins that 101 is a final status
+// and not an informational one. net/http records it as the answer and sends no
+// header after it, which is what a WebSocket library relies on when it writes
+// the status and then hijacks the connection. A wrapper that passed it through
+// left Status and Committed unset, so every upgrade was logged as a 200 and the
+// error path ran over a connection that had already switched protocols.
+func TestWriteHeaderCommitsASwitchingProtocols(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	hooks := 0
+	res.Before(func() { hooks++ })
+
+	res.WriteHeader(http.StatusSwitchingProtocols)
+
+	if res.Status != http.StatusSwitchingProtocols || !res.Committed {
+		t.Errorf("Status/Committed = %d/%v, want 101/true", res.Status, res.Committed)
+	}
+	if hooks != 1 {
+		t.Errorf("the hooks ran %d times, want 1", hooks)
+	}
+	if rec.Code != http.StatusSwitchingProtocols {
+		t.Errorf("the client saw %d, want 101", rec.Code)
+	}
+}
+
+// TestObserveReportsAnUpgradeAsAnUpgrade is the same defect one layer up: the
+// observer, the logger middleware and [ResolveStatus] all read the status off
+// the response, so an upgrade that recorded nothing was metered as a 200.
+func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
+	r := newTestRouter()
+	got := 0
+	r.Observe(func(_ Context, status int, _ int64, _ time.Duration, _ error) { got = status })
+	r.GET("/ws", func(c *tctx) error {
+		c.Response().WriteHeader(http.StatusSwitchingProtocols)
+		return nil
+	})
+
+	do(r, http.MethodGet, "/ws")
+
+	if got != http.StatusSwitchingProtocols {
+		t.Errorf("the observer saw %d, want 101", got)
 	}
 }

@@ -251,22 +251,71 @@ func (n *node[C]) allowed() []string {
 // matchState carries the information that a failed method lookup needs, so
 // that the router can answer 405 instead of 404.
 type matchState[C Context] struct {
-	// pathMatch is a node whose pattern matched the path but which does not
-	// answer the request method.
+	// pathMatch is the first node whose pattern matched the path but which
+	// does not answer the request method. Its pattern and its values are the
+	// ones that [Base.RoutePattern] and [Base.Param] report.
 	pathMatch *node[C]
 
 	// pathVals holds the parameter values of pathMatch. The walk continues
 	// after it records them and overwrites the shared array, so they are a
 	// copy.
 	pathVals []string
+
+	// rest holds the further nodes that matched the path. The Allow header
+	// names their methods too, because the walk backtracks to them: a literal
+	// sibling is visited before the parameter and the catch-all underneath it,
+	// and a request for one of their methods reaches them.
+	//
+	// It is a pointer because [Router.route] holds one matchState per walk in
+	// its own frame, and every request pays for their size. A path that two
+	// patterns match under different methods is rare enough that the slice
+	// header does not earn a place there; the walk that finds one allocates.
+	rest *[]*node[C]
 }
 
-// record stores the first node that matched the path but not the method.
+// record stores a node that matched the path but not the method. Only the
+// first one keeps its values, because only its pattern and its parameters
+// reach the request.
 func (st *matchState[C]) record(n *node[C], vals []string) {
-	if st.pathMatch == nil && len(n.routes) > 0 {
+	if len(n.routes) == 0 {
+		return
+	}
+	if st.pathMatch == nil {
 		st.pathMatch = n
 		st.pathVals = slices.Clone(vals)
+		return
 	}
+	if n == st.pathMatch {
+		return
+	}
+	if st.rest == nil {
+		st.rest = new([]*node[C])
+	}
+	if !slices.Contains(*st.rest, n) {
+		*st.rest = append(*st.rest, n)
+	}
+}
+
+// allowedMethods appends the methods of every node that matched the path,
+// without repeating one.
+func (st *matchState[C]) allowedMethods(dst []string) []string {
+	if st.pathMatch == nil {
+		return dst
+	}
+	add := func(n *node[C]) {
+		for _, m := range n.allowed() {
+			if !slices.Contains(dst, m) {
+				dst = append(dst, m)
+			}
+		}
+	}
+	add(st.pathMatch)
+	if st.rest != nil {
+		for _, n := range *st.rest {
+			add(n)
+		}
+	}
+	return dst
 }
 
 // search walks the tree. n has already consumed its own part of the path, and

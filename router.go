@@ -169,6 +169,11 @@ type Router[C Context] struct {
 	// the innermost scope that owns its path.
 	scopes []*scopeFallback[C]
 
+	// errScopes holds the scopes above that set an error handler, in the same
+	// order. It is empty for a router that sets none, which is the one check
+	// that a failed request pays for the stage.
+	errScopes []*scopeFallback[C]
+
 	// named maps a route name to the pattern that [Router.URL] fills in, and
 	// info carries the name and the value of [Router.Meta] back to
 	// [Router.Routes]. Both stay nil until a route uses them.
@@ -673,11 +678,16 @@ func (r *Router[C]) mustNotBeServing(what string) {
 }
 
 // NotFound sets the handler for a request that matches no route. The
-// middleware of the root applies to it.
+// middleware of the scope applies to it.
 //
 // It takes precedence over the error handler: once set, a request that matches
 // no route goes to this handler and never reaches [Router.ErrorHandler].
 // Without it the router returns [ErrNotFound], which the error handler renders.
+//
+// The handler answers the scope that set it. On the root, and on a scope that
+// carries no prefix of its own, that is every path; on a scope under a prefix
+// it is the paths of that prefix, and the scopes below inherit it. So an API
+// branch answers a miss as JSON while the pages around it keep their own page.
 func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 	r.mustNotBeServing("the not-found handler")
 	r.notFound = h
@@ -688,7 +698,8 @@ func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 // the handler.
 //
 // It takes precedence over the error handler in the same way [Router.NotFound]
-// does. Without it the router returns [ErrMethodNotAllowed].
+// does, and it answers the scope that set it in the same way. Without it the
+// router returns [ErrMethodNotAllowed].
 func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 	r.mustNotBeServing("the method-not-allowed handler")
 	r.methodNotAllowed = h
@@ -705,6 +716,11 @@ func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 // The last two reach it only while [Router.NotFound] and
 // [Router.MethodNotAllowed] are unset. A handler set there answers the request
 // itself and wins.
+//
+// The handler renders the scope that set it, the way [Router.NotFound] does:
+// a handler that a scope under a prefix installs answers the paths of that
+// prefix alone, so one that exposes the internal cause of a failure never
+// renders the failure of a route outside it.
 //
 // The default is [DefaultErrorHandler]. A panic inside the error handler is
 // logged and answered with a bare 500, so a broken renderer cannot loop.
@@ -874,8 +890,8 @@ func (r *Router[C]) buildErr() error {
 	rawNotFound := map[*hostEntry[C]]HandlerFunc[C]{}
 	rawNotAllowed := map[*hostEntry[C]]HandlerFunc[C]{}
 
-	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C]) error
-	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C]) error {
+	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error
+	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error {
 		if open[rt] {
 			return errors.New("router: a router is mounted inside itself")
 		}
@@ -920,31 +936,50 @@ func (r *Router[C]) buildErr() error {
 				r.anyHostRoutes = true
 			}
 
-			// A fallback that the scope sets belongs to the host it sits in,
-			// or to the root when it sits outside every host scope.
-			notFound, notAllowed, errh := r.fallbacks(e)
-			if rt.notFound != nil {
-				*notFound = chain(rt.notFound, m)
-				rawNotFound[e] = rt.notFound
-				if e == nil {
-					r.notFound = rt.notFound // what a host inherits
-				}
-			}
-			if rt.methodNotAllowed != nil {
-				*notAllowed = chain(rt.methodNotAllowed, m)
-				rawNotAllowed[e] = rt.methodNotAllowed
-				if e == nil {
-					r.methodNotAllowed = rt.methodNotAllowed
-				}
-			}
-			if rt.errHandler != nil {
-				*errh = rt.errHandler
-			}
+			// A fallback belongs to the scope that set it. A scope that covers
+			// a whole host, or the whole router, writes into the slots that
+			// answer for it. A scope that sits under a prefix keeps its own,
+			// so that the 404 of an API branch never answers a page outside
+			// it and a handler that exposes an internal cause never renders
+			// the failure of an unrelated route.
+			own := inherited
+			switch {
+			case rt != r && rt.root == rt:
+				// A router that [Router.Mount] attached is a root of its own,
+				// and the root that serves the request supplies the
+				// fallbacks. The defaults that New left on the mounted router
+				// are skipped rather than written over the ones that the
+				// application chose.
 
-			// A scope that carries a prefix owns the fallbacks below it, so
-			// that a 404 under /api still runs the middleware of /api.
-			if scopePrefix := normalizePattern(rt.prefix); scopePrefix != "/" {
-				pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m})
+			case len(rt.hosts) > 0 || normalizePattern(p) == "/":
+				notFound, notAllowed, errh := r.fallbacks(e)
+				if rt.notFound != nil {
+					*notFound = chain(rt.notFound, m)
+					rawNotFound[e] = rt.notFound
+					if e == nil {
+						r.notFound = rt.notFound // what a host inherits
+					}
+				}
+				if rt.methodNotAllowed != nil {
+					*notAllowed = chain(rt.methodNotAllowed, m)
+					rawNotAllowed[e] = rt.methodNotAllowed
+					if e == nil {
+						r.methodNotAllowed = rt.methodNotAllowed
+					}
+				}
+				if rt.errHandler != nil {
+					*errh = rt.errHandler
+				}
+			default:
+				sets := own.take(rt)
+				// A scope that carries a prefix owns the fallbacks below it,
+				// so that a 404 under /api still runs the middleware of /api.
+				// A scope without a prefix of its own needs an entry as soon
+				// as it sets one, because the fallback then answers for the
+				// prefix that the scope sits under.
+				if normalizePattern(rt.prefix) != "/" || sets {
+					pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m, depth: depth, fb: own})
+				}
 			}
 
 			for i, reg := range rt.regs {
@@ -957,14 +992,14 @@ func (r *Router[C]) buildErr() error {
 				}
 			}
 			for _, ch := range rt.children {
-				if err := walk(ch, p, m, e); err != nil {
+				if err := walk(ch, p, m, e, depth+1, own); err != nil {
 					return err
 				}
 			}
 		}
 		return nil
 	}
-	if err := walk(r, "", nil, nil); err != nil {
+	if err := walk(r, "", nil, nil, 0, scopeFallbacks[C]{}); err != nil {
 		return err
 	}
 
@@ -998,25 +1033,45 @@ func (r *Router[C]) buildErr() error {
 		})
 	}
 	for _, ps := range pending {
-		s := &scopeFallback[C]{prefix: ps.prefix, hostIdx: -1}
+		s := &scopeFallback[C]{prefix: ps.prefix, hostIdx: -1, depth: ps.depth}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
 		s.segs, s.statics = countSegments(ps.prefix)
-		s.notFoundChain = chain(resolve(rawNotFound, ps.host, r.notFound), ps.mws)
-		s.notAllowedChain = chain(resolve(rawNotAllowed, ps.host, r.methodNotAllowed), ps.mws)
+		// The scope answers with its own handler, with the one of the scope
+		// that encloses it, or with the one of its host or of the root.
+		notFound, notAllowed := ps.fb.notFound, ps.fb.notAllowed
+		if notFound == nil {
+			notFound = resolve(rawNotFound, ps.host, r.notFound)
+		}
+		if notAllowed == nil {
+			notAllowed = resolve(rawNotAllowed, ps.host, r.methodNotAllowed)
+		}
+		s.notFoundChain = chain(notFound, ps.mws)
+		s.notAllowedChain = chain(notAllowed, ps.mws)
 		s.optionsChain = chain(autoOptions[C], ps.mws)
+		s.errHandler = ps.fb.errHandler
 		r.scopes = append(r.scopes, s)
 	}
 	// Most specific first, so that the first prefix that covers a path is the
-	// innermost scope that registered it. The sort is stable, so two scopes
-	// that share a prefix keep registration order and the outer one wins.
+	// innermost scope that registered it. Two scopes that cover the same
+	// prefix rank the deeper one first, which is what puts a group inside
+	// /api ahead of the scope that opened /api. The sort is stable, so two
+	// scopes that share both keep registration order and the outer one wins.
 	slices.SortStableFunc(r.scopes, func(a, b *scopeFallback[C]) int {
 		if a.segs != b.segs {
 			return b.segs - a.segs
 		}
-		return b.statics - a.statics
+		if a.statics != b.statics {
+			return b.statics - a.statics
+		}
+		return b.depth - a.depth
 	})
+	for _, s := range r.scopes {
+		if s.errHandler != nil {
+			r.errScopes = append(r.errScopes, s)
+		}
+	}
 	r.compiled.Store(true)
 	return nil
 }
@@ -1041,7 +1096,13 @@ func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern strin
 		if r.named == nil {
 			r.named = make(map[string]namedRoute)
 		}
-		r.named[reg.name] = namedRoute{pattern: pattern, parts: parseURLTemplate(pattern)}
+		nr := namedRoute{pattern: pattern, parts: parseURLTemplate(pattern)}
+		// The pattern reached the trie first, so it parses again without an
+		// error. The segments are what a built path is read back against.
+		if segs, _, err := parsePattern(pattern); err == nil {
+			nr.segs, nr.recheck = segs, needsRoundTrip(segs)
+		}
+		r.named[reg.name] = nr
 	}
 	if r.info == nil {
 		r.info = make(map[routeKey]routeInfo)
@@ -1060,6 +1121,38 @@ type pendingScope[C Context] struct {
 	prefix string
 	host   *hostEntry[C]
 	mws    []Middleware[C]
+
+	// fb holds the fallbacks that the scope owns, and depth is how deeply the
+	// scope is nested, which ranks two scopes that cover the same prefix.
+	fb    scopeFallbacks[C]
+	depth int
+}
+
+// scopeFallbacks holds the fallbacks that one path scope owns, as the
+// application wrote them. A scope inside another one inherits the ones that it
+// leaves unset, so a miss under /api/v1 reaches the handler that /api
+// installed. Each one is nil until a path scope sets it, and the host or the
+// root answers for it while it is.
+type scopeFallbacks[C Context] struct {
+	notFound   HandlerFunc[C]
+	notAllowed HandlerFunc[C]
+	errHandler ErrorHandlerFunc[C]
+}
+
+// take copies the fallbacks that the scope sets over the inherited ones, and
+// reports whether the scope set any.
+func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
+	set := false
+	if rt.notFound != nil {
+		f.notFound, set = rt.notFound, true
+	}
+	if rt.methodNotAllowed != nil {
+		f.notAllowed, set = rt.methodNotAllowed, true
+	}
+	if rt.errHandler != nil {
+		f.errHandler, set = rt.errHandler, true
+	}
+	return set
 }
 
 // scopeFallback answers a request that no route of a path scope took. Each
@@ -1070,9 +1163,11 @@ type scopeFallback[C Context] struct {
 	prefix string
 
 	// segs is the number of segments of the prefix and statics is how many of
-	// them carry no parameter. The two rank one scope against another.
+	// them carry no parameter. The two rank one scope against another, and
+	// depth breaks a tie between two scopes that cover the same prefix.
 	segs    int
 	statics int
+	depth   int
 
 	// hostIdx is the host that the scope sits in, or -1 for a scope outside
 	// every host scope.
@@ -1081,6 +1176,10 @@ type scopeFallback[C Context] struct {
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
+
+	// errHandler is the error handler that the scope set, nil for a scope that
+	// set none. It carries no middleware, the way the one of a host does.
+	errHandler ErrorHandlerFunc[C]
 }
 
 // covers reports whether path lies inside the prefix of the scope. A segment
@@ -1473,7 +1572,7 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 		}
 		b.setRoute(match.pattern, match.names, matched)
 		req.Pattern = match.pattern
-		b.res.Header().Set(HeaderAllow, allowHeader(hostSt.pathMatch, anySt.pathMatch))
+		b.res.Header().Set(HeaderAllow, allowHeader(&hostSt, &anySt))
 
 		_, notAllowed, options := r.fallbackChains(host, trimmed)
 		if req.Method == http.MethodOptions && r.autoOptions {
@@ -1489,22 +1588,12 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 	}
 }
 
-// allowHeader joins the methods that the matched nodes answer. Two nodes reach
-// it when a host tree and the host-free tree both hold the path under
-// different methods.
-func allowHeader[C Context](a, b *node[C]) string {
-	switch {
-	case a == nil:
-		return strings.Join(b.allowed(), ", ")
-	case b == nil:
-		return strings.Join(a.allowed(), ", ")
-	}
-	out := a.allowed()
-	for _, m := range b.allowed() {
-		if !slices.Contains(out, m) {
-			out = append(out, m)
-		}
-	}
+// allowHeader joins the methods that every node whose pattern matched the path
+// answers: the ones of the walk over the tree of the matched host, and the ones
+// of the walk over the tree that answers every host.
+func allowHeader[C Context](host, anyHost *matchState[C]) string {
+	out := host.allowedMethods(nil)
+	out = anyHost.allowedMethods(out)
 	slices.Sort(out)
 	return strings.Join(out, ", ")
 }
@@ -1560,15 +1649,48 @@ func (r *Router[C]) handleError(c C, err error) {
 	r.errorHandlerFor(c.base())(c, err)
 }
 
-// errorHandlerFor returns the error handler of the matched host, or the one of
-// the root.
+// errorHandlerFor returns the error handler that renders this failure: the one
+// of the innermost path scope that owns the path, then the one of the matched
+// host, then the one of the root.
+//
+// It reads the path off the request rather than off the match, because a
+// failure of a middleware and a panic both arrive before a route is known.
 func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
+	var host *hostEntry[C]
 	if b.hostIdx >= 0 && r.hostSet != nil {
-		if h := r.hostSet.all[b.hostIdx].errHandler; h != nil {
+		host = r.hostSet.all[b.hostIdx]
+	}
+	if len(r.errScopes) > 0 {
+		if h := r.scopeErrorHandler(host, b.req.URL); h != nil {
 			return h
 		}
 	}
+	if host != nil && host.errHandler != nil {
+		return host.errHandler
+	}
 	return r.errHandler
+}
+
+// scopeErrorHandler returns the handler of the innermost path scope that owns
+// the path and carries one, or nil when no such scope claims it.
+func (r *Router[C]) scopeErrorHandler(host *hostEntry[C], u *url.URL) ErrorHandlerFunc[C] {
+	path, _ := requestPath(u)
+	if path == "" || path[0] != '/' {
+		path = "/" + path
+	}
+	for len(path) > 1 && path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
+	}
+	idx := int32(-1)
+	if host != nil {
+		idx = host.idx
+	}
+	for _, s := range r.errScopes {
+		if s.hostIdx == idx && s.covers(path) {
+			return s.errHandler
+		}
+	}
+	return nil
 }
 
 // canMatch reports whether the path has a route for the method, on the matched
@@ -1592,7 +1714,16 @@ func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []
 // redirectTo points the client at the same URL with a new path. It answers 308
 // for a method other than GET or HEAD, because a 301 makes some clients repeat
 // the request as a GET and drop the body.
+//
+// A path that begins with a second separator collapses to one. The client
+// sends the request target verbatim, and net/url reads no authority out of it,
+// so "//evil.com/" arrives as a path; a Location that kept it is a
+// network-path reference, which the browser resolves against the current
+// scheme and follows to another origin.
 func redirectTo(w http.ResponseWriter, req *http.Request, path string, escaped bool) {
+	for len(path) > 1 && path[1] == '/' {
+		path = path[1:]
+	}
 	u := *req.URL
 	u.Path, u.RawPath = path, ""
 	if escaped {

@@ -50,11 +50,17 @@ func (r *Response) Before(fn func()) { r.before = append(r.before, fn) }
 // status. It runs no hook, because the hooks belong to the status that answers
 // the request.
 //
+// A 101 Switching Protocols is the exception that net/http also makes: it is
+// the answer to the request, and nothing follows it on the connection. It
+// records the status and runs the hooks, so a WebSocket library that writes it
+// and then hijacks leaves an upgrade behind that an observer and a log line
+// read as one.
+//
 // A second call to a committed response is a no-op that logs the dropped code
 // at debug level, which is what names the handler that wrote a body and then
 // returned an error.
 func (r *Response) WriteHeader(code int) {
-	if code >= 100 && code < 200 {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		r.ResponseWriter.WriteHeader(code)
 		return
 	}
