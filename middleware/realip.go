@@ -22,10 +22,21 @@ type RealIPConfig struct {
 	// loopback, the private and the link-local ranges.
 	Trust *TrustSet
 
-	// Headers are the headers to read, in order of preference. They default to
-	// Forwarded, then X-Forwarded-For, then X-Real-Ip. The first header that
-	// names an address decides and the rest go unread, except that a Forwarded
-	// header reporting the protocol alone still hands that on.
+	// Headers are the forwarding headers that the proxies of this deployment
+	// write themselves, in order of preference. The first one that names an
+	// address decides and the rest go unread, except that a Forwarded header
+	// reporting the protocol alone still hands that on.
+	//
+	// There is no default, because the header a proxy writes is a fact about
+	// the deployment and no list guesses it. A config that names none reads
+	// none and the address of the connection stands. Name the one that the
+	// proxy in front of this server appends to:
+	//
+	//	Headers: []string{router.HeaderXForwardedFor}
+	//
+	// Every forwarding header this list does not name is deleted from the
+	// request, so a header that a proxy relayed rather than wrote reaches
+	// neither a later middleware nor the handler.
 	Headers []string
 
 	// Leftmost takes the first entry of the header and reads no trust set at
@@ -39,15 +50,30 @@ type RealIPConfig struct {
 	Leftmost bool
 }
 
-// defaultRealIPHeaders is the header preference of [RealIP]. Forwarded comes
-// first because it is the standard one and it carries the protocol as well.
-var defaultRealIPHeaders = []string{
+// forwardingHeaders are the headers that carry the address of a client past a
+// proxy. [RealIPWithConfig] reads the ones its config names and deletes the
+// rest, because a proxy relays the ones it does not write and a relayed header
+// says what the client wrote in it.
+var forwardingHeaders = []string{
 	router.HeaderForwarded, router.HeaderXForwardedFor, router.HeaderXRealIP,
 }
 
-// RealIP is [RealIPWithConfig] with its default config: the standard trust
-// set, and Forwarded, X-Forwarded-For and X-Real-Ip in that order. It is a
-// middleware itself, so it goes into Use without a call:
+// untrustedHeaders are the headers that go when no trusted proxy made the
+// connection. It adds X-Forwarded-Proto, which no config names and which a
+// trusted proxy writes itself: on a connection that reached the server direct
+// the header is the client saying which protocol it used, and [router.Base.Scheme]
+// answers with it.
+var untrustedHeaders = append(
+	slices.Clone(forwardingHeaders), router.HeaderXForwardedProto,
+)
+
+// RealIP is [RealIPWithConfig] with its default config: the standard trust set
+// and no header. It reads no forwarding header, so the address of the
+// connection stands, and it deletes every forwarding header the request
+// carries so that nothing after it reads one. Name the header of the
+// deployment through [RealIPWithConfig] to get an address out of it.
+//
+// It is a middleware itself, so it goes into Use without a call:
 //
 //	r.Use(middleware.RealIP[Ctx])
 func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -57,13 +83,26 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // RealIPWithConfig replaces the remote address of the request with the address
 // of the client that a forwarding header reports.
 //
-// It walks the chain from the server outwards, the last entry of the header
-// first and the address of the connection past its end, and stops at the first
-// hop outside Trust. That hop is the nearest address the client could not
-// forge: every entry to its right belongs to a proxy of this deployment, and
-// everything to its left is whatever the client chose to send. A connection
-// that no trusted proxy made keeps its own address, and the headers it carries
-// go unread.
+// It reads the headers of Headers and no others, and deletes every forwarding
+// header that Headers does not name. Name only a header that the proxies of
+// this deployment write themselves. Naming a header that the proxy does not
+// itself write makes that header client-controlled: the proxy relays it
+// untouched, this middleware reads it as though the proxy had authored it, and
+// the client picks whatever address it likes. nginx, HAProxy, an AWS or a GCP
+// load balancer, Cloudflare and Envoy all append to X-Forwarded-For, and none
+// of them writes or strips the Forwarded header of RFC 7239.
+//
+//	r.Use(middleware.RealIPWithConfig[Ctx](middleware.RealIPConfig{
+//		Headers: []string{router.HeaderXForwardedFor},
+//	}))
+//
+// Within a named header it walks the chain from the server outwards, the last
+// entry first and the address of the connection past its end, and stops at the
+// first hop outside Trust. That hop is the nearest address the client could
+// not forge: every entry to its right belongs to a proxy of this deployment,
+// and everything to its left is whatever the client chose to send. A
+// connection that no trusted proxy made keeps its own address, and the
+// forwarding headers it carries are deleted unread.
 //
 // This is a change of behaviour. The middleware used to take the leftmost
 // entry, which is the entry that the client writes, so anyone could send
@@ -71,17 +110,25 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // audit log and the geo check. Leftmost brings the old reading back for a
 // deployment whose proxy replaces the header instead of appending to it.
 //
-// It reads the Forwarded header of RFC 7239 as well, which is the standard one
-// and which modern proxies emit. The proto parameter of the hop it picked goes
-// into X-Forwarded-Proto, where [router.Base.Scheme] and [SecureWithConfig]
-// read the scheme of the request.
+// A named Forwarded header reports the protocol as well, and the proto
+// parameter of the hop that stands goes into X-Forwarded-Proto, where
+// [router.Base.Scheme] and [SecureWithConfig] read the scheme of the request.
+// No other X-Forwarded-Proto is read here, so a deployment that terminates TLS
+// at a proxy needs that proxy to set the header itself. The header of an
+// untrusted connection is deleted with the rest: no proxy wrote it, so it is
+// the client naming the protocol of its own request, and the scheme decides
+// whether a cookie is marked Secure and what an absolute URL points at.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
-	if len(cfg.Headers) == 0 {
-		cfg.Headers = defaultRealIPHeaders
-	}
 	if cfg.Trust == nil {
 		cfg.Trust = NewTrustSet()
 	}
+	// The headers to delete are the ones the config does not name, and neither
+	// list changes per request, so the difference is taken once.
+	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {
+		return slices.ContainsFunc(cfg.Headers, func(named string) bool {
+			return strings.EqualFold(name, named)
+		})
+	})
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
@@ -89,8 +136,19 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 				return next(c)
 			}
 			req := c.Request()
-			h := cfg.client(req)
-			if h.addr == "" && h.proto == "" {
+			h, vouched := cfg.client(req)
+
+			// Nothing vouches for the forwarding headers of a connection that
+			// no trusted proxy made, so all of them go, the named ones and the
+			// protocol too.
+			del := unnamed
+			if !vouched {
+				del = untrustedHeaders
+			}
+			carries := slices.ContainsFunc(del, func(name string) bool {
+				return len(req.Header.Values(name)) > 0
+			})
+			if h.addr == "" && h.proto == "" && !carries {
 				return next(c)
 			}
 
@@ -101,11 +159,18 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 			if h.addr != "" {
 				r.RemoteAddr = h.addr
 			}
-			if h.proto != "" {
+			if h.proto != "" || carries {
 				// The header map is shared with the request that came in, so
 				// it needs a copy of its own before anything writes to it.
 				r.Header = req.Header.Clone()
-				r.Header.Set(router.HeaderXForwardedProto, h.proto)
+				if carries {
+					for _, name := range del {
+						r.Header.Del(name)
+					}
+				}
+				if h.proto != "" {
+					r.Header.Set(router.HeaderXForwardedProto, h.proto)
+				}
 			}
 			c.SetRequest(r)
 			return next(c)
@@ -131,16 +196,16 @@ type hop struct {
 	proto string
 }
 
-// client returns the hop that stands as the client of this request. Its zero
-// value means the address of the connection, which the request already
-// carries.
-func (cfg RealIPConfig) client(req *http.Request) hop {
+// client returns the hop that stands as the client of this request, and
+// whether the connection vouches for the headers at all. The zero hop means
+// the address of the connection, which the request already carries.
+func (cfg RealIPConfig) client(req *http.Request) (hop, bool) {
 	if !cfg.Leftmost {
 		// A forwarding header names the client only when a proxy wrote it.
 		// A client that reaches the server itself writes whatever it likes.
 		peer, _, ok := parseHop(req.RemoteAddr)
 		if !ok || !cfg.Trust.Trusted(peer) {
-			return hop{}
+			return hop{}, false
 		}
 	}
 	var best hop
@@ -164,7 +229,7 @@ func (cfg RealIPConfig) client(req *http.Request) hop {
 			break
 		}
 	}
-	return best
+	return best, true
 }
 
 // trustedHop walks the entries from the right and returns the first hop that
@@ -271,9 +336,14 @@ func scheme(v string) string {
 
 // parseHop returns the address of one hop, which may carry a port and which
 // may hold an IPv6 address in brackets, together with the canonical text of
-// the entry. That text is what goes into RemoteAddr, in the form that
-// [net.SplitHostPort] reads, so that nothing a client wrote lands there
-// unread.
+// the entry. That text is what goes into RemoteAddr, so that nothing a client
+// wrote lands there unread.
+//
+// It keeps the shape of the entry: a hop that named a port keeps it, and a
+// hop that named an address alone yields the address alone, because a port
+// this side invented would be a port that no client ever used. RemoteAddr may
+// therefore hold a bare IP, which [net.SplitHostPort] does not read. [ClientIP]
+// reads either shape and is the supported way to ask for the address.
 func parseHop(s string) (netip.Addr, string, bool) {
 	if s = strings.TrimSpace(s); s == "" {
 		return netip.Addr{}, "", false

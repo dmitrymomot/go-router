@@ -80,6 +80,14 @@ func MethodOverrideWithConfig[C router.Context](cfg MethodOverrideConfig) router
 // A client that writes its own request sends the header, which is the reading
 // that costs nothing: no body is read, and the value cannot come from a form
 // that a page on another site submits.
+//
+// Reading no body has a cost of its own on a urlencoded request. net/http
+// parses that body for POST, PUT and PATCH alone, so an override that turned
+// the POST into a DELETE leaves it unparsed: [router.Base.FormValue] answers
+// with nothing and [FromForm] finds no token, which reads as a 403. Send the
+// token in a header, post a multipart body, which parses whatever the method
+// is, or read the method with [MethodFromForm], whose own parse runs first and
+// leaves the fields where the handler finds them.
 func MethodFromHeader(name string) func(router.Context) string {
 	return func(c router.Context) string { return c.Request().Header.Get(name) }
 }
@@ -91,10 +99,31 @@ func MethodFromHeader(name string) func(router.Context) string {
 // It is what an HTML form needs, because a form sets no headers. Reading it
 // parses the body, which has two consequences. The body reaches the handler
 // through the form that net/http parsed and cached, so [router.Base.BindForm]
-// still answers; and the limits of the router no longer apply to that parse,
-// so pair it with [BodyLimit], which caps the body itself.
+// still answers; and the parse runs under [router.Router.MaxBodyBytes] and
+// [router.Router.MaxMultipartMemory], as every other form read of the router
+// does. A body past either cap leaves the field unread, so the request keeps
+// the method it came with, and the first form read of the handler reports the
+// 413.
+//
+// [BodyLimit] caps the body too, but only from [router.Router.Pre], the stage
+// that this middleware runs in. A [BodyLimit] in Use is installed after the
+// route is matched, which is after this parse has read the body:
+//
+//	r.Pre(middleware.BodyLimit[Ctx](64<<10), middleware.MethodOverrideWithConfig[Ctx](...))
 func MethodFromForm(field string) func(router.Context) string {
-	return func(c router.Context) string { return c.Request().PostFormValue(field) }
+	return func(c router.Context) string {
+		if r, ok := c.(formReader); ok {
+			return r.FormValue(field)
+		}
+		// A context that answers FormValue with a signature of its own still
+		// gets a bounded parse, at the default of the library rather than at
+		// the limit that this router carries, which is not reachable here.
+		req := c.Request()
+		if req.Body != nil {
+			req.Body = http.MaxBytesReader(c.Response(), req.Body, router.DefaultMaxBodyBytes)
+		}
+		return req.PostFormValue(field)
+	}
 }
 
 // MethodFromQuery reads the method from a query parameter:
@@ -103,9 +132,20 @@ func MethodFromForm(field string) func(router.Context) string {
 //
 // It reads no body, so it fits a form that posts a file. The method then sits
 // in the action of the form, where a link and a log line carry it too.
+//
+// It leaves a urlencoded body unparsed for the same reason [MethodFromHeader]
+// does, and the way out is the same.
 func MethodFromQuery(param string) func(router.Context) string {
 	return func(c router.Context) string { return c.Request().URL.Query().Get(param) }
 }
+
+// formReader is the form read of [router.Base]. Every [router.Context] answers
+// it, because [router.Context] names an unexported method and only a type that
+// embeds the Base has one. Reading the field through the Base keeps this parse
+// under [router.Router.MaxBodyBytes] and [router.Router.MaxMultipartMemory],
+// and it leaves the failure of a body past either on the context, where the
+// first form read of the handler reports it.
+type formReader interface{ FormValue(name string) string }
 
 // overridable reports whether a POST may become m. A form reaches the three
 // methods that a page has no other way to send.

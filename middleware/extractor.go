@@ -105,6 +105,14 @@ func FromCookie(name string) TokenSource {
 // and the middleware reports the credential that is missing rather than the
 // parse that failed.
 //
+// A urlencoded body reaches it on POST, PUT and PATCH alone, because those are
+// the methods for which [net/http.Request.ParseForm] reads a body at all: a
+// DELETE that spells the credential in application/x-www-form-urlencoded hands
+// over nothing, and so does [router.Base.FormValue] in the handler after it.
+// This bites the request that a method override turned into a DELETE, so put
+// the credential in a header or in a multipart body there, which parses on any
+// method.
+//
 // It does not fit a handler that reads the body itself through
 // [net/http.Request.MultipartReader], because that handler needs a body that
 // nothing has consumed. Carry the credential in a header there.

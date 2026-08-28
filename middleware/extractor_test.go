@@ -225,3 +225,48 @@ func TestTokenSourceNilPanics(t *testing.T) {
 		})
 	})
 }
+
+// TestFromFormReadsTheMethodsThatNetHTTPParses pins the restriction that
+// FromForm inherits from net/http: [net/http.Request.ParseForm] reads a
+// urlencoded body for POST, PUT and PATCH and leaves it alone for every other
+// method, so a DELETE that carries the token in a urlencoded body hands over
+// nothing. A multipart body parses on any method, so it is unaffected.
+func TestFromFormReadsTheMethodsThatNetHTTPParses(t *testing.T) {
+	r := newRouter()
+	h := func(c *appContext) error {
+		return c.String(http.StatusOK, strings.Join(middleware.FromForm("_csrf")(c), ","))
+	}
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		r.Handle(m, "/", h)
+	}
+
+	multipart := strings.Join([]string{
+		"--b", `Content-Disposition: form-data; name="_csrf"`, "", "tok", "--b--", "",
+	}, "\r\n")
+
+	tests := []struct {
+		method string
+		want   string
+	}{
+		{http.MethodPost, "tok"},
+		{http.MethodPut, "tok"},
+		{http.MethodPatch, "tok"},
+		{http.MethodDelete, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			body := url.Values{"_csrf": {"tok"}}.Encode()
+			req := httptest.NewRequest(tt.method, "/", strings.NewReader(body))
+			req.Header.Set(router.HeaderContentType, router.MIMEApplicationForm)
+			if got := do(r, req).Body.String(); got != tt.want {
+				t.Errorf("urlencoded token = %q, want %q", got, tt.want)
+			}
+
+			req = httptest.NewRequest(tt.method, "/", strings.NewReader(multipart))
+			req.Header.Set(router.HeaderContentType, `multipart/form-data; boundary=b`)
+			if got := do(r, req).Body.String(); got != "tok" {
+				t.Errorf("multipart token = %q, want %q", got, "tok")
+			}
+		})
+	}
+}

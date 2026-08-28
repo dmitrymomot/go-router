@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,6 +51,14 @@ type SecureConfig struct {
 	// HSTSMaxAge is how long a browser reaches this host over HTTPS alone.
 	// Zero sends no header.
 	//
+	// It is a duration and not a count of seconds, so write the year that
+	// every guide quotes as one:
+	//
+	//	middleware.SecureConfig{HSTSMaxAge: 365 * 24 * time.Hour}
+	//
+	// A positive age under one second panics, because it renders as
+	// max-age=0, which revokes the header rather than sending it.
+	//
 	// Set it once the site is ready to serve every path over TLS forever: a
 	// browser that saw the header refuses plaintext until it expires, and no
 	// answer can take that back.
@@ -96,9 +105,20 @@ func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
 	// The value never changes, so it is built once rather than per request.
 	hsts := ""
 	if cfg.HSTSMaxAge > 0 {
+		// The header counts in whole seconds, and an age that floors to none
+		// of them spells max-age=0, which is the directive that takes the host
+		// off the list of the browser. A config that asks for HSTS and revokes
+		// it instead is a fault of the wiring, so it fails here rather than in
+		// front of a browser that already holds the pin.
+		secs := int(cfg.HSTSMaxAge.Seconds())
+		if secs < 1 {
+			panic(fmt.Sprintf("middleware: SecureConfig.HSTSMaxAge is %s, under one second; "+
+				"it is a time.Duration, so write 365*24*time.Hour and not the number of seconds",
+				cfg.HSTSMaxAge))
+		}
 		var b strings.Builder
 		b.WriteString("max-age=")
-		b.WriteString(strconv.Itoa(int(cfg.HSTSMaxAge.Seconds())))
+		b.WriteString(strconv.Itoa(secs))
 		if cfg.HSTSIncludeSubdomains {
 			b.WriteString("; includeSubDomains")
 		}

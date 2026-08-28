@@ -232,3 +232,39 @@ func TestSecureSkip(t *testing.T) {
 		t.Errorf("content type options = %q, want none", got)
 	}
 }
+
+// TestSecureRejectsASubSecondHSTSMaxAge pins that a duration that floors to
+// zero seconds is a fault of the wiring rather than a header. RFC 6797 makes
+// max-age=0 the directive that takes the host off the list of the browser, so
+// rendering a positive age as zero would drop a pin that a browser already
+// holds, which is worse than sending nothing.
+func TestSecureRejectsASubSecondHSTSMaxAge(t *testing.T) {
+	tests := []struct {
+		name string
+		age  time.Duration
+	}{
+		{"the number of seconds that every guide quotes", 31536000},
+		{"half a second", 500 * time.Millisecond},
+		{"a nanosecond under a second", time.Second - 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mustPanicContaining(t, "HSTSMaxAge", func() {
+				middleware.SecureWithConfig[*appContext](middleware.SecureConfig{
+					HSTSMaxAge:            tt.age,
+					HSTSIncludeSubdomains: true,
+					HSTSPreload:           true,
+				})
+			})
+		})
+	}
+}
+
+// TestSecureTakesAWholeSecondHSTSMaxAge pins the other side of the boundary,
+// so the guard rejects the ages that floor to zero and nothing else.
+func TestSecureTakesAWholeSecondHSTSMaxAge(t *testing.T) {
+	h := secureHeaders(secureRouter(middleware.SecureConfig{HSTSMaxAge: time.Second}), "https://app.example/")
+	if got := h.Get(router.HeaderStrictTransportSecurity); got != "max-age=1" {
+		t.Errorf("strict transport security = %q, want %q", got, "max-age=1")
+	}
+}
