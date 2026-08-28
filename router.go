@@ -41,41 +41,42 @@ type Router[C Context] struct {
 	prefix string
 	mws    []Middleware[C]
 
-	regs             []registration[C]
-	children         []*Router[C]
-	hasRoutes        bool
-	name             string
-	meta             any
-	tagged           bool
-	nameUsed         bool
-	hosts            []hostSpec
-	inHost           bool
-	notFound         HandlerFunc[C]
-	methodNotAllowed HandlerFunc[C]
-	errHandler       ErrorHandlerFunc[C]
-	newCtx           func(http.ResponseWriter, *http.Request) C
-	pool             *sync.Pool
-	reset            func(C)
-	once             sync.Once
-	started          atomic.Bool
-	tree             *node[C]
-	hostSet          *hostSet[C]
-	routes           []Route
-	notFoundChain    HandlerFunc[C]
-	notAllowedChain  HandlerFunc[C]
-	optionsChain     HandlerFunc[C]
-	autoOptions      bool
-	redirectSlash    bool
-	anyHostRoutes    bool
-	ropts            *routerOpts
-	maxBody          int64
-	maxMultipart     int64
-	strictBind       bool
-	logger           *slog.Logger
-	jsonOpts         []json.Options
-	compiled         atomic.Bool
-	preChain         HandlerFunc[C]
-	observer         func(c Context, status int, size int64, d time.Duration, err error)
+	regs               []registration[C]
+	children           []*Router[C]
+	hasRoutes          bool
+	name               string
+	meta               any
+	tagged             bool
+	nameUsed           bool
+	hosts              []hostSpec
+	inHost             bool
+	notFound           HandlerFunc[C]
+	methodNotAllowed   HandlerFunc[C]
+	errHandler         ErrorHandlerFunc[C]
+	newCtx             func(http.ResponseWriter, *http.Request) C
+	pool               *sync.Pool
+	reset              func(C)
+	once               sync.Once
+	started            atomic.Bool
+	tree               *node[C]
+	hostSet            *hostSet[C]
+	routes             []Route
+	notFoundChain      HandlerFunc[C]
+	notAllowedChain    HandlerFunc[C]
+	optionsChain       HandlerFunc[C]
+	compiledErrHandler ErrorHandlerFunc[C]
+	autoOptions        bool
+	redirectSlash      bool
+	anyHostRoutes      bool
+	ropts              *routerOpts
+	maxBody            int64
+	maxMultipart       int64
+	strictBind         bool
+	logger             *slog.Logger
+	jsonOpts           []json.Options
+	compiled           atomic.Bool
+	preChain           HandlerFunc[C]
+	observer           func(c Context, status int, size int64, d time.Duration, err error)
 
 	preMws     []Middleware[C]
 	compileErr error
@@ -122,6 +123,10 @@ func defaultNotFound[C Context](C) error         { return ErrNotFound }
 func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 
 func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
+	r.handle(method, pattern, h, mws)
+}
+
+func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
 	if r.root.started.Load() {
 		panic("router: cannot register " + method + " " + pattern + " after the router started serving")
 	}
@@ -131,6 +136,7 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 	if h == nil {
 		panic("router: Handle needs a handler for " + method + " " + pattern)
 	}
+	validateMiddleware(mws)
 	if r.name != "" {
 		if r.nameUsed {
 			panic("router: the scope named " + r.name + " already registered a route; open another Name scope for " + method + " " + pattern)
@@ -183,12 +189,22 @@ func (r *Router[C]) Any(pattern string, h HandlerFunc[C], mws ...Middleware[C]) 
 }
 
 func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
+	if h == nil {
+		panic("router: Match needs a handler for " + pattern)
+	}
+	validateMiddleware(mws)
+	for _, method := range methods {
+		if method == "" {
+			panic("router: Match needs non-empty methods")
+		}
+	}
 	for _, m := range methods {
-		r.Handle(m, pattern, h, mws...)
+		r.handle(m, pattern, h, mws)
 	}
 }
 
 func (r *Router[C]) Use(mws ...Middleware[C]) {
+	validateMiddleware(mws)
 	if r.hasRoutes {
 		panic("router: Use must come before the routes of a scope; open a Group for later middleware")
 	}
@@ -198,7 +214,19 @@ func (r *Router[C]) Use(mws ...Middleware[C]) {
 	r.mws = append(r.mws, mws...)
 }
 
+func validateMiddleware[C Context](mws []Middleware[C]) {
+	for _, mw := range mws {
+		if mw == nil {
+			panic("router: middleware must not be nil")
+		}
+	}
+}
+
 func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
+	validateMiddleware(mws)
+	if r.root.started.Load() {
+		panic("router: cannot create a scope after the router started serving")
+	}
 	c := &Router[C]{root: r.root, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
 	r.children = append(r.children, c)
 	return c
@@ -231,6 +259,7 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 		panic("router: Pre belongs to the root router, because it runs before matching picks a scope")
 	}
 	r.mustNotBeServing("the pre-routing middleware")
+	validateMiddleware(mws)
 	r.preMws = append(r.preMws, mws...)
 }
 
@@ -266,14 +295,8 @@ func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 }
 
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
-	if r.root.started.Load() {
-		panic("router: cannot register a host scope after the router started serving")
-	}
 	if len(patterns) == 0 {
 		panic("router: Hosts needs at least one pattern")
-	}
-	if r.inHost || len(r.hosts) > 0 {
-		panic("router: a host scope cannot sit inside another host scope")
 	}
 	specs := make([]hostSpec, 0, len(patterns))
 	for _, p := range patterns {
@@ -282,6 +305,12 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 			panic(err.Error())
 		}
 		specs = append(specs, spec)
+	}
+	if r.root.started.Load() {
+		panic("router: cannot register a host scope after the router started serving")
+	}
+	if r.inHost || len(r.hosts) > 0 {
+		panic("router: a host scope cannot sit inside another host scope")
 	}
 	c := r.newChild("", nil)
 	c.hosts = specs
@@ -332,8 +361,8 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 		h.ServeHTTP(b.res, req)
 		return nil
 	}
-	r.Any(prefix, handler)
-	r.Any(joinPattern(prefix, "/{"+mountParam+"...}"), handler)
+	r.handle(anyMethod, prefix, handler, nil)
+	r.handle(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil)
 }
 
 func stripMountPrefix(r *http.Request, tail string, escaped bool) *http.Request {
@@ -364,16 +393,25 @@ func (r *Router[C]) mustNotBeServing(what string) {
 }
 
 func (r *Router[C]) NotFound(h HandlerFunc[C]) {
+	if h == nil {
+		panic("router: NotFound needs a handler")
+	}
 	r.mustNotBeServing("the not-found handler")
 	r.notFound = h
 }
 
 func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
+	if h == nil {
+		panic("router: MethodNotAllowed needs a handler")
+	}
 	r.mustNotBeServing("the method-not-allowed handler")
 	r.methodNotAllowed = h
 }
 
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
+	if h == nil {
+		panic("router: ErrorHandler needs a handler")
+	}
 	r.mustNotBeServing("the error handler")
 	r.errHandler = h
 }
@@ -405,7 +443,7 @@ func (r *Router[C]) Logger(l *slog.Logger) {
 
 func (r *Router[C]) JSONOptions(opts ...json.Options) {
 	r.mustNotBeServing("the JSON options")
-	r.root.jsonOpts = opts
+	r.root.jsonOpts = slices.Clone(opts)
 }
 
 func (r *Router[C]) RedirectTrailingSlash(on bool) {
@@ -427,8 +465,22 @@ func (r *Router[C]) Routes() []Route {
 func (r *Router[C]) Build() error { return r.root.compile() }
 
 func (r *Router[C]) compile() error {
-	r.once.Do(func() { r.compileErr = r.buildErr() })
+	r.once.Do(func() {
+		freezeRouterGraph(r, make(map[*Router[C]]bool))
+		r.compileErr = r.buildErr()
+	})
 	return r.compileErr
+}
+
+func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
+	if seen[r] {
+		return
+	}
+	seen[r] = true
+	r.root.started.Store(true)
+	for _, child := range r.children {
+		freezeRouterGraph(child, seen)
+	}
 }
 
 func (r *Router[C]) build() {
@@ -438,6 +490,9 @@ func (r *Router[C]) build() {
 }
 
 func (r *Router[C]) buildErr() error {
+	rootNotFound := r.notFound
+	rootNotAllowed := r.methodNotAllowed
+	rootErrHandler := r.errHandler
 	r.tree = new(node[C])
 	r.ropts = &routerOpts{
 		jsonOpts:     r.jsonOpts,
@@ -446,11 +501,9 @@ func (r *Router[C]) buildErr() error {
 		maxMultipart: r.maxMultipart,
 		strictBind:   r.strictBind,
 	}
-	r.notFoundChain = chain(r.notFound, r.mws)
-	r.notAllowedChain = chain(r.methodNotAllowed, r.mws)
+	r.notFoundChain = chain(rootNotFound, r.mws)
+	r.notAllowedChain = chain(rootNotAllowed, r.mws)
 	r.optionsChain = chain(autoOptions[C], r.mws)
-	r.started.Store(true)
-
 	open := make(map[*Router[C]]bool)
 
 	var pending []pendingScope[C]
@@ -478,7 +531,11 @@ func (r *Router[C]) buildErr() error {
 				if host != nil {
 					return errors.New("router: a host scope cannot sit inside another host scope")
 				}
-				e = r.hostEntry(rt.hosts[i])
+				var err error
+				e, err = r.hostEntry(rt.hosts[i])
+				if err != nil {
+					return err
+				}
 				if !e.haveMWs {
 					e.mws, e.haveMWs = m, true
 				}
@@ -496,25 +553,30 @@ func (r *Router[C]) buildErr() error {
 			case rt != r && rt.root == rt:
 
 			case len(rt.hosts) > 0 || normalizePattern(p) == "/":
-				notFound, notAllowed, errh := r.fallbacks(e)
-				if rt.notFound != nil {
-					*notFound = chain(rt.notFound, m)
-					if e == nil {
-						r.notFound = rt.notFound
-					} else {
+				if e == nil {
+					if rt.notFound != nil {
+						rootNotFound = rt.notFound
+						r.notFoundChain = chain(rt.notFound, m)
+					}
+					if rt.methodNotAllowed != nil {
+						rootNotAllowed = rt.methodNotAllowed
+						r.notAllowedChain = chain(rt.methodNotAllowed, m)
+					}
+					if rt.errHandler != nil {
+						rootErrHandler = rt.errHandler
+					}
+				} else {
+					if rt.notFound != nil {
+						e.notFoundChain = chain(rt.notFound, m)
 						e.rawNotFound = rt.notFound
 					}
-				}
-				if rt.methodNotAllowed != nil {
-					*notAllowed = chain(rt.methodNotAllowed, m)
-					if e == nil {
-						r.methodNotAllowed = rt.methodNotAllowed
-					} else {
+					if rt.methodNotAllowed != nil {
+						e.notAllowedChain = chain(rt.methodNotAllowed, m)
 						e.rawNotAllowed = rt.methodNotAllowed
 					}
-				}
-				if rt.errHandler != nil {
-					*errh = rt.errHandler
+					if rt.errHandler != nil {
+						e.errHandler = rt.errHandler
+					}
 				}
 			default:
 				sets := own.take(rt)
@@ -546,10 +608,10 @@ func (r *Router[C]) buildErr() error {
 
 	r.collectRoutes()
 	r.allowCache = map[*node[C]]string{}
-	r.tree.cacheAllow(r.allowCache)
+	r.tree.cacheAllow(r.allowCache, r.autoOptions)
 	if r.hostSet != nil {
 		for _, e := range r.hostSet.all {
-			e.tree.cacheAllow(r.allowCache)
+			e.tree.cacheAllow(r.allowCache, r.autoOptions)
 		}
 	}
 	if len(r.preMws) > 0 {
@@ -561,10 +623,10 @@ func (r *Router[C]) buildErr() error {
 				e.optionsChain = chain(autoOptions[C], e.mws)
 			}
 			if e.notFoundChain == nil {
-				e.notFoundChain = chain(r.notFound, e.mws)
+				e.notFoundChain = chain(rootNotFound, e.mws)
 			}
 			if e.notAllowedChain == nil {
-				e.notAllowedChain = chain(r.methodNotAllowed, e.mws)
+				e.notAllowedChain = chain(rootNotAllowed, e.mws)
 			}
 		}
 		slices.SortStableFunc(r.hostSet.pats, func(a, b *hostEntry[C]) int {
@@ -572,20 +634,23 @@ func (r *Router[C]) buildErr() error {
 		})
 	}
 	for _, ps := range pending {
-		s := &scopeFallback[C]{prefix: ps.prefix, hostIdx: -1, depth: ps.depth}
+		segs, _, err := parsePattern(ps.prefix)
+		if err != nil {
+			return err
+		}
+		s := &scopeFallback[C]{prefix: ps.prefix, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
-		s.segs, s.statics = countSegments(ps.prefix)
 		notFound, notAllowed := ps.fb.notFound, ps.fb.notAllowed
 		if notFound == nil {
-			notFound = r.notFound
+			notFound = rootNotFound
 			if ps.host != nil && ps.host.rawNotFound != nil {
 				notFound = ps.host.rawNotFound
 			}
 		}
 		if notAllowed == nil {
-			notAllowed = r.methodNotAllowed
+			notAllowed = rootNotAllowed
 			if ps.host != nil && ps.host.rawNotAllowed != nil {
 				notAllowed = ps.host.rawNotAllowed
 			}
@@ -597,19 +662,28 @@ func (r *Router[C]) buildErr() error {
 		r.scopes = append(r.scopes, s)
 	}
 	slices.SortStableFunc(r.scopes, func(a, b *scopeFallback[C]) int {
-		if a.segs != b.segs {
-			return b.segs - a.segs
+		for i := range min(len(a.pattern), len(b.pattern)) {
+			as := segmentSpecificity(a.pattern[i].kind)
+			bs := segmentSpecificity(b.pattern[i].kind)
+			if as != bs {
+				return bs - as
+			}
 		}
-		if a.statics != b.statics {
-			return b.statics - a.statics
+		if len(a.pattern) != len(b.pattern) {
+			return len(b.pattern) - len(a.pattern)
 		}
-		return b.depth - a.depth
+		if a.depth != b.depth {
+			return b.depth - a.depth
+		}
+		return strings.Compare(a.prefix, b.prefix)
 	})
 	for _, s := range r.scopes {
 		if s.errHandler != nil {
+			s.errorIdx = int32(len(r.errScopes))
 			r.errScopes = append(r.errScopes, s)
 		}
 	}
+	r.compiledErrHandler = rootErrHandler
 	r.compiled.Store(true)
 	return nil
 }
@@ -642,7 +716,7 @@ func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern strin
 	return nil
 }
 
-func (r *Router[C]) preTerminal(c C) error { return r.route(c, c.base().req) }
+func (r *Router[C]) preTerminal(c C) error { return r.route(c, c.base().req, false) }
 
 type pendingScope[C Context] struct {
 	prefix string
@@ -673,11 +747,11 @@ func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
 }
 
 type scopeFallback[C Context] struct {
-	prefix  string
-	segs    int
-	statics int
-	depth   int
-	hostIdx int32
+	prefix   string
+	pattern  []segment
+	depth    int
+	hostIdx  int32
+	errorIdx int32
 
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
@@ -685,27 +759,29 @@ type scopeFallback[C Context] struct {
 	errHandler      ErrorHandlerFunc[C]
 }
 
-func (s *scopeFallback[C]) covers(path string) bool {
-	prefix := s.prefix
-	for prefix != "" {
+func (s *scopeFallback[C]) covers(path string, escaped bool) bool {
+	for _, want := range s.pattern {
+		if want.kind == segWildcard {
+			return true
+		}
 		if path == "" {
 			return false
 		}
-		want, prest := cutSegment(prefix)
-		got, rest := cutSegment(path)
-		if got == "" || !segmentCovers(want, got) {
+		raw, rest := cutSegment(path)
+		got := raw
+		if want.kind != segStatic {
+			var ok bool
+			got, ok = decodePathSegment(raw, escaped)
+			if !ok {
+				return false
+			}
+		}
+		if !segmentMatches(want, got) {
 			return false
 		}
-		prefix, path = prest, rest
+		path = rest
 	}
 	return true
-}
-
-func segmentCovers(want, got string) bool {
-	if want == "*" || strings.IndexByte(want, '{') >= 0 {
-		return true
-	}
-	return want == got
 }
 
 func cutSegment(p string) (seg, rest string) {
@@ -716,19 +792,7 @@ func cutSegment(p string) (seg, rest string) {
 	return p, ""
 }
 
-func countSegments(p string) (segs, statics int) {
-	for p != "" {
-		seg, rest := cutSegment(p)
-		segs++
-		if seg != "*" && strings.IndexByte(seg, '{') < 0 {
-			statics++
-		}
-		p = rest
-	}
-	return segs, statics
-}
-
-func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path string) *scopeFallback[C] {
+func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path string, escaped bool) *scopeFallback[C] {
 	if len(scopes) == 0 {
 		return nil
 	}
@@ -737,15 +801,15 @@ func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path st
 		idx = host.idx
 	}
 	for _, s := range scopes {
-		if s.hostIdx == idx && s.covers(path) {
+		if s.hostIdx == idx && s.covers(path, escaped) {
 			return s
 		}
 	}
 	return nil
 }
 
-func (r *Router[C]) fallbackChains(host *hostEntry[C], path string) (notFound, notAllowed, options HandlerFunc[C]) {
-	if s := scopeFor(r.scopes, host, path); s != nil {
+func (r *Router[C]) fallbackChains(host *hostEntry[C], path string, escaped bool) (notFound, notAllowed, options HandlerFunc[C]) {
+	if s := scopeFor(r.scopes, host, path, escaped); s != nil {
 		return s.notFoundChain, s.notAllowedChain, s.optionsChain
 	}
 	if host != nil {
@@ -756,21 +820,17 @@ func (r *Router[C]) fallbackChains(host *hostEntry[C], path string) (notFound, n
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
 
-func (r *Router[C]) fallbacks(e *hostEntry[C]) (notFound, notAllowed *HandlerFunc[C], errh *ErrorHandlerFunc[C]) {
-	if e != nil {
-		return &e.notFoundChain, &e.notAllowedChain, &e.errHandler
-	}
-	return &r.notFoundChain, &r.notAllowedChain, &r.errHandler
-}
-
-func (r *Router[C]) hostEntry(spec hostSpec) *hostEntry[C] {
+func (r *Router[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
 	if r.hostSet == nil {
 		r.hostSet = new(hostSet[C])
 	}
 	hs := r.hostSet
 	for _, e := range hs.all {
 		if e.pattern == spec.pattern {
-			return e
+			return e, nil
+		}
+		if sameHostShape(&e.hostSpec, &spec) {
+			return nil, fmt.Errorf("router: host pattern %q has the same match shape as %q but uses different parameter names", spec.pattern, e.pattern)
 		}
 	}
 
@@ -787,7 +847,7 @@ func (r *Router[C]) hostEntry(spec hostSpec) *hostEntry[C] {
 	default:
 		hs.pats = append(hs.pats, e)
 	}
-	return e
+	return e, nil
 }
 
 type routeKey struct{ host, method, pattern string }
@@ -854,7 +914,7 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	//nolint:errcheck // Same as above.
-	root.route(c, req)
+	root.route(c, req, true)
 }
 
 func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
@@ -880,7 +940,7 @@ func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
 		err = r.dispatch(c, r.preChain)
 		return
 	}
-	err = r.route(c, req)
+	err = r.route(c, req, true)
 }
 
 func (r *Router[C]) acquire(w http.ResponseWriter, req *http.Request) C {
@@ -908,6 +968,14 @@ func (r *Router[C]) release(c C) {
 	}
 	if r.pool != nil {
 		r.reset(c)
+		b := c.base()
+		b.req, b.res = nil, nil
+		b.resStorage.ResponseWriter = nil
+		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
+			b.clearRequestSlow()
+		} else {
+			b.paramArr = [maxInlineParams]string{}
+		}
 		r.pool.Put(c)
 	}
 }
@@ -915,11 +983,19 @@ func (r *Router[C]) release(c C) {
 func (r *Router[C]) recycle(c C) {
 	if r.pool != nil {
 		r.reset(c)
+		b := c.base()
+		b.req, b.res = nil, nil
+		b.resStorage.ResponseWriter = nil
+		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
+			b.clearRequestSlow()
+		} else {
+			b.paramArr = [maxInlineParams]string{}
+		}
 		r.pool.Put(c)
 	}
 }
 
-func (r *Router[C]) route(c C, req *http.Request) error {
+func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 	b := c.base()
 
 	path, escaped := requestPath(req.URL)
@@ -939,15 +1015,22 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 		hostVals = b.paramArr[:0]
 	)
 	if r.hostSet != nil {
-		b.host, b.hostKnown = normalizeHost(req.Host), true
-		host, hostVals = r.hostSet.match(b.host, hostVals)
+		var hostOK bool
+		b.host, hostOK = normalizeHostOK(req.Host)
+		b.hostKnown = true
+		if r.pool != nil && b.host != "" {
+			b.needsCleanup = true
+		}
+		if hostOK {
+			host, hostVals = r.hostSet.match(b.host, hostVals)
+		}
 		if host != nil {
 			b.hostIdx, b.hostPattern = host.idx, host.pattern
 			b.setRoute("", host.names, hostVals)
 		}
 	}
 
-	if r.redirectSlash && trimmed != path && r.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):]) {
+	if r.redirectSlash && trimmed != path && r.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
 		redirectTo(b.res, req, trimmed, escaped)
 		return nil
 	}
@@ -956,30 +1039,40 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 		hostSt, anySt matchState[C]
 		n             *node[C]
 		vals          []string
-		nHost         int
 	)
 	if host != nil {
-		n, vals = search(host.tree, trimmed, req.Method, hostVals, &hostSt)
-		nHost = len(hostVals)
+		n, vals = search(host.tree, trimmed, req.Method, hostVals, &hostSt, escaped)
 	}
 	if n == nil && r.anyHostRoutes {
-		if m, v := search(r.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt); m != nil {
-			n, vals, nHost = m, v, 0
+		if m, v := search(r.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
+			n, vals = m, v
 			b.hostIdx, b.hostPattern = -1, ""
 		}
 	}
 
 	switch {
 	case n != nil:
+		selectedHost := host
+		if b.hostIdx < 0 {
+			selectedHost = nil
+		}
+		if len(r.errScopes) > 0 || selectedHost != nil && selectedHost.errHandler != nil {
+			r.selectErrorTarget(b, selectedHost, trimmed, escaped)
+		}
 		if n.kind == edgeWildcard && len(vals) > 0 {
 			b.rawTail = vals[len(vals)-1]
-		}
-		if escaped {
-			unescapeParams(vals[nHost:])
+			b.needsCleanup = b.needsCleanup || b.rawTail != ""
+			if decoded, ok := decodePathSegment(b.rawTail, escaped); ok {
+				vals[len(vals)-1] = decoded
+			}
 		}
 		b.setRoute(n.pattern, n.names, vals)
 		req.Pattern = n.pattern
-		return r.dispatch(c, n.handler(req.Method))
+		h := n.handler(req.Method)
+		if handleErrors {
+			return r.dispatch(c, h)
+		}
+		return h(c)
 
 	case hostSt.pathMatch != nil || anySt.pathMatch != nil:
 		match, matched, skip := hostSt.pathMatch, hostSt.pathVals, len(hostVals)
@@ -988,22 +1081,41 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 			host = nil
 			b.hostIdx, b.hostPattern = -1, ""
 		}
-		if escaped {
-			unescapeParams(matched[skip:])
+		if match.kind == edgeWildcard && len(matched) > skip {
+			matched = slices.Clone(matched)
+			if decoded, ok := decodePathSegment(matched[len(matched)-1], escaped); ok {
+				matched[len(matched)-1] = decoded
+			}
 		}
+		if len(r.errScopes) > 0 || host != nil && host.errHandler != nil {
+			r.selectErrorTarget(b, host, trimmed, escaped)
+		}
+		b.needsCleanup = true
 		b.setRoute(match.pattern, match.names, matched)
 		req.Pattern = match.pattern
 		b.res.Header().Set(HeaderAllow, r.allowHeader(&hostSt, &anySt))
 
-		_, notAllowed, options := r.fallbackChains(host, trimmed)
+		_, notAllowed, options := r.fallbackChains(host, trimmed, escaped)
 		if req.Method == http.MethodOptions && r.autoOptions {
-			return r.dispatch(c, options)
+			if handleErrors {
+				return r.dispatch(c, options)
+			}
+			return options(c)
 		}
-		return r.dispatch(c, notAllowed)
+		if handleErrors {
+			return r.dispatch(c, notAllowed)
+		}
+		return notAllowed(c)
 
 	default:
-		notFound, _, _ := r.fallbackChains(host, trimmed)
-		return r.dispatch(c, notFound)
+		if len(r.errScopes) > 0 || host != nil && host.errHandler != nil {
+			r.selectErrorTarget(b, host, trimmed, escaped)
+		}
+		notFound, _, _ := r.fallbackChains(host, trimmed, escaped)
+		if handleErrors {
+			return r.dispatch(c, notFound)
+		}
+		return notFound(c)
 	}
 }
 
@@ -1022,8 +1134,8 @@ func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
 			}
 		}
 	}
-	out := host.allowedMethods(nil)
-	out = anyHost.allowedMethods(out)
+	out := host.allowedMethods(nil, r.autoOptions)
+	out = anyHost.allowedMethods(out, r.autoOptions)
 	slices.Sort(out)
 	return strings.Join(out, ", ")
 }
@@ -1032,10 +1144,72 @@ func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
 // as %2F. Every other request has the decoded path in Path already, and
 // decoding twice would turn "%252F" into a separator the client never sent.
 func requestPath(u *url.URL) (path string, escaped bool) {
-	if u.RawPath != "" {
-		return u.RawPath, true
+	path = canonicalEscapedPath(u.EscapedPath())
+	if path == u.Path {
+		return u.Path, false
 	}
-	return u.Path, false
+	return path, true
+}
+
+func canonicalEscapedPath(path string) string {
+	const hex = "0123456789ABCDEF"
+	i := strings.IndexByte(path, '%')
+	if i < 0 {
+		return path
+	}
+	for ; i+2 < len(path); i++ {
+		if path[i] != '%' {
+			continue
+		}
+		v, ok := unhex(path[i+1], path[i+2])
+		if !ok {
+			continue
+		}
+		preserve := v == '/' || v == '\\' || v == '%'
+		if preserve && path[i+1] == hex[v>>4] && path[i+2] == hex[v&15] {
+			continue
+		}
+		out := make([]byte, 0, len(path))
+		out = append(out, path[:i]...)
+		for i < len(path) {
+			if i+2 < len(path) && path[i] == '%' {
+				if v, ok := unhex(path[i+1], path[i+2]); ok {
+					if v == '/' || v == '\\' || v == '%' {
+						out = append(out, '%', hex[v>>4], hex[v&15])
+					} else {
+						out = append(out, v)
+					}
+					i += 3
+					continue
+				}
+			}
+			out = append(out, path[i])
+			i++
+		}
+		return string(out)
+	}
+	return path
+}
+
+func unhex(a, b byte) (byte, bool) {
+	hex := func(c byte) (byte, bool) {
+		switch {
+		case c >= '0' && c <= '9':
+			return c - '0', true
+		case c >= 'a' && c <= 'f':
+			return c - 'a' + 10, true
+		case c >= 'A' && c <= 'F':
+			return c - 'A' + 10, true
+		default:
+			return 0, false
+		}
+	}
+	hi, ok := hex(a)
+	if !ok {
+		return 0, false
+	}
+	lo, ok := hex(b)
+	return hi<<4 | lo, ok
 }
 
 func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
@@ -1066,33 +1240,39 @@ func (r *Router[C]) handleError(c C, err error) {
 }
 
 func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
-	var host *hostEntry[C]
-	if b.hostIdx >= 0 && r.hostSet != nil {
-		host = r.hostSet.all[b.hostIdx]
+	if !b.errorRouted {
+		return r.compiledErrHandler
 	}
-	if len(r.errScopes) > 0 {
-		if h := r.scopeErrorHandler(host, b.req.URL); h != nil {
-			return h
-		}
+	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(r.errScopes) {
+		return r.errScopes[b.errorScopeIdx].errHandler
+	}
+	var host *hostEntry[C]
+	if b.hostIdx >= 0 && r.hostSet != nil && int(b.hostIdx) < len(r.hostSet.all) {
+		host = r.hostSet.all[b.hostIdx]
 	}
 	if host != nil && host.errHandler != nil {
 		return host.errHandler
 	}
-	return r.errHandler
+	return r.compiledErrHandler
 }
 
-func (r *Router[C]) scopeErrorHandler(host *hostEntry[C], u *url.URL) ErrorHandlerFunc[C] {
-	path, _ := requestPath(u)
-	if s := scopeFor(r.errScopes, host, normalizePattern(path)); s != nil {
-		return s.errHandler
+func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
+	b.errorRouted = true
+	b.errorScopeIdx = -1
+	if host != nil {
+		b.hostIdx = host.idx
+	} else {
+		b.hostIdx = -1
 	}
-	return nil
+	if s := scopeFor(r.errScopes, host, path, escaped); s != nil {
+		b.errorScopeIdx = s.errorIdx
+	}
 }
 
-func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []string) bool {
+func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []string, escaped bool) bool {
 	if host != nil {
 		var st matchState[C]
-		if n, _ := search(host.tree, path, method, scratch, &st); n != nil || st.pathMatch != nil {
+		if n, _ := search(host.tree, path, method, scratch, &st, escaped); n != nil || st.pathMatch != nil {
 			return true
 		}
 	}
@@ -1100,7 +1280,7 @@ func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []
 		return false
 	}
 	var st matchState[C]
-	n, _ := search(r.tree, path, method, scratch, &st)
+	n, _ := search(r.tree, path, method, scratch, &st, escaped)
 	return n != nil || st.pathMatch != nil
 }
 

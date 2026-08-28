@@ -111,6 +111,118 @@ func TestRewriteLeavesTheQueryAlone(t *testing.T) {
 	}
 }
 
+func TestRewriteMatchesEscapedUnreservedCharacters(t *testing.T) {
+	tests := []struct {
+		name   string
+		match  string
+		to     string
+		target string
+		want   string
+	}{
+		{name: "literal", match: "/old/abc", to: "/new", target: "/old/%61bc", want: "/new"},
+		{name: "wildcard", match: "/old/a*c", to: "/new/$1", target: "/old/%61b%63", want: "/new/b"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			r := rewriteRouter(&got, middleware.RewriteRule{Match: tc.match, To: tc.to})
+			if rec := get(r, tc.target); rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if got != tc.want {
+				t.Errorf("path = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRewriteDoesNotMatchInsidePercentEscapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		match  string
+		target string
+	}{
+		{name: "unreserved triplet", match: "/old/*4A", target: "/old/%4A"},
+		{name: "reserved triplet suffix", match: "/old/*A", target: "/old/%2A"},
+		{name: "reserved triplet middle", match: "/old/*2*", target: "/old/%2F"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			r := newRouter()
+			r.Pre(middleware.Rewrite[*appContext](
+				middleware.RewriteRule{Match: tc.match, To: "/new"},
+			))
+			r.GET("/{rest...}", func(c *appContext) error {
+				got = c.Request().URL.EscapedPath()
+				return c.NoContent(http.StatusOK)
+			})
+
+			if rec := get(r, tc.target); rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if got != tc.target {
+				t.Errorf("escaped path = %q, want unchanged %q", got, tc.target)
+			}
+		})
+	}
+}
+
+func TestRewritePreservesEscapedSeparatorsAsParameterData(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		wantRaw   string
+		wantParam string
+	}{
+		{name: "slash", target: "/old/a%2Fb", wantRaw: "/new/a%2Fb", wantParam: "a/b"},
+		{name: "lowercase slash", target: "/old/a%2fb", wantRaw: "/new/a%2Fb", wantParam: "a/b"},
+		{name: "backslash", target: "/old/a%5Cb", wantRaw: "/new/a%5Cb", wantParam: `a\b`},
+		{name: "double escaped slash", target: "/old/a%252Fb", wantRaw: "/new/a%252Fb", wantParam: "a%2Fb"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRouter()
+			r.Pre(middleware.Rewrite[*appContext](
+				middleware.RewriteRule{Match: "/old/*", To: "/new/$1"},
+			))
+			r.GET("/new/{id}", func(c *appContext) error {
+				if got := c.Request().URL.EscapedPath(); got != tc.wantRaw {
+					t.Errorf("escaped path = %q, want %q", got, tc.wantRaw)
+				}
+				return c.String(http.StatusOK, c.Param("id"))
+			})
+			r.GET("/new/a/b", func(c *appContext) error {
+				return c.String(http.StatusTeapot, "separator became route structure")
+			})
+
+			rec := get(r, tc.target)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+			}
+			if got := rec.Body.String(); got != tc.wantParam {
+				t.Errorf("parameter = %q, want %q", got, tc.wantParam)
+			}
+		})
+	}
+}
+
+func TestRewriteStillMatchesDecodedUnicodeText(t *testing.T) {
+	var got string
+	r := rewriteRouter(&got, middleware.RewriteRule{Match: "/café/*", To: "/résumé/$1"})
+
+	rec := get(r, "/caf%C3%A9/ada")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got != "/résumé/ada" {
+		t.Errorf("path = %q, want %q", got, "/résumé/ada")
+	}
+}
+
 func TestRewritePanicsOnARuleWithoutAMatch(t *testing.T) {
 	mustPanicContaining(t, "Match", func() {
 		middleware.Rewrite[*appContext](middleware.RewriteRule{To: "/new"})

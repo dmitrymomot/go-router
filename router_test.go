@@ -2,12 +2,14 @@ package router
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -185,6 +187,16 @@ func TestAutomaticHeadAndOptions(t *testing.T) {
 	r2.GET("/users", echoRoute)
 	if rec := do(r2, http.MethodOptions, "/users"); rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("disabled OPTIONS status = %d, want 405", rec.Code)
+	} else if got := rec.Header().Get(HeaderAllow); got != "GET, HEAD" {
+		t.Errorf("disabled OPTIONS Allow = %q, want %q", got, "GET, HEAD")
+	}
+
+	r3 := newTestRouter()
+	r3.HandleOPTIONS(false)
+	r3.GET("/users", echoRoute)
+	r3.OPTIONS("/users", echoRoute)
+	if rec := do(r3, http.MethodDelete, "/users"); rec.Header().Get(HeaderAllow) != "GET, HEAD, OPTIONS" {
+		t.Errorf("explicit OPTIONS Allow = %q, want %q", rec.Header().Get(HeaderAllow), "GET, HEAD, OPTIONS")
 	}
 }
 
@@ -319,6 +331,57 @@ func TestEscapedParameter(t *testing.T) {
 
 	if got := do(r, http.MethodGet, "/files/a%2Fb").Body.String(); got != "a/b" {
 		t.Errorf("param = %q, want %q", got, "a/b")
+	}
+}
+
+func TestPercentEscapeCanonicalization(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/alpha", func(c *tctx) error { return c.String(http.StatusOK, "alpha") })
+	r.GET("/café", func(c *tctx) error { return c.String(http.StatusOK, "café") })
+	r.GET("/slash/a%2Fb", func(c *tctx) error { return c.String(http.StatusOK, "escaped slash") })
+	r.GET("/slash/a/b", func(c *tctx) error { return c.String(http.StatusOK, "split slash") })
+	r.GET("/backslash/a%5Cb", func(c *tctx) error { return c.String(http.StatusOK, "escaped backslash") })
+	r.GET(`/backslash/a\b`, func(c *tctx) error { return c.String(http.StatusOK, "plain backslash") })
+	r.GET("/value/{value}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
+
+	tests := []struct{ path, want string }{
+		{"/%61lpha", "alpha"},
+		{"/caf%C3%A9", "café"},
+		{"/caf%c3%a9", "café"},
+		{"/slash/a%2Fb", "escaped slash"},
+		{"/slash/a%2fb", "escaped slash"},
+		{"/backslash/a%5Cb", "escaped backslash"},
+		{"/backslash/a%5cb", "escaped backslash"},
+		{"/value/a%2Fb", "a/b"},
+		{"/value/a%5Cb", `a\b`},
+		{"/value/%252F", "%2F"},
+		{"/value/%255C", "%5C"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := do(r, http.MethodGet, tc.path)
+			if rec.Code != http.StatusOK || rec.Body.String() != tc.want {
+				t.Errorf("GET %s = %d %q, want %d %q", tc.path, rec.Code, rec.Body.String(), http.StatusOK, tc.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalEscapedPath(t *testing.T) {
+	tests := []struct{ path, want string }{
+		{"/plain", "/plain"},
+		{"/%41lpha", "/Alpha"},
+		{"/caf%c3%a9", "/café"},
+		{"/a%2fb%5cc", "/a%2Fb%5Cc"},
+		{"/%252f", "/%252f"},
+		{"/%", "/%"},
+		{"/%2", "/%2"},
+		{"/%zz", "/%zz"},
+	}
+	for _, tc := range tests {
+		if got := canonicalEscapedPath(tc.path); got != tc.want {
+			t.Errorf("canonicalEscapedPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }
 
@@ -1734,5 +1797,455 @@ func TestUseAfterAGroupIsAllowed(t *testing.T) {
 	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
 	if err := r.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
+	}
+}
+
+func TestPreDispatchesEachErrorOnce(t *testing.T) {
+	r := newTestRouter()
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+	calls := 0
+	r.ErrorHandler(func(c *tctx, err error) {
+		calls++
+		_ = c.NoContent(StatusOf(err))
+	})
+	r.GET("/fail", func(*tctx) error { return ErrConflict })
+
+	for _, path := range []string{"/fail", "/missing"} {
+		before := calls
+		do(r, http.MethodGet, path)
+		if calls != before+1 {
+			t.Errorf("GET %s invoked the error handler %d times, want 1", path, calls-before)
+		}
+	}
+}
+
+func TestErrorScopeIsSelectedByRouting(t *testing.T) {
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root") })
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			if c.Path() == "/debug/pre" {
+				return ErrConflict
+			}
+			return next(c)
+		}
+	})
+	r.Route("/debug", func(g *Router[*tctx]) {
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "debug") })
+		g.GET("/mutate", func(c *tctx) error {
+			req := c.Request().Clone(c.Request().Context())
+			req.URL.Path = "/outside"
+			req.URL.RawPath = ""
+			c.SetRequest(req)
+			return ErrConflict
+		})
+	})
+
+	if got := do(r, http.MethodGet, "/debug/pre").Body.String(); got != "root" {
+		t.Errorf("pre-routing error used %q, want root handler", got)
+	}
+	if got := do(r, http.MethodGet, "/debug/mutate").Body.String(); got != "debug" {
+		t.Errorf("routed error after URL mutation used %q, want debug handler", got)
+	}
+}
+
+func TestScopedFallbackUsesParsedPrefix(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			addPlain := func() {
+				r.Route("/t/{value}", func(g *Router[*tctx]) {
+					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "plain") })
+				})
+			}
+			addNumeric := func() {
+				r.Route("/t/{value:[0-9]+}", func(g *Router[*tctx]) {
+					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "numeric") })
+				})
+			}
+			if reverse {
+				addNumeric()
+				addPlain()
+			} else {
+				addPlain()
+				addNumeric()
+			}
+
+			if got := do(r, http.MethodGet, "/t/42/missing").Body.String(); got != "numeric" {
+				t.Errorf("numeric prefix chose %q", got)
+			}
+			if got := do(r, http.MethodGet, "/t/nope/missing").Body.String(); got != "plain" {
+				t.Errorf("plain prefix chose %q", got)
+			}
+		})
+	}
+
+	r := newTestRouter()
+	r.Route("/reports/report-{id:[0-9]+}.csv", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "report") })
+	})
+	if got := do(r, http.MethodGet, "/reports/report-7.csv/missing").Body.String(); got != "report" {
+		t.Errorf("template scope chose %q", got)
+	}
+	if got := do(r, http.MethodGet, "/reports/report-no.csv/missing").Body.String(); got == "report" {
+		t.Error("template scope covered a value rejected by its regex")
+	}
+}
+
+func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			register := func(prefix, name string) {
+				r.Route(prefix, func(g *Router[*tctx]) {
+					g.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+						return func(c *tctx) error {
+							c.SetHeader("X-Scope", name)
+							return next(c)
+						}
+					})
+					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, name+" 404") })
+					g.MethodNotAllowed(func(c *tctx) error {
+						return c.String(http.StatusMethodNotAllowed, name+" 405")
+					})
+					g.ErrorHandler(func(c *tctx, err error) {
+						_ = c.String(http.StatusTeapot, name+" error")
+					})
+				})
+			}
+			if reverse {
+				register("/{x}/b", "parameter-first")
+				register("/a/{x}", "static-first")
+			} else {
+				register("/a/{x}", "static-first")
+				register("/{x}/b", "parameter-first")
+			}
+			r.GET("/a/b/method", echoRoute)
+			r.GET("/a/b/error", func(*tctx) error { return errors.New("boom") })
+
+			if rec := do(r, http.MethodGet, "/a/b/missing"); rec.Code != http.StatusNotFound || rec.Body.String() != "static-first 404" {
+				t.Errorf("404 = %d %q", rec.Code, rec.Body.String())
+			}
+			if rec := do(r, http.MethodPost, "/a/b/method"); rec.Code != http.StatusMethodNotAllowed || rec.Body.String() != "static-first 405" {
+				t.Errorf("405 = %d %q", rec.Code, rec.Body.String())
+			}
+			if rec := do(r, http.MethodOptions, "/a/b/method"); rec.Code != http.StatusNoContent || rec.Header().Get("X-Scope") != "static-first" {
+				t.Errorf("OPTIONS = %d scope %q", rec.Code, rec.Header().Get("X-Scope"))
+			}
+			if rec := do(r, http.MethodGet, "/a/b/error"); rec.Code != http.StatusTeapot || rec.Body.String() != "static-first error" {
+				t.Errorf("error = %d %q", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func registerScopedHandlers(r *Router[*tctx], prefix, name string) {
+	r.Route(prefix, func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, name+" 404") })
+		g.MethodNotAllowed(func(c *tctx) error {
+			return c.String(http.StatusMethodNotAllowed, name+" 405")
+		})
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, name+" error") })
+		g.GET("/method", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
+		g.GET("/error", func(*tctx) error { return errors.New("boom") })
+	})
+}
+
+func TestEscapedStaticScopeKeepsItsFallbacksAndErrorHandler(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			static := func() { registerScopedHandlers(r, "/x/a%2Fb", "static") }
+			dynamic := func() { registerScopedHandlers(r, "/x/{value}", "dynamic") }
+			if reverse {
+				dynamic()
+				static()
+			} else {
+				static()
+				dynamic()
+			}
+
+			tests := []struct {
+				method string
+				path   string
+				code   int
+				body   string
+			}{
+				{http.MethodGet, "/x/a%2Fb/missing", http.StatusNotFound, "static 404"},
+				{http.MethodGet, "/x/a%2fb/missing", http.StatusNotFound, "static 404"},
+				{http.MethodPost, "/x/a%2Fb/method", http.StatusMethodNotAllowed, "static 405"},
+				{http.MethodPost, "/x/a%2fb/method", http.StatusMethodNotAllowed, "static 405"},
+				{http.MethodGet, "/x/a%2Fb/error", http.StatusTeapot, "static error"},
+				{http.MethodGet, "/x/a%2fb/error", http.StatusTeapot, "static error"},
+			}
+			for _, tc := range tests {
+				rec := do(r, tc.method, tc.path)
+				if rec.Code != tc.code || rec.Body.String() != tc.body {
+					t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.path, rec.Code, rec.Body.String(), tc.code, tc.body)
+				}
+			}
+		})
+	}
+}
+
+func TestScopedHandlersMatchCanonicalAndDynamicEscapes(t *testing.T) {
+	t.Run("unreserved static", func(t *testing.T) {
+		r := newTestRouter()
+		registerScopedHandlers(r, "/x/alpha", "static")
+		if got := do(r, http.MethodGet, "/x/%61lpha/missing").Body.String(); got != "static 404" {
+			t.Errorf("fallback = %q, want %q", got, "static 404")
+		}
+		if got := do(r, http.MethodGet, "/x/%61lpha/error").Body.String(); got != "static error" {
+			t.Errorf("error = %q, want %q", got, "static error")
+		}
+	})
+
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("template and regex reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			template := func() { registerScopedHandlers(r, "/x/pre-{value}-post", "template") }
+			regex := func() { registerScopedHandlers(r, "/x/{value:.+}", "regex") }
+			if reverse {
+				regex()
+				template()
+			} else {
+				template()
+				regex()
+			}
+			if got := do(r, http.MethodGet, "/x/pre-a%2Fb-post/missing").Body.String(); got != "template 404" {
+				t.Errorf("fallback = %q, want %q", got, "template 404")
+			}
+			if got := do(r, http.MethodGet, "/x/pre-a%2Fb-post/error").Body.String(); got != "template error" {
+				t.Errorf("error = %q, want %q", got, "template error")
+			}
+		})
+	}
+
+	r := newTestRouter()
+	registerScopedHandlers(r, "/x/{value:.+}", "regex")
+	if got := do(r, http.MethodGet, "/x/a%2Fb/missing").Body.String(); got != "regex 404" {
+		t.Errorf("regex fallback = %q, want %q", got, "regex 404")
+	}
+	if got := do(r, http.MethodGet, "/x/a%2Fb/error").Body.String(); got != "regex error" {
+		t.Errorf("regex error = %q, want %q", got, "regex error")
+	}
+}
+
+func TestScopeCoverageRejectsInvalidDynamicEscapes(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		{"/x/%zz", "/x/%zz/missing", true},
+		{"/x/{value}", "/x/%zz/missing", false},
+		{"/x/pre-{value}", "/x/pre-%zz/missing", false},
+		{"/x/{value:.+}", "/x/%zz/missing", false},
+		{"/x/{rest...}", "/x", true},
+		{"/x/y", "/x", false},
+	}
+	for _, tc := range tests {
+		segs, _, err := parsePattern(tc.pattern)
+		if err != nil {
+			t.Fatalf("parsePattern(%q) = %v", tc.pattern, err)
+		}
+		scope := scopeFallback[*tctx]{pattern: segs}
+		if got := scope.covers(tc.path, true); got != tc.want {
+			t.Errorf("%q covers %q = %v, want %v", tc.pattern, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestScopedHandlersIgnoreInvalidRawPath(t *testing.T) {
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusInternalServerError, "root error") })
+	registerScopedHandlers(r, "/x/safe", "scope")
+	r.GET("/outside/error", func(*tctx) error { return errors.New("boom") })
+
+	tests := []struct {
+		path string
+		body string
+	}{
+		{"/outside/missing", "root 404"},
+		{"/outside/error", "root error"},
+	}
+	for _, tc := range tests {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.URL.RawPath = "/x/safe/%zz"
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != tc.body {
+			t.Errorf("GET %s with invalid RawPath = %q, want %q", tc.path, got, tc.body)
+		}
+	}
+}
+
+func TestBuildValidatesFallbackOnlyPrefixes(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/bad/{", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.NoContent(http.StatusNotFound) })
+	})
+	if err := r.Build(); err == nil || !strings.Contains(err.Error(), "unbalanced") {
+		t.Fatalf("Build() = %v, want an unbalanced-pattern error", err)
+	}
+}
+
+func TestEscapedSegmentsAreDecodedOnceForMatching(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/digits/1", func(c *tctx) error { return c.String(http.StatusOK, "static") })
+	r.GET("/digits/{id:[0-9]+}", func(c *tctx) error { return c.String(http.StatusOK, "numeric "+c.Param("id")) })
+	r.GET("/files/{name:[a-z]+}", func(c *tctx) error { return c.String(http.StatusOK, "safe "+c.Param("name")) })
+	r.GET("/files/{name}", func(c *tctx) error { return c.String(http.StatusOK, "plain "+c.Param("name")) })
+	r.GET("/encoded/{value:.*}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
+	r.GET("/report/report-{id:[0-9]+}.csv", func(c *tctx) error { return c.String(http.StatusOK, c.Param("id")) })
+
+	tests := []struct{ path, want string }{
+		{"/digits/%31", "static"},
+		{"/files/a%2Fb", "plain a/b"},
+		{"/encoded/%252F", "%2F"},
+		{"/report/report-%31.csv", "1"},
+	}
+	for _, tc := range tests {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestInconsistentRawPathIsIgnored(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/admin", func(c *tctx) error { return c.String(http.StatusOK, "admin") })
+	r.GET("/public", func(c *tctx) error { return c.String(http.StatusOK, "public") })
+
+	for _, raw := range []string{"/public", "/%zz"} {
+		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		req.URL.RawPath = raw
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != "admin" {
+			t.Errorf("RawPath %q routed to %q, want Path /admin", raw, got)
+		}
+	}
+}
+
+func TestMountedRouterFreezesWithParent(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/ready", echoRoute)
+	first := newTestRouter()
+	second := newTestRouter()
+	first.Mount("/one", sub)
+	second.Mount("/two", sub)
+
+	if err := first.Build(); err != nil {
+		t.Fatalf("first.Build() = %v", err)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("mounted router accepted a route after its parent built")
+			}
+		}()
+		sub.GET("/late", echoRoute)
+	}()
+	if got := do(second, http.MethodGet, "/two/ready").Code; got != http.StatusOK {
+		t.Errorf("second parent status = %d, want 200", got)
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Error("parent accepted Mount after serving")
+		}
+	}()
+	first.Mount("/late", newTestRouter())
+}
+
+func TestMiddlewareFactoryCanBuildMountedRouter(t *testing.T) {
+	tests := []struct {
+		name    string
+		reenter func(*Router[*tctx]) error
+	}{
+		{"Build", func(r *Router[*tctx]) error { return r.Build() }},
+		{"Routes", func(r *Router[*tctx]) error { r.Routes(); return nil }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := newTestRouter()
+			sub.GET("/ready", echoRoute)
+			r := newTestRouter()
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			var reentryErr error
+			r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+				once.Do(func() {
+					close(entered)
+					<-release
+					reentryErr = tc.reenter(sub)
+				})
+				return next
+			})
+			r.Mount("/sub", sub)
+
+			done := make(chan error, 1)
+			go func() { done <- r.Build() }()
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("middleware factory was not entered")
+			}
+			close(release)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("Build() = %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Build() deadlocked during mounted-router re-entry")
+			}
+			if reentryErr != nil {
+				t.Fatalf("mounted router %s = %v", tc.name, reentryErr)
+			}
+			if got := do(r, http.MethodGet, "/sub/ready").Code; got != http.StatusOK {
+				t.Errorf("status = %d, want 200", got)
+			}
+		})
+	}
+}
+
+func TestParentsSharingAMountBuildConcurrently(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/ready", echoRoute)
+	left, right := newTestRouter(), newTestRouter()
+	left.Mount("/left", sub)
+	right.Mount("/right", sub)
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, r := range []*Router[*tctx]{left, right} {
+		go func() {
+			<-start
+			errs <- r.Build()
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("Build() = %v", err)
+		}
+	}
+	if do(left, http.MethodGet, "/left/ready").Code != http.StatusOK ||
+		do(right, http.MethodGet, "/right/ready").Code != http.StatusOK {
+		t.Fatal("a concurrently built parent omitted the shared mount")
+	}
+}
+
+func TestJSONOptionsClonesCallerSlice(t *testing.T) {
+	r := newTestRouter()
+	opts := []json.Options{json.RejectUnknownMembers(true)}
+	r.JSONOptions(opts...)
+	opts[0] = nil
+	if len(r.jsonOpts) != 1 || r.jsonOpts[0] == nil {
+		t.Fatal("JSONOptions retained the caller's slice backing array")
 	}
 }

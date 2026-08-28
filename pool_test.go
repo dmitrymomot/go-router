@@ -172,6 +172,68 @@ func TestPoolUnderConcurrentRequests(t *testing.T) {
 	wg.Wait()
 }
 
+func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
+	var seen *pctx
+	r := newPooledRouter()
+	r.NotFound(func(c *pctx) error {
+		seen = c
+		return c.NoContent(http.StatusNotFound)
+	})
+	r.MethodNotAllowed(func(c *pctx) error {
+		seen = c
+		return c.NoContent(http.StatusMethodNotAllowed)
+	})
+	r.GET("/backtrack/{value}/wanted", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
+	r.GET("/method/{value}", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
+	r.Host("{tenant}.example.com", func(h *Router[*pctx]) {
+		h.GET("/{a}/{b}/{c}/{d}/{e}/{f}/{g}/{h}/{tail...}", func(c *pctx) error {
+			seen = c
+			req := c.Request()
+			c.Set("request", req)
+			c.Query("q")
+			c.setHXError(ErrBadRequest)
+			c.Response().Before(func() { _ = req.Method })
+			return c.NoContent(http.StatusNoContent)
+		})
+	})
+
+	assertCleared := func() {
+		t.Helper()
+		if seen == nil {
+			t.Fatal("handler did not run")
+		}
+		b := &seen.Base
+		if b.req != nil || b.res != nil || b.queryCache != nil || b.deferred != nil {
+			t.Fatal("pooled context retained completed request state")
+		}
+		if len(b.store) != 0 || b.resStorage.ResponseWriter != nil || b.resStorage.before != nil {
+			t.Fatal("pooled context retained request-owned references")
+		}
+		if b.host != "" || b.rawTail != "" || cap(b.paramVals) > len(b.paramArr) {
+			t.Fatal("pooled context retained matched request data")
+		}
+		for i, value := range b.paramArr {
+			if value != "" {
+				t.Errorf("paramArr[%d] retained %q", i, value)
+			}
+		}
+		for i, value := range b.paramVals {
+			if value != "" {
+				t.Errorf("paramVals[%d] retained %q", i, value)
+			}
+		}
+	}
+
+	doHost(r, http.MethodGet, "acme.example.com", "/1/2/3/4/5/6/7/8/rest/more?q=go")
+	assertCleared()
+	seen = nil
+	do(r, http.MethodGet, "/backtrack/value/missing")
+	assertCleared()
+	seen = nil
+	do(r, http.MethodPost, "/method/value")
+	assertCleared()
+}
+
 func TestNewPooledPanicsWithoutAResetFunction(t *testing.T) {
 	defer func() {
 		if msg := recover(); msg == nil || !strings.Contains(msg.(string), "reset") {

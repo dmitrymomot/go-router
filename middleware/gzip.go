@@ -44,11 +44,17 @@ func GzipWithConfig[C router.Context](cfg GzipConfig) router.Middleware[C] {
 			router.AddVary(res.Header(), router.HeaderAcceptEncoding)
 
 			req := c.Request()
-			if req.Method == http.MethodHead || !acceptsGzip(req.Header.Get(router.HeaderAcceptEncoding)) {
+			if !acceptsGzip(req.Header.Get(router.HeaderAcceptEncoding)) {
 				return next(c)
 			}
 
-			w := &gzipWriter{ResponseWriter: res.ResponseWriter, res: res, pool: pool, min: minLength}
+			w := &gzipWriter{
+				ResponseWriter: res.ResponseWriter,
+				res:            res,
+				pool:           pool,
+				min:            minLength,
+				head:           req.Method == http.MethodHead,
+			}
 			before := res.Size
 			res.ResponseWriter = w
 
@@ -84,6 +90,7 @@ type gzipWriter struct {
 	min   int
 	code  int
 	state uint8
+	head  bool
 }
 
 func (w *gzipWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -118,8 +125,14 @@ func (w *gzipWriter) Write(p []byte) (int, error) {
 	}
 	switch w.state {
 	case gzipOn:
+		if w.head {
+			return len(p), nil
+		}
 		return w.gz.Write(p)
 	case gzipPlain:
+		if w.head {
+			return len(p), nil
+		}
 		n, err := w.ResponseWriter.Write(p)
 		w.written += int64(n)
 		return n, err
@@ -165,6 +178,10 @@ func (w *gzipWriter) commit(compress bool) error {
 	if !compress {
 		w.state = gzipPlain
 		w.ResponseWriter.WriteHeader(code)
+		if w.head {
+			w.buf = w.buf[:0]
+			return nil
+		}
 		if len(w.buf) == 0 {
 			return nil
 		}
@@ -182,6 +199,11 @@ func (w *gzipWriter) commit(compress bool) error {
 	h.Set(router.HeaderContentEncoding, "gzip")
 
 	w.state = gzipOn
+	if w.head {
+		w.ResponseWriter.WriteHeader(code)
+		w.buf = w.buf[:0]
+		return nil
+	}
 	w.gz = w.pool.Get().(*gzip.Writer)
 	w.gz.Reset(gzipSink{w})
 	w.ResponseWriter.WriteHeader(code)
@@ -202,11 +224,12 @@ func (w *gzipWriter) finish(ok bool) {
 		//nolint:errcheck // The response ends here; nothing reads the error.
 		w.commit(false)
 	case gzipOn:
-		if !ok {
+		if !ok || w.head {
 			return
 		}
 		//nolint:errcheck // The response is committed; nothing reads the error.
 		w.gz.Close()
+		w.gz.Reset(io.Discard)
 		w.pool.Put(w.gz)
 		w.gz = nil
 	}

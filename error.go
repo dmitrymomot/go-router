@@ -183,7 +183,7 @@ func writeError(b *Base, err error, exposeCause bool) {
 	if he.Status >= http.StatusInternalServerError || he.Err != nil {
 		logFailure(b, err, he.Status)
 	}
-	if !writableFailure(b, err, he.Status) {
+	if !writableFailure(b, err) {
 		return
 	}
 
@@ -192,21 +192,26 @@ func writeError(b *Base, err error, exposeCause bool) {
 		cause = he.Err.Error()
 	}
 
-	b.Vary(HeaderHXRequest)
+	b.Vary(HeaderAccept, HeaderHXRequest)
 
-	if acceptsJSON(b.req) {
+	switch errorRepresentationFor(b.req) {
+	case errorRepresentationJSON:
 		b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
 		b.res.WriteHeader(he.Status)
+		if b.req.Method == http.MethodHead {
+			return
+		}
 		//nolint:errcheck // The connection is already failing; nothing to report.
 		json.MarshalWrite(b.res, errorBody{
 			Status: he.Status, Error: he.Message, Details: he.Details, Cause: cause,
 		})
 		return
-	}
-
-	if b.IsHTMX() {
+	case errorRepresentationHTML:
 		b.res.Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
 		b.res.WriteHeader(he.Status)
+		if b.req.Method == http.MethodHead {
+			return
+		}
 		//nolint:errcheck // Same as above.
 		b.res.WriteString(html.EscapeString(he.Message))
 		return
@@ -214,6 +219,9 @@ func writeError(b *Base, err error, exposeCause bool) {
 
 	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
 	b.res.WriteHeader(he.Status)
+	if b.req.Method == http.MethodHead {
+		return
+	}
 	//nolint:errcheck // Same as above.
 	b.res.WriteString(he.Message)
 	if cause != "" {
@@ -239,35 +247,41 @@ func logFailure(b *Base, err error, status int) {
 	)
 }
 
-func writableFailure(b *Base, err error, status int) bool {
+func writableFailure(b *Base, err error) bool {
 	if b.res.Committed || errors.Is(err, context.Canceled) {
-		return false
-	}
-	if b.req.Method == http.MethodHead {
-		b.res.WriteHeader(status)
 		return false
 	}
 	return true
 }
 
-var jsonOffers = []string{MIMEApplicationJSON}
+type errorRepresentation uint8
+
+const (
+	errorRepresentationText errorRepresentation = iota
+	errorRepresentationJSON
+	errorRepresentationHTML
+)
 
 // htmx sends "Accept: */*" and swaps what it receives into a page, so it gets
 // HTML unless it names JSON itself.
-func acceptsJSON(r *http.Request) bool {
-	accept := r.Header.Get(HeaderAccept)
-	if strings.Contains(accept, "json") {
-		return true
+func errorRepresentationFor(r *http.Request) errorRepresentation {
+	htmx := hxTrue(r.Header.Get(HeaderHXRequest))
+	offers := [...]string{MIMEApplicationJSON, MIMETextPlain, MIMETextHTML}
+	if htmx {
+		offers = [...]string{MIMETextHTML, MIMEApplicationJSON, MIMETextPlain}
 	}
-	if hxTrue(r.Header.Get(HeaderHXRequest)) {
-		return false
-	}
-	switch {
-	case accept == "", negotiate(accept, jsonOffers) != "":
-		return true
-	case strings.Contains(accept, "*/*"):
-		return true
+
+	switch negotiate(strings.Join(r.Header.Values(HeaderAccept), ","), offers[:]) {
+	case MIMEApplicationJSON:
+		return errorRepresentationJSON
+	case MIMETextHTML:
+		return errorRepresentationHTML
+	case MIMETextPlain:
+		return errorRepresentationText
 	default:
-		return !strings.Contains(accept, "text/")
+		if htmx {
+			return errorRepresentationHTML
+		}
+		return errorRepresentationText
 	}
 }

@@ -2,6 +2,7 @@ package routertest_test
 
 import (
 	"encoding/json/v2"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -122,6 +123,28 @@ func TestFormBodyAndHeader(t *testing.T) {
 		routertest.FormBody(url.Values{"name": {"bo"}}))
 	res.AssertStatus(t, http.StatusNoContent)
 	res.AssertHeader(t, "X-Who", "bo")
+}
+
+func TestRequestOptionsSetHostCookieAndBody(t *testing.T) {
+	req := routertest.Request(http.MethodPatch, "/submit",
+		routertest.Host("tenant.example.com"),
+		routertest.Cookie(&http.Cookie{Name: "session", Value: "abc"}),
+		routertest.Body("text/plain", strings.NewReader("payload")),
+	)
+	if req.Host != "tenant.example.com" {
+		t.Errorf("host = %q", req.Host)
+	}
+	cookie, err := req.Cookie("session")
+	if err != nil || cookie.Value != "abc" {
+		t.Fatalf("cookie = %#v, %v", cookie, err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "payload" || req.Header.Get("Content-Type") != "text/plain" || req.ContentLength != 7 {
+		t.Errorf("body = %q, content type = %q, length = %d", body, req.Header.Get("Content-Type"), req.ContentLength)
+	}
 }
 
 func TestHTMXOption(t *testing.T) {
@@ -252,6 +275,55 @@ func TestNewContextRunsAHandlerWithoutARouter(t *testing.T) {
 	}
 	if got != (user{Name: "primary", Age: 7}) {
 		t.Errorf("got %+v", got)
+	}
+}
+
+func TestRequestHelpersRejectNilInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		call func()
+	}{
+		{name: "request option", call: func() { routertest.Request(http.MethodGet, "/", nil) }},
+		{name: "body reader", call: func() { routertest.Body("text/plain", nil) }},
+		{name: "cookie", call: func() { routertest.Cookie(nil) }},
+		{name: "Serve handler", call: func() { routertest.Serve(nil, routertest.Request(http.MethodGet, "/")) }},
+		{name: "Serve request", call: func() { routertest.Serve(http.NotFoundHandler(), nil) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("call accepted a nil input")
+				}
+			}()
+			tt.call()
+		})
+	}
+}
+
+func TestContextHelpersRejectNilInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*recordingTB)
+	}{
+		{name: "context factory", call: func(tb *recordingTB) {
+			routertest.NewContext[*appContext](tb, nil)
+		}},
+		{name: "context option", call: func(tb *recordingTB) {
+			routertest.NewContext(tb, newContext, nil)
+		}},
+		{name: "server handler", call: func(tb *recordingTB) {
+			routertest.NewServer(tb, nil)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tb := new(recordingTB)
+			tt.call(tb)
+			if !tb.failed || !strings.Contains(tb.msg, "needs") && !strings.Contains(tb.msg, "nil") {
+				t.Fatalf("failure = %v, %q; want a clear validation failure", tb.failed, tb.msg)
+			}
+		})
 	}
 }
 
@@ -605,6 +677,46 @@ func TestAssertGoldenWritesTheFileWithUpdate(t *testing.T) {
 	}
 	setUpdate(t, false)
 	routertest.AssertGolden(t, name, []byte(goldenPage))
+}
+
+func TestAssertGoldenRejectsNamesOutsideTestdata(t *testing.T) {
+	setUpdate(t, true)
+	outside := "outside-routertest-golden.html"
+	_ = os.Remove(outside)
+	t.Cleanup(func() { _ = os.Remove(outside) })
+
+	for _, name := range []string{"", ".", "../" + outside, "nested/../../" + outside, "/tmp/outside", `..\outside`} {
+		t.Run(name, func(t *testing.T) {
+			tb := new(recordingTB)
+			routertest.AssertGolden(tb, name, []byte("unsafe"))
+			if !tb.failed || !strings.Contains(tb.msg, "invalid golden file name") {
+				t.Fatalf("failure = %v, %q; want invalid-name failure", tb.failed, tb.msg)
+			}
+		})
+	}
+	if _, err := os.Stat(outside); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside file exists or cannot be checked: %v", err)
+	}
+}
+
+func TestAssertGoldenDoesNotFollowAnEscapingSymlink(t *testing.T) {
+	setUpdate(t, true)
+	outside := t.TempDir()
+	link := filepath.Join("testdata", "escaping-link")
+	_ = os.Remove(link)
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	tb := new(recordingTB)
+	routertest.AssertGolden(tb, "escaping-link/outside.html", []byte("unsafe"))
+	if !tb.failed {
+		t.Fatal("AssertGolden followed a symlink outside testdata")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "outside.html")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside file exists or cannot be checked: %v", err)
+	}
 }
 
 type recordingTB struct {

@@ -3,6 +3,8 @@ package middleware
 import (
 	"crypto/subtle"
 	"encoding/base64"
+	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,6 +33,7 @@ type KeyAuthConfig[C router.Context] struct {
 	Validator              func(c C, key string) (bool, error)
 	OnError                func(c C, err error) error
 	ContinueOnIgnoredError bool
+	Challenge              string
 }
 
 var defaultKeyAuthSources = []TokenSource{FromHeader(router.HeaderAuthorization, "Bearer ")}
@@ -46,6 +49,10 @@ func KeyAuthWithConfig[C router.Context](cfg KeyAuthConfig[C]) router.Middleware
 	if len(cfg.Sources) == 0 {
 		cfg.Sources = defaultKeyAuthSources
 	}
+	if cfg.Challenge == "" {
+		cfg.Challenge = "Bearer"
+	}
+	cfg.Sources = slices.Clone(cfg.Sources)
 	checkTokenSources("KeyAuthConfig", cfg.Sources)
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -76,17 +83,33 @@ func KeyAuthWithConfig[C router.Context](cfg KeyAuthConfig[C]) router.Middleware
 			}
 
 			if cfg.OnError == nil {
+				keyAuthChallenge(c.Response(), cfg.Challenge)
 				return failure
 			}
+			disableChallenge := keyAuthChallenge(c.Response(), cfg.Challenge)
 			if err := cfg.OnError(c, failure); err != nil {
 				return err
 			}
 			if cfg.ContinueOnIgnoredError {
+				disableChallenge()
 				return next(c)
 			}
 			return nil
 		}
 	}
+}
+
+func keyAuthChallenge(res *router.Response, challenge string) func() {
+	active := challenge != ""
+	if active {
+		res.Before(func() {
+			if active && res.Status == http.StatusUnauthorized &&
+				res.Header().Get(router.HeaderWWWAuthenticate) == "" {
+				res.Header().Set(router.HeaderWWWAuthenticate, challenge)
+			}
+		})
+	}
+	return func() { active = false }
 }
 
 type BasicAuthConfig[C router.Context] struct {

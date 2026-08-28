@@ -23,25 +23,43 @@ func decodeValues(vals url.Values, dst any, tag string, strict bool) ([]FieldErr
 		return nil, fmt.Errorf("decode target must point at a struct, got %s", rv.Kind())
 	}
 	var fields []FieldError
-	decodeStruct(vals, rv, tag, strict, &fields)
+	decodeStruct(vals, rv, tag, strict, &fields, make(map[reflect.Type]bool))
 	return fields, nil
 }
 
-func decodeStruct(vals url.Values, rv reflect.Value, tag string, strict bool, fields *[]FieldError) {
+func decodeStruct(
+	vals url.Values,
+	rv reflect.Value,
+	tag string,
+	strict bool,
+	fields *[]FieldError,
+	active map[reflect.Type]bool,
+) {
+	rt := rv.Type()
+	if active[rt] {
+		return
+	}
+	active[rt] = true
+	defer delete(active, rt)
+
 	for _, f := range structFields(rv.Type(), tag) {
 		fv := rv.Field(f.index)
 
 		if f.embedded {
+			ft := indirectType(fv.Type())
+			if active[ft] {
+				continue
+			}
 			if fv.Kind() == reflect.Pointer {
 				if fv.IsNil() {
-					if !fv.CanSet() {
+					if !fv.CanSet() || !structHasValue(vals, ft, tag, strict, active) {
 						continue
 					}
 					fv.Set(reflect.New(fv.Type().Elem()))
 				}
 				fv = fv.Elem()
 			}
-			decodeStruct(vals, fv, tag, strict, fields)
+			decodeStruct(vals, fv, tag, strict, fields, active)
 			continue
 		}
 
@@ -56,6 +74,30 @@ func decodeStruct(vals url.Values, rv reflect.Value, tag string, strict bool, fi
 			*fields = append(*fields, FieldError{Field: key, Message: err.Error()})
 		}
 	}
+}
+
+func structHasValue(vals url.Values, rt reflect.Type, tag string, strict bool, active map[reflect.Type]bool) bool {
+	if active[rt] {
+		return false
+	}
+	active[rt] = true
+	defer delete(active, rt)
+
+	for _, f := range structFields(rt, tag) {
+		if f.embedded {
+			if structHasValue(vals, indirectType(rt.Field(f.index).Type), tag, strict, active) {
+				return true
+			}
+			continue
+		}
+		if strict && !f.tagged {
+			continue
+		}
+		if _, _, ok := lookupValues(vals, f.keys); ok {
+			return true
+		}
+	}
+	return false
 }
 
 type fieldInfo struct {

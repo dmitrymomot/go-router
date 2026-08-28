@@ -10,12 +10,15 @@ go run .
 Then open <http://localhost:8080> in two windows and type a different name in
 each.
 
-Nothing is stored. A message reaches whoever is connected at that moment and is
-then gone, so a window that opens late starts empty. The room holds the
-channels of the connected readers and nothing else.
+Nothing is stored. Delivery is best-effort to windows connected at that moment,
+and a slow window can miss messages when its small buffer is full. A window
+that opens late starts empty. The room holds the channels of the connected
+readers and nothing else.
 
-The page loads htmx and its sse extension from unpkg, so the first load needs a
-network.
+The page loads version-pinned htmx and SSE extension assets from jsDelivr with
+subresource-integrity and anonymous CORS checks, so the first load needs a
+network. Every state-changing form carries a CSRF token backed by an HttpOnly,
+SameSite cookie.
 
 ## What happens
 
@@ -25,10 +28,13 @@ network.
 | Open the room | `GET /chat` | the whole page |
 | Watch the room | `GET /events`, from an `EventSource` | a stream of rendered HTML |
 | Send a message | `POST /messages`, from htmx | `204`, and `HX-Trigger: message-sent` |
+| Leave the room | `POST /leave`, from htmx | `HX-Redirect: /` |
 
-The answer to a message carries no HTML. The message reaches every window over
-the stream, the sender's window included, so the page has one path for a
-message it wrote and a message somebody else wrote.
+The answer to a message carries no HTML. The room attempts to deliver the
+message to every connected window over the stream, the sender's window
+included. A full listener buffer is skipped so one slow window cannot delay
+the room. The page uses the same rendering path for its own messages and those
+from somebody else.
 
 ## The three htmx pieces
 
@@ -53,7 +59,8 @@ return c.HX().Trigger("message-sent").NoSwap()
 ```
 
 ```html
-<form hx-post="/messages" hx-on:message-sent="this.reset()">
+<form action="/messages" method="post" hx-post="/messages" hx-on:message-sent="this.reset()">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 ```
 
 **A stream of HTML, not of JSON.** `SendComponent` renders a template into the
@@ -94,4 +101,6 @@ func sendTo(reader string) router.SSESender[message] {
 
 A session that is signed instead of a name in a cookie, a history to replay
 through `Last-Event-ID`, one room per URL, and a message rate limit. The room
-counts one reader per window, so two tabs of the same name join twice.
+counts one reader per window, so two tabs of the same name join twice. Its
+fixed-size per-window buffers intentionally favor room-wide responsiveness over
+guaranteed delivery.

@@ -30,7 +30,11 @@ func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Mid
 
 			res := c.Response()
 
-			router.AddVary(res.Header(), router.HeaderHXRequest)
+			router.AddVary(res.Header(),
+				router.HeaderHXRequest,
+				router.HeaderHXBoosted,
+				router.HeaderHXHistoryRestoreRequest,
+			)
 
 			if !router.HTMXWantsPartial(c.Request()) {
 				return next(c)

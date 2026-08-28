@@ -90,6 +90,7 @@ func newStdlib() http.Handler {
 func run(b *testing.B, h http.Handler, target string) {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	w := &nopWriter{h: make(http.Header)}
+	h.ServeHTTP(w, req)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
@@ -99,18 +100,20 @@ func run(b *testing.B, h http.Handler, target string) {
 
 func BenchmarkRouters(b *testing.B) {
 	impls := []struct {
-		name string
-		h    http.Handler
+		name       string
+		newHandler func() http.Handler
 	}{
-		{"go-router", newOurs()},
-		{"go-router-pooled", newOursPooled()},
-		{"chi", newChi()},
-		{"echo", newEcho()},
-		{"stdlib", newStdlib()},
+		{"go-router", newOurs},
+		{"go-router-pooled", newOursPooled},
+		{"chi", newChi},
+		{"echo", newEcho},
+		{"stdlib", newStdlib},
 	}
 	for _, kind := range []string{"Static", "Param", "Deep"} {
 		for _, impl := range impls {
-			b.Run(kind+"/"+impl.name, func(b *testing.B) { run(b, impl.h, targets[kind]) })
+			b.Run(kind+"/"+impl.name, func(b *testing.B) {
+				run(b, impl.newHandler(), targets[kind])
+			})
 		}
 	}
 }

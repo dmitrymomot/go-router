@@ -2,8 +2,10 @@ package middleware_test
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -235,9 +237,33 @@ func TestRateLimitNeedsAStore(t *testing.T) {
 }
 
 func TestNewMemoryStoreNeedsARate(t *testing.T) {
-	mustPanicContaining(t, "rate", func() {
-		middleware.NewMemoryStore[*appContext](0, 1, time.Minute)
+	for _, rate := range []float64{0, -1, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		t.Run(strconv.FormatFloat(rate, 'g', -1, 64), func(t *testing.T) {
+			mustPanicContaining(t, "rate", func() {
+				middleware.NewMemoryStore[*appContext](rate, 1, time.Minute)
+			})
+		})
+	}
+}
+
+func TestRateLimitRetryAfterHandlesTheLargestDuration(t *testing.T) {
+	wait := time.Duration(math.MaxInt64)
+	r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
+		Store: fakeRateStore{wait: wait},
 	})
+
+	rec := get(r, "/")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	seconds := wait / time.Second
+	if wait%time.Second != 0 {
+		seconds++
+	}
+	if got, want := rec.Header().Get(router.HeaderRetryAfter),
+		strconv.FormatInt(int64(seconds), 10); got != want {
+		t.Errorf("retry after = %q, want %q", got, want)
+	}
 }
 
 func TestMemoryStoreKeepsTheLimitPastTheExpiryWindow(t *testing.T) {

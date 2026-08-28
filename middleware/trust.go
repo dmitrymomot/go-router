@@ -1,6 +1,9 @@
 package middleware
 
-import "net/netip"
+import (
+	"net/netip"
+	"strconv"
+)
 
 type TrustSet struct {
 	prefixes  []netip.Prefix
@@ -23,7 +26,10 @@ func TrustPrefix(p netip.Prefix) TrustOption {
 
 func NewTrustSet(opts ...TrustOption) *TrustSet {
 	s := &TrustSet{loopback: true, linkLocal: true, private: true}
-	for _, opt := range opts {
+	for i, opt := range opts {
+		if opt == nil {
+			panic("middleware: NewTrustSet got a nil option at index " + strconv.Itoa(i))
+		}
 		opt(s)
 	}
 	return s

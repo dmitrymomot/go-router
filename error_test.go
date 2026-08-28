@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -354,10 +355,10 @@ func TestDefaultErrorHandlerAnswersHTMXWithHTML(t *testing.T) {
 			body:        `{"status":403,"error":"no <b>entry</b>"}`,
 		},
 		{
-			name:        "a browser gets text",
+			name:        "a browser gets HTML",
 			headers:     map[string]string{HeaderAccept: "text/html"},
-			contentType: MIMETextPlainCharsetUTF8,
-			body:        "no <b>entry</b>",
+			contentType: MIMETextHTMLCharsetUTF8,
+			body:        "no &lt;b&gt;entry&lt;/b&gt;",
 		},
 		{
 			name:        "htmx gets escaped HTML",
@@ -387,8 +388,142 @@ func TestDefaultErrorHandlerAnswersHTMXWithHTML(t *testing.T) {
 			if got := rec.Body.String(); got != tc.body {
 				t.Errorf("body = %q, want %q", got, tc.body)
 			}
-			if got := rec.Header().Get(HeaderVary); got != HeaderHXRequest {
-				t.Errorf("%s = %q, want %q", HeaderVary, got, HeaderHXRequest)
+			wantVary := []string{HeaderAccept, HeaderHXRequest}
+			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, wantVary) {
+				t.Errorf("%s = %q, want %q", HeaderVary, got, wantVary)
+			}
+		})
+	}
+}
+
+func TestDefaultErrorHandlerNegotiatesQuality(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/boom", func(*tctx) error {
+		return ErrForbidden.WithMessage("no <b>entry</b>")
+	})
+
+	tests := []struct {
+		name        string
+		accept      string
+		htmx        bool
+		contentType string
+		body        string
+	}{
+		{
+			"no Accept defaults to JSON", "", false, MIMEApplicationJSONCharsetUTF8,
+			`{"status":403,"error":"no <b>entry</b>"}`,
+		},
+		{
+			"media types ignore case", "APPLICATION/JSON", false, MIMEApplicationJSONCharsetUTF8,
+			`{"status":403,"error":"no <b>entry</b>"}`,
+		},
+		{
+			"an explicit JSON refusal is respected", "application/json;q=0, text/plain;q=1", false,
+			MIMETextPlainCharsetUTF8, "no <b>entry</b>",
+		},
+		{
+			"a preferred HTML representation wins", "application/json;q=0.2, text/html;q=0.9", false,
+			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
+		},
+		{
+			"HTML is not replaced by refused plain text", "text/html;q=1, text/plain;q=0, application/json;q=0", false,
+			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
+		},
+		{
+			"a preferred JSON representation wins", "text/plain;q=0.2, application/json;q=0.9", false,
+			MIMEApplicationJSONCharsetUTF8, `{"status":403,"error":"no <b>entry</b>"}`,
+		},
+		{
+			"an unsupported media type falls back to text", "application/xml", false,
+			MIMETextPlainCharsetUTF8, "no <b>entry</b>",
+		},
+		{
+			"htmx wildcard prefers escaped HTML", "*/*", true,
+			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
+		},
+		{
+			"htmx can prefer JSON", "text/html;q=0.5, application/json;q=0.9", true,
+			MIMEApplicationJSONCharsetUTF8, `{"status":403,"error":"no <b>entry</b>"}`,
+		},
+		{
+			"htmx JSON refusal prefers escaped HTML", "application/json;q=0, */*;q=1", true,
+			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
+		},
+		{
+			"htmx emits negotiated plain text", "text/plain;q=1, text/html;q=0", true,
+			MIMETextPlainCharsetUTF8, "no <b>entry</b>",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := map[string]string{}
+			if tc.accept != "" {
+				headers[HeaderAccept] = tc.accept
+			}
+			if tc.htmx {
+				headers[HeaderHXRequest] = "true"
+			}
+			rec := hxDo(r, http.MethodGet, "/boom", headers)
+
+			if got := rec.Header().Get(HeaderContentType); got != tc.contentType {
+				t.Errorf("Content-Type = %q, want %q", got, tc.contentType)
+			}
+			if got := rec.Body.String(); got != tc.body {
+				t.Errorf("body = %q, want %q", got, tc.body)
+			}
+			wantVary := []string{HeaderAccept, HeaderHXRequest}
+			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, wantVary) {
+				t.Errorf("Vary = %v, want %v", got, wantVary)
+			}
+		})
+	}
+}
+
+func TestDefaultErrorHandlerCombinesAcceptHeaderFields(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/boom", func(*tctx) error { return ErrForbidden })
+
+	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
+	req.Header.Add(HeaderAccept, "text/plain;q=0")
+	req.Header.Add(HeaderAccept, "application/json;q=1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationJSONCharsetUTF8 {
+		t.Errorf("Content-Type = %q, want %q", got, MIMEApplicationJSONCharsetUTF8)
+	}
+	if got, want := rec.Body.String(), `{"status":403,"error":"Forbidden"}`; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/boom", func(*tctx) error { return ErrForbidden })
+
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"JSON", nil},
+		{"text", map[string]string{HeaderAccept: MIMETextPlain}},
+		{"HTMX", map[string]string{HeaderAccept: "*/*", HeaderHXRequest: "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			get := hxDo(r, http.MethodGet, "/boom", tc.headers)
+			head := hxDo(r, http.MethodHead, "/boom", tc.headers)
+
+			if head.Code != get.Code {
+				t.Errorf("HEAD status = %d, GET status = %d", head.Code, get.Code)
+			}
+			if got, want := head.Header().Get(HeaderContentType), get.Header().Get(HeaderContentType); got != want {
+				t.Errorf("HEAD Content-Type = %q, GET Content-Type = %q", got, want)
+			}
+			if got, want := head.Header().Values(HeaderVary), get.Header().Values(HeaderVary); !slices.Equal(got, want) {
+				t.Errorf("HEAD Vary = %v, GET Vary = %v", got, want)
+			}
+			if head.Body.Len() != 0 {
+				t.Errorf("HEAD body = %q, want empty", head.Body.String())
 			}
 		})
 	}

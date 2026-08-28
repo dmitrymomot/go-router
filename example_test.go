@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -239,6 +240,44 @@ func serve(h http.Handler, method, target string) string {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
 	return fmt.Sprint(rec.Code, " ", rec.Body.String())
+}
+
+func TestReadmeContracts(t *testing.T) {
+	newContext := func(http.ResponseWriter, *http.Request) *Context { return new(Context) }
+	r := router.New(newContext)
+	r.Use(middleware.Recover[*Context], middleware.Logger[*Context])
+	sub := router.New(newContext)
+	sub.GET("/users/{id}", func(c *Context) error { return c.NoContent(http.StatusOK) })
+	r.Mount("/api", sub)
+	if err := r.Build(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
+	req.Header.Set(router.HeaderXForwardedProto, "HTTPS, http")
+	if got := router.SchemeOf(req); got != "https" {
+		t.Fatalf("SchemeOf() = %q", got)
+	}
+	req.Header.Set(router.HeaderXForwardedProto, "ftp")
+	if got := router.SchemeOf(req); got != "http" {
+		t.Fatalf("SchemeOf() = %q", got)
+	}
+
+	store := middleware.NewMemoryStoreWithConfig[*Context](middleware.MemoryStoreConfig{
+		Rate:       10,
+		Burst:      30,
+		ExpiresIn:  time.Minute,
+		MaxEntries: 1024,
+	})
+	if middleware.RateLimit(store) == nil {
+		t.Fatal("RateLimit() returned nil")
+	}
+	if router.HTMXPartial(
+		func(c *Context) error { return c.NoContent(http.StatusOK) },
+		func(c *Context) error { return c.NoContent(http.StatusOK) },
+	) == nil {
+		t.Fatal("HTMXPartial() returned nil")
+	}
 }
 
 func ExampleNewPooled() {

@@ -22,7 +22,12 @@ type Response struct {
 
 func (r *Response) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-func (r *Response) Before(fn func()) { r.before = append(r.before, fn) }
+func (r *Response) Before(fn func()) {
+	if fn == nil {
+		panic("router: Response.Before needs a callback")
+	}
+	r.before = append(r.before, fn)
+}
 
 func (r *Response) WriteHeader(code int) {
 	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {

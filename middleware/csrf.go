@@ -54,6 +54,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 	if len(cfg.TokenSources) == 0 {
 		cfg.TokenSources = defaultCSRFSources
 	}
+	cfg.TokenSources = slices.Clone(cfg.TokenSources)
 	checkTokenSources("CSRFConfig", cfg.TokenSources)
 	if cfg.CookieName == "" {
 		cfg.CookieName = DefaultCSRFCookieName

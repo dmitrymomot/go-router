@@ -64,6 +64,9 @@ func (b *Base) jsonOptions(opts []json.Options) []json.Options {
 	if len(def) == 0 {
 		return opts
 	}
+	if len(opts) == 0 {
+		return def
+	}
 	out := make([]json.Options, 0, len(def)+len(opts))
 	out = append(out, def...)
 	return append(out, opts...)
@@ -89,7 +92,10 @@ func (b *Base) NoContent(status int) error {
 }
 
 func (b *Base) Redirect(status int, location string) error {
-	if status < http.StatusMultipleChoices || status > http.StatusPermanentRedirect {
+	switch status {
+	case http.StatusMultipleChoices, http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
 		return ErrInternalServerError.WithError(fmt.Errorf("router: %d is not a redirect status", status))
 	}
 	b.res.Header().Set(HeaderLocation, location)

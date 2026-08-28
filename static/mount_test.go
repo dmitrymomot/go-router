@@ -31,6 +31,28 @@ func TestMountServesTheAssets(t *testing.T) {
 	res.AssertHeader(t, "Cache-Control", "public, max-age=31536000, immutable")
 }
 
+func TestHandlerAndMountRejectNilDependencies(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS()})
+	tests := []struct {
+		name string
+		call func()
+	}{
+		{name: "handler asset set", call: func() { static.Handler[*appContext](nil) }},
+		{name: "mount router", call: func() { static.Mount[*appContext](nil, a) }},
+		{name: "mount asset set", call: func() { static.Mount(newRouter(), nil) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("call accepted a nil dependency")
+				}
+			}()
+			tt.call()
+		})
+	}
+}
+
 func TestMountAnswersTheBarePrefixWithTheIndex(t *testing.T) {
 	r := newRouter()
 	static.Mount(r, newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"}))

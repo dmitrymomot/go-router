@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -431,6 +432,9 @@ func TestHostPanics(t *testing.T) {
 		{"empty label", func() {
 			newTestRouter().Host("a..com", nil)
 		}},
+		{"unicode literal", func() {
+			newTestRouter().Host("bücher.example", nil)
+		}},
 		{"unbalanced braces", func() {
 			newTestRouter().Host("{tenant.example.com", nil)
 		}},
@@ -487,11 +491,128 @@ func TestNormalizeHost(t *testing.T) {
 		{"EXAMPLE.com.:443", "example.com"},
 		{"[::1]:8080", "::1"},
 		{"[::1]", "::1"},
+		{"[2001:DB8::1]:65535", "2001:db8::1"},
+		{"[example.com]", ""},
+		{"[example.com]attacker.invalid", ""},
+		{"[::1", ""},
+		{"[::1]junk", ""},
+		{"[::1]:", ""},
+		{"[::1]:65536", ""},
+		{"::1", ""},
+		{"example.com:not-a-port", ""},
+		{"example.com:80:garbage", ""},
+		{"example.com:", ""},
+		{"example.com:65536", ""},
+		{":80", ""},
+		{".example.com", ""},
+		{"example..com", ""},
+		{"example.com..", ""},
+		{"exa mple.com", ""},
+		{"example.com/path", ""},
+		{"example.com@evil.invalid", ""},
+		{"bücher.example", ""},
 	}
 	for _, tt := range tests {
 		if got := normalizeHost(tt.in); got != tt.want {
 			t.Errorf("normalizeHost(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestHostPatternPreservesNamesAndRegexSyntax(t *testing.T) {
+	r := newTestRouter()
+	r.Host(`{Tenant:\D+}.EXAMPLE.com`, func(h *Router[*tctx]) {
+		h.GET("/", func(c *tctx) error {
+			return c.String(http.StatusOK, c.RouteHost()+"|"+c.Param("Tenant")+"|"+c.Param("tenant"))
+		})
+	})
+
+	if got := doHost(r, http.MethodGet, "Acme.Example.com", "/").Body.String(); got != `{Tenant:\D+}.example.com|acme|` {
+		t.Errorf("alphabetic host = %q", got)
+	}
+	if rec := doHost(r, http.MethodGet, "123.example.com", "/"); rec.Code != http.StatusNotFound {
+		t.Errorf("numeric host status = %d, want 404", rec.Code)
+	}
+}
+
+func TestDynamicHostPrecedenceIsStructural(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			register := []func(){
+				func() {
+					r.Host("*.example.com", func(h *Router[*tctx]) {
+						h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "wildcard") })
+					})
+				},
+				func() {
+					r.Host("{z}.example.com", func(h *Router[*tctx]) {
+						h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "parameter "+c.Param("z")) })
+					})
+				},
+				func() {
+					r.Host("{a:[0-9]+}.example.com", func(h *Router[*tctx]) {
+						h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "regex "+c.Param("a")) })
+					})
+				},
+			}
+			if reverse {
+				slices.Reverse(register)
+			}
+			for _, add := range register {
+				add()
+			}
+
+			if got := doHost(r, http.MethodGet, "123.example.com", "/").Body.String(); got != "regex 123" {
+				t.Errorf("numeric host chose %q", got)
+			}
+			if got := doHost(r, http.MethodGet, "acme.example.com", "/").Body.String(); got != "parameter acme" {
+				t.Errorf("alphabetic host chose %q", got)
+			}
+		})
+	}
+}
+
+func TestEquivalentDynamicHostPatternsAreRejected(t *testing.T) {
+	r := newTestRouter()
+	r.Host("{tenant}.example.com", func(h *Router[*tctx]) { h.GET("/a", echoHost) })
+	r.Host("{account}.example.com", func(h *Router[*tctx]) { h.GET("/b", echoHost) })
+	if err := r.Build(); err == nil || !strings.Contains(err.Error(), "same match shape") {
+		t.Fatalf("Build() = %v, want an equivalent-host-pattern error", err)
+	}
+}
+
+func TestMalformedAuthoritiesNeverMatchHostScopes(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "root") })
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "exact") })
+	})
+	r.Host("*", func(h *Router[*tctx]) {
+		h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "wildcard") })
+	})
+
+	for _, host := range []string{"[example.com]", "[example.com]attacker.invalid", "example.com:not-a-port", "example.com:80:garbage"} {
+		if got := doHost(r, http.MethodGet, host, "/").Body.String(); got != "root" {
+			t.Errorf("Host %q reached %q, want host-free route", host, got)
+		}
+	}
+	if got := doHost(r, http.MethodGet, "example.com:443", "/").Body.String(); got != "exact" {
+		t.Errorf("valid authority reached %q, want exact host", got)
+	}
+}
+
+func TestUnicodeHostsRequirePunycode(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "root") })
+	r.Host("xn--bcher-kva.example", func(h *Router[*tctx]) {
+		h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "punycode") })
+	})
+	if got := doHost(r, http.MethodGet, "bücher.example", "/").Body.String(); got != "root" {
+		t.Errorf("Unicode host reached %q, want root", got)
+	}
+	if got := doHost(r, http.MethodGet, "xn--bcher-kva.example", "/").Body.String(); got != "punycode" {
+		t.Errorf("punycode host reached %q", got)
 	}
 }
 

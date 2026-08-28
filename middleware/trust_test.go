@@ -126,3 +126,9 @@ func TestTrustSetRefusesAnInvalidAddress(t *testing.T) {
 		t.Error("Trusted(invalid) = true, want false")
 	}
 }
+
+func TestNewTrustSetRejectsANilOption(t *testing.T) {
+	mustPanicContaining(t, "nil option", func() {
+		middleware.NewTrustSet(nil)
+	})
+}

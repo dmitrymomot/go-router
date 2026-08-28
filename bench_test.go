@@ -26,6 +26,7 @@ func benchServe(b *testing.B, r http.Handler, w http.ResponseWriter, target stri
 
 func benchServeMethod(b *testing.B, r http.Handler, w http.ResponseWriter, method, target string) {
 	req := httptest.NewRequest(method, target, nil)
+	r.ServeHTTP(w, req)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
@@ -150,6 +151,7 @@ func benchHostRouter() (*Router[*tctx], *nopWriter) {
 func benchServeHost(b *testing.B, r http.Handler, w http.ResponseWriter, host, target string) {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.Host = host
+	r.ServeHTTP(w, req)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {

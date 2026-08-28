@@ -124,7 +124,8 @@ func checkRoundTrip(name string, nr namedRoute, path string, params map[string]s
 			if p != "" {
 				rest = p[1:]
 			}
-			if !sameValue(rest, params[sg.value], escaped) {
+			decoded, ok := decodePathSegment(rest, escaped)
+			if !ok || decoded != params[sg.value] {
 				return bad()
 			}
 			return nil
@@ -132,8 +133,12 @@ func checkRoundTrip(name string, nr namedRoute, path string, params map[string]s
 		if p == "" {
 			return bad()
 		}
-		seg, tail := cutSegment(p)
+		raw, tail := cutSegment(p)
 		p = tail
+		seg, ok := decodePathSegment(raw, escaped)
+		if !ok {
+			return bad()
+		}
 
 		switch sg.kind {
 		case segStatic:
@@ -146,16 +151,16 @@ func checkRoundTrip(name string, nr namedRoute, path string, params map[string]s
 				return bad()
 			}
 			for i, n := range templateNames(sg.parts) {
-				if !sameValue(got[i], params[n], escaped) {
+				if got[i] != params[n] {
 					return bad()
 				}
 			}
 		case segRegex:
-			if !sg.re.MatchString(seg) || !sameValue(seg, params[sg.value], escaped) {
+			if !sg.re.MatchString(seg) || seg != params[sg.value] {
 				return bad()
 			}
 		default:
-			if !sameValue(seg, params[sg.value], escaped) {
+			if seg != params[sg.value] {
 				return bad()
 			}
 		}
@@ -164,15 +169,6 @@ func checkRoundTrip(name string, nr namedRoute, path string, params map[string]s
 		return bad()
 	}
 	return nil
-}
-
-func sameValue(got, want string, escaped bool) bool {
-	if escaped {
-		if v, err := url.PathUnescape(got); err == nil {
-			got = v
-		}
-	}
-	return got == want
 }
 
 func escapeRest(v string) string {

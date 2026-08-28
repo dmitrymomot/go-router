@@ -72,6 +72,7 @@ func writeUser(c Ctx, name string) {
 		Value:    url.QueryEscape(name),
 		Path:     "/",
 		MaxAge:   int(12 * time.Hour / time.Second),
+		Secure:   router.SchemeOf(c.Request()) == "https",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
@@ -83,6 +84,7 @@ func clearUser(c Ctx) {
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
+		Secure:   router.SchemeOf(c.Request()) == "https",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})

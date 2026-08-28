@@ -86,8 +86,12 @@ func TestKeyAuthPlainFormReadsTheBearerToken(t *testing.T) {
 func TestKeyAuthRefusesAKeyItDoesNotKnow(t *testing.T) {
 	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{Validator: keyValidator})
 
-	if rec := do(r, bearer("bad")); rec.Code != http.StatusUnauthorized {
+	rec := do(r, bearer("bad"))
+	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get(router.HeaderWWWAuthenticate); got != "Bearer" {
+		t.Errorf("challenge = %q, want Bearer", got)
 	}
 }
 
@@ -115,8 +119,12 @@ func TestKeyAuthReportsAMissingKey(t *testing.T) {
 			if tt.auth != "" {
 				req.Header.Set(router.HeaderAuthorization, tt.auth)
 			}
-			if rec := do(r, req); rec.Code != http.StatusUnauthorized {
+			rec := do(r, req)
+			if rec.Code != http.StatusUnauthorized {
 				t.Errorf("status = %d, want 401", rec.Code)
+			}
+			if got := rec.Header().Get(router.HeaderWWWAuthenticate); got != "Bearer" {
+				t.Errorf("challenge = %q, want Bearer", got)
 			}
 		})
 	}
@@ -180,8 +188,58 @@ func TestKeyAuthValidatorErrorReachesTheClient(t *testing.T) {
 		},
 	})
 
-	if rec := do(r, bearer("good")); rec.Code != http.StatusServiceUnavailable {
+	rec := do(r, bearer("good"))
+	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get(router.HeaderWWWAuthenticate); got != "" {
+		t.Errorf("challenge = %q, want none on a 503", got)
+	}
+}
+
+func TestKeyAuthUsesAConfiguredChallengeForCustomSources(t *testing.T) {
+	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
+		Sources:   []middleware.TokenSource{middleware.FromHeader("X-Api-Key", "")},
+		Validator: keyValidator,
+		Challenge: `ApiKey realm="widgets"`,
+	})
+
+	rec := get(r, "/")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get(router.HeaderWWWAuthenticate); got != `ApiKey realm="widgets"` {
+		t.Errorf("challenge = %q, want the configured challenge", got)
+	}
+}
+
+func TestKeyAuthCustomSourcesUseTheSafeChallenge(t *testing.T) {
+	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
+		Sources:   []middleware.TokenSource{middleware.FromHeader("X-Api-Key", "")},
+		Validator: keyValidator,
+	})
+
+	rec := get(r, "/")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get(router.HeaderWWWAuthenticate); got != "Bearer" {
+		t.Errorf("challenge = %q, want the safe Bearer default", got)
+	}
+}
+
+func TestKeyAuthCopiesConfiguredSources(t *testing.T) {
+	sources := []middleware.TokenSource{middleware.FromHeader("X-Api-Key", "")}
+	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
+		Sources:   sources,
+		Validator: keyValidator,
+	})
+	sources[0] = middleware.FromQuery("key")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Api-Key", "good")
+	if rec := do(r, req); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 after the caller mutated its source slice", rec.Code)
 	}
 }
 
@@ -214,14 +272,35 @@ func TestKeyAuthOnErrorReplacesTheFailure(t *testing.T) {
 		},
 	})
 
-	if rec := do(r, bearer("bad")); rec.Code != http.StatusForbidden {
+	rec := do(r, bearer("bad"))
+	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
+	}
+	if got := rec.Header().Get(router.HeaderWWWAuthenticate); got != "" {
+		t.Errorf("challenge = %q, want none on a 403", got)
 	}
 	if seen == nil {
 		t.Fatal("OnError saw no error")
 	}
 	if !errors.Is(seen, router.ErrUnauthorized) {
 		t.Errorf("OnError saw %v, want a 401", seen)
+	}
+}
+
+func TestKeyAuthChallengesA401CommittedByOnError(t *testing.T) {
+	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
+		Validator: keyValidator,
+		OnError: func(c *appContext, _ error) error {
+			return c.NoContent(http.StatusUnauthorized)
+		},
+	})
+
+	rec := do(r, bearer("bad"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get(router.HeaderWWWAuthenticate); got != "Bearer" {
+		t.Errorf("challenge = %q, want Bearer", got)
 	}
 }
 

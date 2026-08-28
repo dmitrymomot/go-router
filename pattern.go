@@ -272,6 +272,36 @@ func setTemplateValue(dst []string, i int, p segPart, value string) bool {
 	return true
 }
 
+func segmentMatches(seg segment, value string) bool {
+	switch seg.kind {
+	case segStatic:
+		return value == seg.value
+	case segTemplate:
+		return matchTemplate(make([]string, templateArity(seg.parts)), seg.parts, value)
+	case segRegex:
+		return seg.re.MatchString(value)
+	case segParam:
+		return value != ""
+	default:
+		return true
+	}
+}
+
+func segmentSpecificity(kind segKind) int {
+	switch kind {
+	case segStatic:
+		return 4
+	case segTemplate:
+		return 3
+	case segRegex:
+		return 2
+	case segParam:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func templateSkeleton(parts []segPart) string {
 	var b strings.Builder
 	for _, p := range parts {

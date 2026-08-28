@@ -271,21 +271,53 @@ func TestGzipFlushBeforeTheFirstWriteReachesTheClient(t *testing.T) {
 	}
 }
 
-func TestGzipSkipsAHeadRequest(t *testing.T) {
+func TestGzipHeadUsesTheGetRepresentationHeadersWithoutABody(t *testing.T) {
 	r := gzipRouter(middleware.GzipConfig{})
+	getRec := gzipGet(r, "/long", "gzip")
 
 	req := httptest.NewRequest(http.MethodHead, "/long", nil)
 	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
 	rec := do(r, req)
 
-	if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
-		t.Errorf("content encoding = %q, want none", got)
+	if got, want := rec.Header().Get(router.HeaderContentEncoding),
+		getRec.Header().Get(router.HeaderContentEncoding); got != want {
+		t.Errorf("content encoding = %q, want GET's %q", got, want)
 	}
-	if got := rec.Header().Get(router.HeaderContentLength); got == "" {
-		t.Error("the length of the body that a GET answers with is gone")
+	if got, want := rec.Header().Get(router.HeaderContentLength),
+		getRec.Header().Get(router.HeaderContentLength); got != want {
+		t.Errorf("content length = %q, want GET's %q", got, want)
+	}
+	if got, want := rec.Header().Get(router.HeaderContentType),
+		getRec.Header().Get(router.HeaderContentType); got != want {
+		t.Errorf("content type = %q, want GET's %q", got, want)
 	}
 	if got := rec.Header().Get(router.HeaderVary); got != router.HeaderAcceptEncoding {
 		t.Errorf("vary = %q, want %q", got, router.HeaderAcceptEncoding)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD body is %d bytes, want none", rec.Body.Len())
+	}
+}
+
+func TestGzipHeadKeepsAShortRepresentationPlain(t *testing.T) {
+	r := gzipRouter(middleware.GzipConfig{})
+	getRec := gzipGet(r, "/short", "gzip")
+
+	req := httptest.NewRequest(http.MethodHead, "/short", nil)
+	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+	rec := do(r, req)
+
+	for _, name := range []string{
+		router.HeaderContentEncoding,
+		router.HeaderContentLength,
+		router.HeaderContentType,
+	} {
+		if got, want := rec.Header().Get(name), getRec.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want GET's %q", name, got, want)
+		}
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD body is %d bytes, want none", rec.Body.Len())
 	}
 }
 

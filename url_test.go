@@ -170,6 +170,24 @@ func TestURLReportsABrokenRouteTable(t *testing.T) {
 	}
 }
 
+func TestURLChecksRegexesAgainstDecodedValues(t *testing.T) {
+	r := newTestRouter()
+	r.Name("file").GET("/files/{name:[a-z]+}", echoRoute)
+	if got, err := r.URL("file", map[string]string{"name": "a/b"}); err == nil {
+		t.Fatalf("URL(file) = %q, want regex mismatch", got)
+	}
+
+	r2 := newTestRouter()
+	r2.Name("encoded").GET("/encoded/{value:.*}", echoRoute)
+	got, err := r2.URL("encoded", map[string]string{"value": "%2F"})
+	if err != nil {
+		t.Fatalf("URL(encoded) = %v", err)
+	}
+	if got != "/encoded/%252F" {
+		t.Errorf("URL(encoded) = %q, want exactly-once encoding", got)
+	}
+}
+
 func TestNamedRouteOfAHostScopeResolvesToItsPath(t *testing.T) {
 	r := newTestRouter()
 	r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *Router[*tctx]) {

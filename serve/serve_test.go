@@ -262,6 +262,13 @@ func TestRunNeedsAHandler(t *testing.T) {
 	}
 }
 
+func TestRunNeedsAContext(t *testing.T) {
+	var ctx context.Context
+	if err := serve.Run(ctx, ok(), serve.Config{Addr: "127.0.0.1:0"}); err == nil {
+		t.Fatal("Run accepted a nil context")
+	}
+}
+
 func TestRunNeedsAnAddressOrAListener(t *testing.T) {
 	if err := serve.Run(context.Background(), ok(), serve.Config{}); err == nil {
 		t.Fatal("Run accepted a config with neither Addr nor Listener")
@@ -301,6 +308,21 @@ func TestRunReportsAnOptionFailure(t *testing.T) {
 	}
 	if listened {
 		t.Error("OnListen ran for an option that failed")
+	}
+}
+
+func TestRunRejectsANilOption(t *testing.T) {
+	err := serve.Run(context.Background(), ok(), serve.Config{Addr: "127.0.0.1:0"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "option 0") {
+		t.Fatalf("err = %v, want a clear nil-option error", err)
+	}
+}
+
+func TestCertFSRejectsANilFileSystem(t *testing.T) {
+	err := serve.Run(context.Background(), ok(), serve.Config{Addr: "127.0.0.1:0"},
+		serve.CertFS(nil, "cert.pem", "key.pem"))
+	if err == nil || !strings.Contains(err.Error(), "file system") {
+		t.Fatalf("err = %v, want a clear nil-file-system error", err)
 	}
 }
 
@@ -595,6 +617,133 @@ type errListener struct {
 func (l errListener) Close() error {
 	l.Listener.Close() //nolint:errcheck // The test wants the error below instead.
 	return l.err
+}
+
+type failAfterAcceptListener struct {
+	net.Listener
+	fail     <-chan struct{}
+	err      error
+	accepted atomic.Bool
+}
+
+type acceptErrorListener struct {
+	net.Listener
+	err error
+}
+
+func (l acceptErrorListener) Accept() (net.Conn, error) {
+	return nil, l.err
+}
+
+type closeErrorListener struct {
+	net.Listener
+	err     error
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (l *closeErrorListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.entered) })
+	return l.Listener.Accept()
+}
+
+func (l *closeErrorListener) Close() error {
+	_ = l.Listener.Close()
+	return l.err
+}
+
+func (l *failAfterAcceptListener) Accept() (net.Conn, error) {
+	if l.accepted.Swap(true) {
+		<-l.fail
+		return nil, l.err
+	}
+	return l.Listener.Accept()
+}
+
+func TestUnexpectedListenerFailureClosesActiveConnections(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	boom := errors.New("listener failed")
+	fail := make(chan struct{})
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	h := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(canceled)
+	})
+	s := start(t, h, serve.Config{Listener: &failAfterAcceptListener{
+		Listener: ln,
+		fail:     fail,
+		err:      boom,
+	}})
+	answer := call(client(t), s.url("http", "/"))
+
+	select {
+	case <-started:
+	case <-time.After(wait):
+		t.Fatal("request never reached the handler")
+	}
+	close(fail)
+	select {
+	case err := <-s.errc:
+		s.stopped = true
+		if err != boom {
+			t.Fatalf("Run = %#v, want the original listener failure %#v", err, boom)
+		}
+	case <-time.After(wait):
+		t.Fatal("Run did not return after the listener failed")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(wait):
+		t.Fatal("active request context survived Run")
+	}
+	if res := await(t, answer); res.err == nil {
+		t.Fatalf("active client connection survived with %d %q", res.status, res.body)
+	}
+}
+
+func TestRunReportsServingAndCloseFailures(t *testing.T) {
+	primary, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("primary listen: %v", err)
+	}
+	secondary, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = primary.Close()
+		t.Fatalf("secondary listen: %v", err)
+	}
+	serveErr := errors.New("accept failed")
+	closeErr := errors.New("close failed")
+	entered := make(chan struct{})
+	secondaryDone := make(chan error, 1)
+	err = serve.Run(context.Background(), ok(), serve.Config{
+		Listener: acceptErrorListener{Listener: primary, err: serveErr},
+		OnServer: func(srv *http.Server) error {
+			protocols := new(http.Protocols)
+			protocols.SetHTTP1(true)
+			srv.Protocols = protocols
+			ln := &closeErrorListener{Listener: secondary, err: closeErr, entered: entered}
+			go func() { secondaryDone <- srv.Serve(ln) }()
+			select {
+			case <-entered:
+				return nil
+			case <-time.After(wait):
+				return errors.New("secondary server did not start")
+			}
+		},
+	})
+	if !errors.Is(err, serveErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("Run = %v, want both serving and close failures", err)
+	}
+	select {
+	case <-secondaryDone:
+	case <-time.After(wait):
+		t.Fatal("secondary server survived Run")
+	}
 }
 
 func TestRunReportsAShutdownFailure(t *testing.T) {

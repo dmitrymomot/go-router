@@ -4,9 +4,11 @@ package routertest
 import (
 	"bytes"
 	"encoding/json/v2"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"iter"
 	"maps"
 	"mime/multipart"
@@ -38,10 +40,16 @@ func HTMX() RequestOption {
 }
 
 func Cookie(c *http.Cookie) RequestOption {
+	if c == nil {
+		panic("routertest: Cookie needs a cookie")
+	}
 	return func(r *http.Request) { r.AddCookie(c) }
 }
 
 func Body(contentType string, r io.Reader) RequestOption {
+	if r == nil {
+		panic("routertest: Body needs a reader")
+	}
 	return func(req *http.Request) {
 		setBody(req, contentType, r)
 	}
@@ -130,7 +138,10 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 
 func Request(method, target string, opts ...RequestOption) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
-	for _, opt := range opts {
+	for i, opt := range opts {
+		if opt == nil {
+			panic(fmt.Sprintf("routertest: request option %d is nil", i))
+		}
 		opt(req)
 	}
 	return req
@@ -162,9 +173,19 @@ func NewContext[C router.Context](
 	opts ...ContextOption,
 ) (C, *httptest.ResponseRecorder) {
 	tb.Helper()
+	if newCtx == nil {
+		var zero C
+		tb.Fatalf("routertest: NewContext needs a context factory")
+		return zero, nil
+	}
 
 	var spec contextSpec
-	for _, opt := range opts {
+	for i, opt := range opts {
+		if opt == nil {
+			var zero C
+			tb.Fatalf("routertest: context option %d is nil", i)
+			return zero, nil
+		}
 		opt(&spec)
 	}
 	req := spec.req
@@ -209,6 +230,12 @@ type Response struct {
 }
 
 func Serve(h http.Handler, req *http.Request) *Response {
+	if h == nil {
+		panic("routertest: Serve needs a handler")
+	}
+	if req == nil {
+		panic("routertest: Serve needs a request")
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	res := rec.Result()
@@ -256,6 +283,11 @@ func (r *Response) AssertHeader(tb testing.TB, key, want string) {
 }
 
 func NewServer(tb testing.TB, h http.Handler) *httptest.Server {
+	tb.Helper()
+	if h == nil {
+		tb.Fatalf("routertest: NewServer needs a handler")
+		return nil
+	}
 	return httptest.NewTestServer(tb, h)
 }
 
@@ -338,20 +370,49 @@ func goldenUpdate() bool {
 	return f != nil && f.Value.String() == "true"
 }
 
+func closeGoldenRoot(tb testing.TB, root *os.Root) {
+	tb.Helper()
+	if err := root.Close(); err != nil {
+		tb.Errorf("routertest: close the golden directory: %v", err)
+	}
+}
+
 func AssertGolden(tb testing.TB, name string, got []byte) {
 	tb.Helper()
 
-	file := filepath.Join("testdata", filepath.FromSlash(name))
+	rel, err := goldenName(name)
+	if err != nil {
+		tb.Fatalf("routertest: invalid golden file name %q: %v", name, err)
+		return
+	}
+	file := filepath.Join("testdata", rel)
 	if goldenUpdate() {
-		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
 			tb.Fatalf("routertest: make the golden directory: %v", err)
+			return
 		}
-		if err := os.WriteFile(file, got, 0o644); err != nil {
+		root, err := os.OpenRoot("testdata")
+		if err != nil {
+			tb.Fatalf("routertest: open the golden directory: %v", err)
+			return
+		}
+		defer closeGoldenRoot(tb, root)
+		if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+			tb.Fatalf("routertest: make the golden directory: %v", err)
+			return
+		}
+		if err := root.WriteFile(rel, got, 0o644); err != nil {
 			tb.Fatalf("routertest: write %s: %v", file, err)
 		}
 		return
 	}
-	want, err := os.ReadFile(file)
+	root, err := os.OpenRoot("testdata")
+	if err != nil {
+		tb.Fatalf("routertest: open the golden directory: %v", err)
+		return
+	}
+	defer closeGoldenRoot(tb, root)
+	want, err := root.ReadFile(rel)
 	if err != nil {
 		tb.Fatalf("routertest: read %s: %v; run the test with -%s to write it", file, err, updateFlagName)
 		return
@@ -360,6 +421,13 @@ func AssertGolden(tb testing.TB, name string, got []byte) {
 		tb.Fatalf("%s differs; run the test with -%s to accept the change\ngot:\n%s\nwant:\n%s",
 			file, updateFlagName, got, want)
 	}
+}
+
+func goldenName(name string) (string, error) {
+	if name == "." || !fs.ValidPath(name) || strings.ContainsRune(name, '\\') {
+		return "", errors.New("name must be a slash-separated file path without parent traversal")
+	}
+	return filepath.FromSlash(name), nil
 }
 
 func eventLines(b []byte) iter.Seq[string] {

@@ -1111,6 +1111,38 @@ func TestStrictBindKeepsEmbeddedTaggedFields(t *testing.T) {
 	}
 }
 
+func TestQueryAs(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/search", func(c *tctx) error {
+		page, err := c.QueryAs[int]("page")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%d", page)
+	})
+
+	for _, tt := range []struct {
+		target string
+		want   string
+		code   int
+	}{
+		{target: "/search?page=2", want: "2", code: http.StatusOK},
+		{target: "/search?page=", want: "0", code: http.StatusOK},
+		{target: "/search", want: "0", code: http.StatusOK},
+		{target: "/search?page=abc", code: http.StatusBadRequest},
+	} {
+		t.Run(tt.target, func(t *testing.T) {
+			rec := do(r, http.MethodGet, tt.target)
+			if rec.Code != tt.code {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.code)
+			}
+			if rec.Code == http.StatusOK && rec.Body.String() != tt.want {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tt.want)
+			}
+		})
+	}
+}
+
 func TestQueryAsOK(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/search", func(c *tctx) error {

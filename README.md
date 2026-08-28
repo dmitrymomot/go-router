@@ -137,18 +137,18 @@ type Context struct {
 | `Cookie(name)` `SetCookie(c)` `SignedCookie` `SetSignedCookie` `AddFlash` `Flashes` | [cookies and flash messages](#signed-cookies-and-flash-messages) |
 | `JSON` `JSONPretty` `String` `Stringf` `HTML` `Blob` `Stream` `NoContent` `Redirect` | response rendering |
 | `File` `FileFS` `AttachmentFile` `InlineFile` `Attachment` `Inline` | [files and downloads](#files-and-downloads) |
-| `Render` `RenderStream` `RenderPartial` | template components, such as [templ](https://templ.guide) |
-| `HXRequest()` `HXTarget()` `HXRedirect(url)` and the rest | [htmx](#htmx) |
+| `Render` `RenderStream` | template components, such as [templ](https://templ.guide) |
+| `IsHTMX()` `IsBoosted()` `HTMX()` `HX()` | [htmx](#htmx) |
 | `SSE(status, opts...)` `LastEventID()` | [server-sent events](#server-sent-events) |
 | `Set(k, v)` `Get(k)` | per-request values |
 | `Logger()` | the logger of the router, or `slog.Default` |
 | `Deadline` `Done` `Err` `Value` | `Base` is a `context.Context` |
 
-`Scheme` reads the TLS state of the connection first, then `X-Forwarded-Proto`.
-It takes that header only when it names `http` or `https`, because the value
-goes back to the client in the `Location` of an absolute redirect. Trust it as
-far as you trust the proxy in front of the server, and not at all where clients
-connect directly.
+`Scheme` returns `https` when the connection has TLS. Otherwise it reads the
+first comma-separated `X-Forwarded-Proto` value: `https`, in any case, returns
+`https`; a missing value and every other value return `http`. It never reflects
+an arbitrary scheme into a redirect. Trust the header only as far as you trust
+the proxy in front of the server, and not at all where clients connect directly.
 
 `Accepts` returns the offer the client prefers, or an empty string when it takes
 none. Name the offers in the order the server prefers, because that order
@@ -300,6 +300,12 @@ and the single page fallback.
 `r.Routes()` returns every registered route, with the host pattern that owns
 it, which is handy in a startup log or a test that guards the route table.
 
+`Mount` shares the parent's lifecycle. `Build`, `Routes`, and the first request
+freeze every same-context router reachable through `Mount`, including a
+subrouter shared by more than one parent. Finish configuring that graph before
+any parent compiles it; later registration panics instead of being silently
+ignored.
+
 ### Mounting a subsystem with its own context
 
 Use `MountRouter` when one part of the service needs different dependencies on
@@ -431,9 +437,11 @@ r.Name("user").Meta(openapi.Op{Summary: "read a user"}).GET("/users/{id}", getUs
 ```
 
 `r.Routes()` returns every route with its method, pattern, host, name and meta.
-`r.Build()` compiles the trie now and returns a malformed or conflicting pattern
-as an error instead of panicking, which suits a table that comes from
-configuration and a test that asserts a conflict without `recover`.
+`r.Build()` compiles and freezes the router graph now and returns a malformed or
+conflicting pattern as an error instead of panicking, which suits a table that
+comes from configuration and a test that asserts a conflict without `recover`.
+`r.Routes()` performs the same build before returning its snapshot, so it also
+ends the configuration phase.
 
 `r.Observe(fn)` calls `fn` once per request, after it is answered, with the
 status the client saw, the body size, the duration and the error that reached
@@ -458,7 +466,7 @@ host alone.
 
 ```go
 r := router.New(newCtx)
-r.Use(middleware.Recover[Ctx](), middleware.Logger[Ctx]())   // every host
+r.Use(middleware.Recover[Ctx], middleware.Logger[Ctx])   // every host
 
 // 1. The main site.
 r.Host("example.com", func(h *router.Router[Ctx]) {
@@ -518,7 +526,9 @@ the host and the path both declare is a registration error.
 
 The router matches the host without its port, without a trailing dot and in
 lower case, so `example.com` also answers `Example.com:8080` in development. A
-port inside a pattern is a registration error.
+port inside a pattern is a registration error. Literal labels use ASCII or
+punycode; Unicode literals and malformed request authorities match no host
+scope.
 
 ### Which host wins
 
@@ -1016,9 +1026,10 @@ r.GET("/messages", router.HTMXPartial(messageList, messagePage))
 A boosted request gets the page, not the fragment: htmx takes the body of that
 answer and swaps the whole of it, so a fragment would drop the rest of the
 document. A history restore request gets the page for the same reason. The
-handler also adds `HX-Request` and `HX-Boosted` to `Vary`, because the URL now
-has two answers and a shared cache has to keep them apart. Branching on
-`c.IsHTMX()` yourself means calling `c.Vary(router.HeaderHXRequest)` yourself.
+handler also adds `HX-Request`, `HX-Boosted`, and
+`HX-History-Restore-Request` to `Vary`, because the URL now has multiple
+answers and a shared cache has to keep them apart. Branching on `c.IsHTMX()`
+yourself means calling `c.Vary(router.HeaderHXRequest)` yourself.
 
 ### Writing the response
 
@@ -1179,12 +1190,11 @@ c.AttachmentFile("exports/q1.csv", "q1-report.csv")  // the browser saves it
 c.InlineFile("invoices/7.pdf", "invoice-7.pdf")      // the browser opens it
 ```
 
-The name is a slash-separated path inside the working directory. Every `..` comes
-out of it before the open and `os.Root` resolves what is left, so a name that came
-out of a request reaches no file outside that directory, not even through a
-symbolic link. A file the process cannot open answers `ErrNotFound`, and so does a
-directory; the reason reaches the log and never the client, because the layout of
-the disk is no answer to a request.
+The name is a slash-separated path inside the working directory. Absolute paths,
+volume names, backslashes, and every `..` segment are rejected before the open;
+`os.Root` then prevents symbolic-link escapes. A file the process cannot open
+answers `ErrNotFound`, and so does a directory; the reason reaches the log and
+never the client, because the layout of the disk is no answer to a request.
 
 ```go
 r.GET("/invoices/{id}", func(c *app.Context) error {
@@ -1197,12 +1207,17 @@ r.GET("/invoices/{id}", func(c *app.Context) error {
 
 The answer goes out through `http.ServeContent`, which sets the media type from
 the extension, answers a range request with 206 and a conditional one with 304.
-The disposition header goes out only once the file is open, so a miss answers a
-plain 404 that no browser saves to disk.
+Files from a custom `fs.FS` need not implement `io.ReadSeeker`: the router streams
+them with bounded memory, performs no body read for `HEAD`, and ignores multipart
+ranges or a single range that would require skipping more than 1 MiB. An
+extensionless non-seekable `HEAD` may omit `Content-Type`, because learning it
+would require reading the body. The disposition header goes out only once the
+file is open, so a miss answers a plain 404 that no browser saves to disk.
 
 `Attachment` and `Inline` take a body the process already holds in memory.
 `AttachmentFile` and `InlineFile` stream from disk instead, so a large export
-costs no copy per request and a download that lost the connection resumes.
+costs no full-file copy per request. Seekable files retain normal range support,
+including resumed downloads.
 
 ## Signed cookies and flash messages
 
@@ -1577,9 +1592,11 @@ r.Use(middleware.KeyAuth(func(c Ctx, key string) (bool, error) {
 
 The validator names the context type, so these two calls need no type argument.
 `KeyAuth` reads a bearer token from `Authorization` by default; point it at other
-places with `FromHeader`, `FromQuery`, `FromCookie` and `FromForm`. `BasicAuth`
-does RFC 7617 and sends the `WWW-Authenticate` challenge that makes a browser
-prompt. A config without a validator panics at construction.
+places with `FromHeader`, `FromQuery`, `FromCookie` and `FromForm`. Every 401 it
+produces carries `WWW-Authenticate: Bearer`, including when custom token sources
+are used; set `KeyAuthConfig.Challenge` to another challenge. `BasicAuth` does
+RFC 7617 and sends the challenge that makes a browser prompt. A config without a
+validator panics at construction.
 
 Compare a secret the application holds in memory with `middleware.SecureCompare`
 and never with `==`: a comparison that returns at the first byte that differs
@@ -1597,6 +1614,12 @@ store backed by Redis reaches the connection as the type it is. It counts agains
 `ClientIP` unless `KeyFunc` says otherwise, and a denial sets `Retry-After`. The
 wait is reported without taking a token, so a client that keeps knocking while it
 is denied does not push its own answer further away.
+
+The in-memory store holds at most 65,536 client keys by default. At capacity it
+fails closed for a new key and returns a retry interval without allocating
+another bucket; bounded cleanup reclaims expired entries across shards. Use
+`NewMemoryStoreWithConfig` and `MemoryStoreConfig.MaxEntries` to choose a lower or
+higher bound. Zero keeps the secure default, and a negative value panics.
 
 `BodyLimit` caps the request body itself, which is what a handler that reads
 `Request.Body` or streams an upload needs; `r.MaxBodyBytes` caps only what `Bind`
@@ -1787,12 +1810,16 @@ A path that matches no file answers with `index.html` and status 200, which is
 how the application serves its own routes. The catch-all that `Mount` registers
 loses to every literal route, so `/api/ping` still reaches its handler.
 
-The fallback answers a navigation only: the path carries no file extension, or
-the client accepts `text/html`. A missing script keeps its 404, because an HTML
-body in its place breaks the page in a way that is hard to read. Set
-`Config.Fallback` to replace that test when the routes of the application do not
-fit it. The index itself always revalidates, whatever path reached it, because
-it names the versioned assets.
+The default fallback answers a navigation only: an extensionless path with no
+`Accept` header, or a request that accepts HTML with a positive quality. A path
+with an extension requires an explicit `text/html` range. `text/html;q=0` refuses
+the fallback, and every default decision adds `Vary: Accept`. A missing script
+therefore keeps its 404 instead of receiving an HTML body. Set `Config.Fallback`
+to replace the test when the routes of the application do not fit it; a custom
+predicate adds `Vary: *` because it may inspect any request header. An operational
+filesystem error is a 500 and never activates the SPA fallback. The index itself
+always revalidates, whatever path reached it, because it names the versioned
+assets. `Index` must name a file; `.` and directories are rejected at startup.
 
 ### The rest of the API
 
@@ -1908,6 +1935,11 @@ Two rules, and the API enforces the first one:
    embedded `Base` itself. A field `reset` forgets carries one user's data into
    the next request, so write it as an explicit assignment of every field.
 
+After `reset`, the router detaches the request and response writer and clears
+internal parameters, caches, deferred state, and per-request values before the
+context returns to the pool. That cleanup prevents an idle pool from retaining a
+completed request graph. The pooled benchmark numbers below include its cost.
+
 Never keep a context, its request, or its response writer alive after the
 handler returns. A goroutine that outlives the request would then read and
 write the context of an unrelated one. Copy what it needs before it starts.
@@ -1994,17 +2026,20 @@ A binary that declares one is read too, so the two spellings do the same thing.
 
 ## Performance
 
-Apple M3 Max, Go 1.27, one route set in the three pattern dialects. Run the
-comparison yourself with `just bench-compare`, and the benchmarks of this module
-alone, the host table below among them, with `just bench`.
+Measured on 2026-08-28 with Go 1.27.0 on an Apple M3 Max. The worktree was based
+on commit `655139c3f9b9` and included the security and correctness changes in
+this branch. Every number is the median of ten one-second samples after an
+untimed warm request; construction and lazy compilation are outside the timer.
+The commands, ranges, dependency versions, and complete methodology are in
+[`benchmarks/README.md`](benchmarks/README.md).
 
 | | static | one parameter | eight segments, three parameters |
 |---|---|---|---|
-| **go-router**, pooled | 46 ns, 0 allocs | 52 ns, 0 allocs | 78 ns, 0 allocs |
-| **go-router** | 92 ns, 1 alloc | 97 ns, 1 alloc | 123 ns, 1 alloc |
-| chi | 122 ns, 2 allocs | 216 ns, 4 allocs | 312 ns, 4 allocs |
-| echo | 32 ns, 0 allocs | 39 ns, 0 allocs | 65 ns, 0 allocs |
-| `http.ServeMux` | 96 ns, 0 allocs | 98 ns, 1 alloc | 261 ns, 3 allocs |
+| **go-router**, pooled | 48.1 ns, 0 B, 0 allocs | 54.3 ns, 0 B, 0 allocs | 81.8 ns, 0 B, 0 allocs |
+| **go-router** | 108.6 ns, 384 B, 1 alloc | 131.7 ns, 384 B, 1 alloc | 131.9 ns, 384 B, 1 alloc |
+| chi 5.3.2 | 146.9 ns, 368 B, 2 allocs | 243.8 ns, 704 B, 4 allocs | 347.6 ns, 704 B, 4 allocs |
+| echo 4.15.4 | 33.4 ns, 0 B, 0 allocs | 40.4 ns, 0 B, 0 allocs | 68.3 ns, 0 B, 0 allocs |
+| `http.ServeMux` | 102.6 ns, 0 B, 0 allocs | 106.2 ns, 16 B, 1 alloc | 276.7 ns, 112 B, 3 allocs |
 
 Without pooling, the one allocation is your context: route parameters land in
 an array inside `Base`, so matching itself allocates nothing for up to eight
@@ -2013,27 +2048,25 @@ context object at all — it looks the handler up and calls it with the request
 the server already allocated. `NewPooled` closes that gap; echo does the same
 thing by default and pays for it with the same caveats listed above.
 
-The unpooled row is about 7 percent slower than it was before the accessors on
-this page existed. `Base` grew from 368 to 408 bytes — a query cache, the parsed
-form error, the logger, the multipart limit and two mode flags — which pushes the
-per-request context from the 384-byte size class into the 416-byte one. That step
-is the whole of it: allocating 384 bytes costs 72 ns on this machine and 416 costs
-about 78. Pooling makes the size class free again, which is why the pooled row
-moved by 2 to 5 percent instead.
+The pooled path now clears all request, response, parameter, cache, and store
+references before reuse. That security cleanup is included in these numbers and
+costs several nanoseconds compared with the historical table, while preserving
+zero allocations. The run also saw transient scheduler load in some unpooled
+static and parameter samples; the published medians include every sample, and
+the wide ranges are recorded with the raw methodology instead of being hidden.
 
-Host routing costs the lookup that resolves it, and nothing else:
+Host routing includes full authority validation before scope selection:
 
 | | fixed host | `{tenant}.example.com` | `*` | a host-free route |
 |---|---|---|---|---|
-| **go-router** | 103 ns, 1 alloc | 105 ns, 1 alloc | 100 ns, 1 alloc | 99 ns, 1 alloc |
+| **go-router** | 112.4 ns, 384 B, 1 alloc | 116.2 ns, 384 B, 1 alloc | 111.8 ns, 384 B, 1 alloc | 103.4 ns, 384 B, 1 alloc |
 
 Matching uses a compressed radix tree, the same structure echo uses, so a
 static route costs a few string comparisons rather than one lookup per
-segment. Echo stays ahead by 10 to 20 percent: it carries a smaller context
-and a leaner per-request setup. The rest of the gap paid for the pattern
-syntax above — regular expression parameters, partial segments, and
-backtracking across parameter kinds — which a plain prefix tree does not give
-you.
+segment. The additional work buys regular expression parameters, partial
+segments, backtracking across parameter kinds, scoped fallbacks, and validated
+host authorities. These measurements are a reproducible snapshot, not a
+cross-machine performance promise.
 
 ## What Go 1.27 buys
 
@@ -2049,16 +2082,19 @@ you.
 - **stdlib `uuid`** backs `middleware.RequestID`.
 - **`testing/synctest`** runs the timeout and the heartbeat tests on a fake
   clock.
+- **Iterator helpers** such as `slices.Backward` keep reverse scans explicit.
+- **`testing.B.Loop`** drives the benchmark bodies after their warm-up request.
 
 ## Limitations
 
 - A catch-all must span a whole segment, and two parameters cannot sit side by
   side inside one.
 - A host pattern carries no port, and an IP literal host is not routable.
-- Register every route before the first request. The router compiles its trie
-  once and refuses a later change. The same goes for the settings: `Use`, `Pre`,
-  `Name`, `Meta`, `Observe`, `Logger` and the limits all panic once the router has
-  served a request.
+- Register every route before `Build`, `Routes`, or the first request. The router
+  compiles its trie once and refuses a later change. Building a parent also
+  freezes every same-context router reachable through `Mount`. The same goes for
+  the settings: `Use`, `Pre`, `Name`, `Meta`, `Observe`, `Logger` and the limits
+  all panic once configuration is frozen.
 - Pooling is opt-in, and it hands you the usual lifetime rules with it.
 - **Streaming multipart is not supported.** Every form accessor parses the whole
   body first, so a handler that reads one field can no longer stream the rest.
@@ -2094,8 +2130,11 @@ directory whose name starts with an underscore, so `./...` reaches neither.
 
 CI runs the same recipes. Tool versions are pinned at the top of the
 [justfile](justfile) and run through `go run tool@version`, not declared as
-go.mod tools: a tool directive would put the whole linter dependency tree into
-the module graph of everyone who imports this router.
+go.mod tools. That keeps repository tooling out of this module's own requirements.
+It is an organizational choice, not an importer-safety requirement: Go's module
+pruning means dependencies needed only by a dependency's tool directive usually
+do not enter the consumer's pruned graph. See the official
+[Go dependency guide](https://go.dev/doc/modules/managing-dependencies#tools).
 
 `betteralign` runs in opt-in mode. Only structs marked `betteralign:check` are
 reordered, which today is `Base` and `Response`, the two the router allocates

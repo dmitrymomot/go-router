@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"slices"
 	"strings"
@@ -71,9 +72,11 @@ func (hs *hostSet[C]) match(host string, dst []string) (*hostEntry[C], []string)
 		return e, dst
 	}
 	for _, e := range hs.pats {
-		if vals, ok := e.match(host, dst); ok {
+		vals, ok := e.match(host, dst)
+		if ok {
 			return e, vals
 		}
+		clear(vals[len(dst):])
 	}
 	if hs.any != nil {
 		return hs.any, dst
@@ -146,9 +149,12 @@ func (e *hostEntry[C]) match(host string, dst []string) ([]string, bool) {
 
 func parseHostPattern(pattern string) (hostSpec, error) {
 	raw := pattern
-	pattern = asciiLower(pattern)
 	if n := len(pattern); n > 0 && pattern[n-1] == '.' {
 		pattern = pattern[:n-1]
+	}
+	pattern = lowerHostLiterals(pattern)
+	if !hostLiteralsASCII(pattern) {
+		return hostSpec{}, fmt.Errorf("router: host pattern %q must use ASCII or punycode literals", raw)
 	}
 	if pattern == "" {
 		return hostSpec{}, fmt.Errorf("router: a host pattern must not be empty")
@@ -215,6 +221,54 @@ func parseHostPattern(pattern string) (hostSpec, error) {
 
 	slices.Reverse(s.labels)
 	return s, nil
+}
+
+func hostLiteralsASCII(pattern string) bool {
+	depth := 0
+	for i := range len(pattern) {
+		switch pattern[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		default:
+			if depth == 0 && pattern[i] >= 0x80 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func lowerHostLiterals(pattern string) string {
+	depth := 0
+	for i := range len(pattern) {
+		switch pattern[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		default:
+			if depth == 0 && pattern[i] >= 'A' && pattern[i] <= 'Z' {
+				b := []byte(pattern)
+				depth = 0
+				for j := range len(b) {
+					switch b[j] {
+					case '{':
+						depth++
+					case '}':
+						depth--
+					default:
+						if depth == 0 && b[j] >= 'A' && b[j] <= 'Z' {
+							b[j] += 'a' - 'A'
+						}
+					}
+				}
+				return string(b)
+			}
+		}
+	}
+	return pattern
 }
 
 func splitHostLabels(pattern string) ([]string, error) {
@@ -319,26 +373,171 @@ func lessSpecific(a, b *hostSpec) int {
 	if len(a.labels) != len(b.labels) {
 		return len(b.labels) - len(a.labels)
 	}
-	return strings.Compare(a.pattern, b.pattern)
+	for i := range a.labels {
+		ak, bk := hostLabelSpecificity(a.labels[i]), hostLabelSpecificity(b.labels[i])
+		if ak != bk {
+			return bk - ak
+		}
+	}
+	return strings.Compare(hostShape(a), hostShape(b))
 }
+
+func hostLabelSpecificity(l hostLabel) int {
+	switch {
+	case l.lit != "":
+		return 4
+	case l.parts != nil && l.whole == nil:
+		return 3
+	case l.whole != nil && l.whole.re != nil:
+		return 2
+	case l.whole != nil:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func hostShape(s *hostSpec) string {
+	var b strings.Builder
+	if s.any {
+		return "*"
+	}
+	for i, l := range slices.Backward(s.labels) {
+		if i != len(s.labels)-1 {
+			b.WriteByte('.')
+		}
+		switch {
+		case l.lit != "":
+			b.WriteString("l:")
+			b.WriteString(l.lit)
+		case l.parts != nil && l.whole == nil:
+			b.WriteString("t:")
+			b.WriteString(templateSkeleton(l.parts))
+		case l.whole != nil && l.whole.re != nil:
+			b.WriteString("r:")
+			b.WriteString(l.whole.re.String())
+		case l.rest:
+			b.WriteString("rest")
+		case l.whole != nil:
+			b.WriteString("param")
+		default:
+			b.WriteString("wild")
+		}
+	}
+	return b.String()
+}
+
+func sameHostShape(a, b *hostSpec) bool { return hostShape(a) == hostShape(b) }
 
 // "example.com." is the same host as "example.com", so a router that kept the
 // dot would answer a request a Host header check was meant to catch.
 func normalizeHost(host string) string {
-	if host == "" {
-		return ""
+	host, _ = normalizeHostOK(host)
+	return host
+}
+
+func normalizeHostOK(authority string) (string, bool) {
+	if authority == "" {
+		return "", false
 	}
-	if host[0] == '[' {
-		if i := strings.IndexByte(host, ']'); i >= 0 {
-			host = host[1:i]
+	if authority[0] != '[' {
+		labelStart := 0
+		for i := 0; i < len(authority); i++ {
+			c := authority[i]
+			if c == '.' {
+				if i == labelStart {
+					return "", false
+				}
+				labelStart = i + 1
+				continue
+			}
+			if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_' {
+				continue
+			}
+			return normalizeHostAuthoritySlow(authority)
 		}
-	} else if i := strings.IndexByte(host, ':'); i >= 0 {
-		host = host[:i]
+		if labelStart < len(authority) {
+			return authority, true
+		}
 	}
-	if n := len(host); n > 1 && host[n-1] == '.' {
-		host = host[:n-1]
+	return normalizeHostAuthoritySlow(authority)
+}
+
+func normalizeHostAuthoritySlow(authority string) (string, bool) {
+	if authority[0] == '[' {
+		return normalizeIPAuthority(authority)
 	}
-	return asciiLower(host)
+	hostEnd := len(authority)
+	labelStart := 0
+	upper := false
+	for i := 0; i < len(authority); i++ {
+		c := authority[i]
+		switch {
+		case c == ':':
+			hostEnd = i
+			if !validPort(authority[i+1:]) {
+				return "", false
+			}
+			i = len(authority)
+		case c == '.':
+			if i == labelStart {
+				return "", false
+			}
+			labelStart = i + 1
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		case c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_':
+		default:
+			return "", false
+		}
+	}
+	if hostEnd == 0 {
+		return "", false
+	}
+	if labelStart == hostEnd {
+		hostEnd--
+		if hostEnd == 0 {
+			return "", false
+		}
+	}
+	host := authority[:hostEnd]
+	if upper {
+		host = asciiLower(host)
+	}
+	return host, true
+}
+
+func normalizeIPAuthority(authority string) (string, bool) {
+	end := strings.IndexByte(authority, ']')
+	if end < 0 {
+		return "", false
+	}
+	host := authority[1:end]
+	if strings.IndexByte(host, ':') < 0 || net.ParseIP(host) == nil {
+		return "", false
+	}
+	rest := authority[end+1:]
+	if rest != "" && (rest[0] != ':' || !validPort(rest[1:])) {
+		return "", false
+	}
+	return asciiLower(host), true
+}
+
+func validPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	n := 0
+	for i := range len(port) {
+		if port[i] < '0' || port[i] > '9' {
+			return false
+		}
+		n = n*10 + int(port[i]-'0')
+		if n > 65535 {
+			return false
+		}
+	}
+	return true
 }
 
 func asciiLower(s string) string {

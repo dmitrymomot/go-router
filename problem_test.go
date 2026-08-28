@@ -272,6 +272,9 @@ func TestProblemErrorHandlerHEADWritesNoBody(t *testing.T) {
 	if rec.Body.Len() != 0 {
 		t.Errorf("body = %q, want empty", rec.Body.String())
 	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationProblemJSON {
+		t.Errorf("Content-Type = %q, want %q", got, MIMEApplicationProblemJSON)
+	}
 }
 
 func TestProblemErrorHandlerIgnoresANilError(t *testing.T) {

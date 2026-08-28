@@ -200,8 +200,11 @@ func TestAllowedLeavesTheSentinelOut(t *testing.T) {
 	}
 
 	want := []string{http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPost}
-	if got := n.allowed(); !slices.Equal(got, want) {
+	if got := n.allowed(true); !slices.Equal(got, want) {
 		t.Errorf("allowed() = %q, want %q", got, want)
+	}
+	if got, want := n.allowed(false), []string{http.MethodGet, http.MethodHead, http.MethodPost}; !slices.Equal(got, want) {
+		t.Errorf("allowed(false) = %q, want %q", got, want)
 	}
 }
 
