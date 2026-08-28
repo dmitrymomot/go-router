@@ -906,8 +906,6 @@ func (r *Router[C]) buildErr() error {
 	// set. Both are resolved after the walk, because a scope below may still
 	// replace the fallback of the root that they fall back to.
 	var pending []pendingScope[C]
-	rawNotFound := map[*hostEntry[C]]HandlerFunc[C]{}
-	rawNotAllowed := map[*hostEntry[C]]HandlerFunc[C]{}
 
 	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error
 	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error {
@@ -974,16 +972,18 @@ func (r *Router[C]) buildErr() error {
 				notFound, notAllowed, errh := r.fallbacks(e)
 				if rt.notFound != nil {
 					*notFound = chain(rt.notFound, m)
-					rawNotFound[e] = rt.notFound
 					if e == nil {
 						r.notFound = rt.notFound // what a host inherits
+					} else {
+						e.rawNotFound = rt.notFound
 					}
 				}
 				if rt.methodNotAllowed != nil {
 					*notAllowed = chain(rt.methodNotAllowed, m)
-					rawNotAllowed[e] = rt.methodNotAllowed
 					if e == nil {
 						r.methodNotAllowed = rt.methodNotAllowed
+					} else {
+						e.rawNotAllowed = rt.methodNotAllowed
 					}
 				}
 				if rt.errHandler != nil {
@@ -1029,12 +1029,6 @@ func (r *Router[C]) buildErr() error {
 	// r.notFound and r.methodNotAllowed are final now, so a host and a path
 	// scope that set no fallback of their own inherit the one the application
 	// chose, wherever the scope that chose it sat.
-	resolve := func(raw map[*hostEntry[C]]HandlerFunc[C], e *hostEntry[C], root HandlerFunc[C]) HandlerFunc[C] {
-		if h, ok := raw[e]; ok {
-			return h
-		}
-		return root
-	}
 	if r.hostSet != nil {
 		for _, e := range r.hostSet.all {
 			if e.optionsChain == nil {
@@ -1061,10 +1055,16 @@ func (r *Router[C]) buildErr() error {
 		// that encloses it, or with the one of its host or of the root.
 		notFound, notAllowed := ps.fb.notFound, ps.fb.notAllowed
 		if notFound == nil {
-			notFound = resolve(rawNotFound, ps.host, r.notFound)
+			notFound = r.notFound
+			if ps.host != nil && ps.host.rawNotFound != nil {
+				notFound = ps.host.rawNotFound
+			}
 		}
 		if notAllowed == nil {
-			notAllowed = resolve(rawNotAllowed, ps.host, r.methodNotAllowed)
+			notAllowed = r.methodNotAllowed
+			if ps.host != nil && ps.host.rawNotAllowed != nil {
+				notAllowed = ps.host.rawNotAllowed
+			}
 		}
 		s.notFoundChain = chain(notFound, ps.mws)
 		s.notAllowedChain = chain(notAllowed, ps.mws)

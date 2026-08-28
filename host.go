@@ -91,6 +91,12 @@ type hostEntry[C Context] struct {
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
 	errHandler      ErrorHandlerFunc[C]
+
+	// The same two fallbacks before the middleware of the host wrapped them.
+	// A path scope inside this host that sets no fallback of its own wraps
+	// one of these in its own middleware instead of inheriting the chain.
+	rawNotFound   HandlerFunc[C]
+	rawNotAllowed HandlerFunc[C]
 }
 
 // hostSet resolves a request host to the entry that answers it.
