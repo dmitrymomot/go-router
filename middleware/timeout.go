@@ -17,16 +17,31 @@ type TimeoutConfig struct {
 	// Skip passes a request straight to the next handler when it returns true.
 	Skip func(c router.Context) bool
 
-	// Duration is the deadline for one request. Zero disables the middleware.
+	// Duration is the deadline for one request. It has no default here:
+	// [TimeoutWithConfig] panics on a duration of zero or less, because a
+	// config that a file or a flag fills is how a server ends up with no
+	// deadline at all and nothing that says so.
 	Duration time.Duration
 
 	// Status is the status code of the answer after a deadline. It defaults to
-	// 503 Service Unavailable.
+	// 503 Service Unavailable. OnTimeout replaces it.
 	Status int
 
 	// Message is the text of that answer. It defaults to the standard text of
-	// the status code.
+	// the status code. OnTimeout replaces it.
 	Message string
+
+	// OnTimeout answers a request that ran past the deadline. It receives the
+	// error that the handler returned, joined with
+	// [context.DeadlineExceeded], so errors.Is finds either of them:
+	//
+	//	OnTimeout: func(c router.Context, err error) error {
+	//		return router.ErrGatewayTimeout.WithError(err)
+	//	}
+	//
+	// It replaces Status and Message. The error it returns reaches the error
+	// handler of the router like any other.
+	OnTimeout func(c router.Context, err error) error
 }
 
 // Timeout is [TimeoutWithConfig] with its default config, which is a deadline
@@ -46,7 +61,15 @@ func Timeout[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C]
 // to watch the context, as every call that takes a [context.Context] does. A
 // handler that ignores the context still runs to the end, and the client then
 // sees the answer of that handler and not a timeout.
+//
+// It panics on a Duration of zero or less. Use [Timeout] for the default
+// deadline, and Skip to leave a route out of it: a middleware that reads a
+// zero as "no deadline" answers a misconfigured server with a server that
+// waits forever, which is the failure it exists to prevent.
 func TimeoutWithConfig[C router.Context](cfg TimeoutConfig) router.Middleware[C] {
+	if cfg.Duration <= 0 {
+		panic("middleware: TimeoutWithConfig needs a Duration above zero")
+	}
 	if cfg.Status == 0 {
 		cfg.Status = http.StatusServiceUnavailable
 	}
@@ -56,7 +79,7 @@ func TimeoutWithConfig[C router.Context](cfg TimeoutConfig) router.Middleware[C]
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
-			if cfg.Duration <= 0 || skipped(cfg.Skip, c) {
+			if skipped(cfg.Skip, c) {
 				return next(c)
 			}
 
@@ -68,8 +91,11 @@ func TimeoutWithConfig[C router.Context](cfg TimeoutConfig) router.Middleware[C]
 			err := next(c)
 
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) && !c.Response().Committed {
-				return router.NewHTTPError(cfg.Status, cfg.Message).WithError(
-					errors.Join(err, context.DeadlineExceeded))
+				cause := errors.Join(err, context.DeadlineExceeded)
+				if cfg.OnTimeout != nil {
+					return cfg.OnTimeout(c, cause)
+				}
+				return router.NewHTTPError(cfg.Status, cfg.Message).WithError(cause)
 			}
 			return err
 		}
