@@ -72,8 +72,12 @@ type CSRFConfig struct {
 	// [DefaultCSRFCookieMaxAge].
 	CookieMaxAge time.Duration
 
-	// CookieSecure keeps the cookie off a plain connection. Turn it on in
-	// production. A SameSite of [http.SameSiteNoneMode] turns it on by itself.
+	// CookieSecure keeps the cookie off a plain connection. Leave it unset and
+	// the request decides: a request that [router.Base.Scheme] reads as https
+	// gets a Secure cookie and a plain one does not, which is what keeps the
+	// token off a plaintext connection in production and lets it work over
+	// http://localhost in development. Set it to force the attribute on every
+	// answer. A SameSite of [http.SameSiteNoneMode] forces it too.
 	CookieSecure bool
 
 	// CookieHTTPOnly keeps the cookie away from scripts. Turn it on for a
@@ -107,11 +111,12 @@ type CSRFConfig struct {
 //
 //	r.Use(middleware.CSRF[Ctx])
 //
-// The defaults suit a server-rendered application behind TLS termination. Set
-// CookieSecure and CookieHTTPOnly through [CSRFWithConfig] in production:
+// The token cookie is Secure on a request that arrived over TLS, so the
+// defaults suit a server-rendered application behind TLS termination. Turn
+// CookieHTTPOnly on through [CSRFWithConfig] for a page that renders the token
+// into its forms rather than reading the cookie from a script:
 //
 //	r.Use(middleware.CSRFWithConfig[Ctx](middleware.CSRFConfig{
-//		CookieSecure:   true,
 //		CookieHTTPOnly: true,
 //	}))
 func CSRF[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -137,6 +142,10 @@ func CSRF[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 // and skips both checks. That is what lets a page render the token into its
 // forms, and it keeps the automatic OPTIONS answer of the router working.
 //
+// The cookie is marked Secure on a request that arrived over TLS, and on every
+// request when CookieSecure is set, so the token never goes out over a
+// connection that anyone on the way reads.
+//
 // It writes the cookie for a request that carries none, and leaves the token
 // of one that does alone, so an answer to a request that already holds a token
 // carries no Set-Cookie. An unsafe request without the cookie therefore takes
@@ -161,10 +170,14 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 	if cfg.CookieMaxAge <= 0 {
 		cfg.CookieMaxAge = DefaultCSRFCookieMaxAge
 	}
+	// alwaysSecure marks the cookie whatever the request looks like. Without
+	// it the scheme of the request decides, so the token never travels over a
+	// connection that anyone on the way reads.
+	alwaysSecure := cfg.CookieSecure
 	if cfg.CookieSameSite == http.SameSiteNoneMode {
 		// A browser drops a SameSite=None cookie that is not secure, and a
 		// CSRF middleware whose cookie never arrives refuses every request.
-		cfg.CookieSecure = true
+		alwaysSecure = true
 	}
 	trusted := checkOrigins(cfg.TrustedOrigins)
 	if cfg.AllowSecFetchSite == nil {
@@ -180,7 +193,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 
 			// A cache that keyed the answer on the URL alone would hand one
 			// user a page that carries the token of another.
-			c.Response().Header().Add(router.HeaderVary, router.HeaderCookie)
+			router.AddVary(c.Response().Header(), router.HeaderCookie)
 
 			token := csrfCookieToken(c.Request(), cfg.CookieName)
 			if token == "" {
@@ -191,7 +204,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 					Path:     cfg.CookiePath,
 					Domain:   cfg.CookieDomain,
 					MaxAge:   maxAge,
-					Secure:   cfg.CookieSecure,
+					Secure:   alwaysSecure || overTLS(c.Request()),
 					HttpOnly: cfg.CookieHTTPOnly,
 					SameSite: cfg.CookieSameSite,
 				})
