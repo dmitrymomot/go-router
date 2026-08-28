@@ -1,6 +1,7 @@
 package router
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -263,5 +264,46 @@ func TestNewSettingsAfterServingPanic(t *testing.T) {
 			}()
 			tc.set(r)
 		})
+	}
+}
+
+// TestDeferredErrorsDoNotClobberEachOther guards the shared struct that holds
+// them. They were two fields on Base and now sit behind one pointer, so a
+// handler that meets both must still read both.
+func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
+	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if got := b.formError(); got != nil {
+		t.Errorf("formError() = %v, want nil before either is set", got)
+	}
+	if got := b.hxError(); got != nil {
+		t.Errorf("hxError() = %v, want nil before either is set", got)
+	}
+	if b.deferred != nil {
+		t.Error("deferred is allocated before any failure")
+	}
+
+	form := ErrBadRequest.WithMessage("form")
+	if got := b.setFormError(form); !errors.Is(got, form) {
+		t.Errorf("setFormError returned %v, want the failure it recorded", got)
+	}
+	b.setHXError(ErrInternalServerError.WithMessage("hx"))
+
+	if got := b.formError(); !errors.Is(got, form) {
+		t.Errorf("formError() = %v, want the form failure", got)
+	}
+	if got := b.hxError(); got == nil || got.Error() != ErrInternalServerError.WithMessage("hx").Error() {
+		t.Errorf("hxError() = %v, want the htmx failure", got)
+	}
+
+	// The htmx chain keeps its first failure.
+	b.setHXError(ErrInternalServerError.WithMessage("second"))
+	if got := b.hxError(); got.Error() != ErrInternalServerError.WithMessage("hx").Error() {
+		t.Errorf("hxError() = %v, want the first failure kept", got)
+	}
+
+	b.init(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if b.deferred != nil || b.formError() != nil || b.hxError() != nil {
+		t.Error("init left a deferred failure behind, which a pooled context would carry on")
 	}
 }

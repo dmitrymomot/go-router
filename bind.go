@@ -383,8 +383,8 @@ func (b *Base) limitedBody() io.ReadCloser {
 // parsed then, so the cap goes on the body at most once, and a body that it
 // could not read reports the same failure to every reader after the first.
 func (b *Base) parseForm() error {
-	if b.formErr != nil {
-		return b.formErr
+	if err := b.formError(); err != nil {
+		return err
 	}
 	if b.req.PostForm != nil {
 		// The body is read already, by an earlier call or by the handler
@@ -410,11 +410,9 @@ func (b *Base) parseForm() error {
 		return nil
 	}
 	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-		b.formErr = ErrPayloadTooLarge.WithError(err)
-	} else {
-		b.formErr = ErrBadRequest.WithMessage("malformed form body").WithError(err)
+		return b.setFormError(ErrPayloadTooLarge.WithError(err))
 	}
-	return b.formErr
+	return b.setFormError(ErrBadRequest.WithMessage("malformed form body").WithError(err))
 }
 
 // removeSpilledParts hangs the temporary files of a multipart body on the

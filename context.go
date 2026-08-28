@@ -95,11 +95,6 @@ type Base struct {
 	// call.
 	queryCache url.Values
 
-	// formErr is the failure that parseForm reported. net/http leaves an empty
-	// form behind after a body that it could not read, so every reader after
-	// the first would see an empty form and no reason for it.
-	formErr error
-
 	pattern string
 
 	// host is the request host that the router matched against, without its
@@ -123,11 +118,10 @@ type Base struct {
 	// defaults while it is.
 	ropts *routerOpts
 
-	// hxErr is the first failure of the htmx response chain. It lives here
-	// rather than on the [HXResponse] value, so that a handler which drops one
-	// link of the chain still reports the failure.
-	hxErr error
-
+	// deferred holds the failures that the context reports later than it met
+	// them. Both are rare, so they sit behind one word rather than two
+	// interface fields, which keeps Base inside its size class.
+	deferred *deferredErrors
 	// resStorage backs res, so that a context needs one allocation and not two.
 	resStorage Response
 
@@ -204,8 +198,60 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
 	b.hostIdx, b.pathEscaped = -1, false
 	b.queryCache, b.queryParsed = nil, false
-	b.formErr, b.hxErr = nil, nil
+	b.deferred = nil
 	clear(b.store)
+}
+
+// deferredErrors holds the failures that a context meets before the moment it
+// reports them.
+type deferredErrors struct {
+	// form is the failure that parseForm reported. net/http leaves an empty
+	// form behind after a body that it could not read, so every reader after
+	// the first would see an empty form and no reason for it.
+	form error
+
+	// hx is the first failure of the htmx response chain. It lives on the
+	// context rather than on the [HXResponse] value, so that a handler which
+	// drops one link of the chain still reports the failure.
+	hx error
+}
+
+// deferrals returns the deferred failures of the context, and allocates them on
+// the first one. A request that meets none never pays for them.
+func (b *Base) deferrals() *deferredErrors {
+	if b.deferred == nil {
+		b.deferred = new(deferredErrors)
+	}
+	return b.deferred
+}
+
+// formError returns the failure that parseForm reported, or nil.
+func (b *Base) formError() error {
+	if b.deferred == nil {
+		return nil
+	}
+	return b.deferred.form
+}
+
+// setFormError records the failure of parseForm and returns it.
+func (b *Base) setFormError(err error) error {
+	b.deferrals().form = err
+	return err
+}
+
+// hxError returns the first failure of the htmx response chain, or nil.
+func (b *Base) hxError() error {
+	if b.deferred == nil {
+		return nil
+	}
+	return b.deferred.hx
+}
+
+// setHXError records the first failure of the htmx response chain.
+func (b *Base) setHXError(err error) {
+	if d := b.deferrals(); d.hx == nil {
+		d.hx = err
+	}
 }
 
 // setRoute records the matched route on the context.

@@ -322,11 +322,11 @@ func (b *Base) HX() HXResponse { return HXResponse{b: b} }
 // Err returns the first failure of the chain, and nil for a chain that wrote
 // every header. A method that writes the body reports the same error, so read
 // this only when the chain ends on none of them.
-func (h HXResponse) Err() error { return h.b.hxErr }
+func (h HXResponse) Err() error { return h.b.hxError() }
 
 // fail records the first failure of the chain.
 func (h HXResponse) fail(err error) HXResponse {
-	h.b.hxErr = ErrInternalServerError.WithError(err)
+	h.b.setHXError(ErrInternalServerError.WithError(err))
 	return h
 }
 
@@ -337,7 +337,7 @@ func (h HXResponse) fail(err error) HXResponse {
 // way, but a selector or a URL that holds one is a bug worth reporting instead
 // of a header that silently means something else.
 func (h HXResponse) set(name, value string) HXResponse {
-	if h.b.hxErr != nil {
+	if h.b.hxError() != nil {
 		return h
 	}
 	if strings.ContainsAny(value, "\r\n") {
@@ -448,7 +448,7 @@ func (h HXResponse) TriggerEventsAfterSettle(events ...HXEvent) HXResponse {
 
 // triggerNames writes a comma separated list of event names.
 func (h HXResponse) triggerNames(header string, names []string) HXResponse {
-	if h.b.hxErr != nil || len(names) == 0 {
+	if h.b.hxError() != nil || len(names) == 0 {
 		return h
 	}
 	for i, n := range names {
@@ -499,7 +499,7 @@ func isASCII(s string) bool {
 
 // triggerEvents writes the JSON form of a trigger header.
 func (h HXResponse) triggerEvents(header string, events []HXEvent) HXResponse {
-	if h.b.hxErr != nil || len(events) == 0 {
+	if h.b.hxError() != nil || len(events) == 0 {
 		return h
 	}
 
@@ -595,8 +595,8 @@ func writeUnicodeEscape(sb *strings.Builder, r rune) {
 
 // Render writes an HTML body from a [Component], as [Base.Render] does.
 func (h HXResponse) Render(status int, c Component) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.Render(status, c)
 }
@@ -604,24 +604,24 @@ func (h HXResponse) Render(status int, c Component) error {
 // RenderStream writes an HTML body straight to the client, as
 // [Base.RenderStream] does.
 func (h HXResponse) RenderStream(status int, c Component) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.RenderStream(status, c)
 }
 
 // HTML writes an HTML body, as [Base.HTML] does.
 func (h HXResponse) HTML(status int, html string) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.HTML(status, html)
 }
 
 // String writes a plain text body, as [Base.String] does.
 func (h HXResponse) String(status int, s string) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.String(status, s)
 }
@@ -630,16 +630,16 @@ func (h HXResponse) String(status int, s string) error {
 // like any other, so reach for it only when a listener of a triggered event
 // reads the answer.
 func (h HXResponse) JSON(status int, v any, opts ...json.Options) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.JSON(status, v, opts...)
 }
 
 // NoContent writes the status line alone, as [Base.NoContent] does.
 func (h HXResponse) NoContent(status int) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.NoContent(status)
 }
@@ -663,15 +663,15 @@ func (h HXResponse) NoSwap() error { return h.NoContent(http.StatusNoContent) }
 // A request that htmx did not make gets a plain 303 See Other, so the same
 // handler still serves a browser that runs no JavaScript.
 func (h HXResponse) Redirect(url string) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, url)
 	}
 	h = h.set(HeaderHXRedirect, url)
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.NoContent(http.StatusOK)
 }
@@ -683,15 +683,15 @@ func (h HXResponse) Redirect(url string) error {
 // A request that htmx did not make gets a plain 303 See Other, as
 // [HXResponse.Redirect] explains.
 func (h HXResponse) Location(path string) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, path)
 	}
 	h = h.set(HeaderHXLocation, path)
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.NoContent(http.StatusOK)
 }
@@ -703,11 +703,11 @@ func (h HXResponse) Location(path string) error {
 //
 // It reports an error when loc names no path.
 func (h HXResponse) LocationWith(loc HXLocation) error {
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	if loc.Path == "" {
-		return h.fail(errors.New("router: an HX-Location needs a path")).b.hxErr
+		return h.fail(errors.New("router: an HX-Location needs a path")).b.hxError()
 	}
 	if !h.b.IsHTMX() {
 		return h.b.Redirect(http.StatusSeeOther, loc.Path)
@@ -719,11 +719,11 @@ func (h HXResponse) LocationWith(loc HXLocation) error {
 
 	data, err := json.Marshal(loc, h.b.headerJSONOptions()...)
 	if err != nil {
-		return h.fail(fmt.Errorf("router: encode the HX-Location header: %w", err)).b.hxErr
+		return h.fail(fmt.Errorf("router: encode the HX-Location header: %w", err)).b.hxError()
 	}
 	h = h.set(HeaderHXLocation, escapeNonASCII(string(data)))
-	if h.b.hxErr != nil {
-		return h.b.hxErr
+	if h.b.hxError() != nil {
+		return h.b.hxError()
 	}
 	return h.b.NoContent(http.StatusOK)
 }
