@@ -11,10 +11,8 @@ import (
 	"testing"
 )
 
-// wrapKey stands for the key that a template engine puts on the context.
 type wrapKey struct{}
 
-// comp is the shape that a generated a-h/templ template has.
 func comp(s string) ComponentFunc {
 	return func(_ context.Context, w io.Writer) error {
 		_, err := io.WriteString(w, s)
@@ -53,15 +51,11 @@ func TestRenderKeepsTheHandlerContentType(t *testing.T) {
 	}
 }
 
-// The component reads the route parameters and the values of Set, because it
-// receives the context itself.
 func TestRenderPassesTheContext(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/u/{id}", func(c *tctx) error {
 		c.Set("flash", "saved")
 		return c.Render(http.StatusOK, ComponentFunc(func(ctx context.Context, w io.Writer) error {
-			// A template engine wraps the context, so read the Base the way a
-			// generated template does.
 			ctx = context.WithValue(ctx, wrapKey{}, "wrapped")
 			b, ok := FromContext(ctx)
 			if !ok {
@@ -77,7 +71,6 @@ func TestRenderPassesTheContext(t *testing.T) {
 	}
 }
 
-// A component that fails halfway must not put a partial page on the wire.
 func TestRenderErrorWritesNoPartialBody(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
@@ -111,8 +104,6 @@ func TestRenderHEADWritesTheLengthOnly(t *testing.T) {
 	}
 }
 
-// A page larger than maxPooledRenderBuf still renders. TestKeepBuf covers the
-// decision to drop its buffer.
 func TestRenderLargePage(t *testing.T) {
 	want := strings.Repeat("x", maxPooledRenderBuf+1024)
 	r := newTestRouter()
@@ -123,7 +114,6 @@ func TestRenderLargePage(t *testing.T) {
 	}
 }
 
-// Concurrent renders must not read each other's buffer.
 func TestRenderIsConcurrencySafe(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/{tag}", func(c *tctx) error {
@@ -173,8 +163,6 @@ func TestRenderStream(t *testing.T) {
 	}
 }
 
-// The response is already committed when a streamed component fails, so the
-// error handler keeps the status that RenderStream wrote.
 func TestRenderStreamErrorKeepsTheStatus(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
@@ -204,8 +192,6 @@ func TestRenderStreamHEADWritesNoBody(t *testing.T) {
 	}
 }
 
-// keepBuf is the branch that stops one large page from pinning its buffer for
-// the life of the process.
 func TestKeepBuf(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -225,8 +211,6 @@ func TestKeepBuf(t *testing.T) {
 	}
 }
 
-// An HTTPError from a component keeps its status, so a template that reports a
-// missing record answers 404 and not 500.
 func TestRenderKeepsAnHTTPErrorStatus(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
@@ -244,7 +228,6 @@ func TestRenderKeepsAnHTTPErrorStatus(t *testing.T) {
 	}
 }
 
-// Any other error is internal, so its message stays server-side.
 func TestRenderHidesAnInternalError(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
@@ -262,8 +245,6 @@ func TestRenderHidesAnInternalError(t *testing.T) {
 	}
 }
 
-// A panic inside a component must not poison the buffer pool, so the request
-// after it renders correctly.
 func TestRenderPanicKeepsThePoolUsable(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/boom", func(c *tctx) error {
@@ -284,8 +265,6 @@ func TestRenderPanicKeepsThePoolUsable(t *testing.T) {
 	}
 }
 
-// FromContext reports false outside a request, which keeps a template
-// renderable from a test or a static site generator.
 func TestFromContextWithoutABase(t *testing.T) {
 	b, ok := FromContext(context.Background())
 	if ok {

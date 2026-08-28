@@ -5,7 +5,6 @@ import (
 	"strings"
 )
 
-// Header names that the router and the middleware set or read.
 const (
 	HeaderAccept                          = "Accept"
 	HeaderAcceptEncoding                  = "Accept-Encoding"
@@ -54,7 +53,6 @@ const (
 	HeaderOrigin                        = "Origin"
 )
 
-// Media types that the render helpers write.
 const (
 	MIMEApplicationJSON            = "application/json"
 	MIMEApplicationJSONCharsetUTF8 = "application/json; charset=utf-8"
@@ -69,11 +67,6 @@ const (
 	MIMETextEventStream            = "text/event-stream"
 )
 
-// negotiate returns the offer that the Accept header prefers, or an empty
-// string when the header takes none of them. The offers are in the order that
-// the server prefers, which settles a tie between two of the same quality.
-//
-// A client that sends no Accept header takes anything, so the first offer wins.
 func negotiate(accept string, offers []string) string {
 	if len(offers) == 0 {
 		return ""
@@ -90,11 +83,6 @@ func negotiate(accept string, offers []string) string {
 	return best
 }
 
-// acceptQuality returns the quality that the Accept header gives one media
-// type, which is 0 for a type it refuses.
-//
-// The most specific range that fits the type decides, so
-// "text/*;q=0.9, text/plain;q=0" refuses plain text and still takes HTML.
 func acceptQuality(accept, offer string) float64 {
 	media, _, _ := strings.Cut(offer, ";")
 	typ, sub, ok := strings.Cut(strings.TrimSpace(media), "/")
@@ -118,9 +106,6 @@ func acceptQuality(accept, offer string) float64 {
 	return q
 }
 
-// matchRank reports how closely the media range rt/rs fits the type typ/sub: 2
-// for a match of both parts, 1 for a range of "type/*", 0 for "*/*" and -1 for
-// a range that does not fit at all.
 func matchRank(typ, sub, rt, rs string) int {
 	switch {
 	case rt == "*" && rs == "*":
@@ -134,8 +119,6 @@ func matchRank(typ, sub, rt, rs string) int {
 	}
 }
 
-// quality returns the q value of the parameters of a media range. A range
-// without one has quality 1, and one whose q does not parse has quality 0.
 func quality(params string) float64 {
 	for p := range strings.SplitSeq(params, ";") {
 		k, v, ok := strings.Cut(p, "=")

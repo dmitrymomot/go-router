@@ -18,7 +18,6 @@ func corsRouter(cfg middleware.CORSConfig) *router.Router[*appContext] {
 	return r
 }
 
-// preflight builds a preflight request for the method.
 func preflight(target, method string, origin string) *http.Request {
 	req := httptest.NewRequest(http.MethodOptions, target, nil)
 	req.Header.Set(router.HeaderOrigin, origin)
@@ -26,7 +25,6 @@ func preflight(target, method string, origin string) *http.Request {
 	return req
 }
 
-// panicValue runs fn and returns what it panicked with, or nil.
 func panicValue(fn func()) (v any) {
 	defer func() { v = recover() }()
 	fn()
@@ -83,15 +81,15 @@ func TestCORSPanicsOnTheWildcardWithCredentials(t *testing.T) {
 
 func TestCORSPanicsOnAnEntryThatIsNotAnOrigin(t *testing.T) {
 	bad := []string{
-		"app.example.com",             // no scheme
-		"https://app.example.com/",    // a path
-		"https://app.example.com/api", // a path
-		"https://app.example?q=1",     // a query
-		"https://app.example#frag",    // a fragment
-		"https://*.app.example",       // a wildcard host, which matches nothing
-		"https://",                    // no host
-		"",                            // nothing at all
-		"null",                        // the origin of a sandboxed document
+		"app.example.com",
+		"https://app.example.com/",
+		"https://app.example.com/api",
+		"https://app.example?q=1",
+		"https://app.example#frag",
+		"https://*.app.example",
+		"https://",
+		"",
+		"null",
 	}
 	for _, o := range bad {
 		t.Run(o, func(t *testing.T) {
@@ -157,8 +155,6 @@ func TestCORSCopiesTheOrigins(t *testing.T) {
 }
 
 func TestCORSAllowMethodsFollowTheRoute(t *testing.T) {
-	// The route answers GET alone, so a preflight for DELETE must not be told
-	// that DELETE is welcome.
 	r := corsRouter(middleware.CORSConfig{AllowOrigins: []string{"https://app.example"}})
 
 	rec := do(r, preflight("/data", http.MethodDelete, "https://app.example"))
@@ -180,8 +176,6 @@ func TestCORSAllowMethodsOverrideTheRoute(t *testing.T) {
 }
 
 func TestCORSAllowMethodsFallBackToTheDefaults(t *testing.T) {
-	// A route that answers OPTIONS itself leaves the router no reason to write
-	// an Allow header, so the default list stands.
 	r := newRouter()
 	r.Use(middleware.CORSWithConfig[*appContext](middleware.CORSConfig{
 		AllowOrigins: []string{"https://app.example"},
@@ -256,8 +250,6 @@ func TestCORSMaxAge(t *testing.T) {
 }
 
 func TestCORSAllowOriginFuncReadsTheContext(t *testing.T) {
-	// A host-routed service allows the origin that matches the host of this
-	// request, and nothing else.
 	r := corsRouter(middleware.CORSConfig{
 		AllowOriginFunc: func(c router.Context, origin string) (bool, error) {
 			return origin == "https://"+c.Host(), nil
@@ -296,8 +288,6 @@ func TestCORSAllowOriginFuncErrorAnswersWithoutTheHeaders(t *testing.T) {
 	}
 }
 
-// TestCORSWildcardStillAnswersWithTheWildcard pins that the panic did not cost
-// the plain "every origin, no credentials" config its answer.
 func TestCORSWildcardStillAnswersWithTheWildcard(t *testing.T) {
 	r := corsRouter(middleware.CORSConfig{AllowOrigins: []string{"*"}})
 

@@ -13,13 +13,10 @@ import (
 	"time"
 )
 
-// testKey is a signing key of the shortest length that the codec accepts.
 var testKey = bytes.Repeat([]byte("k"), MinCookieKeyLen)
 
-// testCodec returns a codec that signs with testKey.
 func testCodec() *CookieCodec { return NewCookieCodec(testKey) }
 
-// cookieBase returns a Base whose request carries the cookies.
 func cookieBase(cookies ...*http.Cookie) *Base {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	for _, c := range cookies {
@@ -28,7 +25,6 @@ func cookieBase(cookies ...*http.Cookie) *Base {
 	return NewBase(httptest.NewRecorder(), req)
 }
 
-// setCookies returns the cookies that the response of b carries.
 func setCookies(t *testing.T, b *Base) []*http.Cookie {
 	t.Helper()
 	var out []*http.Cookie
@@ -42,7 +38,6 @@ func setCookies(t *testing.T, b *Base) []*http.Cookie {
 	return out
 }
 
-// signedExpiryOf returns the expiry that the signed value carries.
 func signedExpiryOf(t *testing.T, signed string) int64 {
 	t.Helper()
 	parts := strings.Split(signed, ".")
@@ -127,8 +122,6 @@ func TestCookieCodecRoundTripsAValue(t *testing.T) {
 	}
 }
 
-// The client reads the value, which is the whole point of a signature that is
-// not an encryption.
 func TestEncodeLeavesTheValueReadable(t *testing.T) {
 	cc := testCodec()
 	signed := cc.Encode("uid", []byte("alice"))
@@ -143,8 +136,6 @@ func TestEncodeLeavesTheValueReadable(t *testing.T) {
 	}
 }
 
-// A cookie value that carries a comma, a semicolon, a space or a quote makes
-// net/http drop the value, so the encoding has to keep clear of them.
 func TestEncodeProducesACookieSafeValue(t *testing.T) {
 	cc := testCodec()
 	signed := cc.Encode("uid", []byte{0x00, 0xff, ';', ',', ' ', '"', '\\'})
@@ -215,8 +206,6 @@ func TestDecodeRejectsAnotherKey(t *testing.T) {
 	}
 }
 
-// Two names that end where two values begin sign the same bytes once the two
-// are laid end to end, so the name carries its length into the signature.
 func TestSignBindsTheLengthOfTheName(t *testing.T) {
 	cc := testCodec()
 
@@ -243,8 +232,6 @@ func TestDecodeReportsAnExpiredSignature(t *testing.T) {
 	})
 }
 
-// A signature that no longer verifies says nothing about an expiry, because
-// the expiry it carries is one that anybody could have written.
 func TestDecodeChecksTheSignatureBeforeTheExpiry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cc := testCodec()
@@ -404,8 +391,6 @@ func TestSignedCookieReportsAnExpiredCookie(t *testing.T) {
 	})
 }
 
-// A page on a sibling subdomain sets a cookie of the same name, and the
-// browser sends both.
 func TestSignedCookieTakesTheCookieThatVerifies(t *testing.T) {
 	cc := testCodec()
 	b := cookieBase(

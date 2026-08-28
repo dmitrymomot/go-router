@@ -13,9 +13,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// Context is the request context of the application. It embeds router.Base,
-// which is what makes it satisfy router.Context, and adds whatever the
-// handlers need.
 type Context struct {
 	router.Base
 
@@ -23,8 +20,6 @@ type Context struct {
 	User *User
 }
 
-// CurrentUser is an ordinary method on the application context, so a handler
-// reads it without a type assertion.
 func (c *Context) CurrentUser() *User { return c.User }
 
 type User struct {
@@ -39,8 +34,6 @@ func (s *store) find(id string) (*User, bool) { u, ok := s.users[id]; return u, 
 func Example() {
 	db := &store{users: map[string]*User{"7": {ID: "7", Name: "ann"}}}
 
-	// The factory supplies the application fields. The router fills the
-	// embedded Base with the request, the response and the route parameters.
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
 		return &Context{DB: db}
 	})
@@ -63,8 +56,6 @@ func Example() {
 	// 405 {"status":405,"error":"Method Not Allowed"}
 }
 
-// ExampleRouter_Route groups routes under a prefix and gives the group its own
-// middleware.
 func ExampleRouter_Route() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 
@@ -90,9 +81,6 @@ func ExampleRouter_Route() {
 	// 403 {"status":403,"error":"Forbidden"}
 }
 
-// ExampleRouter_Mount attaches a router at a prefix. The routes of the mounted
-// router join the trie of the parent, so a parameter of the prefix stays
-// readable inside them.
 func ExampleRouter_Mount() {
 	newCtx := func(http.ResponseWriter, *http.Request) *Context { return new(Context) }
 
@@ -117,9 +105,6 @@ func ExampleRouter_Mount() {
 	// GET /t/{tenant}/api/users/{id}
 }
 
-// ExampleRouter_MountRouter attaches a router that carries a different context
-// type. It serves the request on its own and sees the path with the prefix
-// removed.
 func ExampleRouter_MountRouter() {
 	type AdminContext struct {
 		router.Base
@@ -141,7 +126,6 @@ func ExampleRouter_MountRouter() {
 	// 200 root sees user 7 at /users/7
 }
 
-// serveHost sends a request that names a host.
 func serveHost(h http.Handler, method, host, target string) string {
 	req := httptest.NewRequest(method, target, nil)
 	req.Host = host
@@ -150,13 +134,9 @@ func serveHost(h http.Handler, method, host, target string) string {
 	return fmt.Sprint(rec.Code, " ", rec.Body.String())
 }
 
-// ExampleRouter_Host routes a whole service by host: a main site, a fixed
-// subdomain for the API, a subdomain per tenant, and the domain that a tenant
-// brings along.
 func ExampleRouter_Host() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 
-	// The main site.
 	r.Host("example.com", func(h *router.Router[*Context]) {
 		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
 		h.Route("/blog", func(b *router.Router[*Context]) {
@@ -166,16 +146,12 @@ func ExampleRouter_Host() {
 		})
 	})
 
-	// A fixed subdomain, with middleware of its own.
 	r.Host("api.example.com", func(h *router.Router[*Context]) {
 		h.GET("/v1/users/{id}", func(c *Context) error {
 			return c.Stringf(http.StatusOK, "user %s", c.Param("id"))
 		})
 	})
 
-	// One tenant application, on a subdomain or on a domain of the tenant's
-	// own. The subdomain fills the parameter; the custom domain does not, so
-	// the handler falls back to the host itself.
 	r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *router.Router[*Context]) {
 		h.GET("/", func(c *Context) error {
 			tenant := c.Param("tenant")
@@ -186,7 +162,6 @@ func ExampleRouter_Host() {
 		})
 	})
 
-	// A route outside every host scope answers on any host.
 	r.GET("/healthz", func(c *Context) error { return c.String(http.StatusOK, "ok") })
 
 	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/"))
@@ -204,8 +179,6 @@ func ExampleRouter_Host() {
 	// 200 ok
 }
 
-// ExampleRouter_HostRouter gives a host to a router that carries a different
-// context type, with its own middleware, error handler and fallbacks.
 func ExampleRouter_HostRouter() {
 	type APIContext struct {
 		router.Base
@@ -237,7 +210,6 @@ func ExampleRouter_HostRouter() {
 	// 200 landing
 }
 
-// ExampleBase_Bind decodes a request body into a type that the caller names.
 func ExampleBase_Bind() {
 	type CreateUser struct {
 		Name string `json:"name"`
@@ -269,8 +241,6 @@ func serve(h http.Handler, method, target string) string {
 	return fmt.Sprint(rec.Code, " ", rec.Body.String())
 }
 
-// ExampleNewPooled reuses contexts across requests. The factory takes no
-// request, and reset clears every field that a handler writes.
 func ExampleNewPooled() {
 	r := router.NewPooled(
 		func() *Context { return &Context{DB: &store{}} },
@@ -289,14 +259,12 @@ func ExampleNewPooled() {
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/login"))
-	// The next request reuses that context, and reset cleared the user.
 	fmt.Println(serve(r, http.MethodGet, "/whoami"))
 	// Output:
 	// 200 signed in as ann
 	// 200 anonymous
 }
 
-// ExampleRouter_GET_partialSegment reads part of a path segment.
 func ExampleRouter_GET_partialSegment() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 
@@ -318,9 +286,6 @@ func ExampleRouter_GET_partialSegment() {
 	// 200 name=notes.v2 ext=txt
 }
 
-// page stands for a template that the a-h/templ generator produces. A
-// generated templ.Component has exactly this shape, so it satisfies
-// router.Component and needs no adapter.
 func page(title string) router.ComponentFunc {
 	return func(ctx context.Context, w io.Writer) error {
 		path := "unknown"
@@ -332,8 +297,6 @@ func page(title string) router.ComponentFunc {
 	}
 }
 
-// ExampleBase_Render writes an HTML body from a template component. The
-// component reads the request through router.FromContext.
 func ExampleBase_Render() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.GET("/posts/{slug}", func(c *Context) error {
@@ -349,12 +312,6 @@ func ExampleBase_Render() {
 	// <h1>hello</h1><p>/posts/hello</p>
 }
 
-// ExampleServeSSE streams the values of a channel to the client as
-// server-sent events, each one encoded as JSON.
-//
-// The channel of the example is closed, so the stream ends and the handler
-// returns. A real one stays open until the client goes away, and the handler
-// blocks in ServeSSE for as long as that takes.
 func ExampleServeSSE() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 
@@ -381,9 +338,6 @@ func ExampleServeSSE() {
 	// data: {"id":"8","name":"bob"}
 }
 
-// ExampleNewSSEStream declares the shape of a stream once, and every request
-// of the route reuses it. The events carry HTML here, which is what an htmx
-// page reads with its sse extension.
 func ExampleNewSSEStream() {
 	stream := router.NewSSEStream(
 		router.SSEComponent("user", card),
@@ -409,8 +363,6 @@ func ExampleNewSSEStream() {
 	// data: <li id="user-7">ann</li>
 }
 
-// card stands for the template that renders one user, the way page stands for
-// a whole page.
 func card(u *User) router.ComponentFunc {
 	return func(_ context.Context, w io.Writer) error {
 		_, err := fmt.Fprintf(w, "<li id=%q>%s</li>", "user-"+u.ID, u.Name)
@@ -418,8 +370,6 @@ func card(u *User) router.ComponentFunc {
 	}
 }
 
-// ExampleBase_HX writes the htmx headers of an answer. Each method sets one
-// header and returns the chain; the last one writes the body.
 func ExampleBase_HX() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 
@@ -445,10 +395,6 @@ func ExampleBase_HX() {
 	// <li id="user-7">ann</li>
 }
 
-// ExampleBase_HX_redirect sends the browser to another page. htmx would follow
-// a 303 inside the request that it made and swap the answer, so the handler
-// asks for a client-side redirect instead. A client that is not htmx still
-// gets the 303.
 func ExampleBase_HX_redirect() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.POST("/join", func(c *Context) error { return c.HX().Redirect("/chat") })
@@ -469,8 +415,6 @@ func ExampleBase_HX_redirect() {
 	// 303 HX-Redirect="" Location="/chat"
 }
 
-// ExampleHTMXPartial gives one URL two answers: the fragment that htmx swaps,
-// and the page that a browser navigates to.
 func ExampleHTMXPartial() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 

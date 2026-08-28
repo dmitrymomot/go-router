@@ -19,16 +19,11 @@ import (
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
-// appContext is the context of the application under test. DB stands for the
-// fields that an application carries and that a handler reads.
 type appContext struct {
 	router.Base
 	DB string
 }
 
-// newContext is the context factory of the application. It fills the
-// application fields and leaves the request state to the router, the way the
-// factory of a real application does.
 func newContext(http.ResponseWriter, *http.Request) *appContext {
 	return &appContext{DB: "primary"}
 }
@@ -38,7 +33,6 @@ type user struct {
 	Age  int    `json:"age"`
 }
 
-// upload is what the multipart routes report back about the body they read.
 type upload struct {
 	Name        string   `json:"name"`
 	Filenames   []string `json:"filenames"`
@@ -67,8 +61,6 @@ func newRouter() *router.Router[*appContext] {
 		c.SetHeader("X-Who", in.Name)
 		return c.NoContent(http.StatusNoContent)
 	})
-	// The avatar route reads one file the way a handler that takes a single
-	// upload does.
 	r.POST("/avatars", func(c *appContext) error {
 		f, fh, err := c.FormFile("avatar")
 		if err != nil {
@@ -87,8 +79,6 @@ func newRouter() *router.Router[*appContext] {
 			Content:     string(body),
 		})
 	})
-	// The documents route reads every file of one field, and the values of the
-	// same body through the parsed form.
 	r.POST("/documents", func(c *appContext) error {
 		fhs, err := c.FormFiles("docs")
 		if err != nil {
@@ -158,8 +148,6 @@ func TestNewServer(t *testing.T) {
 	}
 }
 
-// eventRouter streams three events, a comment and a retry frame, which covers
-// every frame that a client has to read past.
 func eventRouter() *router.Router[*appContext] {
 	r := router.New(func(http.ResponseWriter, *http.Request) *appContext {
 		return new(appContext)
@@ -175,8 +163,6 @@ func eventRouter() *router.Router[*appContext] {
 		if err := s.Comment("ping"); err != nil {
 			return err
 		}
-		// The second event names no id, so it keeps the one before it, and no
-		// name, so a client reports it as a message.
 		if err := s.Send(router.Event{Data: "two\nlines"}); err != nil {
 			return err
 		}
@@ -196,8 +182,6 @@ func TestEvents(t *testing.T) {
 	)
 }
 
-// The parser reads what a client reads, whichever line break the stream uses,
-// and whatever else it carries.
 func TestEventsParsing(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -243,12 +227,6 @@ func TestEventsParsing(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// NewContext
-// ---------------------------------------------------------------------------
-
-// getUser is a handler under test. It reads a path parameter, which is the
-// state that a context outside a router carries only once NewContext seeds it.
 func getUser(c *appContext) error {
 	id, err := c.ParamAs[int]("id")
 	if err != nil {
@@ -272,8 +250,6 @@ func TestNewContextRunsAHandlerWithoutARouter(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// The name carries the application field, which proves that the handler
-	// received the context of the application and not one of this package.
 	if got != (user{Name: "primary", Age: 7}) {
 		t.Errorf("got %+v", got)
 	}
@@ -336,8 +312,6 @@ func TestNewContextOptions(t *testing.T) {
 			if got := c.RoutePattern(); got != tt.wantPattern {
 				t.Errorf("pattern = %q, want %q", got, tt.wantPattern)
 			}
-			// The router publishes the pattern on the request too, so a
-			// middleware that reads it there reads the same one.
 			if got := c.Request().Pattern; got != tt.wantPattern {
 				t.Errorf("request pattern = %q, want %q", got, tt.wantPattern)
 			}
@@ -358,7 +332,6 @@ func TestNewContextNamesEveryParameter(t *testing.T) {
 	c, _ := routertest.NewContext(t, newContext,
 		routertest.WithParams(map[string]string{"tab": "orders", "id": "7"}))
 
-	// A map holds no order, so the names come back sorted.
 	if got := c.ParamNames(); !slices.Equal(got, []string{"id", "tab"}) {
 		t.Errorf("names = %v, want [id tab]", got)
 	}
@@ -379,8 +352,6 @@ func TestNewContextRecordsTheAnswer(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Errorf("recorder status = %d, want 201", rec.Code)
 	}
-	// The context and the recorder answer for one response, so middleware that
-	// reads the status after the handler reads the one that went out.
 	if got := c.Response().Status; got != http.StatusCreated {
 		t.Errorf("response status = %d, want 201", got)
 	}
@@ -403,8 +374,6 @@ func TestNewContextCarriesTheRequestBody(t *testing.T) {
 	}
 }
 
-// pointerContext embeds the request state through a pointer, which is the
-// other way an application spells its context.
 type pointerContext struct {
 	*router.Base
 }
@@ -425,7 +394,6 @@ func TestNewContextReportsANilBase(t *testing.T) {
 	tb := new(recordingTB)
 
 	routertest.NewContext(tb, func(http.ResponseWriter, *http.Request) *pointerContext {
-		// The factory forgot router.NewBase, so the context carries no state.
 		return new(pointerContext)
 	})
 
@@ -436,10 +404,6 @@ func TestNewContextReportsANilBase(t *testing.T) {
 		t.Errorf("message = %q; it has to name the fix", tb.msg)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// MultipartBody
-// ---------------------------------------------------------------------------
 
 func TestMultipartBodyPostsAFile(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
@@ -473,8 +437,6 @@ func TestMultipartBodyPostsAFile(t *testing.T) {
 func TestMultipartBodyDefaultsTheFilePart(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
 		routertest.MultipartBody(nil, routertest.FilePart{Field: "avatar", Content: []byte("x")}))
-	// A part that named no file would read back as a form value, and the
-	// handler would answer 400 instead.
 	res.AssertStatus(t, http.StatusOK)
 
 	got, err := res.JSON[upload]()
@@ -556,17 +518,8 @@ func TestMultipartBodyEscapesTheNames(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// AssertGolden
-// ---------------------------------------------------------------------------
-
-// goldenPage is the content of testdata/page.html, the way a template renders
-// it.
 const goldenPage = "<div class=\"order\">\n  <h1>Order 7</h1>\n</div>\n"
 
-// setUpdate sets the rewrite flag for one test and restores it afterwards. A
-// run of the suite with the flag would otherwise rewrite the very files that
-// these tests compare against.
 func setUpdate(tb testing.TB, on bool) {
 	tb.Helper()
 	f := flag.Lookup("routertest.update")
@@ -584,14 +537,8 @@ func setUpdate(tb testing.TB, on bool) {
 	})
 }
 
-// plainUpdate is the -update flag that a test package declares for golden
-// files of its own. Declaring it here is the case that used to panic with
-// "flag redefined": routertest initializes first, and a flag it registered
-// under this name would have taken it.
 var plainUpdate = flag.Bool("update", false, "rewrite the golden files of this package")
 
-// TestAssertGoldenReadsThePlainUpdateFlag pins that the two spellings do the
-// same thing, so a project that already runs go test -update keeps one switch.
 func TestAssertGoldenReadsThePlainUpdateFlag(t *testing.T) {
 	const name = "plain/page.html"
 	file := filepath.Join("testdata", filepath.FromSlash(name))
@@ -642,8 +589,6 @@ func TestAssertGoldenReportsADifference(t *testing.T) {
 }
 
 func TestAssertGoldenWritesTheFileWithUpdate(t *testing.T) {
-	// The name carries a directory, so the write covers the one that no
-	// checkout holds yet.
 	const name = "written/page.html"
 	file := filepath.Join("testdata", filepath.FromSlash(name))
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(file)) })
@@ -658,15 +603,10 @@ func TestAssertGoldenWritesTheFileWithUpdate(t *testing.T) {
 	if string(got) != goldenPage {
 		t.Errorf("wrote %q", got)
 	}
-	// Without the flag the same call reads the file back, which is what the
-	// run after the rewrite does.
 	setUpdate(t, false)
 	routertest.AssertGolden(t, name, []byte(goldenPage))
 }
 
-// recordingTB records the failure of a helper instead of ending the test. The
-// embedded interface is nil, so a method that no helper here calls panics
-// rather than answering something made up.
 type recordingTB struct {
 	testing.TB
 	failed bool

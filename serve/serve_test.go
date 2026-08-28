@@ -29,14 +29,8 @@ import (
 	"github.com/dmitrymomot/go-router/serve"
 )
 
-// wait is the ceiling for anything that a passing test reaches at once.
 const wait = 5 * time.Second
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// server is a running Run, with the address it bound.
 type server struct {
 	addr    string
 	cancel  context.CancelFunc
@@ -44,8 +38,6 @@ type server struct {
 	stopped bool
 }
 
-// start runs Run in the background and waits for it to bind. It fills in a
-// loopback address and a silent logger unless the config names its own.
 func start(tb testing.TB, h http.Handler, cfg serve.Config, opts ...serve.Option) *server {
 	tb.Helper()
 
@@ -93,7 +85,6 @@ func start(tb testing.TB, h http.Handler, cfg serve.Config, opts ...serve.Option
 	return s
 }
 
-// stop cancels the context and reports what Run returned.
 func (s *server) stop(tb testing.TB) error {
 	tb.Helper()
 	s.cancel()
@@ -107,12 +98,10 @@ func (s *server) stop(tb testing.TB) error {
 	}
 }
 
-// url returns the address of the server as a URL with the given scheme.
 func (s *server) url(scheme, path string) string {
 	return scheme + "://" + s.addr + path
 }
 
-// ok answers every request with 200 and a short body.
 func ok() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		//nolint:errcheck // The assertions of the test read what arrived.
@@ -120,7 +109,6 @@ func ok() http.Handler {
 	})
 }
 
-// client returns a client that keeps no connection past the test.
 func client(tb testing.TB) *http.Client {
 	tb.Helper()
 	tr := &http.Transport{DisableKeepAlives: true}
@@ -128,15 +116,12 @@ func client(tb testing.TB) *http.Client {
 	return &http.Client{Transport: tr, Timeout: wait}
 }
 
-// result is one answer, or the failure to get one.
 type result struct {
 	err    error
 	body   string
 	status int
 }
 
-// call sends a GET in the background, so that the test can cancel the server
-// while the request is in flight.
 func call(cl *http.Client, url string) <-chan result {
 	out := make(chan result, 1)
 	go func() {
@@ -152,7 +137,6 @@ func call(cl *http.Client, url string) <-chan result {
 	return out
 }
 
-// await reads one answer, or fails the test.
 func await(tb testing.TB, c <-chan result) result {
 	tb.Helper()
 	select {
@@ -164,8 +148,6 @@ func await(tb testing.TB, c <-chan result) result {
 	}
 }
 
-// blocker is a handler that reports when it is running and holds the request
-// until the test releases it.
 type blocker struct {
 	inflight chan struct{}
 	release  chan struct{}
@@ -175,8 +157,6 @@ type blocker struct {
 
 func newBlocker(tb testing.TB) *blocker {
 	b := &blocker{inflight: make(chan struct{}), release: make(chan struct{})}
-	// A test that fails before it releases the handler still has to let the
-	// goroutine of the request go.
 	tb.Cleanup(b.free)
 	return b
 }
@@ -189,7 +169,6 @@ func (b *blocker) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	b.finished.Store(true)
 }
 
-// running waits until the handler has the request.
 func (b *blocker) running(tb testing.TB) {
 	tb.Helper()
 	select {
@@ -199,20 +178,15 @@ func (b *blocker) running(tb testing.TB) {
 	}
 }
 
-// free lets the handler finish. The timer of a test and the cleanup of the
-// test both call it, so it only ever closes once.
 func (b *blocker) free() {
 	b.once.Do(func() { close(b.release) })
 }
 
-// logLine is one record that the server logged.
 type logLine struct {
 	msg   string
 	level slog.Level
 }
 
-// logRecorder collects the records of the server, so that a test can read the
-// errors it reports on its own.
 type logRecorder struct {
 	lines chan logLine
 }
@@ -235,8 +209,6 @@ func (h *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
 
 func (h *logRecorder) WithGroup(string) slog.Handler { return h }
 
-// selfSigned builds a certificate for the loopback address, which is the one
-// the tests dial.
 func selfSigned(tb testing.TB) (certPEM, keyPEM []byte) {
 	tb.Helper()
 
@@ -269,7 +241,6 @@ func selfSigned(tb testing.TB) (certPEM, keyPEM []byte) {
 	return certPEM, keyPEM
 }
 
-// tlsClient trusts the certificate that selfSigned built.
 func tlsClient(tb testing.TB, certPEM []byte, http2 bool) *http.Client {
 	tb.Helper()
 	pool := x509.NewCertPool()
@@ -284,10 +255,6 @@ func tlsClient(tb testing.TB, certPEM []byte, http2 bool) *http.Client {
 	tb.Cleanup(tr.CloseIdleConnections)
 	return &http.Client{Transport: tr, Timeout: wait}
 }
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
 
 func TestRunNeedsAHandler(t *testing.T) {
 	if err := serve.Run(context.Background(), nil, serve.Config{Addr: "127.0.0.1:0"}); err == nil {
@@ -354,8 +321,6 @@ func TestRunReportsTheOnServerFailure(t *testing.T) {
 	}
 }
 
-// The TLS setup fails before the server serves, which is the one path that
-// reaches neither Serve nor the drain.
 func TestRunReportsATLSConfigWithoutACertificate(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -397,8 +362,6 @@ func TestRunReturnsNilWhenTheContextIsAlreadyDone(t *testing.T) {
 	}
 }
 
-// The server that Run builds carries the timeouts of the config, and only the
-// header deadline has a default.
 func TestTimeoutsReachTheServer(t *testing.T) {
 	type timeouts struct {
 		header, read, write, idle time.Duration
@@ -446,8 +409,6 @@ func TestTimeoutsReachTheServer(t *testing.T) {
 	}
 }
 
-// A write deadline cuts off a long download and a server-sent event stream
-// alike, so it stays the decision of the application.
 func TestWriteTimeoutHasNoDefault(t *testing.T) {
 	if got := captureServer(t, serve.Config{}).WriteTimeout; got != 0 {
 		t.Fatalf("WriteTimeout = %s, want no default", got)
@@ -475,7 +436,6 @@ func TestTheErrorLogWritesToTheConfiguredLogger(t *testing.T) {
 	}
 }
 
-// captureServer returns the server that Run built, without letting it bind.
 func captureServer(tb testing.TB, cfg serve.Config, opts ...serve.Option) *http.Server {
 	tb.Helper()
 
@@ -494,10 +454,6 @@ func captureServer(tb testing.TB, cfg serve.Config, opts ...serve.Option) *http.
 	}
 	return srv
 }
-
-// ---------------------------------------------------------------------------
-// Serving
-// ---------------------------------------------------------------------------
 
 func TestRunServesRequests(t *testing.T) {
 	s := start(t, ok(), serve.Config{})
@@ -542,7 +498,6 @@ func TestOnListenReceivesTheBoundAddress(t *testing.T) {
 	if port == "0" {
 		t.Fatal("OnListen reported the port of the config, not the one it bound")
 	}
-	// The port it reported is the one that answers.
 	if res := await(t, call(client(t), s.url("http", "/"))); res.err != nil {
 		t.Fatalf("request to the address of OnListen: %v", res.err)
 	}
@@ -554,7 +509,6 @@ func TestRunServesTheListenerOfTheConfig(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 
-	// Addr and Network say nothing once a listener is set.
 	s := start(t, ok(), serve.Config{Addr: "127.0.0.1:1", Network: "unix", Listener: ln})
 	if s.addr != ln.Addr().String() {
 		t.Fatalf("addr = %s, want the address of the listener %s", s.addr, ln.Addr())
@@ -571,13 +525,6 @@ func TestRunServesTheListenerOfTheConfig(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Shutdown
-// ---------------------------------------------------------------------------
-
-// Run waits for the goroutine that drains. Serve returns as soon as Shutdown
-// closes the listener, which is long before the requests in flight are done,
-// so a Run that returns there reports a shutdown that has not happened.
 func TestRunWaitsForTheDrainToFinish(t *testing.T) {
 	b := newBlocker(t)
 	s := start(t, b, serve.Config{})
@@ -585,7 +532,6 @@ func TestRunWaitsForTheDrainToFinish(t *testing.T) {
 	answer := call(client(t), s.url("http", "/"))
 	b.running(t)
 
-	// The handler stays in flight until after the context is cancelled.
 	time.AfterFunc(100*time.Millisecond, b.free)
 
 	if err := s.stop(t); err != nil {
@@ -618,8 +564,6 @@ func TestTheDrainReportsItsTimeout(t *testing.T) {
 	if b.finished.Load() {
 		t.Fatal("the handler finished; the test proves nothing about the timeout")
 	}
-	// The timeout closes what it could not drain, so the client hears about it
-	// instead of waiting for a body that never comes.
 	if res := await(t, answer); res.err == nil {
 		t.Fatalf("the request survived the timeout with %d %q", res.status, res.body)
 	}
@@ -643,8 +587,6 @@ func TestANegativeShutdownTimeoutSkipsTheDrain(t *testing.T) {
 	}
 }
 
-// errListener closes the socket underneath and reports a failure, which is
-// what a shutdown reports on its way out.
 type errListener struct {
 	net.Listener
 	err error
@@ -676,9 +618,6 @@ func TestRunReportsAShutdownFailure(t *testing.T) {
 				ShutdownTimeout: tt.timeout,
 			})
 
-			// The server closes the listeners it accepted on, so the shutdown
-			// only reaches this one once the server is serving. One answered
-			// request says that it is.
 			if res := await(t, call(client(t), s.url("http", "/"))); res.err != nil {
 				t.Fatalf("request: %v", res.err)
 			}
@@ -690,8 +629,6 @@ func TestRunReportsAShutdownFailure(t *testing.T) {
 	}
 }
 
-// A stream has no way to hear about a shutdown, because the drain leaves the
-// request contexts alone. RegisterOnShutdown is the way to tell it.
 func TestOnServerRegistersAShutdownHook(t *testing.T) {
 	shutdown := make(chan struct{})
 	s := start(t, ok(), serve.Config{
@@ -710,10 +647,6 @@ func TestOnServerRegistersAShutdownHook(t *testing.T) {
 		t.Fatal("the drain never ran the hook that OnServer registered")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// TLS
-// ---------------------------------------------------------------------------
 
 func TestServesOverTLS(t *testing.T) {
 	certPEM, keyPEM := selfSigned(t)
@@ -813,8 +746,6 @@ func TestTLSOffersHTTP2(t *testing.T) {
 	}
 }
 
-// A TLS config of the caller is served as it stands, because a floor that the
-// package raises behind its back is one that nobody can lower.
 func TestAnExplicitTLSConfigWins(t *testing.T) {
 	certPEM, keyPEM := selfSigned(t)
 	own := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -871,12 +802,6 @@ func TestCertOptionsReportAFailure(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Logging
-// ---------------------------------------------------------------------------
-
-// A failed handshake is the error that a server reports on its own. It belongs
-// in the handler of the application, not on stderr.
 func TestHandshakeFailuresReachTheLogger(t *testing.T) {
 	certPEM, keyPEM := selfSigned(t)
 	rec := newLogRecorder()
@@ -886,8 +811,6 @@ func TestHandshakeFailuresReachTheLogger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	// Bytes that no TLS client would send, and that do not look like the
-	// plain HTTP request that the server answers with a 400 of its own.
 	if _, err := conn.Write([]byte("hello, is this tls?\r\n\r\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -906,10 +829,6 @@ func TestHandshakeFailuresReachTheLogger(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Example
-// ---------------------------------------------------------------------------
-
 func Example() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -917,9 +836,6 @@ func Example() {
 		fmt.Fprint(w, "ok")
 	})
 
-	// A program stops on a signal:
-	//
-	//	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 
@@ -927,7 +843,6 @@ func Example() {
 	done := make(chan error, 1)
 	go func() {
 		done <- serve.Run(ctx, mux, serve.Config{
-			// Port zero binds an ephemeral port, which OnListen reports.
 			Addr:     "127.0.0.1:0",
 			OnListen: func(a net.Addr) { bound <- a },
 		})

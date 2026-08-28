@@ -89,7 +89,6 @@ func TestSetScalarLeavesAPointerNilForAnEmptyValue(t *testing.T) {
 		t.Errorf("Page = %d, want nil for an empty value", *dst.Page)
 	}
 
-	// A string field takes an empty value, so a pointer to one still fills.
 	if err := setScalar(rv.Field(1), "", ""); err != nil {
 		t.Fatalf("setScalar: %v", err)
 	}
@@ -177,8 +176,6 @@ func TestDecodeValuesReadsAFormatTag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// The layout has to reach the decoder through the struct tag, which
-			// is the only way an application names one.
 			rt := reflect.StructOf([]reflect.StructField{{
 				Name: "Since",
 				Type: reflect.TypeFor[time.Time](),
@@ -218,8 +215,6 @@ func TestDecodeValuesKeepsRFC3339WithoutAFormatTag(t *testing.T) {
 		t.Errorf("Since = %v, want %v", got.Since, want)
 	}
 
-	// A bare date is what the format tag exists for, and RFC 3339 still
-	// refuses it.
 	fields, err = decodeValues(url.Values{"since": {"2026-01-02"}}, &got, "query", false)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
@@ -273,7 +268,6 @@ func TestDecodeValuesCollectsEveryFieldError(t *testing.T) {
 			t.Errorf("fields[%d].Field = %q, want %q", i, fields[i].Field, want)
 		}
 	}
-	// The decoder keeps going, so the fields that do fit are still filled.
 	if got.Term != "go" {
 		t.Errorf("Term = %q, want the decoder to have kept going", got.Term)
 	}
@@ -350,8 +344,6 @@ func TestDecodeValuesSkipsADashTag(t *testing.T) {
 }
 
 func TestStructFieldsKeepsAPlanPerTag(t *testing.T) {
-	// One type binds from more than one source, and each source reads a tag of
-	// its own, so the cached plan cannot be shared between them.
 	type in struct {
 		Value string `form:"body" query:"url"`
 	}
@@ -535,8 +527,6 @@ func TestDecodeValuesFillsAnEmbeddedPointer(t *testing.T) {
 }
 
 func TestDecodeValuesLeavesAnUnexportedEmbeddedPointerAlone(t *testing.T) {
-	// reflect cannot allocate through an unexported embedded pointer, so the
-	// decoder passes it by instead of panicking on it.
 	type filter struct {
 		*hiddenPage
 		Term string `query:"q"`
@@ -555,7 +545,6 @@ func TestDecodeValuesLeavesAnUnexportedEmbeddedPointerAlone(t *testing.T) {
 	}
 }
 
-// hiddenPage is embedded by pointer, and its own name keeps it unexported.
 type hiddenPage struct {
 	Offset int `query:"offset"`
 }

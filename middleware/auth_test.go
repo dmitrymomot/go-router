@@ -11,8 +11,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// keyAuthRouter answers with the tenant that the validator put on the context,
-// which is what the typed context buys over a store of any values.
 func keyAuthRouter(cfg middleware.KeyAuthConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.KeyAuthWithConfig(cfg))
@@ -20,7 +18,6 @@ func keyAuthRouter(cfg middleware.KeyAuthConfig[*appContext]) *router.Router[*ap
 	return r
 }
 
-// keyValidator accepts one key and names the tenant that holds it.
 func keyValidator(c *appContext, key string) (bool, error) {
 	if !middleware.SecureCompare(key, "good") {
 		return false, nil
@@ -29,14 +26,12 @@ func keyValidator(c *appContext, key string) (bool, error) {
 	return true, nil
 }
 
-// bearer returns a request that carries a bearer token.
 func bearer(key string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(router.HeaderAuthorization, "Bearer "+key)
 	return req
 }
 
-// basicHeader returns the value of an RFC 7617 Authorization header.
 func basicHeader(user, pass string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 }
@@ -171,8 +166,6 @@ func TestKeyAuthReadsTheConfiguredSources(t *testing.T) {
 			if got := do(r, tt.request()).Body.String(); got != "widgets" {
 				t.Errorf("tenant = %q, want %q", got, "widgets")
 			}
-			// The configured source replaces the default, so the bearer token
-			// no longer authenticates.
 			if rec := do(r, bearer("good")); rec.Code != http.StatusUnauthorized {
 				t.Errorf("status = %d, want 401 for the default source", rec.Code)
 			}
@@ -187,7 +180,6 @@ func TestKeyAuthValidatorErrorReachesTheClient(t *testing.T) {
 		},
 	})
 
-	// A store that is down is a fault of the server, not a key that is wrong.
 	if rec := do(r, bearer("good")); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", rec.Code)
 	}
@@ -263,8 +255,6 @@ func TestKeyAuthContinueOnIgnoredError(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	// The handler ran, and the validator never wrote a tenant onto the
-	// context, so the request is the one that the factory built.
 	if got := rec.Body.String(); got != "acme" {
 		t.Errorf("tenant = %q, want the unauthenticated one", got)
 	}
@@ -313,7 +303,6 @@ func TestKeyAuthNeedsAValidator(t *testing.T) {
 	})
 }
 
-// basicAuthRouter answers with the user that the validator put on the context.
 func basicAuthRouter(cfg middleware.BasicAuthConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.BasicAuthWithConfig(cfg))
@@ -321,7 +310,6 @@ func basicAuthRouter(cfg middleware.BasicAuthConfig[*appContext]) *router.Router
 	return r
 }
 
-// basicValidator accepts one pair and names the tenant that holds it.
 func basicValidator(c *appContext, user, pass string) (bool, error) {
 	if !middleware.SecureCompare(user, "ops") || !middleware.SecureCompare(pass, "p:ss word") {
 		return false, nil
@@ -338,7 +326,6 @@ func TestBasicAuthAcceptsTheCredentials(t *testing.T) {
 		auth string
 	}{
 		{"the credentials", basicHeader("ops", "p:ss word")},
-		// RFC 7235 lets a client spell the scheme any way at all.
 		{"the scheme in lower case", "basic " + basicHeader("ops", "p:ss word")[len("Basic "):]},
 		{"the scheme in upper case", "BASIC " + basicHeader("ops", "p:ss word")[len("Basic "):]},
 	}
@@ -352,8 +339,6 @@ func TestBasicAuthAcceptsTheCredentials(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200", rec.Code)
 			}
-			// The password holds a colon, and only the first one ends the
-			// user name.
 			if got := rec.Body.String(); got != "ops" {
 				t.Errorf("user = %q, want %q", got, "ops")
 			}
@@ -413,9 +398,6 @@ func TestBasicAuthMalformedCredentialsAreABadRequest(t *testing.T) {
 		name string
 		auth string
 	}{
-		// Neither of these is a credential that is wrong. Both are a header
-		// that is not a credential, and a challenge would only make the client
-		// send the same again.
 		{"base64 that does not decode", "Basic !!not-base64!!"},
 		{"a payload without a colon", "Basic " + base64.StdEncoding.EncodeToString([]byte("ops"))},
 	}
@@ -440,8 +422,6 @@ func TestBasicAuthChallengeQuotesTheRealm(t *testing.T) {
 	}{
 		{"the default realm", "", `Basic realm="Restricted"`},
 		{"a realm of its own", "Admin area", `Basic realm="Admin area"`},
-		// A realm that carries a quote or a line break forges no header of its
-		// own, because the value is quoted once at construction.
 		{"a realm that carries a quote", `Ad"min`, `Basic realm="Ad\"min"`},
 		{"a realm that carries a line break", "Ad\r\nmin", `Basic realm="Ad\r\nmin"`},
 	}

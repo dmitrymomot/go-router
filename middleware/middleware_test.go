@@ -11,8 +11,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// appContext is the application context of the tests. It shows the shape that
-// an application uses: embed router.Base and add fields.
 type appContext struct {
 	router.Base
 	Tenant string
@@ -34,17 +32,10 @@ func get(h http.Handler, target string) *httptest.ResponseRecorder {
 	return do(h, httptest.NewRequest(http.MethodGet, target, nil))
 }
 
-// skipPath returns a Skip function that passes over one path.
 func skipPath(path string) func(router.Context) bool {
 	return func(c router.Context) bool { return c.Request().URL.Path == path }
 }
 
-// TestDefaultFactories checks that the plain factory of every middleware
-// returns a usable middleware, and that the whole set composes into one chain.
-//
-// The factories that take an argument stay out of it: BodyLimit and RateLimit
-// have no plain form to check, and MethodOverride and Rewrite belong in
-// [router.Router.Pre], which runs before the route is matched.
 func TestDefaultFactories(t *testing.T) {
 	r := newRouter()
 	r.Use(
@@ -73,8 +64,6 @@ func TestDefaultFactories(t *testing.T) {
 	}
 }
 
-// TestDefaultCORSAllowsEveryOrigin pins what the plain CORS factory does,
-// because it is the one default that is permissive.
 func TestDefaultCORSAllowsEveryOrigin(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.CORS[*appContext])
@@ -87,8 +76,6 @@ func TestDefaultCORSAllowsEveryOrigin(t *testing.T) {
 	}
 }
 
-// TestDefaultTimeoutAppliesADeadline pins that the plain Timeout factory is
-// not a no-op.
 func TestDefaultTimeoutAppliesADeadline(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.Timeout[*appContext])

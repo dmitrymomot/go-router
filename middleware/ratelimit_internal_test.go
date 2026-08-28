@@ -8,10 +8,6 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// newTestMemoryStore returns the store behind the interface, so that a test
-// reads the map it keeps. That map is the only place the sweep shows: a bucket
-// that refilled answers exactly as a bucket that the sweep dropped and Allow
-// started again, which is what makes the eviction safe and invisible at once.
 func newTestMemoryStore(t *testing.T, rate float64, burst int, expiresIn time.Duration) *memoryStore[router.Context] {
 	t.Helper()
 	s, ok := NewMemoryStore[router.Context](rate, burst, expiresIn).(*memoryStore[router.Context])
@@ -21,7 +17,6 @@ func newTestMemoryStore(t *testing.T, rate float64, burst int, expiresIn time.Du
 	return s
 }
 
-// take asks the store for one request and reports whether it passed.
 func take(t *testing.T, s *memoryStore[router.Context], id string) bool {
 	t.Helper()
 	allowed, _, err := s.Allow(nil, id)
@@ -33,7 +28,6 @@ func take(t *testing.T, s *memoryStore[router.Context], id string) bool {
 
 func TestMemoryStoreSweepDropsARefilledBucket(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// Two a second and two at once, so a second of quiet refills the burst.
 		s := newTestMemoryStore(t, 2, 2, time.Second)
 
 		take(t, s, "ada")
@@ -43,7 +37,6 @@ func TestMemoryStoreSweepDropsARefilledBucket(t *testing.T) {
 		}
 
 		time.Sleep(2 * time.Second)
-		// The request sweeps first, then makes a bucket of its own.
 		take(t, s, "ada")
 
 		if len(s.visitors) != 1 {
@@ -54,8 +47,6 @@ func TestMemoryStoreSweepDropsARefilledBucket(t *testing.T) {
 
 func TestMemoryStoreSweepKeepsABucketThatOwesTokens(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// A thousandth of a request a second against a burst of two: the wait
-		// that follows refills a five-hundredth of one token.
 		s := newTestMemoryStore(t, 0.001, 2, time.Second)
 
 		take(t, s, "ada")
@@ -65,7 +56,6 @@ func TestMemoryStoreSweepKeepsABucketThatOwesTokens(t *testing.T) {
 		}
 
 		time.Sleep(2 * time.Second)
-		// The request of another identity is what runs the sweep.
 		take(t, s, "grace")
 
 		if len(s.visitors) != 2 {

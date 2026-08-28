@@ -11,14 +11,10 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// bodyLimitPayload is what the binding route of the body limit tests decodes.
 type bodyLimitPayload struct {
 	Name string `json:"name"`
 }
 
-// bodyLimitRouter answers on two routes: one reads the body itself, which is
-// the reader that only the middleware caps, and one binds it, which the router
-// caps as well.
 func bodyLimitRouter(cfg middleware.BodyLimitConfig, ran *bool) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.BodyLimitWithConfig[*appContext](cfg))
@@ -41,8 +37,6 @@ func bodyLimitRouter(cfg middleware.BodyLimitConfig, ran *bool) *router.Router[*
 	return r
 }
 
-// bodyLimitPost builds a POST whose declared length is len(body) unless the
-// caller names another one.
 func bodyLimitPost(target, body string, contentLength int64) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	req.Header.Set(router.HeaderContentType, router.MIMEApplicationJSON)
@@ -69,8 +63,6 @@ func TestBodyLimitStopsABodyThatUnderstatesItsLength(t *testing.T) {
 	ran := false
 	r := bodyLimitRouter(middleware.BodyLimitConfig{Limit: 8}, &ran)
 
-	// A length of -1 is what a chunked body declares, so nothing but the
-	// reader itself can stop this one.
 	rec := do(r, bodyLimitPost("/read", strings.Repeat("x", 64), -1))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", rec.Code)

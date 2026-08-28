@@ -1,9 +1,4 @@
 // Package benchmarks compares go-router with chi and echo.
-//
-// It is a separate module, so the library itself keeps no dependency on
-// either. Run it with:
-//
-//	cd benchmarks && go test -bench . -benchmem
 package benchmarks
 
 import (
@@ -17,7 +12,6 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// routes is one route set in the three pattern dialects.
 var routes = []struct{ ours, chi, echo string }{
 	{"/", "/", "/"},
 	{"/health", "/health", "/health"},
@@ -34,7 +28,6 @@ var routes = []struct{ ours, chi, echo string }{
 	{"/assets/{path...}", "/assets/*", "/assets/*"},
 }
 
-// targets are the paths that every benchmark requests.
 var targets = map[string]string{
 	"Static": "/v1/search/repos",
 	"Param":  "/v1/users/42",
@@ -89,7 +82,6 @@ func newEcho() http.Handler {
 func newStdlib() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range routes {
-		// The pattern syntax of the stdlib mux matches the one of this router.
 		mux.HandleFunc("GET "+rt.ours, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	}
 	return mux

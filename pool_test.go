@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// pctx is the application context of the pooling tests.
 type pctx struct {
 	Base
 	User string
@@ -78,18 +77,11 @@ func TestPoolResetsTheRequestState(t *testing.T) {
 	}
 }
 
-// TestPoolResetsTheCachedRequestState covers the state that a handler fills on
-// demand rather than the router up front: the parsed query, the reason a form
-// body failed to parse, the normalized host and the host pattern of the route.
-// A context that carried any of them out of the pool would answer the next
-// request with the state of the previous one.
 func TestPoolResetsTheCachedRequestState(t *testing.T) {
 	r := NewPooled(func() *pctx { return new(pctx) }, resetPctx)
 	r.MaxBodyBytes(16)
 	r.Host("example.com", func(h *Router[*pctx]) {
 		h.POST("/first", func(c *pctx) error {
-			// Fill every cache. The body is over the limit, so the form parse
-			// fails and the context remembers why.
 			c.Query("q")
 			c.Host()
 			if _, err := c.FormValues(); err == nil {
@@ -117,8 +109,6 @@ func TestPoolResetsTheCachedRequestState(t *testing.T) {
 		t.Fatalf("first request: status = %d, want 204: %s", rec.Code, rec.Body)
 	}
 
-	// The second request takes the same context back out of the pool: no query
-	// string, another host, no host pattern and a body that parses.
 	second := httptest.NewRequest(http.MethodPost, "/second", strings.NewReader("name=ann"))
 	second.Host = "other.test"
 	second.Header.Set(HeaderContentType, MIMEApplicationForm)
@@ -132,10 +122,6 @@ func TestPoolResetsTheCachedRequestState(t *testing.T) {
 }
 
 func TestPoolDropsAContextThatPanicked(t *testing.T) {
-	// A context whose request panicked never goes back into the pool, so every
-	// panicking request has to build a fresh one. Counting the builds is
-	// stable; comparing pointers is not, because the garbage collector empties
-	// a sync.Pool whenever it runs.
 	const rounds = 20
 	built := 0
 
@@ -153,7 +139,6 @@ func TestPoolDropsAContextThatPanicked(t *testing.T) {
 			built, rounds)
 	}
 
-	// A clean request reuses one instead.
 	built = 0
 	for range rounds {
 		do(r, http.MethodGet, "/ok")
@@ -167,8 +152,6 @@ func TestPoolUnderConcurrentRequests(t *testing.T) {
 	r := newPooledRouter()
 	r.GET("/users/{id}", func(c *pctx) error {
 		c.User = c.Param("id")
-		// The value must survive the whole handler, whatever the other
-		// goroutines do.
 		if c.User != c.Param("id") {
 			return ErrInternalServerError.WithMessage("context crossed requests")
 		}

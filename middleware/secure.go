@@ -9,88 +9,32 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// SecureOmit turns one header off. Assign it to a field whose empty value
-// means the default, the way a struct tag drops a field:
-//
-//	middleware.SecureConfig{FrameOptions: middleware.SecureOmit}
-//
-// A page that names its frame-ancestors in a Content-Security-Policy has no
-// use for X-Frame-Options, and this is how it stops sending both.
 const SecureOmit = "-"
 
-// SecureConfig configures [SecureWithConfig].
 type SecureConfig struct {
-	// Skip passes a request straight to the next handler when it returns true.
 	Skip func(c router.Context) bool
 
-	// ContentTypeNosniff is the X-Content-Type-Options header. It defaults to
-	// "nosniff", which stops a browser from guessing a media type that differs
-	// from the one the answer declares.
 	ContentTypeNosniff string
 
-	// FrameOptions is the X-Frame-Options header. It defaults to "SAMEORIGIN",
-	// which lets only this site frame the page.
 	FrameOptions string
 
-	// ContentSecurityPolicy is the policy of the page. An empty value sends no
-	// header, because a policy that fits every application does not exist.
 	ContentSecurityPolicy string
 
-	// CSPReportOnly sends the policy as Content-Security-Policy-Report-Only,
-	// which reports what a policy would have blocked and blocks nothing. Use
-	// it to measure a new policy before it takes effect.
 	CSPReportOnly bool
 
-	// ReferrerPolicy is the Referrer-Policy header. It defaults to
-	// "strict-origin-when-cross-origin", which sends the full URL to this
-	// origin, the origin alone to another one, and nothing at all when the
-	// answer leaves HTTPS.
 	ReferrerPolicy string
 
-	// HSTSMaxAge is how long a browser reaches this host over HTTPS alone.
-	// Zero sends no header.
-	//
-	// It is a duration and not a count of seconds, so write the year that
-	// every guide quotes as one:
-	//
-	//	middleware.SecureConfig{HSTSMaxAge: 365 * 24 * time.Hour}
-	//
-	// A positive age under one second panics, because it renders as
-	// max-age=0, which revokes the header rather than sending it.
-	//
-	// Set it once the site is ready to serve every path over TLS forever: a
-	// browser that saw the header refuses plaintext until it expires, and no
-	// answer can take that back.
 	HSTSMaxAge time.Duration
 
-	// HSTSIncludeSubdomains extends HSTSMaxAge to every subdomain of this
-	// host.
 	HSTSIncludeSubdomains bool
 
-	// HSTSPreload adds the preload token, which is what the browser preload
-	// list asks for. It counts only together with HSTSIncludeSubdomains and a
-	// max-age of at least a year.
 	HSTSPreload bool
 }
 
-// Secure is [SecureWithConfig] with its default config: nosniff, SAMEORIGIN,
-// strict-origin-when-cross-origin, no policy and no HSTS. It is a middleware
-// itself, so it goes into Use without a call:
-//
-//	r.Use(middleware.Secure[Ctx])
 func Secure[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return SecureWithConfig[C](SecureConfig{})(next)
 }
 
-// SecureWithConfig writes the security headers of an answer. It holds no
-// state and reads nothing of the request but its scheme.
-//
-// The headers go out before the handler runs, so an answer that the handler
-// wrote and an answer that an error produced carry the same ones.
-//
-// It does not send X-XSS-Protection. Every current browser ignores the header,
-// and the filter it used to turn on introduced holes of its own, which is why
-// the browsers dropped it. A Content-Security-Policy is what replaced it.
 func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
 	nosniff := setting(cfg.ContentTypeNosniff, "nosniff")
 	frame := setting(cfg.FrameOptions, "SAMEORIGIN")
@@ -101,14 +45,8 @@ func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
 		csp = router.HeaderContentSecurityPolicyReportOnly
 	}
 
-	// The value never changes, so it is built once rather than per request.
 	hsts := ""
 	if cfg.HSTSMaxAge > 0 {
-		// The header counts in whole seconds, and an age that floors to none
-		// of them spells max-age=0, which is the directive that takes the host
-		// off the list of the browser. A config that asks for HSTS and revokes
-		// it instead is a fault of the wiring, so it fails here rather than in
-		// front of a browser that already holds the pin.
 		secs := int(cfg.HSTSMaxAge.Seconds())
 		if secs < 1 {
 			panic(fmt.Sprintf("middleware: SecureConfig.HSTSMaxAge is %s, under one second; "+
@@ -145,9 +83,6 @@ func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
 			if cfg.ContentSecurityPolicy != "" {
 				h.Set(csp, cfg.ContentSecurityPolicy)
 			}
-			// HSTS over plaintext says nothing: a client that reads it there
-			// reached the server over the very protocol the header forbids,
-			// and an attacker who can read it can strip it.
 			if hsts != "" && router.SchemeOf(c.Request()) == "https" {
 				h.Set(router.HeaderStrictTransportSecurity, hsts)
 			}
@@ -156,8 +91,6 @@ func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
 	}
 }
 
-// setting returns the value of a header field, its default when the field is
-// empty, or an empty string when the field asks for no header at all.
 func setting(v, fallback string) string {
 	switch v {
 	case "":

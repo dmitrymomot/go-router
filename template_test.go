@@ -28,13 +28,8 @@ func TestPartialSegmentParameters(t *testing.T) {
 		{"/reports/rep-20260102.csv", "/reports/rep-{date}.csv date=20260102"},
 		{"/reports/sum-20260102.csv", "/reports/sum-{date}.csv date=20260102"},
 		{"/reports/rep-20260102.json", "/reports/rep-{date}.json date=20260102"},
-		// A literal segment still wins over a template.
 		{"/reports/latest.csv", "/reports/latest.csv"},
-		// Literals bind as far right as they can, so the extra dots belong to
-		// the parameter.
 		{"/reports/rep-a.csv.csv", "/reports/rep-{date}.csv date=a.csv"},
-		// Nothing matches the template, so the walk falls back to the plain
-		// parameter.
 		{"/reports/quarterly", "/reports/{name} name=quarterly"},
 		{"/reports/rep-.csv", "/reports/{name} name=rep-.csv"},
 		{"/files/notes.txt", "/files/{name}.{ext} name=notes ext=txt"},
@@ -63,12 +58,12 @@ func TestPartialSegmentMisses(t *testing.T) {
 	r.GET("/tickets/T-{id:[0-9]+}", echoRoute)
 
 	for _, path := range []string{
-		"/reports/rep-.csv",     // the parameter would be empty
-		"/reports/rep-2026.txt", // the trailing literal does not match
-		"/reports/sum-2026.csv", // the leading literal does not match
-		"/reports/2026.csv",     // no leading literal at all
-		"/tickets/T-abc",        // the regular expression rejects it
-		"/tickets/abc",          // the leading literal is missing
+		"/reports/rep-.csv",
+		"/reports/rep-2026.txt",
+		"/reports/sum-2026.csv",
+		"/reports/2026.csv",
+		"/tickets/T-abc",
+		"/tickets/abc",
 	} {
 		t.Run(path, func(t *testing.T) {
 			if code := do(r, http.MethodGet, path).Code; code != http.StatusNotFound {
@@ -125,8 +120,6 @@ func TestParameterEscaping(t *testing.T) {
 		{"an escaped separator stays inside one segment", "/files/a%2Fb", "a/b"},
 		{"an escaped space decodes", "/files/a%20b", "a b"},
 		{"a plus sign is literal in a path", "/files/a+b", "a+b"},
-		// %25 is a literal percent. Decoding the parameter a second time would
-		// turn %252F into a separator that the client never sent.
 		{"a literal percent survives", "/files/a%25b", "a%b"},
 		{"a double encoded separator survives", "/files/a%252Fb", "a%2Fb"},
 		{"a catch-all decodes each segment", "/tree/x/a%2Fb/y", "x/a/b/y"},

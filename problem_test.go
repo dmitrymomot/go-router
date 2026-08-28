@@ -11,7 +11,6 @@ import (
 	"testing"
 )
 
-// problemRouter answers every request with err, through the problem handler.
 func problemRouter(exposeCause bool, err error) *Router[*tctx] {
 	r := newTestRouter()
 	r.ErrorHandler(ProblemErrorHandler[*tctx](exposeCause))
@@ -81,8 +80,6 @@ func TestProblemErrorHandlerWritesTheDocument(t *testing.T) {
 			`{"type":"about:blank","title":"Payment Required","status":402}`,
 		},
 		{
-			// The handler asked for a 400 and carries the problem as the cause,
-			// so the answer is the 400 that every error handler reads here.
 			"an HTTP error that carries a problem",
 			ErrBadRequest.WithError(&ProblemError{Status: http.StatusConflict, Title: "Too little credit"}),
 			http.StatusBadRequest,
@@ -102,8 +99,6 @@ func TestProblemErrorHandlerWritesTheDocument(t *testing.T) {
 			if rec.Code != tc.status {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
 			}
-			// Swapping the error handler changes the wire shape and never the
-			// status, so a client reads the same code either way.
 			if got := StatusOf(tc.err); got != rec.Code {
 				t.Errorf("StatusOf reads %d, and the answer is %d; they have to agree", got, rec.Code)
 			}
@@ -117,8 +112,6 @@ func TestProblemErrorHandlerWritesTheDocument(t *testing.T) {
 	}
 }
 
-// The document reaches a client that asked for HTML too, because a service
-// that opts in has told its clients to read one.
 func TestProblemErrorHandlerAnswersEveryClient(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/orders/7", nil)
 	req.Header.Set(HeaderAccept, MIMETextHTML)
@@ -132,8 +125,6 @@ func TestProblemErrorHandlerAnswersEveryClient(t *testing.T) {
 	}
 }
 
-// The message of an error that is not an HTTPError stays server-side, whatever
-// the error carries.
 func TestProblemErrorHandlerHidesTheInternalMessage(t *testing.T) {
 	captureLogs(t)
 
@@ -170,10 +161,6 @@ func TestProblemErrorHandlerExposesTheCause(t *testing.T) {
 	}
 }
 
-// It logs the internal cause at the level that the status names, a client that
-// went away at debug level, and every failure from 500 up. A problem that a
-// handler described carries no internal cause, so one below 500 reaches no
-// log.
 func TestProblemErrorHandlerLogsTheInternalCause(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -219,9 +206,6 @@ func TestProblemErrorHandlerLogsTheInternalCause(t *testing.T) {
 	}
 }
 
-// A [ProblemError] below 500 is the one record the two handlers do not share.
-// The problem handler reads the failure as described and logs nothing, and
-// [DefaultErrorHandler] logs the error that it re-wrapped as an internal cause.
 func TestProblemErrorHandlerSkipsTheLogOfADescribedProblem(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -245,8 +229,6 @@ func TestProblemErrorHandlerSkipsTheLogOfADescribedProblem(t *testing.T) {
 			})
 			got := do(r, http.MethodGet, "/orders/7")
 
-			// The status is the same either way, so the record is the whole of
-			// the difference.
 			if got.Code != http.StatusConflict {
 				t.Errorf("status = %d, want %d", got.Code, http.StatusConflict)
 			}
@@ -257,8 +239,6 @@ func TestProblemErrorHandlerSkipsTheLogOfADescribedProblem(t *testing.T) {
 	}
 }
 
-// A handler that already wrote the response keeps what it wrote, because the
-// status line is long gone.
 func TestProblemErrorHandlerSkipsACommittedResponse(t *testing.T) {
 	captureLogs(t)
 
@@ -329,8 +309,6 @@ func TestProblemErrorMessage(t *testing.T) {
 	}
 }
 
-// A ProblemError carries its status to a router that never opted in, because
-// it is a StatusCoder. The body is then the shape of the default handler.
 func TestProblemErrorReachesTheDefaultHandler(t *testing.T) {
 	captureLogs(t)
 

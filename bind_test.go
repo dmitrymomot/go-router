@@ -26,8 +26,6 @@ type createUser struct {
 	Ignored string    `json:"-"`
 }
 
-// formUser adds a duration, which encoding/json/v2 refuses to encode without
-// an explicit format tag but which the form decoder reads directly.
 type formUser struct {
 	createUser
 	TTL time.Duration `form:"ttl"`
@@ -81,8 +79,6 @@ func TestBindJSONTellsAnEmptyBodyFromAMalformedOne(t *testing.T) {
 		return err
 	})
 
-	// encoding/json/v2 reports an empty input and a truncated one as the same
-	// syntax error, so only the bytes that the decoder read tell them apart.
 	for _, tt := range []struct {
 		name  string
 		body  string
@@ -198,11 +194,6 @@ func TestBindQueryReportsAParseError(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	// The binder now collects every field that did not fit and reports them in
-	// the details, keyed by the name the request spells, instead of flattening
-	// the first one into a prose message that names the Go field. A single bad
-	// field therefore reads as "page", not as "Page", and it arrives through
-	// the same channel that a form with three bad fields uses.
 	if !strings.Contains(rec.Body.String(), `"field":"page"`) {
 		t.Errorf("body does not name the field: %q", rec.Body.String())
 	}
@@ -212,10 +203,6 @@ func TestBindQueryReportsAParseError(t *testing.T) {
 }
 
 func TestBindQueryKeepsADecoderFaultOffTheWire(t *testing.T) {
-	// A target that is not a pointer to a struct is a fault of the handler.
-	// The client still sees a 400, because Bind falls through to the query
-	// string for a body that names no media type, but the text of the decoder
-	// belongs in the log and not in the answer.
 	r := newTestRouter()
 	r.GET("/s", func(c *tctx) error {
 		_, err := c.BindQuery[[]string]()
@@ -230,7 +217,6 @@ func TestBindQueryKeepsADecoderFaultOffTheWire(t *testing.T) {
 		t.Errorf("body = %s, want no word of the decoder in it", rec.Body)
 	}
 
-	// The cause still reaches the error handler, which logs it.
 	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/s", nil))
 	var target []string
 	err := b.decodeInto(url.Values{"a": {"1"}}, &target, "query")
@@ -247,8 +233,6 @@ func TestBindQueryKeepsADecoderFaultOffTheWire(t *testing.T) {
 }
 
 func TestBindQueryLeavesAnOptionalFieldNilForAnEmptyValue(t *testing.T) {
-	// A pointer is how a handler tells "the client did not send this" from a
-	// zero that it did send, and a cleared input posts an empty value.
 	type filter struct {
 		Page *int `query:"page"`
 	}
@@ -339,7 +323,6 @@ func TestJSONOptionsApplyToBind(t *testing.T) {
 	}
 }
 
-// post sends a body of the named media type and returns the recorded answer.
 func post(h http.Handler, target, contentType, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	req.Header.Set(HeaderContentType, contentType)
@@ -348,19 +331,16 @@ func post(h http.Handler, target, contentType, body string) *httptest.ResponseRe
 	return rec
 }
 
-// postForm sends a URL encoded body.
 func postForm(h http.Handler, target string, values url.Values) *httptest.ResponseRecorder {
 	return post(h, target, MIMEApplicationForm, values.Encode())
 }
 
-// upload is one file part of a multipart body.
 type upload struct {
 	field   string
 	name    string
 	content string
 }
 
-// multipartBody builds a multipart body and returns it with its media type.
 func multipartBody(t *testing.T, values url.Values, files ...upload) (body, contentType string) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -387,7 +367,6 @@ func multipartBody(t *testing.T, values url.Values, files ...upload) (body, cont
 	return buf.String(), w.FormDataContentType()
 }
 
-// details decodes the field errors that the error handler wrote.
 func details(t *testing.T, rec *httptest.ResponseRecorder) []FieldError {
 	t.Helper()
 	var body struct {
@@ -468,8 +447,6 @@ func TestParseFormReadsTheBodyOnce(t *testing.T) {
 }
 
 func TestFormFileRejectsABodyOverTheLimit(t *testing.T) {
-	// The upload is the only thing the handler reads, so nothing else applies
-	// the cap of the router on its way in.
 	r := newTestRouter()
 	r.MaxBodyBytes(64)
 	r.POST("/avatars", func(c *tctx) error {
@@ -598,18 +575,12 @@ func TestBindFormUsesTheMultipartMemoryOfTheRouter(t *testing.T) {
 }
 
 func TestMultipartTempFilesGoAwayWithTheRequest(t *testing.T) {
-	// Every shipped middleware hands the context a copy of the request, and
-	// net/http removes the temporary files of the request that it holds
-	// itself, so nothing removed the ones that the binder parsed into a copy.
-	// The request that carries no copy still parses into the one the server
-	// holds, and the two cleanups then meet on the same files.
 	copyRequest := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
 		return func(c *tctx) error {
 			c.SetRequest(c.Request().WithContext(c.Request().Context()))
 			return next(c)
 		}
 	}
-	// uploads answers the upload on a router that spills every part to disk.
 	uploads := func(mw ...Middleware[*tctx]) *Router[*tctx] {
 		r := newTestRouter()
 		r.MaxMultipartMemory(1)
@@ -642,7 +613,6 @@ func TestMultipartTempFilesGoAwayWithTheRequest(t *testing.T) {
 			build:  func() http.Handler { return uploads(copyRequest) },
 		},
 		{
-			// The router copies the request itself to strip the prefix.
 			name:   "a mounted router",
 			target: "/api/avatars",
 			build:  mounted,
@@ -655,7 +625,7 @@ func TestMultipartTempFilesGoAwayWithTheRequest(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			t.Setenv("TMPDIR", dir) // Where a part that spills lands.
+			t.Setenv("TMPDIR", dir)
 
 			srv := httptest.NewServer(tt.build())
 			defer srv.Close()
@@ -679,9 +649,6 @@ func TestMultipartTempFilesGoAwayWithTheRequest(t *testing.T) {
 	}
 }
 
-// waitForTempFiles waits for the multipart temporary files under dir to reach
-// want, and answers with the count that it saw last. The request removes them
-// once its context ends, which the server does after the handler returns.
 func waitForTempFiles(dir string, want int) int {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -733,8 +700,6 @@ func TestFormValueReadsTheBodyAndNotTheQuery(t *testing.T) {
 			c.FormDefault("role", "user"), c.FormDefault("name", "anon"))
 	})
 
-	// The query carries a role, and the body does not. A form field that the
-	// body never posted must not come out of the URL.
 	rec := postForm(r, "/users?role=admin", url.Values{"name": {"bo"}})
 	if got, want := rec.Body.String(), "bo//user/bo"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
@@ -880,7 +845,6 @@ func TestBindHeader(t *testing.T) {
 	}
 }
 
-// signup checks itself, which is what makes it a [Validator].
 type signup struct {
 	Email string `form:"email" json:"email"`
 	Age   int    `form:"age" json:"age"`
@@ -944,7 +908,6 @@ func TestValidatorPassesAGoodValue(t *testing.T) {
 	}
 }
 
-// plainInvalid reports a failure that names no field.
 type plainInvalid struct {
 	Name string `json:"name"`
 }
@@ -965,7 +928,6 @@ func TestValidatorWithoutFieldErrorsReportsNoDetails(t *testing.T) {
 	if got := details(t, rec); len(got) != 0 {
 		t.Errorf("details = %+v, want none", got)
 	}
-	// The message of the cause stays internal, as it does for any other error.
 	if strings.Contains(rec.Body.String(), "the name is taken") {
 		t.Errorf("body leaks the internal cause: %q", rec.Body.String())
 	}
@@ -1016,8 +978,6 @@ func TestStrictBindFillsOnlyTaggedFields(t *testing.T) {
 	}
 	body := url.Values{"name": {"bo"}, "isadmin": {"true"}}
 
-	// The default fills the untagged field from the lower-cased name it
-	// spells, which is the mass assignment that StrictBind closes.
 	loose := newTestRouter()
 	loose.POST("/users", handler)
 	if got, want := postForm(loose, "/users", body).Body.String(), "bo/true"; got != want {
@@ -1053,8 +1013,6 @@ func TestStrictBindFillsOnlyTaggedFieldsOfAJSONBody(t *testing.T) {
 			in.Name, in.IsAdmin, in.Profile.City, in.Profile.Level,
 			len(in.Friends), in.Since.Year())
 	}
-	// json/v2 matches an untagged exported field under its exact Go name, so
-	// that name is what the request spells to reach a field no tag exposes.
 	body := `{"name":"bo","IsAdmin":true,"since":"2026-01-02T03:04:05Z",
 		"profile":{"city":"lviv","Level":9},"friends":[{"city":"kyiv","Level":8}]}`
 
@@ -1064,8 +1022,6 @@ func TestStrictBindFillsOnlyTaggedFieldsOfAJSONBody(t *testing.T) {
 		t.Errorf("loose body = %q, want %q", got, want)
 	}
 
-	// Strict binding blanks the untagged field of the value and of every
-	// struct it holds, and leaves a type that decodes itself alone.
 	strict := newTestRouter()
 	strict.StrictBind(true)
 	strict.POST("/users", handler)
@@ -1074,16 +1030,12 @@ func TestStrictBindFillsOnlyTaggedFieldsOfAJSONBody(t *testing.T) {
 	}
 }
 
-// strictNode nests into itself, which is what makes the walk of the strict
-// binder follow the values it holds rather than the types it reads.
 type strictNode struct {
 	Label string      `json:"label"`
 	Next  *strictNode `json:"next"`
 	Depth int
 }
 
-// strictCoin reads its own JSON, so its own code decides which of its fields a
-// request reaches and the strict binder leaves them alone.
 type strictCoin struct {
 	Amount int
 	Code   string
@@ -1242,8 +1194,6 @@ func TestParseValue(t *testing.T) {
 	if err != nil || empty != 0 {
 		t.Errorf("ParseValue of an empty string = %d, %v", empty, err)
 	}
-	// The zero value of a pointer is nil, so an empty string yields nil and
-	// not a pointer to a zero.
 	unset, err := ParseValue[*int]("")
 	if err != nil || unset != nil {
 		t.Errorf("ParseValue[*int] of an empty string = %v, %v", unset, err)

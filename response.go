@@ -10,69 +10,35 @@ import (
 	"strings"
 )
 
-// Response wraps an [http.ResponseWriter] and records the status code and the
-// number of bytes that the handler wrote. Middleware reads those fields after
-// the handler returns.
-//
-// Response implements Unwrap, so [http.NewResponseController] reaches the
-// hijack and deadline methods of the writer underneath.
-//
 // betteralign:check
-//
-// A Response lives inside every [Base], so its layout is worth keeping tight.
 type Response struct {
 	http.ResponseWriter
 
 	before []func()
 
-	// Status is the status code that the handler wrote. It is 0 until the
-	// handler commits the response.
 	Status int
 
-	// Size is the number of body bytes that the handler wrote.
 	Size int64
 
-	// Committed reports whether the header is already written.
 	Committed bool
 }
 
-// Unwrap returns the writer underneath, for [http.NewResponseController].
 func (r *Response) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-// Before registers a function that runs immediately before the header is
-// written. Use it to set a header that depends on the status code.
 func (r *Response) Before(fn func()) { r.before = append(r.before, fn) }
 
-// WriteHeader writes the status line.
-//
-// An informational status, from 100 to 199, goes straight to the client and
-// leaves the response open, so a 103 Early Hints does not swallow the final
-// status. It runs no hook, because the hooks belong to the status that answers
-// the request.
-//
-// A 101 Switching Protocols is the exception that net/http also makes: it is
-// the answer to the request, and nothing follows it on the connection. It
-// records the status and runs the hooks, so a WebSocket library that writes it
-// and then hijacks leaves an upgrade behind that an observer and a log line
-// read as one.
-//
-// A second call to a committed response is a no-op that logs the dropped code
-// at debug level, which is what names the handler that wrote a body and then
-// returned an error.
 func (r *Response) WriteHeader(code int) {
 	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		r.ResponseWriter.WriteHeader(code)
 		return
 	}
 	if r.Committed {
-		// The record costs an allocation to build, so ask the handler first.
 		if l := slog.Default(); l.Enabled(context.Background(), slog.LevelDebug) {
 			l.Debug("router: the response is already committed",
 				slog.Int("dropped", code), slog.Int("status", r.Status))
 		}
 		return
 	}
-	// The status comes first, so that a hook reads the one that goes out.
 	r.Status = code
 	for _, fn := range r.before {
 		fn()
@@ -81,8 +47,6 @@ func (r *Response) WriteHeader(code int) {
 	r.Committed = true
 }
 
-// Write writes the body and commits the response with status 200 if the
-// handler did not set a status.
 func (r *Response) Write(b []byte) (int, error) {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -92,7 +56,6 @@ func (r *Response) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// WriteString writes a string body.
 func (r *Response) WriteString(s string) (int, error) {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -102,13 +65,6 @@ func (r *Response) WriteString(s string) (int, error) {
 	return n, err
 }
 
-// Flush sends any buffered data to the client.
-//
-// A flush before the first write commits the response with status 200, because
-// the server writes that status line itself as it flushes. Committing it here
-// runs the [Response.Before] hooks and records the status, so that an observer
-// and a log line report the status the client saw and the error handler writes
-// no second answer into a stream that already carries one.
 func (r *Response) Flush() {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -117,13 +73,6 @@ func (r *Response) Flush() {
 	http.NewResponseController(r.ResponseWriter).Flush()
 }
 
-// ReadFrom implements [io.ReaderFrom], so that a copy into the response reaches
-// the ReadFrom of the writer underneath instead of running through a buffer of
-// its own. That is the path [http.ServeContent] takes for a file, where the
-// server sends the body without copying it through user space.
-//
-// A writer that has no ReadFrom of its own falls back to [io.Copy], which is
-// what the caller would have run anyway.
 func (r *Response) ReadFrom(src io.Reader) (int64, error) {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -133,38 +82,18 @@ func (r *Response) ReadFrom(src io.Reader) (int64, error) {
 	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
 		n, err = rf.ReadFrom(src)
 	} else {
-		// io.Copy on the writer itself, never on r: r.Write would count the
-		// same bytes a second time.
 		n, err = io.Copy(r.ResponseWriter, src)
 	}
 	r.Size += n
 	return n, err
 }
 
-// Hijack takes the connection away from the server, so that the caller speaks
-// its own protocol on it. A WebSocket library that asserts [http.Hijacker]
-// against the response writer finds it here.
-//
-// It reaches the connection through [http.NewResponseController], so it works
-// through any writer that the server put underneath.
 func (r *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return http.NewResponseController(r.ResponseWriter).Hijack()
 }
 
-// unwrapLimit bounds the walk of [UnwrapResponse]. A chain of wrappers is a
-// handful of writers deep, so a longer one is a cycle.
 const unwrapLimit = 16
 
-// UnwrapResponse returns the [Response] that w wraps, and reports whether it
-// found one. It follows the Unwrap method of every writer in between, in the
-// form that [http.NewResponseController] reads.
-//
-// A wrapper that a handler puts around the response reads the status and the
-// size of the request through it:
-//
-//	if res, ok := router.UnwrapResponse(w); ok && res.Status == http.StatusOK {
-//		// ...
-//	}
 func UnwrapResponse(w http.ResponseWriter) (*Response, bool) {
 	for range unwrapLimit {
 		switch v := w.(type) {
@@ -179,8 +108,6 @@ func UnwrapResponse(w http.ResponseWriter) (*Response, bool) {
 	return nil, false
 }
 
-// headerContainsToken reports whether the named header holds the token, after
-// a case-insensitive comparison of each comma separated element.
 func headerContainsToken(h http.Header, name, token string) bool {
 	for _, v := range h.Values(name) {
 		for part := range strings.SplitSeq(v, ",") {

@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// doHost sends a request that names a host.
 func doHost(h http.Handler, method, host, target string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, nil)
 	req.Host = host
@@ -17,7 +16,6 @@ func doHost(h http.Handler, method, host, target string) *httptest.ResponseRecor
 	return rec
 }
 
-// echoHost writes the host pattern, the path pattern and every parameter.
 func echoHost(c *tctx) error {
 	parts := []string{c.RouteHost() + "|" + c.RoutePattern()}
 	for _, n := range c.ParamNames() {
@@ -26,9 +24,6 @@ func echoHost(c *tctx) error {
 	return c.String(http.StatusOK, strings.Join(parts, " "))
 }
 
-// siteRouter builds the four cases that a multi-tenant service needs: a main
-// site, a fixed subdomain, a subdomain per tenant, and a domain of the tenant's
-// own.
 func siteRouter() *Router[*tctx] {
 	r := newTestRouter()
 
@@ -49,8 +44,8 @@ func siteRouter() *Router[*tctx] {
 		h.GET("/settings", echoHost)
 	})
 
-	r.GET("/healthz", echoHost) // every host answers it
-	r.GET("/{page}", echoHost)  // a host-free route with a parameter of its own
+	r.GET("/healthz", echoHost)
+	r.GET("/{page}", echoHost)
 	return r
 }
 
@@ -69,15 +64,12 @@ func TestHostMatch(t *testing.T) {
 		{"acme.com", "/", "*|/"},
 		{"acme.com", "/settings", "*|/settings"},
 
-		// A route outside every host scope answers on any host.
 		{"example.com", "/healthz", "|/healthz"},
 		{"api.example.com", "/healthz", "|/healthz"},
 		{"acme.com", "/healthz", "|/healthz"},
 
-		// A host-free route with a parameter, reached from a matched host.
 		{"api.example.com", "/legal", "|/{page} page=legal"},
 
-		// The port, the case and a trailing dot do not take part.
 		{"Example.COM:8443", "/", "example.com|/"},
 		{"example.com.", "/", "example.com|/"},
 		{"ACME.example.com", "/", "{tenant}.example.com|/ tenant=acme"},
@@ -100,22 +92,18 @@ func TestHostMiss(t *testing.T) {
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 	r.GET("/healthz", echoHost)
 
-	// A host that no pattern claims falls back to the host-free routes, and
-	// then to 404.
 	if rec := doHost(r, http.MethodGet, "other.com", "/healthz"); rec.Code != http.StatusOK {
 		t.Errorf("healthz on an unknown host = %d, want 200", rec.Code)
 	}
 	if rec := doHost(r, http.MethodGet, "other.com", "/"); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown host = %d, want 404", rec.Code)
 	}
-	// The path exists on another host only.
 	if rec := doHost(r, http.MethodGet, "api.example.com", "/"); rec.Code != http.StatusNotFound {
 		t.Errorf("path of another host = %d, want 404", rec.Code)
 	}
 }
 
 func TestHostOnlyRouter(t *testing.T) {
-	// A router whose every route sits inside a host scope answers nothing else.
 	r := newTestRouter()
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 
@@ -178,7 +166,6 @@ func TestHostLabelSyntax(t *testing.T) {
 		})
 	}
 
-	// A label that the regular expression rejects finds no route.
 	if rec := doHost(r, http.MethodGet, "acme1.example.com", "/"); rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
@@ -189,8 +176,6 @@ func TestHostSuffixIsALabelBoundary(t *testing.T) {
 	r.Host("{tenant}.example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 	r.Host("{a}.{b}.example.net", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 
-	// The static tail of a pattern starts at a dot, so a host that merely ends
-	// in the same letters does not match.
 	for _, host := range []string{"acmeexample.com", "example.com", "a.b.c.example.net", "b.example.net"} {
 		t.Run(host, func(t *testing.T) {
 			if rec := doHost(r, http.MethodGet, host, "/"); rec.Code != http.StatusNotFound {
@@ -289,11 +274,9 @@ func TestHostFallbacks(t *testing.T) {
 		{"host 405", "example.com", http.MethodPost, "/", http.StatusMethodNotAllowed, "site 405"},
 		{"host error", "example.com", http.MethodGet, "/boom", http.StatusTeapot, "site err"},
 
-		// api.example.com sets none of them, so the root ones apply.
 		{"root 404 on a host", "api.example.com", http.MethodGet, "/nope", http.StatusNotFound, "root 404"},
 		{"root error on a host", "api.example.com", http.MethodGet, "/boom", http.StatusTeapot, "root err"},
 
-		// No host matched at all.
 		{"root 404", "other.com", http.MethodGet, "/nope", http.StatusNotFound, "root 404"},
 	}
 	for _, tt := range tests {
@@ -325,13 +308,12 @@ func TestHostPanicUsesHostErrorHandler(t *testing.T) {
 func TestHostMethodNotAllowedAllow(t *testing.T) {
 	r := newTestRouter()
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/x", echoHost) })
-	r.POST("/x", echoHost) // every host
+	r.POST("/x", echoHost)
 
 	rec := doHost(r, http.MethodPut, "example.com", "/x")
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
 	}
-	// The Allow header names the methods of both trees.
 	if got := rec.Header().Get(HeaderAllow); got != "GET, HEAD, OPTIONS, POST" {
 		t.Errorf("Allow = %q, want %q", got, "GET, HEAD, OPTIONS, POST")
 	}
@@ -389,7 +371,6 @@ func TestHostContextAccessors(t *testing.T) {
 			return c.String(http.StatusOK, c.Host()+" "+c.RouteHost()+" "+c.Param("tenant"))
 		})
 	})
-	// A route outside a host scope still reads the request host.
 	r.GET("/healthz", func(c *tctx) error {
 		return c.String(http.StatusOK, c.Host()+" ["+c.RouteHost()+"]")
 	})
@@ -425,7 +406,6 @@ func TestHostRoutes(t *testing.T) {
 }
 
 func TestHostSharedScopeMergesTrees(t *testing.T) {
-	// Two Host calls that name the same pattern share one tree.
 	r := newTestRouter()
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/a", echoHost) })
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/b", echoHost) })
@@ -529,7 +509,6 @@ func TestHostPooledContextClearsHost(t *testing.T) {
 	if got := doHost(r, http.MethodGet, "a.example.com", "/").Body.String(); got != "a.example.com|{tenant}.example.com|a" {
 		t.Fatalf("body = %q", got)
 	}
-	// The next request reuses the context, so nothing of the first may remain.
 	if got := doHost(r, http.MethodGet, "other.com", "/healthz").Body.String(); got != "other.com||" {
 		t.Fatalf("body = %q", got)
 	}
@@ -566,7 +545,6 @@ func TestHostRestLabel(t *testing.T) {
 			}
 		})
 	}
-	// A catch-all label needs at least one label of its own.
 	if rec := doHost(r, http.MethodGet, "example.com", "/"); rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
@@ -606,7 +584,6 @@ func TestHostRedirectTrailingSlashFallsBackToHostFreeRoutes(t *testing.T) {
 
 func TestPerHostErrorHandlers(t *testing.T) {
 	r := newTestRouter()
-	// The root renders anything that no host claims.
 	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root: "+err.Error()) })
 
 	r.Host("api.example.com", func(h *Router[*tctx]) {
@@ -636,7 +613,6 @@ func TestPerHostErrorHandlers(t *testing.T) {
 		{"acme.example.com", "/boom", "<h1>acme</h1>"},
 		{"other.com", "/boom", "root: 404 Not Found"},
 
-		// A 404 on a host must reach that host's renderer too.
 		{"api.example.com", "/nope", `{"error":"404 Not Found"}`},
 		{"acme.example.com", "/nope", "<h1>acme</h1>"},
 	}
@@ -650,9 +626,6 @@ func TestPerHostErrorHandlers(t *testing.T) {
 	}
 }
 
-// TestHostParamsSurviveTheHostFreeWalk guards the host parameters against the
-// walk of the host-free trie, which appends behind them and must not write
-// over them when it matches nothing.
 func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 	build := func() *Router[*tctx] {
 		r := newTestRouter()
@@ -662,18 +635,15 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 			})
 			h.GET("/", echoHost)
 		})
-		r.GET("/{page}", echoHost) // host-free, and it carries a parameter
+		r.GET("/{page}", echoHost)
 		return r
 	}
 
-	// The host trie misses, then the host-free trie writes "nope" into the
-	// shared array while it tries /{page} and fails.
 	r := build()
 	if got := doHost(r, http.MethodGet, "acme.example.com", "/nope/deep").Body.String(); got != "404 tenant=acme" {
 		t.Errorf("body = %q, want %q", got, "404 tenant=acme")
 	}
 
-	// The trailing-slash check walks the same two tries, into the same array.
 	rs := build()
 	rs.RedirectTrailingSlash(true)
 	if got := doHost(rs, http.MethodGet, "acme.example.com", "/nope/deep/").Body.String(); got != "404 tenant=acme" {
@@ -681,11 +651,8 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 	}
 }
 
-// TestHostInheritsTheFallbackOfTheRoot covers a fallback that a scope below the
-// root sets: a host that sets none of its own still inherits it.
 func TestHostInheritsTheFallbackOfTheRoot(t *testing.T) {
 	r := newTestRouter()
-	// A Group, not the root itself, and it comes before the host scope.
 	r.Group(func(g *Router[*tctx]) {
 		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "custom 404") })
 		g.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "custom 405") })
@@ -703,8 +670,6 @@ func TestHostInheritsTheFallbackOfTheRoot(t *testing.T) {
 	}
 }
 
-// TestHostFreeRouteUsesTheRootFallbacks pins the rule that a route which
-// answers every host is rendered by the root, whatever host it arrived on.
 func TestHostFreeRouteUsesTheRootFallbacks(t *testing.T) {
 	r := newTestRouter()
 	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "root 405") })
@@ -732,7 +697,6 @@ func TestHostFreeRouteUsesTheRootFallbacks(t *testing.T) {
 		})
 	}
 
-	// RouteHost reports no host for a route that answers every host.
 	r2 := newTestRouter()
 	r2.Host("example.com", func(h *Router[*tctx]) { h.GET("/site", echoHost) })
 	r2.GET("/healthz", echoHost)
@@ -741,8 +705,6 @@ func TestHostFreeRouteUsesTheRootFallbacks(t *testing.T) {
 	}
 }
 
-// TestHostNestedScopePanicsAtRegistration keeps the nesting error with the
-// stack of the caller, instead of leaving it for the first request.
 func TestHostNestedScopePanicsAtRegistration(t *testing.T) {
 	for _, tt := range []struct {
 		name string

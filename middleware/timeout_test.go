@@ -28,8 +28,6 @@ func timeoutRouter(cfg middleware.TimeoutConfig) *router.Router[*appContext] {
 }
 
 func TestTimeout(t *testing.T) {
-	// synctest runs the deadline on a fake clock, so the test finishes at once
-	// and never depends on the speed of the machine.
 	synctest.Test(t, func(t *testing.T) {
 		r := timeoutRouter(middleware.TimeoutConfig{Duration: 20 * time.Millisecond})
 
@@ -155,8 +153,6 @@ func TestTimeoutOnTimeoutSeesTheErrorOfTheHandler(t *testing.T) {
 	})
 }
 
-// timeoutFailingRouter answers /boom with a plain server fault under a deadline
-// that never fires, and reports what the router logged for it.
 func timeoutFailingRouter() (*router.Router[*appContext], *bytes.Buffer) {
 	var buf bytes.Buffer
 	r := newRouter()
@@ -166,13 +162,6 @@ func timeoutFailingRouter() (*router.Router[*appContext], *bytes.Buffer) {
 	return r, &buf
 }
 
-// TestTimeoutKeepsAServerFaultAtErrorLevel pins the level of a 500 that has
-// nothing to do with the deadline.
-//
-// The router logs a failed request at debug level when the context of the
-// request is cancelled, because that is a client that went away rather than a
-// server fault. A middleware that leaves its own cancelled context behind
-// takes every 500 under it out of the 5xx alerts.
 func TestTimeoutKeepsAServerFaultAtErrorLevel(t *testing.T) {
 	r, buf := timeoutFailingRouter()
 
@@ -197,9 +186,6 @@ func TestTimeoutHandsTheErrorHandlerALiveContext(t *testing.T) {
 	}
 }
 
-// TestTimeoutStillReportsAClientThatWentAway is the other half of the pair: the
-// request that the middleware puts back has to carry the cancellation of the
-// server, or a client that hung up would read as a server fault.
 func TestTimeoutStillReportsAClientThatWentAway(t *testing.T) {
 	r, buf := timeoutFailingRouter()
 

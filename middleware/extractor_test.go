@@ -12,20 +12,16 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// tokenContext returns a context that holds the request, which is what a token
-// source reads. A source needs no router, so a test drives it directly.
 func tokenContext(req *http.Request) router.Context {
 	return router.NewBase(httptest.NewRecorder(), req)
 }
 
-// postForm returns a request that posts an HTML form.
 func postForm(target string, values url.Values) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(values.Encode()))
 	req.Header.Set(router.HeaderContentType, router.MIMEApplicationForm)
 	return req
 }
 
-// mustPanicContaining runs fn and reports the panic that it expects.
 func mustPanicContaining(t *testing.T, want string, fn func()) {
 	t.Helper()
 	defer func() {
@@ -68,8 +64,6 @@ func TestFromHeaderCutsTheSchemePrefix(t *testing.T) {
 			for _, v := range tt.values {
 				req.Header.Add(router.HeaderAuthorization, v)
 			}
-			// The source resolves the canonical key once, so a name in any
-			// case reaches the same header.
 			got := middleware.FromHeader("authorization", tt.prefix)(tokenContext(req))
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("tokens = %q, want %q", got, tt.want)
@@ -129,9 +123,6 @@ func TestFromCookieReadsTheCookie(t *testing.T) {
 	}
 }
 
-// formSourceRouter answers with the token that the body carries and the title
-// that the handler reads after it, which is what shows that the source left
-// the body alone.
 func formSourceRouter(maxBody int64) *router.Router[*appContext] {
 	r := newRouter()
 	if maxBody > 0 {
@@ -156,8 +147,6 @@ func TestFromFormLeavesTheBodyReadable(t *testing.T) {
 func TestFromFormReadsTheBodyAndNotTheQuery(t *testing.T) {
 	r := formSourceRouter(0)
 
-	// A token in the URL is one that any link forges, so the source reads the
-	// body alone.
 	rec := do(r, postForm("/?_csrf=forged", url.Values{"title": {"hello"}}))
 	if got := rec.Body.String(); got != "|hello" {
 		t.Errorf("answer = %q, want %q", got, "|hello")
@@ -226,11 +215,6 @@ func TestTokenSourceNilPanics(t *testing.T) {
 	})
 }
 
-// TestFromFormReadsTheMethodsThatNetHTTPParses pins the restriction that
-// FromForm inherits from net/http: [net/http.Request.ParseForm] reads a
-// urlencoded body for POST, PUT and PATCH and leaves it alone for every other
-// method, so a DELETE that carries the token in a urlencoded body hands over
-// nothing. A multipart body parses on any method, so it is unaffected.
 func TestFromFormReadsTheMethodsThatNetHTTPParses(t *testing.T) {
 	r := newRouter()
 	h := func(c *appContext) error {

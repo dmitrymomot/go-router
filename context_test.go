@@ -9,8 +9,6 @@ import (
 	"testing"
 )
 
-// newBase returns a Base bound to a GET of the target, the way the router binds
-// one before it calls a handler.
 func newBase(target string) *Base {
 	return NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
 }
@@ -42,7 +40,6 @@ func TestSchemeValidatesTheForwardedProto(t *testing.T) {
 		{"a scheme that is not one of the two", false, "javascript:alert(1)", "http"},
 		{"an injected host", false, "https://evil.example.com", "http"},
 		{"an empty first element", false, ", https", "http"},
-		// The connection is the truth, whatever the header claims.
 		{"TLS under a header that says http", true, "http", "https"},
 	}
 	for _, tc := range tests {
@@ -120,9 +117,6 @@ func TestQueryHelpersReadTheSameParse(t *testing.T) {
 		t.Errorf("QueryDefault(%q) = %q", "q", got)
 	}
 
-	// The parse is cached, which is what makes QueryValues the map that the
-	// other two read. A caller that changes it changes their answer, which is
-	// why the doc comment forbids it.
 	b.QueryValues().Set("q", "rust")
 	if got := b.Query("q"); got != "rust" {
 		t.Errorf("Query(%q) = %q after a change to QueryValues, want the cached parse", "q", got)
@@ -135,7 +129,6 @@ func TestSetRequestDropsTheParsedQuery(t *testing.T) {
 		t.Fatalf("Query(%q) = %q", "q", got)
 	}
 
-	// A middleware that rewrites the URL changes what the handler reads.
 	b.SetRequest(httptest.NewRequest(http.MethodGet, "/search?q=rust", nil))
 	if got := b.Query("q"); got != "rust" {
 		t.Errorf("Query(%q) = %q, want the value of the new request", "q", got)
@@ -143,7 +136,6 @@ func TestSetRequestDropsTheParsedQuery(t *testing.T) {
 }
 
 func TestInitDropsTheParsedQuery(t *testing.T) {
-	// A pooled context must not answer with the query of the request before it.
 	b := newBase("/search?q=go")
 	if got := b.Query("q"); got != "go" {
 		t.Fatalf("Query(%q) = %q", "q", got)
@@ -267,9 +259,6 @@ func TestNewSettingsAfterServingPanic(t *testing.T) {
 	}
 }
 
-// TestDeferredErrorsDoNotClobberEachOther guards the shared struct that holds
-// them. They were two fields on Base and now sit behind one pointer, so a
-// handler that meets both must still read both.
 func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
 	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
@@ -296,7 +285,6 @@ func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
 		t.Errorf("hxError() = %v, want the htmx failure", got)
 	}
 
-	// The htmx chain keeps its first failure.
 	b.setHXError(ErrInternalServerError.WithMessage("second"))
 	if got := b.hxError(); got.Error() != ErrInternalServerError.WithMessage("hx").Error() {
 		t.Errorf("hxError() = %v, want the first failure kept", got)
@@ -308,8 +296,6 @@ func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
 	}
 }
 
-// Every writer of a Vary header goes through AddVary, so two of them naming
-// the same header write it once and a Vary of "*" swallows the rest.
 func TestAddVarySkipsWhatTheHeaderAlreadyNames(t *testing.T) {
 	h := http.Header{}
 	AddVary(h, HeaderCookie)

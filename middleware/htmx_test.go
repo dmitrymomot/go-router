@@ -9,7 +9,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// hxGet sends a GET whose htmx headers the caller names.
 func hxGet(h http.Handler, target string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	for k, v := range headers {
@@ -18,7 +17,6 @@ func hxGet(h http.Handler, target string, headers map[string]string) *httptest.R
 	return do(h, req)
 }
 
-// redirectRouter answers /go with a 303 to /there.
 func redirectRouter(mw router.Middleware[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(mw)
@@ -80,8 +78,6 @@ func TestHTMXRedirect(t *testing.T) {
 			if got := rec.Header().Get(router.HeaderLocation); got != tc.location {
 				t.Errorf("%s = %q, want %q", router.HeaderLocation, got, tc.location)
 			}
-			// Both answers need it: a cache that stored the 200 would hand a
-			// browser navigation a blank page.
 			if got := rec.Header().Get(router.HeaderVary); got != router.HeaderHXRequest {
 				t.Errorf("%s = %q, want %q", router.HeaderVary, got, router.HeaderHXRequest)
 			}
@@ -113,14 +109,11 @@ func TestHTMXRedirectSkip(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Errorf("status = %d, want 303", rec.Code)
 	}
-	// A skipped request has one answer, so it needs no Vary either.
 	if got := rec.Header().Get(router.HeaderVary); got != "" {
 		t.Errorf("%s = %q, want no header", router.HeaderVary, got)
 	}
 }
 
-// TestHTMXRedirectLeavesEveryOtherAnswerAlone proves that the middleware only
-// rewrites a 3xx that carries a location.
 func TestHTMXRedirectLeavesEveryOtherAnswerAlone(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.HTMXRedirect[*appContext])
@@ -149,9 +142,6 @@ func TestHTMXRedirectLeavesEveryOtherAnswerAlone(t *testing.T) {
 	}
 }
 
-// TestHTMXRedirectReportsTheStatusThatWentOut proves that a logger above the
-// middleware records the 200 that reached the client, and not the 303 that the
-// handler wrote.
 func TestHTMXRedirectReportsTheStatusThatWentOut(t *testing.T) {
 	var logged int
 	watch := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
@@ -172,8 +162,6 @@ func TestHTMXRedirectReportsTheStatusThatWentOut(t *testing.T) {
 	}
 }
 
-// TestHTMXRedirectComposesWithHX proves that a handler which already asked for
-// the client-side redirect passes through untouched.
 func TestHTMXRedirectComposesWithHX(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.HTMXRedirect[*appContext])
@@ -191,9 +179,6 @@ func TestHTMXRedirectComposesWithHX(t *testing.T) {
 	}
 }
 
-// TestHTMXRedirectKeepsTheStreamFlushable proves that the writer of the
-// middleware unwraps, which is what a server-sent event stream needs to reach
-// the flusher of the server.
 func TestHTMXRedirectKeepsTheStreamFlushable(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.HTMXRedirect[*appContext])
