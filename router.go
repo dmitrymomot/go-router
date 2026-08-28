@@ -169,6 +169,11 @@ type Router[C Context] struct {
 	// the innermost scope that owns its path.
 	scopes []*scopeFallback[C]
 
+	// allowCache holds the Allow header of every node that carries routes,
+	// joined by the build. A 405 and an auto-OPTIONS answer read it rather
+	// than sorting and joining the method list again per request.
+	allowCache map[*node[C]]string
+
 	// errScopes holds the scopes above that set an error handler, in the same
 	// order. It is empty for a router that sets none, which is the one check
 	// that a failed request pays for the stage.
@@ -1023,6 +1028,14 @@ func (r *Router[C]) buildErr() error {
 	}
 
 	r.collectRoutes()
+	// Every route is in a tree now, so the Allow header of a node is fixed.
+	r.allowCache = map[*node[C]]string{}
+	r.tree.cacheAllow(r.allowCache)
+	if r.hostSet != nil {
+		for _, e := range r.hostSet.all {
+			e.tree.cacheAllow(r.allowCache)
+		}
+	}
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
 	}
@@ -1598,7 +1611,7 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 		}
 		b.setRoute(match.pattern, match.names, matched)
 		req.Pattern = match.pattern
-		b.res.Header().Set(HeaderAllow, allowHeader(&hostSt, &anySt))
+		b.res.Header().Set(HeaderAllow, r.allowHeader(&hostSt, &anySt))
 
 		_, notAllowed, options := r.fallbackChains(host, trimmed)
 		if req.Method == http.MethodOptions && r.autoOptions {
@@ -1617,7 +1630,26 @@ func (r *Router[C]) route(c C, req *http.Request) error {
 // allowHeader joins the methods that every node whose pattern matched the path
 // answers: the ones of the walk over the tree of the matched host, and the ones
 // of the walk over the tree that answers every host.
-func allowHeader[C Context](host, anyHost *matchState[C]) string {
+func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
+	// One node answered for the path, which is the usual shape, and the build
+	// joined its header already. Every other shape merges the methods of two
+	// trees or of the siblings that the walk backtracked into, so it is built
+	// here. A cache that holds nothing for the node reads as a miss and takes
+	// the same road.
+	if host.rest == nil && anyHost.rest == nil {
+		var only *node[C]
+		switch {
+		case host.pathMatch != nil && anyHost.pathMatch == nil:
+			only = host.pathMatch
+		case anyHost.pathMatch != nil && host.pathMatch == nil:
+			only = anyHost.pathMatch
+		}
+		if only != nil {
+			if s, ok := r.allowCache[only]; ok {
+				return s
+			}
+		}
+	}
 	out := host.allowedMethods(nil)
 	out = anyHost.allowedMethods(out)
 	slices.Sort(out)
