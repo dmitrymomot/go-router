@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-// tctx is the application context that the tests use.
 type tctx struct {
 	Base
 	Tag string
@@ -22,8 +21,6 @@ func newTestRouter() *Router[*tctx] {
 	return New(func(http.ResponseWriter, *http.Request) *tctx { return &tctx{Tag: "app"} })
 }
 
-// echoRoute writes the pattern and every parameter, so one assertion covers
-// both the match and the parameter values.
 func echoRoute(c *tctx) error {
 	parts := []string{c.RoutePattern()}
 	for _, n := range c.ParamNames() {
@@ -66,7 +63,7 @@ func TestMatch(t *testing.T) {
 		{"/users/new", "/users/new"},
 		{"/users/42", "/users/{id} id=42"},
 		{"/users/42/posts/7", "/users/{id}/posts/{postID} id=42 postID=7"},
-		{"/a/b/c", "/a/{x}/c x=b"}, // static "b" fails deeper, the walk backtracks
+		{"/a/b/c", "/a/{x}/c x=b"},
 		{"/a/b/d", "/a/b/d"},
 		{"/a/z/c", "/a/{x}/c x=z"},
 		{"/files/a/b/c.txt", "/files/{path...} path=a/b/c.txt"},
@@ -120,9 +117,6 @@ func TestNotFoundAndMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// TestAllowHeaderNamesExactlyTheMethodsThatAnswer checks the Allow header
-// against the router that sent it: every method it names answers the request,
-// and every method it leaves out produces the 405 that carries it.
 func TestAllowHeaderNamesExactlyTheMethodsThatAnswer(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/users", echoRoute)
@@ -151,10 +145,6 @@ func TestAllowHeaderNamesExactlyTheMethodsThatAnswer(t *testing.T) {
 	}
 }
 
-// TestASentinelRouteNeverProducesA405 pins the reason the sentinel of
-// [Router.Any] contributes nothing to the Allow header: a node that carries
-// one answers whatever arrives, so no request reaches the 405 that would have
-// to name every method.
 func TestASentinelRouteNeverProducesA405(t *testing.T) {
 	r := newTestRouter()
 	r.Any("/rpc", echoRoute)
@@ -275,7 +265,6 @@ func TestMountSameContext(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	// The prefix parameter stays readable inside the mounted router.
 	if got, want := rec.Body.String(), "/tenants/{tid}/api/users/{id} tid=acme id=7"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
@@ -346,7 +335,6 @@ func TestErrorHandling(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 
-	// A browser asks for HTML, so the same error comes back as text.
 	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
 	req.Header.Set(HeaderAccept, "text/html,application/xhtml+xml")
 	textRec := httptest.NewRecorder()
@@ -473,8 +461,6 @@ func TestPanics(t *testing.T) {
 }
 
 func TestWrapHandlerAndWrapMiddleware(t *testing.T) {
-	// A standard middleware that both replaces the request and wraps the
-	// response writer, which is the shape that exercises the adapter.
 	tagging := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			next.ServeHTTP(&prefixWriter{ResponseWriter: w, prefix: "["},
@@ -500,8 +486,6 @@ func TestWrapHandlerAndWrapMiddleware(t *testing.T) {
 
 type ctxKey string
 
-// prefixWriter writes a prefix before the first body byte, the way a standard
-// middleware wraps the writer it was handed.
 type prefixWriter struct {
 	http.ResponseWriter
 	prefix string
@@ -584,7 +568,6 @@ func TestErrorHandlerCatchesEverything(t *testing.T) {
 		})
 	}
 
-	// The panic reaches the handler with its stack in the internal cause.
 	seen = nil
 	do(r, http.MethodGet, "/panic")
 	if !strings.Contains(seen[0].msg, "panic: boom") {
@@ -661,17 +644,12 @@ func TestMountRouterDoesNotShareParameters(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	// The mounted router re-matches the stripped path, so a parameter of the
-	// prefix does not cross the seam. Use Mount and one context type when the
-	// prefix parameter has to reach the mounted routes.
 	want := `tenant="" id="7" path="/users/7"`
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
-// setHeader marks the response, so that an assertion can tell which middleware
-// chain ran around a fallback.
 func setHeader(name, value string) Middleware[*tctx] {
 	return func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
 		return func(c *tctx) error {
@@ -681,9 +659,6 @@ func setHeader(name, value string) Middleware[*tctx] {
 	}
 }
 
-// TestMatchedRouteReachesAWrappedHandler covers the labels that a standard
-// middleware reads: the pattern on the request, which keeps a tracing span out
-// of unbounded cardinality, and the parameters that PathValue answers.
 func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
 	var seen []string
 	std := func(next http.Handler) http.Handler {
@@ -714,9 +689,6 @@ func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
 	}
 }
 
-// TestRequestPatternIsSetForAFallbackToo pins the label of a request that no
-// route answered: a 405 carries the pattern whose method did not fit, and a
-// 404 carries none, because no pattern matched.
 func TestRequestPatternIsSetForAFallbackToo(t *testing.T) {
 	var pattern string
 	r := newTestRouter()
@@ -737,12 +709,6 @@ func TestRequestPatternIsSetForAFallbackToo(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// The pre-routing stage
-// ---------------------------------------------------------------------------
-
-// rewritePath is the shape of Pre middleware that the stage exists for: it
-// replaces the request, and the trie then matches the path it left behind.
 func rewritePath(from, to string) Middleware[*tctx] {
 	return func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
 		return func(c *tctx) error {
@@ -798,9 +764,6 @@ func TestPreOverridesTheMethodBeforeMatching(t *testing.T) {
 	}
 }
 
-// TestPreRunsBeforeTheRoutingMiddleware pins the order of the two stages and
-// the state that a Pre middleware sees, which is a request that nothing has
-// matched yet.
 func TestPreRunsBeforeTheRoutingMiddleware(t *testing.T) {
 	var order []string
 	r := newTestRouter()
@@ -828,8 +791,6 @@ func TestPreRunsBeforeTheRoutingMiddleware(t *testing.T) {
 	}
 }
 
-// TestPreRunsForAFallbackToo checks that the stage is not tied to a match: a
-// path that no route answers still passes through it.
 func TestPreRunsForAFallbackToo(t *testing.T) {
 	ran := 0
 	r := newTestRouter()
@@ -849,8 +810,6 @@ func TestPreRunsForAFallbackToo(t *testing.T) {
 	}
 }
 
-// TestPreErrorReachesTheErrorHandler covers a Pre middleware that answers by
-// itself, which is what an authentication gate in front of the trie does.
 func TestPreErrorReachesTheErrorHandler(t *testing.T) {
 	r := newTestRouter()
 	r.Pre(func(HandlerFunc[*tctx]) HandlerFunc[*tctx] {
@@ -867,9 +826,6 @@ func TestPreErrorReachesTheErrorHandler(t *testing.T) {
 	}
 }
 
-// TestPreDecidesWhatRedirectTrailingSlashSees documents the interaction: the
-// matcher normalizes the path that the stage left behind, so the redirect
-// points at the rewritten URL and not at the one the client sent.
 func TestPreDecidesWhatRedirectTrailingSlashSees(t *testing.T) {
 	r := newTestRouter()
 	r.RedirectTrailingSlash(true)
@@ -907,10 +863,6 @@ func TestPreRunsBeforeTheHostMatch(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Prefix-scoped fallbacks
-// ---------------------------------------------------------------------------
-
 func TestPrefixScopeAnswersItsOwnFallbacks(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
@@ -947,9 +899,6 @@ func TestPrefixScopeAnswersItsOwnFallbacks(t *testing.T) {
 	}
 }
 
-// TestPrefixScopeFallbackPicksTheInnermostScope checks the longest matching
-// prefix, and that the chain of the inner scope still carries the middleware of
-// the outer one.
 func TestPrefixScopeFallbackPicksTheInnermostScope(t *testing.T) {
 	r := newTestRouter()
 	r.Use(setHeader("X-Root", "root"))
@@ -964,7 +913,7 @@ func TestPrefixScopeFallbackPicksTheInnermostScope(t *testing.T) {
 
 	tests := []struct {
 		path string
-		want [3]string // root, api, v1
+		want [3]string
 	}{
 		{"/api/v1/typo", [3]string{"root", "api", "v1"}},
 		{"/api/typo", [3]string{"root", "api", ""}},
@@ -986,8 +935,6 @@ func TestPrefixScopeFallbackPicksTheInnermostScope(t *testing.T) {
 	}
 }
 
-// TestPrefixScopeFallbackCoversAParameterPrefix checks that a prefix with a
-// parameter in it still owns the fallbacks below it.
 func TestPrefixScopeFallbackCoversAParameterPrefix(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/t/{tenant}", func(g *Router[*tctx]) {
@@ -1003,8 +950,6 @@ func TestPrefixScopeFallbackCoversAParameterPrefix(t *testing.T) {
 	}
 }
 
-// TestPrefixScopeFallbackUsesTheHandlerOfItsHost checks that the scope
-// contributes its middleware and the host still chooses the handler.
 func TestPrefixScopeFallbackUsesTheHandlerOfItsHost(t *testing.T) {
 	r := newTestRouter()
 	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
@@ -1024,8 +969,6 @@ func TestPrefixScopeFallbackUsesTheHandlerOfItsHost(t *testing.T) {
 		t.Errorf("X-Scope = %q, want %q", got, "v1")
 	}
 
-	// The same path on a host that no scope claims keeps the root handler and
-	// runs no scope middleware, because the scope belongs to the other host.
 	rec = doHost(r, http.MethodGet, "other.example.com", "/v1/typo")
 	if got := rec.Body.String(); got != "root 404" {
 		t.Errorf("body = %q, want %q", got, "root 404")
@@ -1035,8 +978,6 @@ func TestPrefixScopeFallbackUsesTheHandlerOfItsHost(t *testing.T) {
 	}
 }
 
-// TestMountedRoutesKeepTheFallbackOfTheirPrefix covers the shim that Mount
-// opens, which carries the prefix of the mounted routes.
 func TestMountedRoutesKeepTheFallbackOfTheirPrefix(t *testing.T) {
 	sub := newTestRouter()
 	sub.GET("/users", echoRoute)
@@ -1051,10 +992,6 @@ func TestMountedRoutesKeepTheFallbackOfTheirPrefix(t *testing.T) {
 		t.Errorf("X-Scope = %q, want %q", got, "api")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Names and metadata
-// ---------------------------------------------------------------------------
 
 func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	type op struct{ Summary string }
@@ -1080,8 +1017,6 @@ func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	}
 }
 
-// TestNameAndMetaComposeInEitherOrder pins that the two describe one route
-// rather than opening a scope each.
 func TestNameAndMetaComposeInEitherOrder(t *testing.T) {
 	r := newTestRouter()
 	r.Meta("first").Name("a").GET("/a", echoRoute)
@@ -1101,8 +1036,6 @@ func TestNameAndMetaComposeInEitherOrder(t *testing.T) {
 	}
 }
 
-// TestMetaScopeCarriesEveryRouteOnIt checks that Meta, unlike Name, is not
-// spent by the first route.
 func TestMetaScopeCarriesEveryRouteOnIt(t *testing.T) {
 	g := newTestRouter()
 	tagged := g.Meta("shared")
@@ -1115,10 +1048,6 @@ func TestMetaScopeCarriesEveryRouteOnIt(t *testing.T) {
 		}
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Any, QUERY and Build
-// ---------------------------------------------------------------------------
 
 func TestAnyAnswersAMethodOutsideTheStandardSet(t *testing.T) {
 	r := newTestRouter()
@@ -1160,8 +1089,6 @@ func TestExplicitMethodBeatsAny(t *testing.T) {
 			if got := do(r, http.MethodPut, "/x").Body.String(); got != "any" {
 				t.Errorf("PUT = %q, want %q", got, "any")
 			}
-			// A route that answers every method produces no 405, so nothing
-			// claims a method that the route does not answer.
 			if rec := do(r, "PROPFIND", "/x"); rec.Code != http.StatusOK || rec.Header().Get(HeaderAllow) != "" {
 				t.Errorf("PROPFIND: status = %d, Allow = %q, want 200 and no Allow header", rec.Code, rec.Header().Get(HeaderAllow))
 			}
@@ -1169,9 +1096,6 @@ func TestExplicitMethodBeatsAny(t *testing.T) {
 	}
 }
 
-// TestAnyServesHeadFromTheGetRouteFirst pins the order of the two fallbacks:
-// the GET handler answers a HEAD before the Any entry does. A HEAD answer
-// carries no body, so the handler records which one ran.
 func TestAnyServesHeadFromTheGetRouteFirst(t *testing.T) {
 	ran := ""
 	r := newTestRouter()
@@ -1239,7 +1163,6 @@ func TestBindReadsTheQueryOfAQueryRequest(t *testing.T) {
 		return c.String(http.StatusOK, in.Term)
 	})
 
-	// A QUERY request carries a body, and Bind still reads the query string.
 	req := httptest.NewRequest(MethodQuery, "/search?term=books", strings.NewReader("term=records"))
 	req.Header.Set(HeaderContentType, MIMEApplicationForm)
 	rec := httptest.NewRecorder()
@@ -1298,8 +1221,6 @@ func TestBuildReportsWhatTheRouterWouldPanicOn(t *testing.T) {
 			case !strings.Contains(err.Error(), tc.want):
 				t.Errorf("Build() = %v, want an error that mentions %q", err, tc.want)
 			}
-			// The failure sticks, so a request cannot slip past a table that
-			// never compiled.
 			if again := r.Build(); again == nil || again.Error() != err.Error() {
 				t.Errorf("the second Build() = %v, want the first one, %v", again, err)
 			}
@@ -1314,8 +1235,6 @@ func TestBuildCompilesTheTableItself(t *testing.T) {
 	if err := r.Build(); err != nil {
 		t.Fatalf("Build() = %v", err)
 	}
-	// Build compiled the trie, so the router refuses a later route the way the
-	// first request does.
 	defer func() {
 		if rec := recover(); rec == nil {
 			t.Error("no panic, want one that refuses a route after the router compiled")
@@ -1341,11 +1260,6 @@ func TestServeHTTPPanicsOnATableThatBuildRejects(t *testing.T) {
 	do(r, http.MethodGet, "/a")
 }
 
-// ---------------------------------------------------------------------------
-// The observer
-// ---------------------------------------------------------------------------
-
-// record is one call of the observer.
 type record struct {
 	route  string
 	status int
@@ -1393,8 +1307,6 @@ func TestObserveReportsEveryRequest(t *testing.T) {
 			if len(*got) != 1 {
 				t.Fatalf("the observer ran %d times, want 1", len(*got))
 			}
-			// The record describes the answer that the client read, so it is
-			// checked against the recorder rather than against a literal.
 			g := (*got)[0]
 			if g.route != tc.wantRoute {
 				t.Errorf("route = %q, want %q", g.route, tc.wantRoute)
@@ -1415,8 +1327,6 @@ func TestObserveReportsEveryRequest(t *testing.T) {
 	}
 }
 
-// TestObserveReportsTheStatusTheClientSaw covers the half that ResolveStatus
-// answers from the response rather than from the error.
 func TestObserveReportsTheStatusTheClientSaw(t *testing.T) {
 	r, got := observedRouter(t)
 	r.GET("/late", func(c *tctx) error {
@@ -1449,8 +1359,6 @@ func TestObserveMeasuresTheRequest(t *testing.T) {
 	}
 }
 
-// TestObservePoolsTheContextAfterItReads checks that the seam does not hand a
-// context back to the pool before the observer has read it.
 func TestObservePoolsTheContextAfterItReads(t *testing.T) {
 	var got []string
 	r := NewPooled(func() *tctx { return new(tctx) }, func(c *tctx) { c.Tag = "" })
@@ -1543,9 +1451,6 @@ func TestRegistrationPanics(t *testing.T) {
 	}
 }
 
-// TestObserveReportsARequestThatThePreStageAnswered covers the two stages
-// together: the observer measures the whole request, including the middleware
-// that ran in front of the matcher.
 func TestObserveReportsARequestThatThePreStageAnswered(t *testing.T) {
 	r, got := observedRouter(t)
 	r.Pre(rewritePath("/old/", "/new/"))
@@ -1573,10 +1478,6 @@ func TestObserveReportsARequestThatThePreStageAnswered(t *testing.T) {
 	}
 }
 
-// TestScopeFallbacksAnswerTheirScopeAlone pins the fallbacks of a path scope to
-// the paths of that scope. They used to be written into the slots of the root,
-// so the last scope registered answered every miss of the router and the
-// handler of the root was lost.
 func TestScopeFallbacksAnswerTheirScopeAlone(t *testing.T) {
 	text := func(status int, body string) HandlerFunc[*tctx] {
 		return func(c *tctx) error { return c.String(status, body) }
@@ -1618,9 +1519,6 @@ func TestScopeFallbacksAnswerTheirScopeAlone(t *testing.T) {
 	}
 }
 
-// TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone is the same defect in
-// the shape that needs no second scope: one scope handler used to escape to
-// every path of the router.
 func TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
@@ -1637,9 +1535,6 @@ func TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone(t *testing.T) {
 	}
 }
 
-// TestAScopeFallbackReachesTheScopesBelowIt pins that a scope inside another
-// one inherits the fallback of the scope that encloses it, rather than falling
-// straight back to the root.
 func TestAScopeFallbackReachesTheScopesBelowIt(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
@@ -1652,10 +1547,6 @@ func TestAScopeFallbackReachesTheScopesBelowIt(t *testing.T) {
 	}
 }
 
-// TestScopeErrorHandlerAnswersItsScopeAlone pins the error handler of a path
-// scope to that scope. It used to replace the one of the root, so a handler
-// that a debug branch installed rendered the failures of every route, and the
-// internal cause of an unrelated request reached the client with it.
 func TestScopeErrorHandlerAnswersItsScopeAlone(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/debug", func(g *Router[*tctx]) {
@@ -1676,10 +1567,6 @@ func TestScopeErrorHandlerAnswersItsScopeAlone(t *testing.T) {
 	}
 }
 
-// TestRedirectTrailingSlashNeverPointsAtAnotherHost covers the open redirect
-// that a path of "//evil.com/" produced: a Location that begins with "//" is a
-// network-path reference, which a browser resolves against the current scheme
-// and follows to another origin.
 func TestRedirectTrailingSlashNeverPointsAtAnotherHost(t *testing.T) {
 	r := newTestRouter()
 	r.RedirectTrailingSlash(true)
@@ -1698,10 +1585,6 @@ func TestRedirectTrailingSlashNeverPointsAtAnotherHost(t *testing.T) {
 	}
 }
 
-// TestAllowHeaderNamesTheMethodsOfEveryMatchingRoute covers the methods that
-// backtracking would have served. A literal sibling used to hide the catch-all
-// or the parameter route underneath it, so the header left out methods that
-// the router answers, and a CORS preflight blocked a request that returns 200.
 func TestAllowHeaderNamesTheMethodsOfEveryMatchingRoute(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1748,10 +1631,6 @@ func TestAllowHeaderNamesTheMethodsOfEveryMatchingRoute(t *testing.T) {
 	}
 }
 
-// TestAMountedRouterKeepsTheFallbacksOfTheRoot pins the documented rule that
-// the root supplies the fallbacks of a mounted router. The defaults that New
-// left on the mounted router used to be written over the ones the application
-// chose, so mounting silently replaced them.
 func TestAMountedRouterKeepsTheFallbacksOfTheRoot(t *testing.T) {
 	sub := newTestRouter()
 	sub.GET("/users", echoRoute)
@@ -1774,9 +1653,6 @@ func TestAMountedRouterKeepsTheFallbacksOfTheRoot(t *testing.T) {
 	}
 }
 
-// TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix covers the scope that
-// carries no prefix of its own: its fallback answers the prefix it sits under,
-// and no path outside it.
 func TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
@@ -1795,8 +1671,6 @@ func TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix(t *testing.T) {
 	}
 }
 
-// TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone pins that a path scope
-// of one host does not render the failures of another host.
 func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
 	boom := func(*tctx) error { return errors.New("boom") }
 
@@ -1833,10 +1707,6 @@ func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
 	}
 }
 
-// A route that Name, Meta or With registered is a route of the scope that
-// opened them, so Use on that scope refuses to arrive after it. The router
-// resolves the middleware of a scope when it compiles, so a Use that slipped
-// through would have wrapped the route above it.
 func TestUseAfterATaggedRoutePanics(t *testing.T) {
 	register := map[string]func(*Router[*tctx]){
 		"Name":  func(r *Router[*tctx]) { r.Name("u").GET("/u", echoRoute) },
@@ -1858,8 +1728,6 @@ func TestUseAfterATaggedRoutePanics(t *testing.T) {
 	}
 }
 
-// A Group is a scope of its own, so the scope that opened it still takes
-// middleware afterwards.
 func TestUseAfterAGroupIsAllowed(t *testing.T) {
 	r := newTestRouter()
 	r.Group(func(g *Router[*tctx]) { g.GET("/a", echoRoute) })

@@ -16,8 +16,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// csrfRouter answers a safe and an unsafe request on the same path with the
-// token that the middleware issued.
 func csrfRouter(cfg middleware.CSRFConfig) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.CSRFWithConfig[*appContext](cfg))
@@ -29,7 +27,6 @@ func csrfRouter(cfg middleware.CSRFConfig) *router.Router[*appContext] {
 	return r
 }
 
-// csrfCookie returns the token cookie that the answer set.
 func csrfCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	for _, c := range rec.Result().Cookies() {
@@ -41,8 +38,6 @@ func csrfCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	return nil
 }
 
-// csrfSession returns the token that a safe request issued and the cookie that
-// carries it, which is the pair that a form sends back.
 func csrfSession(t *testing.T, r http.Handler) (string, *http.Cookie) {
 	t.Helper()
 	rec := get(r, "/")
@@ -52,7 +47,6 @@ func csrfSession(t *testing.T, r http.Handler) (string, *http.Cookie) {
 	return rec.Body.String(), csrfCookie(t, rec)
 }
 
-// withCookie attaches a cookie to a request.
 func withCookie(req *http.Request, c *http.Cookie) *http.Request {
 	req.AddCookie(c)
 	return req
@@ -73,8 +67,6 @@ func TestCSRFIssuesATokenOnASafeRequest(t *testing.T) {
 		t.Errorf("cookie = %q, want the token that the handler read", got)
 	}
 
-	// A shared cache that keyed on the URL alone would hand one user the token
-	// of another.
 	if got := rec.Header().Values(router.HeaderVary); !containsFold(got, router.HeaderCookie) {
 		t.Errorf("vary = %q, want it to name Cookie", got)
 	}
@@ -91,8 +83,6 @@ func TestCSRFIssuesATokenOnASafeRequest(t *testing.T) {
 func TestCSRFTokensDiffer(t *testing.T) {
 	r := csrfRouter(middleware.CSRFConfig{})
 
-	// A token that a clock orders, such as a UUID version 7, would hand an
-	// attacker most of the next one.
 	seen := make(map[string]bool, 64)
 	for range 64 {
 		token := get(r, "/").Body.String()
@@ -131,8 +121,6 @@ func TestCSRFSafeMethodsSkipValidation(t *testing.T) {
 		{http.MethodGet, http.StatusOK},
 		{http.MethodHead, http.StatusOK},
 		{http.MethodTrace, http.StatusOK},
-		// No route answers OPTIONS, so the automatic answer of the router does,
-		// and the middleware must not stand in its way.
 		{http.MethodOptions, http.StatusNoContent},
 		{http.MethodPost, http.StatusForbidden},
 	}
@@ -165,8 +153,6 @@ func TestCSRFAcceptsTheTokenFromTheForm(t *testing.T) {
 		return c.String(http.StatusOK, middleware.CSRFTokenFrom(c))
 	})
 	r.POST("/", func(c *appContext) error {
-		// The middleware parsed the body to find the token, and the handler
-		// still reads the same form.
 		return c.String(http.StatusOK, c.FormValue("title"))
 	})
 	token, cookie := csrfSession(t, r)
@@ -218,8 +204,6 @@ func TestCSRFRefusesAnUnsafeRequest(t *testing.T) {
 			},
 		},
 		{
-			// A page on a sibling domain sets a second cookie of the name, so
-			// that it picks the token that it then submits.
 			name: "two cookies of the name",
 			request: func() *http.Request {
 				req := withCookie(httptest.NewRequest(http.MethodPost, "/", nil), cookie)
@@ -251,11 +235,8 @@ func TestCSRFSecFetchSiteDecidesFirst(t *testing.T) {
 	}{
 		{"the site asked itself", "same-origin", false, http.StatusOK},
 		{"the user asked", "none", false, http.StatusOK},
-		// The metadata comes first, so a token cannot rescue a request that
-		// another site made the browser send.
 		{"another site asked", "cross-site", true, http.StatusForbidden},
 		{"a sibling subdomain asked", "same-site", true, http.StatusForbidden},
-		// A client that sends no such header falls back to the token.
 		{"no metadata and a token", "", true, http.StatusOK},
 		{"no metadata and no token", "", false, http.StatusForbidden},
 	}
@@ -360,7 +341,6 @@ func TestCSRFAllowSecFetchSiteOfItsOwn(t *testing.T) {
 		})
 		token, cookie := csrfSession(t, r)
 
-		// The hook refused, so the token never gets a say.
 		req := withCookie(httptest.NewRequest(http.MethodPost, "/", nil), cookie)
 		req.Header.Set(router.HeaderXCSRFToken, token)
 		if rec := do(r, req); rec.Code != http.StatusTooManyRequests {
@@ -424,8 +404,6 @@ func TestCSRFCookieAttributes(t *testing.T) {
 	})
 
 	t.Run("SameSite None forces Secure", func(t *testing.T) {
-		// A browser drops a SameSite=None cookie that is not secure, and a
-		// token that never arrives refuses every request after it.
 		cookie := csrfCookie(t, get(csrfRouter(middleware.CSRFConfig{
 			CookieSameSite: http.SameSiteNoneMode,
 		}), "/"))
@@ -455,8 +433,6 @@ func TestCSRFTokenReachesAComponent(t *testing.T) {
 	r.GET("/", func(c *appContext) error {
 		return c.Render(http.StatusOK, router.ComponentFunc(
 			func(ctx context.Context, w io.Writer) error {
-				// A template reads the request state and not the application
-				// context, which is the path that templ takes.
 				b, ok := router.FromContext(ctx)
 				if !ok {
 					return errors.New("the component received no request state")
@@ -492,8 +468,6 @@ func TestCSRFSkip(t *testing.T) {
 	}
 }
 
-// containsFold reports whether any of the values names want, which is how a
-// Vary header reads whether it arrives as one line or several.
 func containsFold(values []string, want string) bool {
 	for _, v := range values {
 		for part := range strings.SplitSeq(v, ",") {

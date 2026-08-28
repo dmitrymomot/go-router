@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-// hxDo sends a request whose headers the caller sets, which is how a test says
-// that htmx made it.
 func hxDo(h http.Handler, method, target string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, nil)
 	for k, v := range headers {
@@ -20,8 +18,6 @@ func hxDo(h http.Handler, method, target string, headers map[string]string) *htt
 	return rec
 }
 
-// htmxHeaders are the request headers of an htmx request that carries every
-// field.
 var htmxHeaders = map[string]string{
 	HeaderHXRequest:               "true",
 	HeaderHXBoosted:               "true",
@@ -103,9 +99,6 @@ func TestIsHTMXIgnoresCase(t *testing.T) {
 	}
 }
 
-// TestHTMXRequestSpelling proves that the constants are already in the form
-// that net/http canonicalises to, so a lookup finds a header that a client
-// spelled the way the htmx documentation does.
 func TestHTMXRequestSpelling(t *testing.T) {
 	for _, name := range []string{
 		HeaderHXRequest, HeaderHXBoosted, HeaderHXCurrentURL,
@@ -178,7 +171,7 @@ func TestVary(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
 		c.Vary(HeaderHXRequest, "")
-		c.Vary("hx-request") // the same name, in another case
+		c.Vary("hx-request")
 		c.Vary(HeaderAccept)
 		return c.NoContent(http.StatusOK)
 	})
@@ -374,8 +367,6 @@ func TestHXRejectsALineBreakInAHeader(t *testing.T) {
 	}
 }
 
-// TestHXKeepsTheFirstFailure proves that a chain reports the failure that
-// stopped it, and not one that a later call would have produced.
 func TestHXKeepsTheFirstFailure(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
@@ -546,8 +537,6 @@ func TestHXBodyMethods(t *testing.T) {
 	}
 }
 
-// TestHXBodyMethodsReportAFailedChain proves that every method which ends a
-// chain reports the failure instead of writing a body.
 func TestHXBodyMethodsReportAFailedChain(t *testing.T) {
 	bad := func(c *tctx) HXResponse { return c.HX().Retarget("a\nb") }
 
@@ -643,8 +632,6 @@ func TestHXRedirectRejectsALineBreakInTheURL(t *testing.T) {
 	}
 }
 
-// TestHXRejectsInvalidUTF8 proves that the JSON encoder, which refuses text
-// that is not valid UTF-8, reports through the chain like any other failure.
 func TestHXRejectsInvalidUTF8(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/trigger", func(c *tctx) error {
@@ -664,14 +651,11 @@ func TestHXRejectsInvalidUTF8(t *testing.T) {
 	}
 }
 
-// TestHXReportsAFailureOfADroppedLink proves that the failure belongs to the
-// request and not to the value, so a handler that drops one link of the chain
-// still reports it instead of answering as though the header went out.
 func TestHXReportsAFailureOfADroppedLink(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
 		hx := c.HX()
-		hx.Retarget("bad\nvalue") // the returned chain is dropped
+		hx.Retarget("bad\nvalue")
 		return hx.Render(http.StatusOK, comp("x"))
 	})
 
@@ -684,10 +668,6 @@ func TestHXReportsAFailureOfADroppedLink(t *testing.T) {
 	}
 }
 
-// TestHXTriggerRejectsARepeatedName proves that the header never carries the
-// same event twice: the JSON form would hold a duplicate object member, which
-// encoding/json/v2 refuses to read and which a browser resolves by keeping the
-// last one, so the earlier event would vanish.
 func TestHXTriggerRejectsARepeatedName(t *testing.T) {
 	ends := map[string]func(c *tctx) error{
 		"Trigger": func(c *tctx) error {

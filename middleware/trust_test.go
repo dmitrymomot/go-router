@@ -25,8 +25,6 @@ func TestTrustSetDefaults(t *testing.T) {
 		{"203.0.113.7", false},
 		{"2001:db8::1", false},
 		{"8.8.8.8", false},
-		// An IPv4 address that reached an IPv6 listener reads the same as the
-		// address it holds.
 		{"::ffff:10.0.0.1", true},
 		{"::ffff:203.0.113.7", false},
 	}
@@ -91,8 +89,6 @@ func TestTrustSetPrefixAddsARange(t *testing.T) {
 	}
 }
 
-// TestTrustSetPrefixTakesAnUnmaskedPrefix pins that a prefix whose address
-// carries bits below the mask still names the range it meant.
 func TestTrustSetPrefixTakesAnUnmaskedPrefix(t *testing.T) {
 	set := middleware.NewTrustSet(middleware.TrustPrefix(netip.MustParsePrefix("203.0.113.42/24")))
 	if !set.Trusted(netip.MustParseAddr("203.0.113.7")) {
@@ -100,8 +96,6 @@ func TestTrustSetPrefixTakesAnUnmaskedPrefix(t *testing.T) {
 	}
 }
 
-// TestTrustSetIgnoresAZone pins that a link-local address that names its
-// interface still matches a prefix, which carries no zone of its own.
 func TestTrustSetIgnoresAZone(t *testing.T) {
 	set := middleware.NewTrustSet(
 		middleware.TrustLinkLocal(false),

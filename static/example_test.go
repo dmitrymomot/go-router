@@ -12,21 +12,12 @@ import (
 	"github.com/dmitrymomot/go-router/static"
 )
 
-// dist stands in for the embedded build output. A real program writes
-//
-//	//go:embed all:dist
-//	var dist embed.FS
-//
-// and passes Root "dist", because //go:embed keeps the directory name in every
-// path.
 var dist = fstest.MapFS{
 	"index.html":  {Data: []byte("<h1>app</h1>")},
 	"css/app.css": {Data: []byte("body{}")},
 }
 
 func Example() {
-	// Build is normally empty, so that New derives it from the content. This
-	// example pins it to keep the output stable.
 	assets := static.Must(static.Config{FS: dist, Prefix: "/static", Build: "v1"})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *appContext {

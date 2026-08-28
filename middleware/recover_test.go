@@ -10,8 +10,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// recoverRouter catches the error that the middleware built, which is where
-// the stack of the panic lives.
 func recoverRouter(cfg middleware.RecoverConfig, caught **router.PanicValue) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.RecoverWithConfig[*appContext](cfg))
@@ -112,7 +110,6 @@ func TestRecoverSkip(t *testing.T) {
 	r.Use(middleware.RecoverWithConfig[*appContext](middleware.RecoverConfig{Skip: skipPath("/boom")}))
 	r.GET("/boom", func(*appContext) error { panic("handler exploded") })
 
-	// The router still catches the panic that this middleware passed over.
 	rec := get(r, "/boom")
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)

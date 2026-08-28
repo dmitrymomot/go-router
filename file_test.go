@@ -13,17 +13,12 @@ import (
 	"time"
 )
 
-// doReq serves one prepared request, which is what a test needs when the
-// request carries a header.
 func doReq(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
 }
 
-// serveDir writes the named files into a fresh directory and makes it the
-// working directory for the rest of the test, because that is the root that
-// [Base.File] opens.
 func serveDir(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -45,7 +40,6 @@ func writeFiles(t *testing.T, dir string, files map[string]string) {
 	}
 }
 
-// fileRouter serves one route that hands name to File.
 func fileRouter(name string) *Router[*tctx] {
 	r := newTestRouter()
 	r.GET("/f", func(c *tctx) error { return c.File(name) })
@@ -76,8 +70,6 @@ func TestFileServesTheContent(t *testing.T) {
 	}
 }
 
-// A download that lost the connection resumes, because the answer goes out
-// through http.ServeContent.
 func TestFileAnswersARangeRequest(t *testing.T) {
 	serveDir(t, map[string]string{"readme.txt": "hello file"})
 
@@ -127,8 +119,6 @@ func TestFileHEADWritesTheLengthOnly(t *testing.T) {
 	}
 }
 
-// A name that leaves the working directory answers the same 404 as a name that
-// nothing holds, so the client learns nothing about the disk from either.
 func TestFileNameOutsideTheRootAnswersNotFound(t *testing.T) {
 	captureLogs(t)
 
@@ -166,9 +156,6 @@ func TestFileNameOutsideTheRootAnswersNotFound(t *testing.T) {
 	}
 }
 
-// os.Root refuses a symbolic link that points out of the directory, which a
-// cleaned path alone does not catch. The reason stays server-side: the client
-// reads the standard text of the status, and the log carries the rest.
 func TestFileSymlinkOutOfTheRootAnswersNotFound(t *testing.T) {
 	logs := captureLogs(t)
 
@@ -220,8 +207,6 @@ func TestFileFS(t *testing.T) {
 	if got := do(r, http.MethodGet, "/miss").Code; got != http.StatusNotFound {
 		t.Errorf("a missing file answers %d, want 404", got)
 	}
-	// The ".." never reaches the file system, so the name resolves inside the
-	// tree and answers 404 like any other file that it does not hold.
 	if got := do(r, http.MethodGet, "/escape").Code; got != http.StatusNotFound {
 		t.Errorf("a name that tries to leave the tree answers %d, want 404", got)
 	}
@@ -232,8 +217,6 @@ func TestFileFS(t *testing.T) {
 	}
 }
 
-// plainFS opens files that carry no Seek method, which a file system outside
-// this module is free to do. The answer then goes out of a buffer.
 type plainFS struct {
 	files   map[string]string
 	failing bool
@@ -284,7 +267,6 @@ func TestFileFSReadsAFileThatCannotSeek(t *testing.T) {
 	req.Header.Set("Range", "bytes=4-8")
 	rec := doReq(r, req)
 
-	// The buffer is a reader that seeks, so the range still answers.
 	if rec.Code != http.StatusPartialContent {
 		t.Fatalf("status = %d, want 206", rec.Code)
 	}
@@ -293,8 +275,6 @@ func TestFileFSReadsAFileThatCannotSeek(t *testing.T) {
 	}
 }
 
-// A file that fails to read answers 500 with no part of it on the wire, because
-// the read comes before the headers.
 func TestFileFSUnreadableFileWritesNoBody(t *testing.T) {
 	captureLogs(t)
 
@@ -359,8 +339,6 @@ func TestInlineFile(t *testing.T) {
 	}
 }
 
-// A 404 that carries a Content-Disposition makes the browser save the error
-// page, so the header waits until the file is open.
 func TestAttachmentFileMissWritesNoDisposition(t *testing.T) {
 	serveDir(t, map[string]string{"exports/report.csv": "a,b\n"})
 
@@ -429,8 +407,6 @@ func TestAttachmentWritesTheDisposition(t *testing.T) {
 	}
 }
 
-// The header is a quoted-string with an optional RFC 5987 twin, and a name that
-// a request supplied never breaks out of either.
 func TestContentDisposition(t *testing.T) {
 	tests := []struct {
 		name     string

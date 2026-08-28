@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// namedRouter registers one named route per pattern shape that [Router.URL]
-// has to fill in.
 func namedRouter() *Router[*tctx] {
 	r := newTestRouter()
 	r.Name("home").GET("/", echoRoute)
@@ -60,8 +58,6 @@ func TestURLFillsInEveryPatternShape(t *testing.T) {
 	}
 }
 
-// TestURLBuildsAPathThatRoutesBack is the property that makes the builder
-// worth having: whatever it returns reaches the route it was built from.
 func TestURLBuildsAPathThatRoutesBack(t *testing.T) {
 	r := namedRouter()
 
@@ -164,8 +160,6 @@ func TestMustURLPanicsOnAMistake(t *testing.T) {
 	}
 }
 
-// TestURLReportsABrokenRouteTable checks that URL surfaces a build failure
-// rather than reporting the name as unknown.
 func TestURLReportsABrokenRouteTable(t *testing.T) {
 	r := newTestRouter()
 	r.Name("dup").GET("/a", echoRoute)
@@ -176,9 +170,6 @@ func TestURLReportsABrokenRouteTable(t *testing.T) {
 	}
 }
 
-// TestNamedRouteOfAHostScopeResolvesToItsPath pins that a name inside a host
-// scope builds the path alone, because the host pattern carries parameters of
-// its own.
 func TestNamedRouteOfAHostScopeResolvesToItsPath(t *testing.T) {
 	r := newTestRouter()
 	r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *Router[*tctx]) {
@@ -224,10 +215,6 @@ func TestParseURLTemplateCutsAPattern(t *testing.T) {
 	}
 }
 
-// TestURLRefusesAValueThatReadsBackAsAnotherOne covers the link that points at
-// a different resource than the one the caller named. The builder writes a
-// value with url.PathEscape, which leaves the separators of a template segment
-// alone, and the matcher then splits the segment somewhere else.
 func TestURLRefusesAValueThatReadsBackAsAnotherOne(t *testing.T) {
 	r := newTestRouter()
 	r.Name("rep").GET("/r/{env}-{name}", echoRoute)
@@ -252,9 +239,6 @@ func TestURLRefusesAValueThatReadsBackAsAnotherOne(t *testing.T) {
 	}
 }
 
-// TestURLRefusesAValueThePatternRejects covers the one mistake that a pattern
-// can detect on its own: a value that its regular expression does not accept
-// used to build a path that answers 404.
 func TestURLRefusesAValueThePatternRejects(t *testing.T) {
 	r := namedRouter()
 	r.Name("tmpl").GET("/reports/rep-{date:[0-9]{8}}.csv", echoRoute)
@@ -277,10 +261,6 @@ func TestURLRefusesAValueThePatternRejects(t *testing.T) {
 	}
 }
 
-// TestURLBuildsAPathThatRoutesBackForEveryShape is the round trip that the
-// builder promises, over the shapes whose values carry a separator of their
-// own segment. Whatever URL returns either reaches the route it was built from
-// with the values it was given, or reports an error.
 func TestURLBuildsAPathThatRoutesBackForEveryShape(t *testing.T) {
 	r := newTestRouter()
 	r.Name("rep").GET("/r/{env}-{name}", echoRoute)

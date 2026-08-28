@@ -14,10 +14,8 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// gzipLongBody is longer than the default MinLength, so it compresses.
 var gzipLongBody = strings.Repeat("<p>the quick brown fox</p>", 100)
 
-// gzipRouter answers the routes that the compression tests read.
 func gzipRouter(cfg middleware.GzipConfig) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.GzipWithConfig[*appContext](cfg))
@@ -51,7 +49,6 @@ func gzipRouter(cfg middleware.GzipConfig) *router.Router[*appContext] {
 	return r
 }
 
-// gzipGet asks for target with an Accept-Encoding header of its own.
 func gzipGet(h http.Handler, target, accept string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	if accept != "" {
@@ -60,7 +57,6 @@ func gzipGet(h http.Handler, target, accept string) *httptest.ResponseRecorder {
 	return do(h, req)
 }
 
-// ungzip returns the body that the recorder holds, expanded.
 func ungzip(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	zr, err := gzip.NewReader(bytes.NewReader(rec.Body.Bytes()))
@@ -172,21 +168,11 @@ func TestGzipPassesAnEventStreamThrough(t *testing.T) {
 	}
 }
 
-// TestGzipDeliversEachEventAsItIsSent reads what the client holds while the
-// stream is still open, which is the half that the body of a finished response
-// cannot show.
-//
-// A wrapper that buffered the stream would answer every one of those reads
-// with an empty body and still leave the right bytes behind at the end, so a
-// stream of events that only arrives when the handler returns passes the test
-// above and reaches nobody in time.
 func TestGzipDeliversEachEventAsItIsSent(t *testing.T) {
 	sent := []string{"one", "two", "three"}
 
 	w := &flushWatcher{ResponseRecorder: httptest.NewRecorder()}
 	r := newRouter()
-	// A MinLength of 1 asks the wrapper to compress whatever it may, so the
-	// stream passes through on its media type alone.
 	r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
 	r.GET("/events", func(c *appContext) error {
 		s, err := c.SSE(http.StatusOK)
@@ -219,13 +205,11 @@ func TestGzipDeliversEachEventAsItIsSent(t *testing.T) {
 	}
 }
 
-// flushWatcher records what the client holds at each flush.
 type flushWatcher struct {
 	*httptest.ResponseRecorder
 	flushed []int
 }
 
-// Flush implements [http.Flusher].
 func (w *flushWatcher) Flush() { w.flushed = append(w.flushed, w.Body.Len()) }
 
 func TestGzipFlushReachesTheClientBeforeTheBodyEnds(t *testing.T) {
@@ -266,7 +250,6 @@ func TestGzipFlushBeforeTheFirstWriteReachesTheClient(t *testing.T) {
 	r.GET("/early", func(c *appContext) error {
 		res := c.Response()
 		res.WriteHeader(http.StatusOK)
-		// A page that sends its headers first, the way a slow render does.
 		res.Flush()
 		_, err := res.Write([]byte(gzipLongBody))
 		return err
@@ -378,8 +361,6 @@ func TestGzipLeavesAnUnfinishedStreamAfterAPanic(t *testing.T) {
 	rec := gzipGet(r, "/boom", "gzip")
 	zr, err := gzip.NewReader(bytes.NewReader(rec.Body.Bytes()))
 	if err != nil {
-		// Nothing but the gzip header reached the client, which says the same
-		// thing: the stream never ended.
 		return
 	}
 	if _, err := io.ReadAll(zr); err == nil {
@@ -416,8 +397,6 @@ func TestGzipPlainFormCompresses(t *testing.T) {
 }
 
 func TestGzipServesARealConnection(t *testing.T) {
-	// A recorder keeps no framing, so only a real server reports a
-	// Content-Length that no longer describes the body.
 	srv := httptest.NewServer(gzipRouter(middleware.GzipConfig{}))
 	defer srv.Close()
 
@@ -465,9 +444,6 @@ func TestGzipSkip(t *testing.T) {
 	}
 }
 
-// gzipFlushRouter answers one route whose handler flushes before it writes a
-// byte and never names a status of its own, which is the shape that leaves the
-// wrapper to answer the header on its own.
 func gzipFlushRouter(t *testing.T, cfg middleware.GzipConfig, h router.HandlerFunc[*appContext]) *flushWatcher {
 	t.Helper()
 	r := newRouter()
@@ -509,8 +485,6 @@ func TestGzipFlushWithoutAStatusCommitsTheResponse(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200: the flush answered the header already", w.Code)
 	}
-	// The stream is committed and compressed, so the error handler has no body
-	// to add. One that added it would append plain bytes past the gzip trailer.
 	if body := ungzip(t, w.ResponseRecorder); body != "" {
 		t.Errorf("body = %q, want none", body)
 	}
@@ -533,8 +507,6 @@ func TestGzipFlushWithoutAStatusLeavesAnEventStreamAlone(t *testing.T) {
 	}
 }
 
-// statusRecorder records every status line rather than the first, which is
-// what names a wrapper that wrote a second one.
 type statusRecorder struct {
 	http.ResponseWriter
 	codes []int
@@ -546,10 +518,6 @@ func (s *statusRecorder) Write(p []byte) (int, error) { return len(p), nil }
 
 func (s *statusRecorder) Flush() {}
 
-// TestGzipCommitsASwitchingProtocols pins that a 101 settles the response here
-// as it does in [router.Response]. It is the answer to the request and nothing
-// compressible follows it, so it goes out once and the connection it hands
-// over carries the bytes of the upgraded protocol, not a gzip member.
 func TestGzipCommitsASwitchingProtocols(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -15,15 +15,11 @@ import (
 	"time"
 )
 
-// A WebSocket library asserts these interfaces against the response writer that
-// it receives, so the wrapper has to satisfy them.
 var (
 	_ http.Hijacker = (*Response)(nil)
 	_ http.Flusher  = (*Response)(nil)
 )
 
-// statusWriter records every status that reaches the writer underneath, which
-// is what tells a header that went out once from one that went out twice.
 type statusWriter struct {
 	http.ResponseWriter
 	codes []int
@@ -34,7 +30,6 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// recordSink collects the records that a logger handles.
 type recordSink struct {
 	slog.Handler
 	records []slog.Record
@@ -47,7 +42,6 @@ func (h *recordSink) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-// intAttr returns the named integer attribute of a record.
 func intAttr(r slog.Record, key string) (int64, bool) {
 	var (
 		v  int64
@@ -63,7 +57,6 @@ func intAttr(r slog.Record, key string) (int64, bool) {
 	return v, ok
 }
 
-// captureLogs sends the default logger to a sink for the rest of the test.
 func captureLogs(t *testing.T) *recordSink {
 	t.Helper()
 	sink := &recordSink{Handler: slog.Default().Handler()}
@@ -130,8 +123,6 @@ func TestWriteHeaderDropsASecondStatusAndLogsIt(t *testing.T) {
 }
 
 func TestWriteHeaderKeepsAnInformationalStatusOutOfTheAnswer(t *testing.T) {
-	// The handler reports what the wrapper recorded, so the test reads it
-	// without racing the server goroutine.
 	type answer struct {
 		status    int
 		committed bool
@@ -202,7 +193,6 @@ func TestWriteHeaderKeepsAnInformationalStatusOutOfTheAnswer(t *testing.T) {
 func TestHijackTakesOverTheConnection(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
-		// A WebSocket library reaches the connection this way.
 		hj, ok := c.ResponseWriter().(http.Hijacker)
 		if !ok {
 			return ErrInternalServerError.WithMessage("the response writer is no http.Hijacker")
@@ -248,16 +238,12 @@ func TestHijackReportsAWriterThatCannotDoIt(t *testing.T) {
 	}
 }
 
-// wrapWriter is the shape of a wrapper that a handler puts around the response:
-// it forwards everything and names the writer underneath through Unwrap.
 type wrapWriter struct {
 	http.ResponseWriter
 }
 
 func (w *wrapWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// loopWriter unwraps to itself, which is the cycle that a bounded walk has to
-// survive.
 type loopWriter struct {
 	http.ResponseWriter
 }
@@ -302,7 +288,6 @@ func TestUnwrapResponseReadsTheStatusAndTheSize(t *testing.T) {
 	//nolint:errcheck // The recorder never fails.
 	res.WriteString("body")
 
-	// A gzip or an ETag wrapper of the application reads the two fields here.
 	var w http.ResponseWriter = &wrapWriter{res}
 	got, ok := UnwrapResponse(w)
 	if !ok {
@@ -313,12 +298,6 @@ func TestUnwrapResponseReadsTheStatusAndTheSize(t *testing.T) {
 	}
 }
 
-// TestWriteHeaderCommitsASwitchingProtocols pins that 101 is a final status
-// and not an informational one. net/http records it as the answer and sends no
-// header after it, which is what a WebSocket library relies on when it writes
-// the status and then hijacks the connection. A wrapper that passed it through
-// left Status and Committed unset, so every upgrade was logged as a 200 and the
-// error path ran over a connection that had already switched protocols.
 func TestWriteHeaderCommitsASwitchingProtocols(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
@@ -338,9 +317,6 @@ func TestWriteHeaderCommitsASwitchingProtocols(t *testing.T) {
 	}
 }
 
-// TestObserveReportsAnUpgradeAsAnUpgrade is the same defect one layer up: the
-// observer, the logger middleware and [ResolveStatus] all read the status off
-// the response, so an upgrade that recorded nothing was metered as a 200.
 func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
 	r := newTestRouter()
 	got := 0
@@ -357,10 +333,6 @@ func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
 	}
 }
 
-// A flush before the first write commits the response: the server writes a 200
-// status line as it flushes, so the wrapper has to record that status and run
-// its hooks, or an observer reports a status the client never saw and the error
-// handler writes a second answer into the stream.
 func TestFlushCommitsTheResponse(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
@@ -375,8 +347,6 @@ func TestFlushCommitsTheResponse(t *testing.T) {
 	}
 }
 
-// readFromWriter is a writer that copies a reader itself, the way the response
-// writer of net/http does for a file.
 type readFromWriter struct {
 	http.ResponseWriter
 	used bool
@@ -387,13 +357,8 @@ func (w *readFromWriter) ReadFrom(r io.Reader) (int64, error) {
 	return io.Copy(w.ResponseWriter, r)
 }
 
-// A copy into the response reaches the ReadFrom of the writer underneath,
-// which is the path that sends a file without copying it through user space,
-// and the bytes still reach Size.
 func TestReadFromReachesTheWriterUnderneath(t *testing.T) {
 	rec := httptest.NewRecorder()
-	// A plain reader: strings.Reader implements WriteTo, and io.Copy would
-	// take that path instead of the ReadFrom of the writer.
 	src := func() io.Reader { return io.LimitReader(strings.NewReader("hello"), 5) }
 
 	under := &readFromWriter{ResponseWriter: rec}
@@ -406,7 +371,6 @@ func TestReadFromReachesTheWriterUnderneath(t *testing.T) {
 		t.Errorf("Size = %d, body = %q; want 5, %q", res.Size, rec.Body, "hello")
 	}
 
-	// A writer without one falls back to a copy, and counts the same bytes.
 	plain := httptest.NewRecorder()
 	res = &Response{ResponseWriter: plain}
 	if _, err := io.Copy(res, src()); err != nil || res.Size != 5 {

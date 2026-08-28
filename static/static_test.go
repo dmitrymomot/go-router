@@ -19,7 +19,6 @@ import (
 	"github.com/dmitrymomot/go-router/static"
 )
 
-// immutableCache is the Cache-Control of a versioned answer.
 const immutableCache = "public, max-age=31536000, immutable"
 
 const (
@@ -29,7 +28,6 @@ const (
 	appJS     = "console.log(1)"
 )
 
-// assetFS is the file set that the embedded mode tests answer from.
 func assetFS() fstest.MapFS {
 	return fstest.MapFS{
 		"index.html":     {Data: []byte(rootIndex)},
@@ -39,7 +37,6 @@ func assetFS() fstest.MapFS {
 	}
 }
 
-// assetDir writes the same file set into a temporary directory.
 func assetDir(tb testing.TB) string {
 	tb.Helper()
 	dir := tb.TempDir()
@@ -64,7 +61,6 @@ func newAssets(tb testing.TB, cfg static.Config) *static.Assets {
 	return a
 }
 
-// reqOption changes a request that get builds.
 type reqOption func(*http.Request)
 
 func header(key, value string) reqOption {
@@ -84,10 +80,6 @@ func get(h http.Handler, target string, opts ...reqOption) *httptest.ResponseRec
 	h.ServeHTTP(rec, req)
 	return rec
 }
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
 
 func TestNewNeedsASource(t *testing.T) {
 	if _, err := static.New(static.Config{}); err == nil {
@@ -141,10 +133,6 @@ func TestRootSelectsASubdirectory(t *testing.T) {
 		t.Fatalf("body = %q, want the file under the root", rec.Body.String())
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Embedded mode
-// ---------------------------------------------------------------------------
 
 func TestServeAFile(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS()})
@@ -361,10 +349,6 @@ func TestMaxAgeCachesAnUnversionedAnswer(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Single page application
-// ---------------------------------------------------------------------------
-
 func TestSPAAnswersADeepLink(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), SPA: true})
 
@@ -380,7 +364,6 @@ func TestSPAAnswersADeepLink(t *testing.T) {
 func TestSPAAnswersAPathWithoutAnExtension(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), SPA: true})
 
-	// curl sends no Accept header, and a deep link still has to work.
 	if rec := get(a, "/dashboard"); rec.Body.String() != rootIndex {
 		t.Fatalf("body = %q, want the index", rec.Body.String())
 	}
@@ -414,10 +397,6 @@ func TestSPAWithoutAnIndexIsNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404 when the set holds no index", rec.Code)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Live mode
-// ---------------------------------------------------------------------------
 
 func TestDirModeReadsTheNextEdit(t *testing.T) {
 	dir := assetDir(t)
@@ -497,10 +476,6 @@ func TestDirModeRootSelectsASubdirectory(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// URLs
-// ---------------------------------------------------------------------------
-
 func TestPrefixIsNormalized(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"", "/"},
@@ -573,12 +548,6 @@ func TestMustPanicsOnABrokenConfig(t *testing.T) {
 	static.Must(static.Config{})
 }
 
-// ---------------------------------------------------------------------------
-// Unusual file systems
-// ---------------------------------------------------------------------------
-
-// plainFile is a file that implements Read and nothing else, which is what a
-// hand written fs.FS often returns.
 type plainFile struct {
 	io.Reader
 	info fs.FileInfo
@@ -587,8 +556,6 @@ type plainFile struct {
 func (f plainFile) Stat() (fs.FileInfo, error) { return f.info, nil }
 func (f plainFile) Close() error               { return nil }
 
-// plainFS strips the Seek method off every file of the set, and breaks the
-// read once broken is set.
 type plainFS struct {
 	fs.FS
 	broken atomic.Bool
@@ -615,7 +582,6 @@ func (p *plainFS) Open(name string) (fs.File, error) {
 	return plainFile{Reader: bytes.NewReader(data), info: info}, nil
 }
 
-// errReader fails every read.
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
@@ -652,10 +618,6 @@ func TestNewReportsAnUnreadableAssetSet(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Remaining paths
-// ---------------------------------------------------------------------------
-
 func TestTheBareBuildTagAnswersTheIndex(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), Build: "v1"})
 
@@ -663,8 +625,6 @@ func TestTheBareBuildTagAnswersTheIndex(t *testing.T) {
 	if got := rec.Body.String(); got != rootIndex {
 		t.Fatalf("body = %q, want the index", got)
 	}
-	// The index names the versioned assets, so the build tag in the path does
-	// not make it immutable.
 	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
 		t.Errorf("cache control = %q, want no-cache", got)
 	}
@@ -693,8 +653,6 @@ func TestHasRejectsAnEmptyName(t *testing.T) {
 func TestSPAAnswersADeepLinkThatLooksLikeAFile(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), SPA: true})
 
-	// The path carries an extension, so only the Accept header tells the
-	// fallback that this is a navigation.
 	rec := get(a, "/reports/2026.01", header("Accept", "text/html;q=0.9,*/*;q=0.8"))
 	if rec.Body.String() != rootIndex {
 		t.Fatalf("body = %q, want the index", rec.Body.String())
@@ -704,8 +662,6 @@ func TestSPAAnswersADeepLinkThatLooksLikeAFile(t *testing.T) {
 func TestSPAAnswersADirectoryWithoutAnIndex(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), SPA: true})
 
-	// "/css" is a directory of the set and holds no index. It still reads as a
-	// route of the application.
 	if got := get(a, "/css").Body.String(); got != rootIndex {
 		t.Fatalf("body = %q, want the index", got)
 	}
@@ -719,7 +675,6 @@ func TestVersionedIndexStillRevalidates(t *testing.T) {
 			t.Errorf("%s: cache control = %q, want no-cache", target, got)
 		}
 	}
-	// Every other file under the tag keeps the immutable answer.
 	if got := get(a, "/v1/css/app.css").Header().Get("Cache-Control"); got != immutableCache {
 		t.Errorf("cache control = %q, want an immutable one", got)
 	}
@@ -736,8 +691,6 @@ func TestNewRefusesAnIndexOutsideTheSet(t *testing.T) {
 func TestMaxAgeUnderASecondKeepsNoCache(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), MaxAge: 500 * time.Millisecond})
 
-	// "public, max-age=0" lets a shared cache keep the answer, so the shorter
-	// request has to leave the stricter default in place.
 	if got := get(a, "/css/app.css").Header().Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("cache control = %q, want no-cache", got)
 	}
@@ -750,8 +703,6 @@ func TestFallbackReplacesTheNavigationTest(t *testing.T) {
 		Fallback: func(r *http.Request) bool { return !strings.HasPrefix(r.URL.Path, "/api/") },
 	})
 
-	// The default rule would answer both from the extension and the Accept
-	// header; the replacement reads the path alone.
 	if got := get(a, "/reports/2026.01").Body.String(); got != rootIndex {
 		t.Errorf("body = %q, want the index", got)
 	}
@@ -774,12 +725,6 @@ func TestURLEscapesTheName(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// RedirectDir
-// ---------------------------------------------------------------------------
-
-// resolve reads a Location header the way a browser does, against the URL that
-// the request named.
 func resolve(tb testing.TB, target, location string) string {
 	tb.Helper()
 	base, err := url.Parse(target)
@@ -864,9 +809,6 @@ func TestRedirectDirKeepsTheQuery(t *testing.T) {
 func TestRedirectDirKeepsThePrefix(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static", RedirectDir: true})
 
-	// The route of the router reads the whole path, and http.StripPrefix hands
-	// over one without the prefix. A relative Location resolves to the same
-	// place under both, which an absolute one built from the path could not.
 	r := newRouter()
 	static.Mount(r, a)
 
@@ -884,17 +826,12 @@ func TestRedirectDirKeepsThePrefix(t *testing.T) {
 func TestRedirectDirNeverAnswersTheSPAFallback(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), SPA: true, RedirectDir: true})
 
-	// A path of the application matches no file, so the index answers it. A
-	// redirect there would send the browser to a route that the application
-	// never named.
 	for _, target := range []string{"/dashboard", "/orders/7/edit", "/css"} {
 		rec := get(a, target)
 		if rec.Code != http.StatusOK || rec.Body.String() != rootIndex {
 			t.Errorf("%s: status = %d, body = %q, want the index", target, rec.Code, rec.Body.String())
 		}
 	}
-	// A directory that holds an index is a page of its own, and it redirects
-	// like any other.
 	if rec := get(a, "/sub"); rec.Code != http.StatusMovedPermanently {
 		t.Errorf("status = %d, want 301 for a directory that holds an index", rec.Code)
 	}

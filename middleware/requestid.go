@@ -6,43 +6,19 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// RequestIDKey is the context key under which [RequestIDWithConfig] stores the
-// identifier. Read it with [RequestIDFrom].
 const RequestIDKey = "request_id"
 
-// RequestIDConfig configures [RequestIDWithConfig].
 type RequestIDConfig struct {
-	// Skip passes a request straight to the next handler when it returns true.
-	Skip func(c router.Context) bool
-
-	// Header is the request and response header that carries the identifier.
-	// It defaults to X-Request-Id.
-	Header string
-
-	// Generator builds an identifier. It defaults to a UUID version 7, which
-	// sorts by creation time.
-	Generator func() string
-
-	// IgnoreInbound drops the identifier that the request carried and always
-	// generates one. Turn it on when the server faces clients directly,
-	// because a client can put any value in the header.
+	Skip          func(c router.Context) bool
+	Header        string
+	Generator     func() string
 	IgnoreInbound bool
 }
 
-// RequestID is [RequestIDWithConfig] with its default config: the X-Request-Id
-// header, a UUID version 7, and the identifier of the request kept when it
-// carries one.
-//
-// It is a middleware itself, so it goes into Use without a call:
-//
-//	r.Use(middleware.RequestID[Ctx])
 func RequestID[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return RequestIDWithConfig[C](RequestIDConfig{})(next)
 }
 
-// RequestIDWithConfig gives every request an identifier. It keeps the one that
-// the request carried unless IgnoreInbound is set, stores the value on the
-// context and echoes it in the response header.
 func RequestIDWithConfig[C router.Context](cfg RequestIDConfig) router.Middleware[C] {
 	if cfg.Header == "" {
 		cfg.Header = router.HeaderXRequestID
@@ -70,8 +46,6 @@ func RequestIDWithConfig[C router.Context](cfg RequestIDConfig) router.Middlewar
 	}
 }
 
-// RequestIDFrom returns the identifier that [RequestIDWithConfig] stored, or
-// an empty string.
 func RequestIDFrom[C router.Context](c C) string {
 	s, _ := c.Value(RequestIDKey).(string)
 	return s

@@ -16,12 +16,10 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// decompressPayload is what the binding route of the decompress tests decodes.
 type decompressPayload struct {
 	Name string `json:"name"`
 }
 
-// gzipped returns s as a gzip stream.
 func gzipped(t *testing.T, s string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -35,7 +33,6 @@ func gzipped(t *testing.T, s string) []byte {
 	return buf.Bytes()
 }
 
-// decompressRouter binds on one route and reads the body itself on the other.
 func decompressRouter(cfg middleware.DecompressConfig) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.DecompressWithConfig[*appContext](cfg))
@@ -61,7 +58,6 @@ func decompressRouter(cfg middleware.DecompressConfig) *router.Router[*appContex
 	return r
 }
 
-// decompressPost builds a POST that names gzip and carries body.
 func decompressPost(target string, body []byte) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(body))
 	req.Header.Set(router.HeaderContentType, router.MIMEApplicationJSON)
@@ -90,12 +86,6 @@ func TestDecompressClearsTheHeadersOfTheCompressedBody(t *testing.T) {
 	}
 }
 
-// TestDecompressLeavesTheRequestThatCameInAlone pins that the two header
-// deletions land on a copy.
-//
-// The middleware hands the handler a shallow copy of the request, which shares
-// the header map with the one that came in, and that one belongs to the
-// server. A middleware above this one reads the request as the client sent it.
 func TestDecompressLeavesTheRequestThatCameInAlone(t *testing.T) {
 	var encoding string
 	watch := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
@@ -171,8 +161,6 @@ func TestDecompressPassesAnEmptyBodyThrough(t *testing.T) {
 }
 
 func TestDecompressStopsAZipBomb(t *testing.T) {
-	// Forty kilobytes of zeros compress to a few dozen bytes, which is what
-	// makes a cap on the body that arrives no cap at all.
 	bomb := gzipped(t, strings.Repeat("0", 40<<10))
 
 	tests := []struct {
@@ -222,10 +210,6 @@ func TestDecompressSkip(t *testing.T) {
 	}
 }
 
-// decompressFailingRouter answers every request with an error and hands the
-// body that the chain left behind to read. The router runs the error handler
-// after the middleware chain unwinds, so read is the reader of a request that
-// this middleware has already finished with.
 func decompressFailingRouter(read func(body []byte, err error)) *router.Router[*appContext] {
 	r := newRouter()
 	r.ErrorHandler(func(c *appContext, _ error) {
@@ -255,8 +239,6 @@ func TestDecompressBodyStopsAnsweringWhenTheChainReturns(t *testing.T) {
 }
 
 func TestDecompressDoesNotHandOneReaderToTwoRequests(t *testing.T) {
-	// Long enough that a read takes several turns of the window, which is what
-	// leaves room for another request to reset the reader in the middle of one.
 	payload := gzipped(t, strings.Repeat("the quick brown fox\n", 2048))
 
 	var leaked atomic.Int64

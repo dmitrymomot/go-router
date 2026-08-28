@@ -13,7 +13,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// rateLimitRouter answers one route that the limit guards.
 func rateLimitRouter(cfg middleware.RateLimitConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.RateLimitWithConfig[*appContext](cfg))
@@ -21,19 +20,16 @@ func rateLimitRouter(cfg middleware.RateLimitConfig[*appContext]) *router.Router
 	return r
 }
 
-// fakeRateStore answers whatever the test put in it.
 type fakeRateStore struct {
 	err   error
 	wait  time.Duration
 	allow bool
 }
 
-// Allow implements [middleware.RateLimitStore].
 func (s fakeRateStore) Allow(*appContext, string) (bool, time.Duration, error) {
 	return s.allow, s.wait, s.err
 }
 
-// rateLimitGet asks for the route from one address.
 func rateLimitGet(h http.Handler, addr string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = addr
@@ -89,8 +85,6 @@ func TestRateLimitDeniedRequestsTakeNoToken(t *testing.T) {
 		})
 
 		get(r, "/")
-		// A client that keeps knocking through the whole second must not push
-		// its own answer further away.
 		for range 4 {
 			if rec := get(r, "/"); rec.Code != http.StatusTooManyRequests {
 				t.Fatalf("status = %d, want 429", rec.Code)
@@ -125,10 +119,6 @@ func TestRateLimitCountsEachClientOnItsOwn(t *testing.T) {
 
 func TestMemoryStoreForgetsAClientThatWentQuiet(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// Two requests a second and two at once, so the wait refills the whole
-		// burst and the store may drop the bucket. Whether it dropped it is
-		// not visible from here, by design: a bucket that refilled holds what
-		// a new one starts with, so the answer reads the same either way.
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
 			Store: middleware.NewMemoryStore[*appContext](2, 2, time.Second),
 		})
@@ -250,16 +240,8 @@ func TestNewMemoryStoreNeedsARate(t *testing.T) {
 	})
 }
 
-// TestMemoryStoreKeepsTheLimitPastTheExpiryWindow walks the shape that a
-// per-hour quota has: a burst that takes far longer to refill than the window
-// the store forgets an idle identity after. A sweep that drops such a bucket
-// hands the client a fresh burst every window, which is the limit itself
-// handing out the requests it exists to refuse.
 func TestMemoryStoreKeepsTheLimitPastTheExpiryWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// A thousand requests an hour, a thousand at once. The bucket needs the
-		// whole hour to refill, twenty times the three minutes of the default
-		// expiry.
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
 			Store: middleware.NewMemoryStore[*appContext](1000.0/3600, 1000, 0),
 		})
@@ -272,13 +254,9 @@ func TestMemoryStoreKeepsTheLimitPastTheExpiryWindow(t *testing.T) {
 					allowed++
 				}
 			}
-			// Past the window, so the sweep of the next request sees the
-			// bucket as idle.
 			time.Sleep(middleware.DefaultRateLimitExpiry + time.Second)
 		}
 
-		// The burst it started with, plus the requests that the hour of
-		// sleeping refilled.
 		if want := 1000 + rounds*51; allowed > want {
 			t.Errorf("%d requests passed a limit of 1000 an hour, want at most %d", allowed, want)
 		}

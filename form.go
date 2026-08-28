@@ -13,22 +13,6 @@ import (
 	"time"
 )
 
-// decodeValues fills dst, which must be a non-nil pointer to a struct, from a
-// set of URL values. It reads the field name from the named tag, then from the
-// json tag, and falls back to the field name itself, its lower-case form and
-// its canonical header form. With strict set it fills only the fields that a
-// tag names.
-//
-// It handles strings, booleans, the integer and float kinds, [time.Duration],
-// any type that implements [encoding.TextUnmarshaler] such as [time.Time],
-// pointers to those, slices of those, and embedded structs. A time.Time field
-// that carries a format tag reads that layout instead, and a byte slice takes
-// the bytes of the value as they arrived.
-//
-// It keeps decoding after a value that does not fit and returns one
-// [FieldError] per such value, so a form with three bad fields reports three.
-// The error it returns names a target that is not a pointer to a struct, which
-// is a fault of the caller and not of the request.
 func decodeValues(vals url.Values, dst any, tag string, strict bool) ([]FieldError, error) {
 	rv := reflect.ValueOf(dst)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
@@ -43,8 +27,6 @@ func decodeValues(vals url.Values, dst any, tag string, strict bool) ([]FieldErr
 	return fields, nil
 }
 
-// decodeStruct fills one struct and appends a [FieldError] for every value
-// that did not fit.
 func decodeStruct(vals url.Values, rv reflect.Value, tag string, strict bool, fields *[]FieldError) {
 	for _, f := range structFields(rv.Type(), tag) {
 		fv := rv.Field(f.index)
@@ -63,8 +45,6 @@ func decodeStruct(vals url.Values, rv reflect.Value, tag string, strict bool, fi
 			continue
 		}
 
-		// Strict binding fills only what a tag names, so a request cannot reach
-		// a field that the type never meant to expose.
 		if strict && !f.tagged {
 			continue
 		}
@@ -78,55 +58,32 @@ func decodeStruct(vals url.Values, rv reflect.Value, tag string, strict bool, fi
 	}
 }
 
-// fieldInfo is the decoding plan of one struct field.
 type fieldInfo struct {
-	// keys are the keys that the field reads, in the order that the decoder
-	// tries them.
-	keys []string
-
-	// layout is the format tag of the field, empty without one.
-	layout string
-
-	// index is the position of the field in the struct.
-	index int
-
-	// tagged reports that a tag named the field.
-	tagged bool
-
-	// embedded reports an embedded struct whose own fields the decoder fills.
+	keys     []string
+	layout   string
+	index    int
+	tagged   bool
 	embedded bool
 }
 
-// fieldsKey identifies a decoding plan. The tag belongs in the key because one
-// type binds from a form, a query, a path and a header, and each of those
-// reads a tag of its own.
 type fieldsKey struct {
 	typ reflect.Type
 	tag string
 }
 
-// fieldCache holds the decoding plans, keyed by [fieldsKey].
 var fieldCache sync.Map
 
-// structFields returns the decoding plan of a struct type, and builds it on
-// the first request that binds the type. The plan depends on the type and on
-// the tag alone, so the decoder resolves the struct tags of a field once
-// instead of re-parsing them on every request.
 func structFields(rt reflect.Type, tag string) []fieldInfo {
 	key := fieldsKey{typ: rt, tag: tag}
 	if v, ok := fieldCache.Load(key); ok {
 		plan, _ := v.([]fieldInfo)
 		return plan
 	}
-	// Two requests that arrive together build the same plan, and the first one
-	// to store it is the plan that both of them read.
 	v, _ := fieldCache.LoadOrStore(key, buildFields(rt, tag))
 	plan, _ := v.([]fieldInfo)
 	return plan
 }
 
-// buildFields resolves the decoding plan of every field that the decoder
-// fills, and leaves out the fields that it skips.
 func buildFields(rt reflect.Type, tag string) []fieldInfo {
 	plan := make([]fieldInfo, 0, rt.NumField())
 	for i := range rt.NumField() {
@@ -137,16 +94,12 @@ func buildFields(rt reflect.Type, tag string) []fieldInfo {
 		}
 		embedded := ft.Anonymous && !tagged && indirectType(ft.Type).Kind() == reflect.Struct
 
-		// An embedded struct promotes its exported fields even when its own
-		// type name is unexported, and reflect can set those fields. Any other
-		// unexported field it cannot set at all.
 		if !ft.IsExported() && !embedded {
 			continue
 		}
 
 		f := fieldInfo{layout: layout, index: i, tagged: tagged, embedded: embedded}
 		if !embedded {
-			// An embedded struct is not a value of its own, so it reads no key.
 			f.keys = fieldKeys(name, ft.Name)
 		}
 		plan = append(plan, f)
@@ -154,11 +107,6 @@ func buildFields(rt reflect.Type, tag string) []fieldInfo {
 	return plan
 }
 
-// fieldKeys returns the keys that a field reads, in the order that the decoder
-// tries them: the name that a tag gave it and then the name of the field
-// itself, each of them as written, in lower case, and in the canonical header
-// form. Resolving them once per type is what keeps the decoder from lowering a
-// name on every request that leaves the field out.
 func fieldKeys(name, goName string) []string {
 	keys := make([]string, 0, 6)
 	add := func(key string) {
@@ -172,16 +120,11 @@ func fieldKeys(name, goName string) []string {
 		}
 		add(n)
 		add(strings.ToLower(n))
-		// A header map holds X-Request-Id, and the tag that names it reads
-		// x-request-id.
 		add(textproto.CanonicalMIMEHeaderKey(n))
 	}
 	return keys
 }
 
-// fieldName returns the key that a field reads and the layout of its format
-// tag. tagged reports whether a tag named the field, and skip reports a "-"
-// tag.
 func fieldName(ft reflect.StructField, tag string) (name, layout string, tagged, skip bool) {
 	layout = ft.Tag.Get("format")
 	for _, key := range []string{tag, "json"} {
@@ -200,8 +143,6 @@ func fieldName(ft reflect.StructField, tag string) (name, layout string, tagged,
 	return ft.Name, layout, false, false
 }
 
-// lookupValues finds the first key that the values hold. It returns the key
-// that matched, which is how the request spells the field.
 func lookupValues(vals url.Values, keys []string) (string, []string, bool) {
 	for _, k := range keys {
 		if v, ok := vals[k]; ok {
@@ -211,8 +152,6 @@ func lookupValues(vals url.Values, keys []string) (string, []string, bool) {
 	return "", nil, false
 }
 
-// indirectType returns the type that t holds, through as many pointers as it
-// takes to reach a value.
 func indirectType(t reflect.Type) reflect.Type {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -220,8 +159,6 @@ func indirectType(t reflect.Type) reflect.Type {
 	return t
 }
 
-// setField assigns one or more raw values to a field. layout is the format tag
-// of the field, which only a [time.Time] reads.
 func setField(fv reflect.Value, raw []string, layout string) error {
 	if fv.Kind() == reflect.Slice && fv.Type().Elem().Kind() != reflect.Uint8 {
 		out := reflect.MakeSlice(fv.Type(), len(raw), len(raw))
@@ -239,13 +176,7 @@ func setField(fv reflect.Value, raw []string, layout string) error {
 	return setScalar(fv, raw[0], layout)
 }
 
-// setScalar parses s into a single value. layout is the format tag of the
-// field, empty for a field that carries none.
 func setScalar(fv reflect.Value, s, layout string) error {
-	// An empty value leaves a non-string field at its zero value, so that
-	// "?limit=" does not fail. It comes before the pointer branch, because the
-	// zero value of a pointer is nil: a cleared input leaves the field nil,
-	// which is how a handler tells it from a zero that the client sent.
 	if s == "" && indirectType(fv.Type()).Kind() != reflect.String {
 		return nil
 	}
@@ -257,8 +188,6 @@ func setScalar(fv reflect.Value, s, layout string) error {
 		return setScalar(fv.Elem(), s, layout)
 	}
 
-	// A layout beats the TextUnmarshaler of time.Time, which reads RFC 3339 and
-	// nothing else, while an <input type="date"> posts a bare date.
 	if layout != "" && fv.Type() == reflect.TypeFor[time.Time]() {
 		return setTime(fv, s, layout)
 	}
@@ -272,9 +201,6 @@ func setScalar(fv reflect.Value, s, layout string) error {
 		}
 	}
 
-	// A byte slice takes the bytes of the value itself. setField keeps such a
-	// field out of the per-element path, because a request that names it once
-	// sends one string and not a list of numbers.
 	if fv.Kind() == reflect.Slice && fv.Type().Elem().Kind() == reflect.Uint8 {
 		fv.SetBytes([]byte(s))
 		return nil
@@ -321,9 +247,6 @@ func setScalar(fv reflect.Value, s, layout string) error {
 	return nil
 }
 
-// setTime parses s into a [time.Time] with the layout that a format tag names.
-// The layout is a reference time, the one [time.Parse] reads, or one of
-// "unix", "unixmilli" and "unixnano" for a count since the epoch.
 func setTime(fv reflect.Value, s, layout string) error {
 	var t time.Time
 	switch layout {

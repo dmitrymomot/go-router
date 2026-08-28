@@ -8,48 +8,16 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// RecoverConfig configures [RecoverWithConfig].
 type RecoverConfig struct {
-	// Skip passes a request straight to the next handler when it returns true.
-	Skip func(c router.Context) bool
-
-	// StackSize is the stack that the error keeps, in bytes. Zero uses
-	// [router.DefaultStackSize]. The frames at the top name the fault, so a
-	// smaller buffer still answers the question that the log line asks; a
-	// runaway recursion is what fills a large one.
-	StackSize int
-
-	// DisableStack keeps no stack at all. The error still carries the panic
-	// value, so the record names what failed and not where.
+	Skip         func(c router.Context) bool
+	StackSize    int
 	DisableStack bool
 }
 
-// Recover is [RecoverWithConfig] with its default config. It is a middleware
-// itself, so it goes into Use without a call:
-//
-//	r.Use(middleware.Recover[Ctx])
 func Recover[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return RecoverWithConfig[C](RecoverConfig{})(next)
 }
 
-// RecoverWithConfig turns a panic in a handler into a 500 error, with the
-// stack in the internal cause so that the error handler logs it and the client
-// never sees it.
-//
-// The router already catches a panic that escapes the whole chain, so this is
-// not what keeps the server alive. Use it to catch the panic *inside* the
-// chain, where the middleware around it still runs: a logger above it then
-// records the failed request, and a middleware below it still gets its
-// deferred work done.
-//
-// It re-panics on [http.ErrAbortHandler], which is how a handler tells the
-// server to drop the connection.
-//
-// The stack is the one of the goroutine that panicked, and of no other. A
-// dump of every goroutine of the process, which is what runtime.Stack takes
-// with its second argument, writes the stacks of every request in flight into
-// one record: a panic under load then fills the log with the traffic that the
-// panic did not touch.
 func RecoverWithConfig[C router.Context](cfg RecoverConfig) router.Middleware[C] {
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) (err error) {
@@ -76,9 +44,6 @@ func RecoverWithConfig[C router.Context](cfg RecoverConfig) router.Middleware[C]
 	}
 }
 
-// panicCause returns the panic value as an error, so that errors.Is reaches an
-// error that a handler passed to panic. A value of any other type gets one
-// that reads as the value does.
 func panicCause(rec any) error {
 	if err, ok := rec.(error); ok {
 		return err

@@ -17,7 +17,6 @@ func secureRouter(cfg middleware.SecureConfig) *router.Router[*appContext] {
 	return r
 }
 
-// secureHeaders answers the request over the scheme that the target names.
 func secureHeaders(r http.Handler, target string) http.Header {
 	return do(r, httptest.NewRequest(http.MethodGet, target, nil)).Header()
 }
@@ -48,9 +47,6 @@ func TestSecureDefaults(t *testing.T) {
 	}
 }
 
-// TestSecureSendsNoXSSProtection pins the header that this middleware refuses
-// to write, because every current browser ignores it and the filter it turned
-// on had holes of its own.
 func TestSecureSendsNoXSSProtection(t *testing.T) {
 	h := secureHeaders(secureRouter(middleware.SecureConfig{}), "https://app.example/")
 	if got := h.Get("X-XSS-Protection"); got != "" {
@@ -102,7 +98,6 @@ func TestSecureOmitDropsAHeader(t *testing.T) {
 			if got := h.Get(tt.header); got != "" {
 				t.Errorf("%s = %q, want none", tt.header, got)
 			}
-			// The rest of the headers keep going out.
 			if got := h.Get(router.HeaderReferrerPolicy); got == "" && tt.header != router.HeaderReferrerPolicy {
 				t.Error("the referrer policy went away with it")
 			}
@@ -184,8 +179,6 @@ func TestSecureHSTSValue(t *testing.T) {
 func TestSecureHSTSNeedsHTTPS(t *testing.T) {
 	r := secureRouter(middleware.SecureConfig{HSTSMaxAge: 24 * time.Hour})
 
-	// A plaintext answer carries no HSTS: a client that reads it there reached
-	// the server over the very protocol the header forbids.
 	if got := secureHeaders(r, "http://app.example/").Get(router.HeaderStrictTransportSecurity); got != "" {
 		t.Errorf("strict transport security = %q, want none over plaintext", got)
 	}
@@ -210,8 +203,6 @@ func TestSecureHSTSReadsTheForwardedScheme(t *testing.T) {
 	}
 }
 
-// TestSecureHeadersSurviveAnError pins that the headers go out before the
-// handler runs, so the answer that an error produced carries them too.
 func TestSecureHeadersSurviveAnError(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.Secure[*appContext])
@@ -233,11 +224,6 @@ func TestSecureSkip(t *testing.T) {
 	}
 }
 
-// TestSecureRejectsASubSecondHSTSMaxAge pins that a duration that floors to
-// zero seconds is a fault of the wiring rather than a header. RFC 6797 makes
-// max-age=0 the directive that takes the host off the list of the browser, so
-// rendering a positive age as zero would drop a pin that a browser already
-// holds, which is worse than sending nothing.
 func TestSecureRejectsASubSecondHSTSMaxAge(t *testing.T) {
 	tests := []struct {
 		name string
@@ -260,8 +246,6 @@ func TestSecureRejectsASubSecondHSTSMaxAge(t *testing.T) {
 	}
 }
 
-// TestSecureTakesAWholeSecondHSTSMaxAge pins the other side of the boundary,
-// so the guard rejects the ages that floor to zero and nothing else.
 func TestSecureTakesAWholeSecondHSTSMaxAge(t *testing.T) {
 	h := secureHeaders(secureRouter(middleware.SecureConfig{HSTSMaxAge: time.Second}), "https://app.example/")
 	if got := h.Get(router.HeaderStrictTransportSecurity); got != "max-age=1" {

@@ -30,8 +30,6 @@ func TestLoggerReportsTheStatusOfAFailedHandler(t *testing.T) {
 	r, buf := loggerRouter(middleware.LoggerConfig{})
 
 	get(r, "/gone")
-	// The handler returned an error, so the response was still uncommitted
-	// when the middleware ran. The record must still carry 410.
 	if !strings.Contains(buf.String(), "status=410") {
 		t.Errorf("record = %q, want status=410", buf.String())
 	}
@@ -170,9 +168,6 @@ func TestLoggerAttrs(t *testing.T) {
 	}
 }
 
-// TestLoggerLevelsSelectInfo pins that Info is reachable in the two fields
-// whose default is louder than it. A service that reads a 4xx as a client
-// fault rather than an incident logs it at Info and wants that level kept.
 func TestLoggerLevelsSelectInfo(t *testing.T) {
 	r, buf := loggerRouter(middleware.LoggerConfig{
 		ClientErrorLevel: slog.LevelInfo,
@@ -188,8 +183,6 @@ func TestLoggerLevelsSelectInfo(t *testing.T) {
 	}
 }
 
-// TestLoggerLevelsMoveAtRunTime pins the other half of taking a [slog.Leveler]:
-// a level that an operator turns down without building the middleware again.
 func TestLoggerLevelsMoveAtRunTime(t *testing.T) {
 	var serverErrors slog.LevelVar
 	serverErrors.Set(slog.LevelError)

@@ -14,24 +14,20 @@ import (
 	"time"
 )
 
-// sseReq is a request for the route that every test in this file registers.
 func sseReq() *http.Request { return httptest.NewRequest(http.MethodGet, "/events", nil) }
 
-// sseServe runs h as the /events route and returns the recorder.
 func sseServe(h HandlerFunc[*tctx], req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	sseServeTo(h, req, rec)
 	return rec
 }
 
-// sseServeTo runs h as the /events route and writes to w.
 func sseServeTo(h HandlerFunc[*tctx], req *http.Request, w http.ResponseWriter) {
 	r := newTestRouter()
 	r.GET("/events", h)
 	r.ServeHTTP(w, req)
 }
 
-// sseOpen opens a stream and hands the writer to fn.
 func sseOpen(fn func(s *SSEWriter) error, opts ...SSEOption) HandlerFunc[*tctx] {
 	return func(c *tctx) error {
 		s, err := c.SSE(http.StatusOK, opts...)
@@ -58,8 +54,6 @@ func TestSSEHeaders(t *testing.T) {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
-	// A stream has no length, and the header has to reach the client before
-	// the first event, so that the EventSource fires its open event.
 	if got := rec.Header().Get(HeaderContentLength); got != "" {
 		t.Errorf("Content-Length = %q, want none", got)
 	}
@@ -68,7 +62,6 @@ func TestSSEHeaders(t *testing.T) {
 	}
 }
 
-// A handler that sets the media type itself keeps it, as it does in Render.
 func TestSSEKeepsTheHandlerContentType(t *testing.T) {
 	rec := sseServe(func(c *tctx) error {
 		c.SetHeader(HeaderContentType, "text/event-stream; charset=utf-8")
@@ -81,7 +74,6 @@ func TestSSEKeepsTheHandlerContentType(t *testing.T) {
 	}
 }
 
-// An HTTP/2 request carries no Connection header, which the protocol forbids.
 func TestSSENoConnectionHeaderOnHTTP2(t *testing.T) {
 	req := sseReq()
 	req.Proto, req.ProtoMajor, req.ProtoMinor = "HTTP/2.0", 2, 0
@@ -111,8 +103,6 @@ func TestSSESendData(t *testing.T) {
 	}
 }
 
-// The data field carries one line per line of the payload, whichever line
-// break the payload uses.
 func TestSSEDataLines(t *testing.T) {
 	tests := []struct {
 		name string
@@ -169,7 +159,6 @@ func TestSSESendJSON(t *testing.T) {
 	}
 }
 
-// A value that cannot be encoded leaves nothing on the wire and reports a 500.
 func TestSSESendJSONErrorWritesNothing(t *testing.T) {
 	rec := sseServe(sseOpen(func(s *SSEWriter) error {
 		if err := s.SendData("first"); err != nil {
@@ -200,8 +189,6 @@ func TestSSESendComponent(t *testing.T) {
 	}
 }
 
-// A component writes in as many calls as it likes, and a line break that falls
-// between two of them still ends the line once.
 func TestSSESendComponentSplitWrites(t *testing.T) {
 	parts := []string{"<ul>\r", "\n<li>one</li>\n", "</ul>"}
 	rec := sseServe(sseOpen(func(s *SSEWriter) error {
@@ -221,7 +208,6 @@ func TestSSESendComponentSplitWrites(t *testing.T) {
 	}
 }
 
-// The component reads the request through the context, as it does in Render.
 func TestSSESendComponentPassesTheContext(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/u/{id}/events", sseOpen(func(s *SSEWriter) error {
@@ -240,7 +226,6 @@ func TestSSESendComponentPassesTheContext(t *testing.T) {
 	}
 }
 
-// A component that fails halfway leaves no partial frame on the wire.
 func TestSSESendComponentErrorWritesNothing(t *testing.T) {
 	rec := sseServe(sseOpen(func(s *SSEWriter) error {
 		if err := s.SendData("first"); err != nil {
@@ -262,7 +247,6 @@ func TestSSESendComponentErrorWritesNothing(t *testing.T) {
 	}
 }
 
-// An HTTPError from a component keeps its status, as it does in Render.
 func TestSSESendComponentKeepsAnHTTPError(t *testing.T) {
 	var got error
 	sseServe(sseOpen(func(s *SSEWriter) error {
@@ -277,8 +261,6 @@ func TestSSESendComponentKeepsAnHTTPError(t *testing.T) {
 	}
 }
 
-// An ID or a name that holds a line break would forge fields of its own, so
-// the writer reports it and writes nothing.
 func TestSSEFieldWithALineBreak(t *testing.T) {
 	for _, e := range []Event{
 		{ID: "7\nevent: forged", Data: "x"},
@@ -302,8 +284,6 @@ func TestSSEFieldWithALineBreak(t *testing.T) {
 	}
 }
 
-// A stream that a send broke reports the same failure for every later send, so
-// that a loop that watches its errors ends.
 func TestSSESendAfterAFailure(t *testing.T) {
 	want := errors.New("connection reset")
 	var first, second error
@@ -324,7 +304,6 @@ func TestSSESendAfterAFailure(t *testing.T) {
 	}
 }
 
-// A HEAD request gets the headers alone, and every send is a no-op.
 func TestSSEHEAD(t *testing.T) {
 	var (
 		open             bool
@@ -334,10 +313,6 @@ func TestSSEHEAD(t *testing.T) {
 
 	r := newTestRouter()
 	r.GET("/events", sseOpen(func(s *SSEWriter) error {
-		// The router recovers a panic from a handler, and the response is
-		// already committed, so an assertion that runs here reports nothing
-		// once a send panics. Carry the answers out and read them after the
-		// request, and let reached report that the handler ran to its end.
 		open = !s.Closed()
 		sendErr = s.Send(Event{Data: "hello"})
 		commErr = s.Comment("ping")
@@ -369,8 +344,6 @@ func TestSSEHEAD(t *testing.T) {
 	}
 }
 
-// A writer that cannot flush fails before the response is committed, so the
-// error handler still answers.
 func TestSSEUnflushableWriter(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sseServeTo(sseOpen(func(*SSEWriter) error {
@@ -383,8 +356,6 @@ func TestSSEUnflushableWriter(t *testing.T) {
 	}
 }
 
-// The writer looks through a wrapper for the flush, as the response controller
-// of net/http does.
 func TestSSEFlushThroughAWrapper(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sseServeTo(sseOpen(func(s *SSEWriter) error {
@@ -409,7 +380,6 @@ func TestSSERetryOption(t *testing.T) {
 	}
 }
 
-// A retry under a millisecond has nothing to say in a field that counts them.
 func TestSSERetryBelowAMillisecond(t *testing.T) {
 	rec := sseServe(sseOpen(func(s *SSEWriter) error {
 		return s.SendData("hello")
@@ -455,8 +425,6 @@ func TestLastEventIDIsEmptyOnAFirstConnection(t *testing.T) {
 	}, sseReq())
 }
 
-// failWriter fails every write, which is what a connection that the client
-// dropped does.
 type failWriter struct {
 	*httptest.ResponseRecorder
 	err error
@@ -464,24 +432,16 @@ type failWriter struct {
 
 func (w failWriter) Write([]byte) (int, error) { return 0, w.err }
 
-// noFlush hides every method of the writer underneath, so that the stream
-// finds no flush.
 type noFlush struct{ http.ResponseWriter }
 
-// unwrapWriter hides the flush of the writer underneath but points at it, as
-// the middleware of net/http does.
 type unwrapWriter struct{ http.ResponseWriter }
 
 func (w unwrapWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// stamp is a value that formats itself, which SSEText renders through
-// fmt.Sprint.
 type stamp struct{ n int }
 
 func (s stamp) String() string { return fmt.Sprintf("n=%d", s.n) }
 
-// closedChan returns a channel that already holds vs and is closed, so that a
-// driver drains it and returns without a goroutine.
 func closedChan[T any](vs ...T) <-chan T {
 	ch := make(chan T, len(vs))
 	for _, v := range vs {
@@ -505,8 +465,6 @@ func TestServeSSEDrainsTheChannel(t *testing.T) {
 	}
 }
 
-// A closed channel ends the stream, and the handler reports no error, because
-// the end of a stream is not a failure.
 func TestServeSSEReportsNoErrorAtTheEnd(t *testing.T) {
 	var got error
 	sseServe(func(c *tctx) error {
@@ -519,15 +477,12 @@ func TestServeSSEReportsNoErrorAtTheEnd(t *testing.T) {
 	}
 }
 
-// A client that goes away ends the stream, and the handler reports no error.
 func TestServeSSEStopsWhenTheClientGoesAway(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	var got error
 	rec := sseServe(func(c *tctx) error {
-		// The channel never carries a value, so only the cancelled request
-		// context can end the stream.
 		got = ServeSSE(c, make(chan string), SSEText[string]("msg"))
 		return got
 	}, sseReq().WithContext(ctx))
@@ -543,8 +498,6 @@ func TestServeSSEStopsWhenTheClientGoesAway(t *testing.T) {
 	}
 }
 
-// The heartbeat keeps an idle connection open. The bubble of testing/synctest
-// runs its clock, so the count is exact and the test takes no time.
 func TestServeSSEHeartbeat(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ch := make(chan string)
@@ -569,7 +522,6 @@ func TestServeSSEHeartbeat(t *testing.T) {
 	})
 }
 
-// A stream without the option sends no heartbeat.
 func TestServeSSENoHeartbeatByDefault(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ch := make(chan string)
@@ -606,8 +558,6 @@ func TestServeSSECloseOption(t *testing.T) {
 	}
 }
 
-// The close event stays unsent when the client goes away, because nothing
-// reaches a client that is gone.
 func TestServeSSECloseOptionSkippedOnDisconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -622,8 +572,6 @@ func TestServeSSECloseOptionSkippedOnDisconnect(t *testing.T) {
 	}
 }
 
-// A sender that fails ends the stream and reaches the error handler, which
-// writes nothing more, because the response is committed.
 func TestServeSSESenderError(t *testing.T) {
 	want := errors.New("render failed")
 	var got error
@@ -654,7 +602,6 @@ func TestServeSSEWithoutASender(t *testing.T) {
 	}
 }
 
-// A HEAD request answers with the headers alone and reads no value.
 func TestServeSSEHEAD(t *testing.T) {
 	ch := make(chan string, 1)
 	ch <- "one"
@@ -713,8 +660,6 @@ func TestSSESenders(t *testing.T) {
 	})
 }
 
-// One stream value serves every request, and it carries its options into each
-// of them.
 func TestSSEStreamServe(t *testing.T) {
 	stream := NewSSEStream(SSEComponent("row", card), SSERetry(time.Second))
 
@@ -739,9 +684,6 @@ func TestNewSSEStreamWithoutASender(t *testing.T) {
 	NewSSEStream[string](nil)
 }
 
-// The stream runs over a real connection: the header reaches the client before
-// the first event, every event reaches it as the handler writes it, and the
-// handler returns when the client goes away.
 func TestSSEOverAServer(t *testing.T) {
 	ch := make(chan string)
 	handlerErr := make(chan error, 1)
@@ -779,8 +721,6 @@ func TestSSEOverAServer(t *testing.T) {
 		return line
 	}
 
-	// The headers and the retry frame arrive before any event, which proves
-	// that the stream flushes them.
 	for _, want := range []string{"retry: 2000\n", "\n"} {
 		if got := readLine(); got != want {
 			t.Fatalf("line = %q, want %q", got, want)
@@ -810,8 +750,6 @@ func TestSSEOverAServer(t *testing.T) {
 	}
 }
 
-// flushErrWriter reports a failed flush, which an HTTP/2 stream that the peer
-// reset does.
 type flushErrWriter struct {
 	*httptest.ResponseRecorder
 	err error
@@ -819,7 +757,6 @@ type flushErrWriter struct {
 
 func (w flushErrWriter) FlushError() error { return w.err }
 
-// deadlineWriter fails to clear the write deadline.
 type deadlineWriter struct {
 	*httptest.ResponseRecorder
 	err error
@@ -827,7 +764,6 @@ type deadlineWriter struct {
 
 func (w deadlineWriter) SetWriteDeadline(time.Time) error { return w.err }
 
-// A flush that fails ends the stream, and the writer keeps reporting it.
 func TestSSEFlushError(t *testing.T) {
 	want := errors.New("stream reset")
 	var opened, sent error
@@ -842,7 +778,6 @@ func TestSSEFlushError(t *testing.T) {
 		return nil
 	}, sseReq(), flushErrWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
 
-	// SSE flushes the header itself, so the failure reaches the handler there.
 	if !errors.Is(opened, want) {
 		t.Errorf("SSE = %v, want %v", opened, want)
 	}
@@ -851,8 +786,6 @@ func TestSSEFlushError(t *testing.T) {
 	}
 }
 
-// A write deadline that the writer refuses to clear fails the stream before it
-// commits anything, so the error handler still answers.
 func TestSSEWriteDeadlineError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sseServeTo(sseOpen(func(*SSEWriter) error {
@@ -865,8 +798,6 @@ func TestSSEWriteDeadlineError(t *testing.T) {
 	}
 }
 
-// The retry frame is the first write of the stream, so a client that is
-// already gone fails it there.
 func TestSSERetryWriteError(t *testing.T) {
 	want := errors.New("connection reset")
 	var opened error
@@ -881,7 +812,6 @@ func TestSSERetryWriteError(t *testing.T) {
 	}
 }
 
-// Every send reports the failure that closed the stream, whichever send it is.
 func TestSSEEverySendReportsTheFailure(t *testing.T) {
 	want := errors.New("connection reset")
 
@@ -902,7 +832,6 @@ func TestSSEEverySendReportsTheFailure(t *testing.T) {
 	}), sseReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
 }
 
-// Every send is a no-op for a HEAD request, and none of them reports an error.
 func TestSSEEverySendIsANoOpForHEAD(t *testing.T) {
 	var (
 		errs    map[string]error
@@ -911,8 +840,6 @@ func TestSSEEverySendIsANoOpForHEAD(t *testing.T) {
 
 	r := newTestRouter()
 	r.GET("/events", sseOpen(func(s *SSEWriter) error {
-		// Read the answers after the request, so that a send which panics
-		// fails the test instead of skipping the assertions. See TestSSEHEAD.
 		errs = map[string]error{
 			"Send":          s.Send(Event{Data: "one"}),
 			"SendData":      s.SendData("one"),
@@ -938,7 +865,6 @@ func TestSSEEverySendIsANoOpForHEAD(t *testing.T) {
 	}
 }
 
-// A stream that cannot open reaches the error handler through the driver too.
 func TestServeSSEUnflushableWriter(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sseServeTo(func(c *tctx) error {
@@ -950,7 +876,6 @@ func TestServeSSEUnflushableWriter(t *testing.T) {
 	}
 }
 
-// A heartbeat that cannot reach the client ends the stream.
 func TestServeSSEHeartbeatError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		want := errors.New("connection reset")
@@ -978,22 +903,14 @@ func TestServeSSEHeartbeatError(t *testing.T) {
 	})
 }
 
-// engineComponent stands for the component type of a template engine: another
-// interface with the same method, which is what the a-h/templ generator emits.
-// A function that returns one is not a func(T) Component, so SSEComponent has
-// to infer the type instead of naming it.
 type engineComponent interface {
 	Render(ctx context.Context, w io.Writer) error
 }
 
-// card returns the concrete component type of this package.
 func card(s string) ComponentFunc { return comp("<li>" + s + "</li>") }
 
-// engineCard returns the component type of a template engine.
 func engineCard(s string) engineComponent { return comp("<li>" + s + "</li>") }
 
-// SSEComponent takes the component of a template engine, which is the input it
-// exists for.
 func TestSSEComponentOfATemplateEngine(t *testing.T) {
 	rec := sseServe(func(c *tctx) error {
 		return ServeSSE(c, closedChan("one"), SSEComponent("row", engineCard))
@@ -1004,8 +921,6 @@ func TestSSEComponentOfATemplateEngine(t *testing.T) {
 	}
 }
 
-// An event that the writer rejects before it writes anything leaves the stream
-// open, because nothing reached the client.
 func TestSSERejectedEventKeepsTheStreamOpen(t *testing.T) {
 	rec := sseServe(sseOpen(func(s *SSEWriter) error {
 		if err := s.Send(Event{ID: "7\nevent: forged", Data: "x"}); err == nil {
@@ -1030,8 +945,6 @@ func TestSSERejectedEventKeepsTheStreamOpen(t *testing.T) {
 	}
 }
 
-// A stream that sent one huge event drops the room for it, so a connection
-// that then runs for hours does not hold it.
 func TestSSEDropsALargeFrameBuffer(t *testing.T) {
 	var big, after int
 
@@ -1055,8 +968,6 @@ func TestSSEDropsALargeFrameBuffer(t *testing.T) {
 	}
 }
 
-// The options of a stream belong to it, so a caller that keeps the slice
-// cannot reach into a stream that it already built.
 func TestNewSSEStreamCopiesTheOptions(t *testing.T) {
 	opts := []SSEOption{SSERetry(time.Second)}
 	stream := NewSSEStream(SSEText[string]("msg"), opts...)

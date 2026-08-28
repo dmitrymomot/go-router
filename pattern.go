@@ -7,7 +7,6 @@ import (
 	"strings"
 )
 
-// segKind is the kind of one pattern segment.
 type segKind uint8
 
 const (
@@ -18,30 +17,21 @@ const (
 	segWildcard
 )
 
-// segment is one "/" delimited part of a route pattern.
 type segment struct {
 	kind  segKind
-	value string // static text, the parameter name, or the raw template text
+	value string
 	re    *regexp.Regexp
-
-	// parts holds the pieces of a template segment such as "rep-{date}.csv".
 	parts []segPart
 }
 
-// segPart is one piece of a template segment: either literal text or a
-// parameter that runs up to the next literal.
 type segPart struct {
-	lit  string // empty for a parameter
+	lit  string
 	name string
 	re   *regexp.Regexp
 }
 
-// mountParam is the parameter name that [Router.MountHandler] uses for the
-// part of the path that it strips before it calls the mounted handler.
 const mountParam = "*"
 
-// normalizePattern gives a pattern a leading "/" and removes a trailing "/".
-// The root pattern stays "/".
 func normalizePattern(p string) string {
 	if p == "" {
 		return "/"
@@ -55,7 +45,6 @@ func normalizePattern(p string) string {
 	return p
 }
 
-// joinPattern joins a prefix and a pattern into one normalized pattern.
 func joinPattern(prefix, pattern string) string {
 	prefix = normalizePattern(prefix)
 	pattern = normalizePattern(pattern)
@@ -68,17 +57,6 @@ func joinPattern(prefix, pattern string) string {
 	return prefix + pattern
 }
 
-// parsePattern splits a route pattern into segments and returns the parameter
-// names in the order in which the pattern declares them. It reports an error
-// for a malformed pattern.
-//
-// Supported syntax:
-//
-//	/users              a static segment
-//	/users/{id}         a named parameter that matches one segment
-//	/users/{id:[0-9]+}  a named parameter with a regular expression
-//	/files/{path...}    a named catch-all, which must be the last segment
-//	/files/*            an anonymous catch-all, named "*"
 func parsePattern(pattern string) ([]segment, []string, error) {
 	pattern = normalizePattern(pattern)
 	if pattern == "/" {
@@ -144,8 +122,6 @@ func parsePattern(pattern string) ([]segment, []string, error) {
 	return segs, names, nil
 }
 
-// isWholeBrace reports whether the segment is a single "{...}" group with no
-// text around it.
 func isWholeBrace(raw string) bool {
 	if !strings.HasPrefix(raw, "{") {
 		return false
@@ -154,9 +130,6 @@ func isWholeBrace(raw string) bool {
 	return ok && end == len(raw)-1
 }
 
-// closingBrace returns the index of the "}" that closes the "{" at start. It
-// counts depth, so a quantifier inside a regular expression does not end the
-// group early.
 func closingBrace(raw string, start int) (int, bool) {
 	depth := 0
 	for i := start; i < len(raw); i++ {
@@ -173,8 +146,6 @@ func closingBrace(raw string, start int) (int, bool) {
 	return 0, false
 }
 
-// parseTemplate reads a segment that mixes literal text with parameters, such
-// as "rep-{date}.csv" or "{name}.json".
 func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
 	var (
 		parts []segPart
@@ -237,8 +208,6 @@ func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
 	return parts, names, nil
 }
 
-// appendTemplateValues matches seg against a template and appends the
-// parameter values in declaration order.
 func appendTemplateValues(dst []string, parts []segPart, seg string) ([]string, bool) {
 	base := len(dst)
 	for range templateArity(parts) {
@@ -247,7 +216,6 @@ func appendTemplateValues(dst []string, parts []segPart, seg string) ([]string, 
 	return dst, matchTemplate(dst[base:], parts, seg)
 }
 
-// templateArity returns the number of parameters that a template declares.
 func templateArity(parts []segPart) int {
 	n := 0
 	for _, p := range parts {
@@ -258,19 +226,9 @@ func templateArity(parts []segPart) int {
 	return n
 }
 
-// matchTemplate matches seg against a template and writes the parameter values
-// into out, which holds one slot per parameter in declaration order.
-//
-// Literals are matched as far to the right as the segment allows, so a
-// parameter takes as much as it can. "rep-{date}.csv" reads "a.csv" out of
-// "rep-a.csv.csv", and "{name}.{ext}" splits "a.b.txt" into "a.b" and "txt".
-//
-// No parameter may be empty, which is what keeps "rep-.csv" from matching.
 func matchTemplate(out []string, parts []segPart, seg string) bool {
 	lo, hi := 0, len(seg)
 
-	// Peel the literals at both ends. What is left alternates parameter,
-	// literal, parameter, and starts and ends with a parameter.
 	first, last := 0, len(parts)-1
 	if parts[first].lit != "" {
 		if !strings.HasPrefix(seg, parts[first].lit) {
@@ -291,8 +249,6 @@ func matchTemplate(out []string, parts []segPart, seg string) bool {
 		return false
 	}
 
-	// Walk the inner literals from the right, so each parameter keeps as much
-	// of the segment as it can.
 	end := hi
 	for i := last - 1; i >= first; i -= 2 {
 		lit := parts[i].lit
@@ -308,8 +264,6 @@ func matchTemplate(out []string, parts []segPart, seg string) bool {
 	return setTemplateValue(out, 0, parts[first], seg[lo:end])
 }
 
-// setTemplateValue stores one parameter value after it checks that the value
-// is not empty and that the regular expression, if any, accepts it.
 func setTemplateValue(dst []string, i int, p segPart, value string) bool {
 	if value == "" || (p.re != nil && !p.re.MatchString(value)) {
 		return false
@@ -318,8 +272,6 @@ func setTemplateValue(dst []string, i int, p segPart, value string) bool {
 	return true
 }
 
-// templateSkeleton describes the shape of a template without its parameter
-// names, so that the trie can tell two spellings of one shape apart.
 func templateSkeleton(parts []segPart) string {
 	var b strings.Builder
 	for _, p := range parts {
@@ -336,7 +288,6 @@ func templateSkeleton(parts []segPart) string {
 	return b.String()
 }
 
-// templateNames returns the parameter names of a template, in order.
 func templateNames(parts []segPart) []string {
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
@@ -347,8 +298,6 @@ func templateNames(parts []segPart) []string {
 	return out
 }
 
-// parseBraceSegment reads a "{...}" segment. It returns the parameter name, an
-// optional regular expression, and whether the segment is a catch-all.
 func parseBraceSegment(raw, pattern string) (name, expr string, wildcard bool, err error) {
 	end, ok := closingBrace(raw, 0)
 	if !ok || end != len(raw)-1 {
@@ -374,43 +323,25 @@ func parseBraceSegment(raw, pattern string) (name, expr string, wildcard bool, e
 	return body, "", false, nil
 }
 
-// edgeKind is the way one edge of the radix tree consumes the path.
 type edgeKind uint8
 
 const (
-	// edgeLiteral consumes a run of literal text, which may span several
-	// segments. The tree compresses those runs, so a static route costs a few
-	// string comparisons instead of one lookup per segment.
 	edgeLiteral edgeKind = iota
-
-	// The kinds below consume exactly one segment.
 	edgeTemplate
 	edgeRegex
 	edgeParam
-
-	// edgeWildcard consumes the rest of the path.
 	edgeWildcard
 )
 
-// edge is one step of a pattern in the form that the radix tree inserts.
 type edge struct {
 	kind  edgeKind
-	lit   string // edgeLiteral: the text to consume
-	name  string // the parameter name
+	lit   string
+	name  string
 	re    *regexp.Regexp
-	parts []segPart // edgeTemplate
-	raw   string    // edgeTemplate: the segment as written, for messages
+	parts []segPart
+	raw   string
 }
 
-// patternEdges turns the segments of a pattern into the edges of the radix
-// tree. It joins neighbouring literal segments into one edge, which is what
-// the tree compresses.
-//
-// The "/" in front of a parameter or a catch-all belongs to that edge, not to
-// the literal before it. Two things follow. /v1/users and /v1/users/{id} share
-// one node instead of hanging a node that holds a single "/" underneath, which
-// takes a level out of every parameter route. And /files matches
-// /files/{path...} as well as /files/a/b.
 func patternEdges(segs []segment) []edge {
 	var (
 		edges []edge
@@ -450,7 +381,6 @@ func patternEdges(segs []segment) []edge {
 	return edges
 }
 
-// commonPrefixLen returns the length of the longest prefix that a and b share.
 func commonPrefixLen(a, b string) int {
 	n := min(len(a), len(b))
 	i := 0

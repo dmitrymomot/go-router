@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// nopWriter discards the answer, so a benchmark measures the router and not
-// the recorder.
 type nopWriter struct{ h http.Header }
 
 func (w *nopWriter) Header() http.Header         { return w.h }
@@ -61,8 +59,6 @@ func BenchmarkRegexParam(b *testing.B) {
 }
 
 func BenchmarkBacktrack(b *testing.B) {
-	// The static branch /a/b exists but has no c below it, so the walk has to
-	// fall back to the parameter branch.
 	r, w := benchRouter("/a/{x}/c", "/a/b/d")
 	benchServe(b, r, w, "/a/b/c")
 }
@@ -72,8 +68,6 @@ func BenchmarkNotFound(b *testing.B) {
 	benchServe(b, r, w, "/nothing/here")
 }
 
-// benchMethodRouter registers every method on one pattern, so that a request
-// for another method matches the path and misses the method.
 func benchMethodRouter(pattern string, methods ...string) (*Router[*tctx], *nopWriter) {
 	ok := func(c *tctx) error { return c.NoContent(http.StatusOK) }
 	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
@@ -83,33 +77,21 @@ func benchMethodRouter(pattern string, methods ...string) (*Router[*tctx], *nopW
 	return r, &nopWriter{h: make(http.Header)}
 }
 
-// The three benchmarks below are the answers that carry an Allow header. They
-// name the methods of every route that the path matched, which is a value the
-// build settles and a request must not recompute.
-
-// BenchmarkMethodNotAllowed measures a path that matched under another method.
 func BenchmarkMethodNotAllowed(b *testing.B) {
 	r, w := benchMethodRouter("/users/{id}", http.MethodGet)
 	benchServeMethod(b, r, w, http.MethodDelete, "/users/42")
 }
 
-// BenchmarkPreflight measures the OPTIONS answer that the router writes for a
-// route that handles no OPTIONS itself. It is the request that a browser sends
-// ahead of every cross-origin write, so a service behind CORS pays it as often
-// as it pays for the write.
 func BenchmarkPreflight(b *testing.B) {
 	r, w := benchMethodRouter("/users/{id}", http.MethodGet, http.MethodPost)
 	benchServeMethod(b, r, w, http.MethodOptions, "/users/42")
 }
 
-// BenchmarkPreflightStatic is the same answer for a literal path, where the
-// walk itself costs least and the header is the larger half of the work.
 func BenchmarkPreflightStatic(b *testing.B) {
 	r, w := benchMethodRouter("/health", http.MethodGet)
 	benchServeMethod(b, r, w, http.MethodOptions, "/health")
 }
 
-// apiRoutes is a route set of the size that a real service has.
 var apiRoutes = []string{
 	"/", "/health", "/metrics",
 	"/v1/users", "/v1/users/{id}", "/v1/users/{id}/avatar",
@@ -149,8 +131,6 @@ func BenchmarkMiddlewareChain(b *testing.B) {
 	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/users/42")
 }
 
-// benchHostRouter builds the four host shapes that a multi-tenant service
-// needs, each with the same small route set.
 func benchHostRouter() (*Router[*tctx], *nopWriter) {
 	ok := func(c *tctx) error { return c.NoContent(http.StatusOK) }
 	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
@@ -192,8 +172,6 @@ func BenchmarkHostAny(b *testing.B) {
 	benchServeHost(b, r, w, "acme.com", "/settings")
 }
 
-// BenchmarkHostFallback measures a route that no host scope registered, which
-// costs the host lookup and then a second trie walk.
 func BenchmarkHostFallback(b *testing.B) {
 	r, w := benchHostRouter()
 	benchServeHost(b, r, w, "api.example.com", "/healthz")

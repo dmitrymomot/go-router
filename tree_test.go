@@ -7,14 +7,11 @@ import (
 	"testing"
 )
 
-// TestRadixSplitting exercises the shapes that node splitting produces. Each
-// case registers patterns whose literal runs overlap, so the tree has to split
-// a node and keep the children of the old one reachable.
 func TestRadixSplitting(t *testing.T) {
 	tests := []struct {
 		name     string
 		patterns []string
-		requests map[string]string // path -> matched pattern, or "" for 404
+		requests map[string]string
 	}{
 		{
 			name:     "one literal is a prefix of another",
@@ -117,13 +114,10 @@ func TestRadixSplitting(t *testing.T) {
 	}
 }
 
-// TestRadixKeepsRoutesAcrossASplit checks that splitting a node does not lose
-// the methods or the parameter names that the old node carried.
 func TestRadixKeepsRoutesAcrossASplit(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/orders/{id}", echoRoute)
 	r.POST("/orders/{id}", echoRoute)
-	// Registering this splits the /orders node that already holds both routes.
 	r.GET("/order", echoRoute)
 
 	for _, tc := range []struct {
@@ -149,14 +143,12 @@ func TestRadixKeepsRoutesAcrossASplit(t *testing.T) {
 	}
 }
 
-// TestNodeHandlerPrefersTheExactMethod walks the three probes that a node
-// performs, in the order that decides which handler answers.
 func TestNodeHandlerPrefersTheExactMethod(t *testing.T) {
 	tests := []struct {
 		name    string
-		routes  []string // the methods that the node carries
+		routes  []string
 		request string
-		want    string // the method whose handler answers, or "" for none
+		want    string
 	}{
 		{"the exact method", []string{"GET", "POST"}, "POST", "POST"},
 		{"HEAD falls back to GET", []string{"GET"}, "HEAD", "GET"},
@@ -171,16 +163,12 @@ func TestNodeHandlerPrefersTheExactMethod(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Each handler names the entry it was registered under, which
-			// is what the assertion reads back.
 			answered := ""
 			n := new(node[*tctx])
 			for _, m := range tc.routes {
 				h := func(*tctx) error { answered = m; return nil }
 				n.routes = append(n.routes, methodHandler[*tctx]{method: m, handler: h})
 				if m == anyMethod {
-					// insert files the sentinel in a field of its own too,
-					// which is where handler reads it back.
 					n.catchAll = h
 				}
 			}
@@ -205,10 +193,6 @@ func TestNodeHandlerPrefersTheExactMethod(t *testing.T) {
 	}
 }
 
-// TestAllowedLeavesTheSentinelOut pins the Allow header of a node that carries
-// both an explicit method and the entry of Any. Such a node answers every
-// method and so never produces a 405, but nothing may claim a method that the
-// router cannot name.
 func TestAllowedLeavesTheSentinelOut(t *testing.T) {
 	n := new(node[*tctx])
 	for _, m := range []string{http.MethodGet, anyMethod, http.MethodPost} {
@@ -221,9 +205,6 @@ func TestAllowedLeavesTheSentinelOut(t *testing.T) {
 	}
 }
 
-// TestAnySharesANodeWithAnExplicitMethod checks the insert side: the sentinel
-// is an entry like any other, so it neither conflicts with an explicit method
-// nor loses the pattern of the node.
 func TestAnySharesANodeWithAnExplicitMethod(t *testing.T) {
 	r := newTestRouter()
 	r.Any("/orders/{id}", func(c *tctx) error { return c.String(http.StatusOK, "any "+c.Param("id")) })
@@ -244,8 +225,6 @@ func TestAnySharesANodeWithAnExplicitMethod(t *testing.T) {
 	}
 }
 
-// TestDuplicateAnyConflicts checks that two Any registrations on one pattern
-// are the same clash that two GET registrations are.
 func TestDuplicateAnyConflicts(t *testing.T) {
 	r := newTestRouter()
 	r.Any("/x", echoRoute)

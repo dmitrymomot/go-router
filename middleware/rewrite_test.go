@@ -8,9 +8,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// rewriteRouter reports the path that reached the router after the rules ran.
-// The catch-all takes every path, so a rule that rewrites onto a path with no
-// route of its own still answers.
 func rewriteRouter(path *string, rules ...middleware.RewriteRule) *router.Router[*appContext] {
 	r := newRouter()
 	r.Pre(middleware.Rewrite[*appContext](rules...))

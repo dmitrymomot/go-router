@@ -40,7 +40,6 @@ func TestHTTPErrorKeepsTheCause(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Error("the cause is not reachable through Unwrap")
 	}
-	// A copy leaves the sentinel untouched.
 	if ErrServiceUnavailable.Err != nil {
 		t.Error("WithError changed the sentinel")
 	}
@@ -63,8 +62,6 @@ func TestStatusOf(t *testing.T) {
 	}
 }
 
-// codedError is the error of a package that names its own status without
-// importing the router.
 type codedError struct{ status int }
 
 func (e *codedError) Error() string { return "the connection string is wrong" }
@@ -91,8 +88,6 @@ func TestStatusOfReadsAStatusCoder(t *testing.T) {
 	}
 }
 
-// A StatusCoder contributes its status, never its text: only an HTTPError
-// carries a message that is meant for the client.
 func TestErrorHandlerHidesTheMessageOfAStatusCoder(t *testing.T) {
 	captureLogs(t)
 
@@ -187,7 +182,6 @@ func TestPanicErrorCarriesTheValueAndTheStack(t *testing.T) {
 		t.Errorf("Error() = %q, want it to name the panic", got)
 	}
 
-	// A handler that panics with an error keeps it reachable.
 	sentinel := errors.New("no rows")
 	if !errors.Is(PanicError(sentinel), sentinel) {
 		t.Error("the panic value is not reachable through Unwrap")
@@ -291,7 +285,6 @@ func TestErrorHandlerExposesTheCause(t *testing.T) {
 	}
 }
 
-// levelRecorder records the level of every log record it handles.
 type levelRecorder struct {
 	slog.Handler
 	levels []slog.Level
@@ -304,8 +297,6 @@ func (h *levelRecorder) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-// A client that goes away mid-response is not a server fault, so it must not
-// fire the 5xx alerts of a streamed page.
 func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -345,9 +336,6 @@ func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
 	}
 }
 
-// TestDefaultErrorHandlerAnswersHTMXWithHTML pins the one exception to the
-// content negotiation: htmx sends "Accept: */*" and swaps what it receives
-// into a page, so a JSON error would land there as text.
 func TestDefaultErrorHandlerAnswersHTMXWithHTML(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/boom", func(*tctx) error {
@@ -399,8 +387,6 @@ func TestDefaultErrorHandlerAnswersHTMXWithHTML(t *testing.T) {
 			if got := rec.Body.String(); got != tc.body {
 				t.Errorf("body = %q, want %q", got, tc.body)
 			}
-			// Two answers for one URL, so a shared cache has to keep them
-			// apart.
 			if got := rec.Header().Get(HeaderVary); got != HeaderHXRequest {
 				t.Errorf("%s = %q, want %q", HeaderVary, got, HeaderHXRequest)
 			}

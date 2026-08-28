@@ -58,8 +58,6 @@ func TestMountRegistersGETAndHEADOnly(t *testing.T) {
 
 	res := routertest.Do(r, http.MethodPost, "/static/css/app.css")
 	res.AssertStatus(t, http.StatusMethodNotAllowed)
-	// The router builds the Allow header from the registered methods and adds
-	// the OPTIONS that it answers itself.
 	res.AssertHeader(t, "Allow", "GET, HEAD, OPTIONS")
 
 	routertest.Do(r, http.MethodHead, "/static/css/app.css").AssertStatus(t, http.StatusOK)
@@ -110,8 +108,6 @@ func TestMountHandlerServesTheAssetsToo(t *testing.T) {
 func TestHandlerReportsAWrongMethod(t *testing.T) {
 	r := newRouter()
 	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"})
-	// Any registers every method, so the handler itself has to refuse the
-	// write methods instead of leaving it to the router.
 	r.Any("/static/{"+static.PathParam+"...}", static.Handler[*appContext](a))
 
 	res := routertest.Do(r, http.MethodPost, "/static/css/app.css")
@@ -122,8 +118,6 @@ func TestHandlerReportsAWrongMethod(t *testing.T) {
 func TestHandlerOnARouteWithoutTheParameter(t *testing.T) {
 	r := newRouter()
 	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"})
-	// No catch-all: the handler has to read the request path instead of
-	// resolving the empty parameter to the index.
 	r.GET("/static/css/app.css", static.Handler[*appContext](a))
 	r.GET("/favicon.ico", static.Handler[*appContext](a))
 
@@ -131,9 +125,6 @@ func TestHandlerOnARouteWithoutTheParameter(t *testing.T) {
 	routertest.Get(r, "/favicon.ico").AssertStatus(t, http.StatusNotFound)
 }
 
-// TestMountInsideAHostScope covers the seam between the two features: a host
-// scope hands Mount a scope like any other, and the catch-all of the assets
-// has to leave the parameters of the host readable.
 func TestMountInsideAHostScope(t *testing.T) {
 	r := newRouter()
 	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"})
@@ -150,7 +141,6 @@ func TestMountInsideAHostScope(t *testing.T) {
 
 	routertest.Get(r, "/who", routertest.Host("acme.example.com")).AssertBody(t, "acme")
 
-	// The assets answer that host alone.
 	routertest.Get(r, a.URL("css/app.css"), routertest.Host("other.invalid")).
 		AssertStatus(t, http.StatusNotFound)
 }

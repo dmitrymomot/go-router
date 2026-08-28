@@ -11,9 +11,6 @@ import (
 	"time"
 )
 
-// flashRequest returns a Base whose request carries the cookies that the
-// response of b set, the way the next request from the browser does. A cookie
-// that b expired stays behind, because the browser dropped it.
 func flashRequest(t *testing.T, b *Base) *Base {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -26,8 +23,6 @@ func flashRequest(t *testing.T, b *Base) *Base {
 	return NewBase(httptest.NewRecorder(), req)
 }
 
-// flashCookieOf returns the flash cookie that the response of b carries, and
-// reports whether it found one.
 func flashCookieOf(t *testing.T, b *Base) (*http.Cookie, bool) {
 	t.Helper()
 	for _, c := range setCookies(t, b) {
@@ -38,7 +33,6 @@ func flashCookieOf(t *testing.T, b *Base) (*http.Cookie, bool) {
 	return nil, false
 }
 
-// addFlashes adds every message and fails on the first that does not fit.
 func addFlashes(t *testing.T, b *Base, cc *CookieCodec, flashes ...Flash) {
 	t.Helper()
 	for _, f := range flashes {
@@ -48,7 +42,6 @@ func addFlashes(t *testing.T, b *Base, cc *CookieCodec, flashes ...Flash) {
 	}
 }
 
-// wantFlashes fails unless got holds exactly want.
 func wantFlashes(t *testing.T, got, want []Flash) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -86,8 +79,6 @@ func TestAddFlashKeepsTheOrderOfTheCalls(t *testing.T) {
 	})
 }
 
-// Three calls leave one cookie, not three, because a browser keeps the last
-// header of a name and the rest is weight.
 func TestAddFlashWritesOneCookie(t *testing.T) {
 	cc := testCodec()
 	b := cookieBase()
@@ -102,7 +93,6 @@ func TestAddFlashWritesOneCookie(t *testing.T) {
 	}
 }
 
-// A second request that adds a message keeps the one that the first left.
 func TestAddFlashAppendsToTheCookieOfTheRequest(t *testing.T) {
 	cc := testCodec()
 	first := cookieBase()
@@ -156,8 +146,6 @@ func TestFlashesIsSafeToCallTwice(t *testing.T) {
 	}
 }
 
-// A handler that reads the messages and then adds one starts a new list, and
-// hands the browser the message it just added and nothing it already showed.
 func TestAddFlashAfterFlashesStartsAgain(t *testing.T) {
 	cc := testCodec()
 	post := cookieBase()
@@ -208,9 +196,6 @@ func TestFlashesDropsACookieItCannotTrust(t *testing.T) {
 	}
 }
 
-// A page on a sibling subdomain sets a cookie of the same name, and the
-// browser sends it ahead of the one this server wrote. The messages are in the
-// one that verifies.
 func TestFlashesTakesTheCookieThatVerifies(t *testing.T) {
 	cc := testCodec()
 	post := cookieBase()
@@ -228,8 +213,6 @@ func TestFlashesTakesTheCookieThatVerifies(t *testing.T) {
 	wantFlashes(t, get.Flashes(cc), []Flash{{Kind: "success", Message: "saved"}})
 }
 
-// AddFlash reads past the planted cookie too, so the message it adds joins the
-// ones the request carries instead of starting a list again.
 func TestAddFlashTakesTheCookieThatVerifies(t *testing.T) {
 	cc := testCodec()
 	first := cookieBase()
@@ -343,8 +326,6 @@ func TestAddFlashReportsAMessageThatIsNotUTF8(t *testing.T) {
 	}
 }
 
-// The cookie stays inside the size that a browser guarantees, which is what
-// makes the limit worth checking against the whole header line.
 func TestAddFlashMeasuresTheWholeCookie(t *testing.T) {
 	cc := testCodec()
 	b := cookieBase()

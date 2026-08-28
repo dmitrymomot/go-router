@@ -13,8 +13,6 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// methodOverrideRouter answers every method on one path with the name of the
-// method that reached it.
 func methodOverrideRouter(cfg middleware.MethodOverrideConfig) *router.Router[*appContext] {
 	r := newRouter()
 	r.Pre(middleware.MethodOverrideWithConfig[*appContext](cfg))
@@ -27,7 +25,6 @@ func methodOverrideRouter(cfg middleware.MethodOverrideConfig) *router.Router[*a
 	return r
 }
 
-// methodOverridePost builds a POST that names another method in the header.
 func methodOverridePost(target, override string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, target, nil)
 	if override != "" {
@@ -149,21 +146,17 @@ func TestMethodOverrideSkip(t *testing.T) {
 	}
 }
 
-// countingReader counts the bytes that a reader of it pulled.
 type countingReader struct {
 	r    io.Reader
 	read int64
 }
 
-// Read implements [io.Reader].
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.read += int64(n)
 	return n, err
 }
 
-// multipartOverride builds the body of a form that names a method and posts a
-// file of filler bytes beside it, in the order a browser sends the two.
 func multipartOverride(t *testing.T, method string, filler int) (body []byte, contentType string) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -184,8 +177,6 @@ func multipartOverride(t *testing.T, method string, filler int) (body []byte, co
 	return buf.Bytes(), w.FormDataContentType()
 }
 
-// methodFromFormRouter answers /posts/7 on POST and on DELETE, and reads the
-// form on the POST so that a body it could not parse reports itself.
 func methodFromFormRouter() *router.Router[*appContext] {
 	r := newRouter()
 	r.Pre(middleware.MethodOverrideWithConfig[*appContext](middleware.MethodOverrideConfig{
@@ -201,20 +192,12 @@ func methodFromFormRouter() *router.Router[*appContext] {
 	return r
 }
 
-// TestMethodFromFormBoundsTheBodyItParses walks the body that the getter reads.
-//
-// The middleware belongs in Pre, which runs before the route is matched and so
-// before every Use middleware, [BodyLimit] included. A parse that answers to
-// nothing but its own default therefore reads a chunked body of any size, and
-// no cap the router carries applies.
 func TestMethodFromFormBoundsTheBodyItParses(t *testing.T) {
 	body, contentType := multipartOverride(t, http.MethodDelete, 1<<20)
 
 	r := methodFromFormRouter()
 	r.MaxBodyBytes(4 << 10)
 
-	// A reader of its own leaves the request with no Content-Length, which is
-	// what a chunked upload sends and what a cap on that header cannot see.
 	counted := &countingReader{r: bytes.NewReader(body)}
 	req := httptest.NewRequest(http.MethodPost, "/posts/7", counted)
 	req.Header.Set(router.HeaderContentType, contentType)
@@ -246,11 +229,6 @@ func TestMethodFromFormReadsAMultipartFormUnderTheCap(t *testing.T) {
 	}
 }
 
-// TestMethodOverrideAndTheFormItLeavesUnparsed pins which getter leaves a
-// urlencoded body readable. net/http parses that body for POST, PUT and PATCH
-// alone, so an override to DELETE loses it unless the getter parsed it first.
-// The doc of every getter names the consequence; this holds the three of them
-// to it.
 func TestMethodOverrideAndTheFormItLeavesUnparsed(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -288,9 +266,6 @@ func TestMethodOverrideAndTheFormItLeavesUnparsed(t *testing.T) {
 	}
 }
 
-// TestMethodOverrideKeepsAMultipartFormReadable pins the way out that the doc
-// offers: a multipart body parses whatever the method is, so a getter that
-// reads no body still leaves the fields where the handler finds them.
 func TestMethodOverrideKeepsAMultipartFormReadable(t *testing.T) {
 	r := newRouter()
 	r.Pre(middleware.MethodOverrideWithConfig[*appContext](
