@@ -70,6 +70,10 @@ func Logger[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // error, because the error handler runs after this middleware returns and the
 // response is still uncommitted at that moment.
 //
+// It describes the request as the chain left it, not as it arrived, so a
+// method override below this middleware reports the method that answered and a
+// rewrite reports the path that matched.
+//
 // The record holds the method, the path, the route, the status, the duration,
 // the size, the client address, the host, the host pattern of the route, the
 // protocol, the user agent and the referer. A field whose header the request
@@ -107,9 +111,12 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
 				return next(c)
 			}
 
-			req := c.Request()
 			start := time.Now()
 			err := next(c)
+			// The request comes off the context after the chain ran, so that a
+			// middleware below this one that replaced it, a method override or
+			// a rewrite among them, is what the record describes.
+			req := c.Request()
 			status := statusOf(c, err)
 
 			level := cfg.Level
