@@ -23,7 +23,11 @@ func benchRouter(patterns ...string) (*Router[*tctx], *nopWriter) {
 }
 
 func benchServe(b *testing.B, r http.Handler, w http.ResponseWriter, target string) {
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	benchServeMethod(b, r, w, http.MethodGet, target)
+}
+
+func benchServeMethod(b *testing.B, r http.Handler, w http.ResponseWriter, method, target string) {
+	req := httptest.NewRequest(method, target, nil)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
@@ -66,6 +70,43 @@ func BenchmarkBacktrack(b *testing.B) {
 func BenchmarkNotFound(b *testing.B) {
 	r, w := benchRouter("/users/{id}")
 	benchServe(b, r, w, "/nothing/here")
+}
+
+// benchMethodRouter registers every method on one pattern, so that a request
+// for another method matches the path and misses the method.
+func benchMethodRouter(pattern string, methods ...string) (*Router[*tctx], *nopWriter) {
+	ok := func(c *tctx) error { return c.NoContent(http.StatusOK) }
+	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+	for _, m := range methods {
+		r.Handle(m, pattern, ok)
+	}
+	return r, &nopWriter{h: make(http.Header)}
+}
+
+// The three benchmarks below are the answers that carry an Allow header. They
+// name the methods of every route that the path matched, which is a value the
+// build settles and a request must not recompute.
+
+// BenchmarkMethodNotAllowed measures a path that matched under another method.
+func BenchmarkMethodNotAllowed(b *testing.B) {
+	r, w := benchMethodRouter("/users/{id}", http.MethodGet)
+	benchServeMethod(b, r, w, http.MethodDelete, "/users/42")
+}
+
+// BenchmarkPreflight measures the OPTIONS answer that the router writes for a
+// route that handles no OPTIONS itself. It is the request that a browser sends
+// ahead of every cross-origin write, so a service behind CORS pays it as often
+// as it pays for the write.
+func BenchmarkPreflight(b *testing.B) {
+	r, w := benchMethodRouter("/users/{id}", http.MethodGet, http.MethodPost)
+	benchServeMethod(b, r, w, http.MethodOptions, "/users/42")
+}
+
+// BenchmarkPreflightStatic is the same answer for a literal path, where the
+// walk itself costs least and the header is the larger half of the work.
+func BenchmarkPreflightStatic(b *testing.B) {
+	r, w := benchMethodRouter("/health", http.MethodGet)
+	benchServeMethod(b, r, w, http.MethodOptions, "/health")
 }
 
 // apiRoutes is a route set of the size that a real service has.
