@@ -40,7 +40,11 @@ func skipPath(path string) func(router.Context) bool {
 }
 
 // TestDefaultFactories checks that the plain factory of every middleware
-// returns a usable middleware.
+// returns a usable middleware, and that the whole set composes into one chain.
+//
+// The factories that take an argument stay out of it: BodyLimit and RateLimit
+// have no plain form to check, and MethodOverride and Rewrite belong in
+// [router.Router.Pre], which runs before the route is matched.
 func TestDefaultFactories(t *testing.T) {
 	r := newRouter()
 	r.Use(
@@ -50,7 +54,11 @@ func TestDefaultFactories(t *testing.T) {
 		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
 			Logger: slog.New(slog.DiscardHandler),
 		}),
+		middleware.Secure[*appContext],
 		middleware.CORS[*appContext],
+		middleware.CSRF[*appContext],
+		middleware.Decompress[*appContext],
+		middleware.Gzip[*appContext],
 		middleware.Timeout[*appContext],
 		middleware.HTMXRedirect[*appContext],
 	)

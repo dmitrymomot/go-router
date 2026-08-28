@@ -112,7 +112,7 @@ func (a *Assets) fallback(r *http.Request, name string) bool {
 }
 
 // write opens the named file and sends it. A directory answers with the index
-// file that it holds.
+// file that it holds, or with the redirect that Config.RedirectDir asks for.
 //
 // Every failure to open is a miss, whatever the file system reported. A path
 // that leaves the asset set fails with an error of its own, and the client
@@ -125,9 +125,38 @@ func (a *Assets) write(w http.ResponseWriter, r *http.Request, name string, vers
 	//nolint:errcheck // The file is read only.
 	defer f.Close()
 	if info.IsDir() {
-		return a.write(w, r, path.Join(name, a.index), versioned)
+		idx := path.Join(name, a.index)
+		// The index has to exist for the slashed form to answer anything. A
+		// directory without one keeps the 404 that it answers today, and under
+		// SPA it keeps reaching the fallback, which a redirect would take away
+		// from it.
+		if a.redirectDir && !strings.HasSuffix(r.URL.Path, "/") && a.Has(idx) {
+			redirectDir(w, r)
+			return nil
+		}
+		return a.write(w, r, idx, versioned)
 	}
 	return a.send(w, r, name, f, info, versioned)
+}
+
+// redirectDir answers a directory request whose URL carries no trailing slash
+// with the 301 that Config.RedirectDir asks for.
+//
+// The Location is relative: it names the last segment of the request path and
+// a slash, so the browser resolves it under whatever prefix the request
+// carried, including one that [http.StripPrefix] or the MountHandler method of
+// the router removed before this package saw the path. It leads with "./" so
+// that a segment which holds a colon does not read as the scheme of an
+// absolute URL.
+func redirectDir(w http.ResponseWriter, r *http.Request) {
+	// EscapedPath keeps the encoding that the client sent, so a name that
+	// holds a space or a "#" goes back the way it arrived.
+	dest := "./" + path.Base(r.URL.EscapedPath()) + "/"
+	if q := r.URL.RawQuery; q != "" {
+		dest += "?" + q
+	}
+	w.Header().Set("Location", dest)
+	w.WriteHeader(http.StatusMovedPermanently)
 }
 
 // send writes the headers and the body of one file.

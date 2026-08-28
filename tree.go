@@ -50,7 +50,13 @@ type node[C Context] struct {
 	parts []segPart
 	raw   string
 
-	routes  []methodHandler[C]
+	routes []methodHandler[C]
+
+	// catchAll is the handler of the entry that [Router.Any] registered, nil
+	// for a node that carries none. It sits beside routes rather than in
+	// them, so that a lookup for an explicit method never scans for it.
+	catchAll HandlerFunc[C]
+
 	pattern string
 	names   []string
 }
@@ -96,6 +102,9 @@ func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFu
 		}
 	}
 	cur.routes = append(cur.routes, methodHandler[C]{method: method, handler: h})
+	if method == anyMethod {
+		cur.catchAll = h
+	}
 	return nil
 }
 
@@ -191,8 +200,14 @@ func namingConflict(existing, want string) error {
 	return fmt.Errorf("the parameter at this position is already named %q, not %q", existing, want)
 }
 
-// handler returns the handler for the method. A HEAD request falls back to the
-// GET handler, as net/http does.
+// handler returns the handler for the method. The exact method wins; a HEAD
+// request then falls back to the GET handler, as net/http does, and any method
+// falls back to the entry that [Router.Any] registered.
+//
+// The entry of Any keeps a field of its own instead of a place among the
+// routes, because every request runs this lookup: a node that carries no such
+// entry then answers with a nil field, and one that does never slows the
+// method it names outright.
 func (n *node[C]) handler(method string) HandlerFunc[C] {
 	for _, mh := range n.routes {
 		if mh.method == method {
@@ -206,14 +221,21 @@ func (n *node[C]) handler(method string) HandlerFunc[C] {
 			}
 		}
 	}
-	return nil
+	return n.catchAll
 }
 
 // allowed returns the methods that the node answers, in a stable order and
 // with the implied HEAD and OPTIONS entries.
+//
+// The entry of [Router.Any] contributes nothing, because the router cannot
+// name every method that it answers. A node that carries one never reaches
+// this point anyway: it answers whatever arrives, so it produces no 405.
 func (n *node[C]) allowed() []string {
 	out := make([]string, 0, len(n.routes)+2)
 	for _, mh := range n.routes {
+		if mh.method == anyMethod {
+			continue
+		}
 		out = append(out, mh.method)
 	}
 	if slices.Contains(out, http.MethodGet) && !slices.Contains(out, http.MethodHead) {
@@ -229,22 +251,71 @@ func (n *node[C]) allowed() []string {
 // matchState carries the information that a failed method lookup needs, so
 // that the router can answer 405 instead of 404.
 type matchState[C Context] struct {
-	// pathMatch is a node whose pattern matched the path but which does not
-	// answer the request method.
+	// pathMatch is the first node whose pattern matched the path but which
+	// does not answer the request method. Its pattern and its values are the
+	// ones that [Base.RoutePattern] and [Base.Param] report.
 	pathMatch *node[C]
 
 	// pathVals holds the parameter values of pathMatch. The walk continues
 	// after it records them and overwrites the shared array, so they are a
 	// copy.
 	pathVals []string
+
+	// rest holds the further nodes that matched the path. The Allow header
+	// names their methods too, because the walk backtracks to them: a literal
+	// sibling is visited before the parameter and the catch-all underneath it,
+	// and a request for one of their methods reaches them.
+	//
+	// It is a pointer because [Router.route] holds one matchState per walk in
+	// its own frame, and every request pays for their size. A path that two
+	// patterns match under different methods is rare enough that the slice
+	// header does not earn a place there; the walk that finds one allocates.
+	rest *[]*node[C]
 }
 
-// record stores the first node that matched the path but not the method.
+// record stores a node that matched the path but not the method. Only the
+// first one keeps its values, because only its pattern and its parameters
+// reach the request.
 func (st *matchState[C]) record(n *node[C], vals []string) {
-	if st.pathMatch == nil && len(n.routes) > 0 {
+	if len(n.routes) == 0 {
+		return
+	}
+	if st.pathMatch == nil {
 		st.pathMatch = n
 		st.pathVals = slices.Clone(vals)
+		return
 	}
+	if n == st.pathMatch {
+		return
+	}
+	if st.rest == nil {
+		st.rest = new([]*node[C])
+	}
+	if !slices.Contains(*st.rest, n) {
+		*st.rest = append(*st.rest, n)
+	}
+}
+
+// allowedMethods appends the methods of every node that matched the path,
+// without repeating one.
+func (st *matchState[C]) allowedMethods(dst []string) []string {
+	if st.pathMatch == nil {
+		return dst
+	}
+	add := func(n *node[C]) {
+		for _, m := range n.allowed() {
+			if !slices.Contains(dst, m) {
+				dst = append(dst, m)
+			}
+		}
+	}
+	add(st.pathMatch)
+	if st.rest != nil {
+		for _, n := range *st.rest {
+			add(n)
+		}
+	}
+	return dst
 }
 
 // search walks the tree. n has already consumed its own part of the path, and

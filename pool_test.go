@@ -78,6 +78,59 @@ func TestPoolResetsTheRequestState(t *testing.T) {
 	}
 }
 
+// TestPoolResetsTheCachedRequestState covers the state that a handler fills on
+// demand rather than the router up front: the parsed query, the reason a form
+// body failed to parse, the normalized host and the host pattern of the route.
+// A context that carried any of them out of the pool would answer the next
+// request with the state of the previous one.
+func TestPoolResetsTheCachedRequestState(t *testing.T) {
+	r := NewPooled(func() *pctx { return new(pctx) }, resetPctx)
+	r.MaxBodyBytes(16)
+	r.Host("example.com", func(h *Router[*pctx]) {
+		h.POST("/first", func(c *pctx) error {
+			// Fill every cache. The body is over the limit, so the form parse
+			// fails and the context remembers why.
+			c.Query("q")
+			c.Host()
+			if _, err := c.FormValues(); err == nil {
+				return ErrInternalServerError.WithMessage("the oversized body parsed")
+			}
+			return c.NoContent(http.StatusNoContent)
+		})
+	})
+	r.POST("/second", func(c *pctx) error {
+		vals, err := c.FormValues()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "q=%q host=%q routeHost=%q name=%q",
+			c.Query("q"), c.Host(), c.RouteHost(), vals.Get("name"))
+	})
+
+	first := httptest.NewRequest(http.MethodPost, "/first?q=one",
+		strings.NewReader("name="+strings.Repeat("x", 100)))
+	first.Host = "example.com"
+	first.Header.Set(HeaderContentType, MIMEApplicationForm)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, first)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("first request: status = %d, want 204: %s", rec.Code, rec.Body)
+	}
+
+	// The second request takes the same context back out of the pool: no query
+	// string, another host, no host pattern and a body that parses.
+	second := httptest.NewRequest(http.MethodPost, "/second", strings.NewReader("name=ann"))
+	second.Host = "other.test"
+	second.Header.Set(HeaderContentType, MIMEApplicationForm)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, second)
+
+	want := `q="" host="other.test" routeHost="" name="ann"`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
 func TestPoolDropsAContextThatPanicked(t *testing.T) {
 	// A context whose request panicked never goes back into the pool, so every
 	// panicking request has to build a fresh one. Counting the builds is

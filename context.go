@@ -26,8 +26,10 @@ package router
 import (
 	"context"
 	"encoding/json/v2"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -88,6 +90,11 @@ type Base struct {
 	store    map[string]any
 	paramArr [maxInlineParams]string
 
+	// queryCache holds the parsed query string of the request. queryValues
+	// fills it on demand, because url.Query re-parses and allocates on every
+	// call.
+	queryCache url.Values
+
 	pattern string
 
 	// host is the request host that the router matched against, without its
@@ -106,19 +113,17 @@ type Base struct {
 	paramNames []string
 	paramVals  []string
 
-	// jsonOpts are the encoding/json/v2 options of the router.
-	jsonOpts []json.Options
+	// ropts are the settings of the router that serves the request. It is nil
+	// on a context that no router built, and opts answers with the package
+	// defaults while it is.
+	ropts *routerOpts
 
-	// hxErr is the first failure of the htmx response chain. It lives here
-	// rather than on the [HXResponse] value, so that a handler which drops one
-	// link of the chain still reports the failure.
-	hxErr error
-
+	// deferred holds the failures that the context reports later than it met
+	// them. Both are rare, so they sit behind one word rather than two
+	// interface fields, which keeps Base inside its size class.
+	deferred *deferredErrors
 	// resStorage backs res, so that a context needs one allocation and not two.
 	resStorage Response
-
-	// maxBody is the request body limit that the router applies to Bind.
-	maxBody int64
 
 	// hostIdx is the index of the matched host entry inside the router, or -1.
 	// The error handler and the fallbacks read it to find the host again after
@@ -129,8 +134,38 @@ type Base struct {
 	// host is a legitimate answer, so it cannot mark the field as unset.
 	hostKnown bool
 
+	// queryParsed reports that queryCache holds the query of the request. A
+	// request without a query string parses to an empty map, which is a
+	// legitimate answer, so it cannot mark the field as unset.
+	queryParsed bool
+
 	// pathEscaped reports whether the matched path was still percent encoded.
 	pathEscaped bool
+}
+
+// routerOpts holds the settings that every request of one router shares. The
+// router builds it once, and every context points at it, so a context carries
+// one word instead of a copy of every setting.
+type routerOpts struct {
+	jsonOpts     []json.Options
+	logger       *slog.Logger
+	maxBody      int64
+	maxMultipart int64
+	strictBind   bool
+}
+
+// defaultRouterOpts answers for a context that no router built, such as one
+// that [NewBase] returns. It carries the settings of a router that the
+// application left alone.
+var defaultRouterOpts = &routerOpts{maxBody: DefaultMaxBodyBytes}
+
+// opts returns the settings that the request obeys: the ones of the router
+// that serves it, or the package defaults on a context that no router built.
+func (b *Base) opts() *routerOpts {
+	if b.ropts == nil {
+		return defaultRouterOpts
+	}
+	return b.ropts
 }
 
 // NewBase returns a Base that is bound to w and r. Use it when the application
@@ -143,25 +178,80 @@ func NewBase(w http.ResponseWriter, r *http.Request) *Base {
 
 // init binds the request state. The router calls it after the context factory
 // returns, so a factory never has to call it.
+//
+// Every request pays for it, so it has to stay under the inline budget of the
+// compiler. That is what the grouped assignments buy: they say the same thing
+// as one statement each and cost the compiler less. Check with
+//
+//	go build -gcflags='-m=2' . 2>&1 | grep 'Base).init'
+//
+// after a field joins Base, because a call here costs a frame per request.
 func (b *Base) init(w http.ResponseWriter, r *http.Request) {
-	b.req = r
-	if res, ok := w.(*Response); ok {
-		b.res = res
-	} else {
+	res, ok := w.(*Response)
+	if !ok {
 		b.resStorage = Response{ResponseWriter: w}
-		b.res = &b.resStorage
+		res = &b.resStorage
 	}
-	b.pattern = ""
-	b.paramNames = nil
-	b.paramVals = b.paramArr[:0]
-	b.rawTail = ""
-	b.host = ""
-	b.hostKnown = false
-	b.hostPattern = ""
-	b.hostIdx = -1
-	b.pathEscaped = false
-	b.hxErr = nil
+	b.req, b.res = r, res
+	b.pattern, b.rawTail = "", ""
+	b.paramNames, b.paramVals = nil, b.paramArr[:0]
+	b.host, b.hostKnown, b.hostPattern = "", false, ""
+	b.hostIdx, b.pathEscaped = -1, false
+	b.queryCache, b.queryParsed = nil, false
+	b.deferred = nil
 	clear(b.store)
+}
+
+// deferredErrors holds the failures that a context meets before the moment it
+// reports them.
+type deferredErrors struct {
+	// form is the failure that parseForm reported. net/http leaves an empty
+	// form behind after a body that it could not read, so every reader after
+	// the first would see an empty form and no reason for it.
+	form error
+
+	// hx is the first failure of the htmx response chain. It lives on the
+	// context rather than on the [HXResponse] value, so that a handler which
+	// drops one link of the chain still reports the failure.
+	hx error
+}
+
+// deferrals returns the deferred failures of the context, and allocates them on
+// the first one. A request that meets none never pays for them.
+func (b *Base) deferrals() *deferredErrors {
+	if b.deferred == nil {
+		b.deferred = new(deferredErrors)
+	}
+	return b.deferred
+}
+
+// formError returns the failure that parseForm reported, or nil.
+func (b *Base) formError() error {
+	if b.deferred == nil {
+		return nil
+	}
+	return b.deferred.form
+}
+
+// setFormError records the failure of parseForm and returns it.
+func (b *Base) setFormError(err error) error {
+	b.deferrals().form = err
+	return err
+}
+
+// hxError returns the first failure of the htmx response chain, or nil.
+func (b *Base) hxError() error {
+	if b.deferred == nil {
+		return nil
+	}
+	return b.deferred.hx
+}
+
+// setHXError records the first failure of the htmx response chain.
+func (b *Base) setHXError(err error) {
+	if d := b.deferrals(); d.hx == nil {
+		d.hx = err
+	}
 }
 
 // setRoute records the matched route on the context.
@@ -171,6 +261,13 @@ func (b *Base) setRoute(pattern string, names, vals []string) {
 	b.paramVals = vals
 }
 
+// SetRouteForTest records a matched route on a context that no router built. It
+// exists for [routertest.NewContext]; production code must let the router set
+// the route.
+func SetRouteForTest(b *Base, pattern string, names, vals []string) {
+	b.setRoute(pattern, names, vals)
+}
+
 func (b *Base) base() *Base { return b }
 
 // Request returns the request that is in flight.
@@ -178,7 +275,24 @@ func (b *Base) Request() *http.Request { return b.req }
 
 // SetRequest replaces the request. Middleware uses it to attach a new
 // [context.Context] to the request.
-func (b *Base) SetRequest(r *http.Request) { b.req = r }
+//
+// It drops the parsed query of the old request, so a middleware that rewrites
+// the URL changes what [Base.Query] answers.
+func (b *Base) SetRequest(r *http.Request) {
+	b.req = r
+	b.queryCache, b.queryParsed = nil, false
+}
+
+// Logger returns the logger that [Router.Logger] set, or [slog.Default] while
+// the router has none:
+//
+//	c.Logger().InfoContext(c, "order placed", slog.String("id", id))
+func (b *Base) Logger() *slog.Logger {
+	if l := b.opts().logger; l != nil {
+		return l
+	}
+	return slog.Default()
+}
 
 // Response returns the response writer wrapper.
 func (b *Base) Response() *Response { return b.res }
@@ -280,6 +394,56 @@ func (b *Base) Host() string {
 	return b.host
 }
 
+// IsTLS reports whether the request arrived over TLS.
+func (b *Base) IsTLS() bool { return b.req.TLS != nil }
+
+// Scheme returns the scheme that the request used, "https" or "http". It reads
+// the TLS state of the connection first, then the X-Forwarded-Proto header that
+// a proxy sets in front of a plain connection.
+//
+// It reads the first element of that header and takes it only when it names
+// "http" or "https"; any other value reads as "http". An unchecked value goes
+// back to the client in the Location header of an absolute redirect, which is
+// what makes the check part of the answer and not a nicety.
+//
+// Trust the header only as far as you trust the proxy in front of the server. A
+// server that clients reach directly must not read it at all, because the
+// client sends it just as easily.
+func (b *Base) Scheme() string {
+	if b.req.TLS != nil {
+		return "https"
+	}
+	proto, _, _ := strings.Cut(b.req.Header.Get(HeaderXForwardedProto), ",")
+	if strings.EqualFold(strings.TrimSpace(proto), "https") {
+		return "https"
+	}
+	return "http"
+}
+
+// UserAgent returns the User-Agent header of the request.
+func (b *Base) UserAgent() string { return b.req.UserAgent() }
+
+// Referer returns the Referer header of the request.
+func (b *Base) Referer() string { return b.req.Referer() }
+
+// Accepts returns the offer that the client takes and prefers, or an empty
+// string when it takes none of them. Name the offers in the order that the
+// server prefers, because that order settles a tie:
+//
+//	switch c.Accepts(router.MIMETextHTML, router.MIMEApplicationJSON) {
+//	case router.MIMETextHTML:
+//		return c.Render(http.StatusOK, view.Order(order))
+//	default:
+//		return c.JSON(http.StatusOK, order)
+//	}
+//
+// It reads the q value of every media range, and matches an offer against a
+// range of "type/*" and against "*/*". A client that sends no Accept header
+// takes everything, so the first offer wins.
+func (b *Base) Accepts(offers ...string) string {
+	return negotiate(b.req.Header.Get(HeaderAccept), offers)
+}
+
 // Param returns the value of the named route parameter, or an empty string.
 func (b *Base) Param(name string) string {
 	v, _ := b.ParamOK(name)
@@ -332,7 +496,16 @@ func (b *Base) Vary(names ...string) { AddVary(b.res.Header(), names...) }
 
 // AddVary adds header names to the Vary header of h, and skips a name that it
 // already carries. [Base.Vary] is this for the response in flight.
+//
+// Every writer of a Vary header goes through it, in this package and in the
+// middleware, so that two of them naming the same header write it once: a
+// repeated field costs a cache one more comparison and answers nothing.
 func AddVary(h http.Header, names ...string) {
+	// A Vary of "*" already says that the answer varies on everything, so a
+	// field name beside it adds nothing.
+	if headerContainsToken(h, HeaderVary, "*") {
+		return
+	}
 	for _, name := range names {
 		if name == "" || headerContainsToken(h, HeaderVary, name) {
 			continue
@@ -341,20 +514,45 @@ func AddVary(h http.Header, names ...string) {
 	}
 }
 
-// Query returns the first value of the named query parameter.
-func (b *Base) Query(name string) string { return b.req.URL.Query().Get(name) }
+// queryValues parses the query string of the request once. [url.URL.Query]
+// parses it again and allocates a new map on every call, which a handler that
+// reads three parameters would pay for three times.
+func (b *Base) queryValues() url.Values {
+	if !b.queryParsed {
+		b.queryCache, b.queryParsed = b.req.URL.Query(), true
+	}
+	return b.queryCache
+}
+
+// Query returns the first value of the named query parameter, or an empty
+// string. Use [Base.QueryOK] to tell an absent parameter from an empty one.
+func (b *Base) Query(name string) string { return b.queryValues().Get(name) }
+
+// QueryOK returns the first value of the named query parameter and reports
+// whether the query holds it. An empty value is a value: "?q=" answers "" and
+// true.
+func (b *Base) QueryOK(name string) (string, bool) {
+	v, ok := b.queryValues()[name]
+	if !ok || len(v) == 0 {
+		return "", false
+	}
+	return v[0], true
+}
 
 // QueryDefault returns the first value of the named query parameter, or def
-// when the query does not hold it.
+// when the query does not hold it and when it holds it empty.
 func (b *Base) QueryDefault(name, def string) string {
-	if v := b.req.URL.Query()[name]; len(v) > 0 && v[0] != "" {
+	if v := b.queryValues()[name]; len(v) > 0 && v[0] != "" {
 		return v[0]
 	}
 	return def
 }
 
 // QueryValues returns every query parameter.
-func (b *Base) QueryValues() url.Values { return b.req.URL.Query() }
+//
+// The router parses the query once per request and hands the same map to every
+// caller, so treat it as read only. Copy it with [maps.Clone] before a change.
+func (b *Base) QueryValues() url.Values { return b.queryValues() }
 
 // Cookie returns the named cookie.
 func (b *Base) Cookie(name string) (*http.Cookie, error) { return b.req.Cookie(name) }

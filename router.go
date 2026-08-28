@@ -2,6 +2,8 @@ package router
 
 import (
 	"encoding/json/v2"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Route describes one registered route. [Router.Routes] returns them.
@@ -17,18 +20,38 @@ type Route struct {
 	Pattern string
 
 	// Host is the host pattern of the scope that registered the route. It is
-	// empty for a route that answers every host. It comes last, so that an
-	// unkeyed literal of the two fields above still compiles.
+	// empty for a route that answers every host. It follows the two fields
+	// above, which are the ones that a route table is usually keyed by.
 	Host string
+
+	// Name is the name that [Router.Name] gave the route, empty for a route
+	// that carries none. [Router.URL] builds a path from it.
+	Name string
+
+	// Meta is the value that [Router.Meta] attached to the route. The router
+	// never reads it; it carries whatever a generator outside this module puts
+	// on a route, such as an OpenAPI operation. A value that is not comparable
+	// makes the Route that holds it uncomparable too, so compare the fields
+	// that a test cares about rather than the whole struct.
+	Meta any
 }
 
-// stdMethods are the methods that [Router.Any] and [Router.MountHandler]
-// register.
-var stdMethods = []string{
-	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
-	http.MethodPatch, http.MethodDelete, http.MethodConnect,
-	http.MethodOptions, http.MethodTrace,
-}
+// MethodQuery is the QUERY method of RFC 10008. It is safe and idempotent like
+// GET and carries a body like POST, which is what lets a client send a query
+// too large for a URL.
+//
+// net/http declares no constant for it yet.
+const MethodQuery = "QUERY"
+
+// anyMethod is the method of the entry that [Router.Any] registers. A node
+// answers a request with it once no explicit method of the node fits, so one
+// entry covers every method, including a WebDAV or a QUERY request that no
+// list of standard methods holds.
+//
+// The value is the one that [Route] reports for such a route, and no request
+// can spell it: net/http rejects a method that is not a token, and "*" is the
+// wildcard of a request line that never reaches a handler.
+const anyMethod = "*"
 
 // registration is one route as the application declared it, before the router
 // resolves prefixes and middleware.
@@ -37,6 +60,11 @@ type registration[C Context] struct {
 	pattern string
 	handler HandlerFunc[C]
 	mws     []Middleware[C]
+
+	// name and meta come from the scope that [Router.Name] and [Router.Meta]
+	// opened. They live beside the trie, so the matcher never reads them.
+	name string
+	meta any
 }
 
 // Router routes requests to handlers of the shape func(C) error, where C is
@@ -58,6 +86,14 @@ type Router[C Context] struct {
 	regs      []registration[C]
 	children  []*Router[C]
 	hasRoutes bool
+
+	// name and meta belong to a scope that [Router.Name] or [Router.Meta]
+	// opened, and reach the next route that the scope registers. nameUsed
+	// marks the name as spent, which is what refuses a second route on it.
+	name     string
+	meta     any
+	tagged   bool
+	nameUsed bool
 
 	// hosts holds the host patterns that [Router.Host] bound to this scope. It
 	// is nil for a scope that answers every host.
@@ -93,8 +129,64 @@ type Router[C Context] struct {
 	// Without one the router skips the second trie walk on a miss.
 	anyHostRoutes bool
 
-	maxBody  int64
-	jsonOpts []json.Options
+	// ropts is the snapshot that build() takes of the settings below. Every
+	// context points at it, so binding a request to all of them is one
+	// pointer store.
+	ropts *routerOpts
+
+	// The settings that ropts snapshots. The setters write them, and a
+	// request reads them through ropts and never here.
+	maxBody      int64
+	maxMultipart int64
+	strictBind   bool
+	logger       *slog.Logger
+	jsonOpts     []json.Options
+
+	// The fields below arrived after the ones above and sit behind them, so
+	// that the fields a request reads keep the offsets, and the cache lines,
+	// that they had. Only the three that a request touches come first.
+
+	// compiled reports that buildErr finished. started goes up as buildErr
+	// begins, so only this one says that the trie is whole, and it is the
+	// check that a request pays instead of entering sync.Once.
+	compiled atomic.Bool
+
+	// preChain is the chain of [Router.Pre] around the matcher. It is nil
+	// while no Pre middleware exists, which is the one check that a request
+	// pays for the stage, and preMws is what it was built from.
+	preChain HandlerFunc[C]
+
+	// observer is the function that [Router.Observe] set. It is nil for a
+	// router that reports nothing, which is the single check that a request
+	// pays for the seam.
+	observer func(c Context, status int, size int64, d time.Duration, err error)
+
+	preMws     []Middleware[C]
+	compileErr error
+
+	// scopes holds the fallbacks of every path scope that carries a prefix,
+	// most specific first. A request that no route answered runs the chain of
+	// the innermost scope that owns its path.
+	scopes []*scopeFallback[C]
+
+	// errScopes holds the scopes above that set an error handler, in the same
+	// order. It is empty for a router that sets none, which is the one check
+	// that a failed request pays for the stage.
+	errScopes []*scopeFallback[C]
+
+	// named maps a route name to the pattern that [Router.URL] fills in, and
+	// info carries the name and the value of [Router.Meta] back to
+	// [Router.Routes]. Both stay nil until a route uses them.
+	named map[string]namedRoute
+	info  map[routeKey]routeInfo
+
+	// owner is the scope that opened this one as an extension of itself, which
+	// [Router.Name], [Router.Meta] and [Router.With] do. A route that such a
+	// scope registers is a route of the owner as the application reads it, so
+	// it marks the owner too and [Router.Use] still refuses to arrive after
+	// it. It is nil for the root and for a scope that [Router.Group],
+	// [Router.Route] or [Router.Host] opened, which are scopes of their own.
+	owner *Router[C]
 }
 
 // New returns a root router. newContext builds the application context for one
@@ -181,12 +273,25 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 	if h == nil {
 		panic("router: Handle needs a handler for " + method + " " + pattern)
 	}
-	r.hasRoutes = true
+	if r.name != "" {
+		if r.nameUsed {
+			panic("router: the scope named " + r.name + " already registered a route; open another Name scope for " + method + " " + pattern)
+		}
+		r.nameUsed = true
+	}
+	// The scope that [Router.Name], [Router.Meta] or [Router.With] opened
+	// registers on behalf of the one above it, so the route counts for both
+	// and a later Use on either of them panics.
+	for s := r; s != nil; s = s.owner {
+		s.hasRoutes = true
+	}
 	r.regs = append(r.regs, registration[C]{
 		method:  method,
 		pattern: pattern,
 		handler: h,
 		mws:     slices.Clone(mws),
+		name:    r.name,
+		meta:    r.meta,
 	})
 }
 
@@ -227,11 +332,19 @@ func (r *Router[C]) OPTIONS(pattern string, h HandlerFunc[C], mws ...Middleware[
 	r.Handle(http.MethodOptions, pattern, h, mws...)
 }
 
-// Any registers a handler for every standard method.
+// Any registers a handler for every method that no explicit route of the
+// pattern answers. One entry covers them all, so the route also answers a
+// method that no list holds, such as QUERY or a WebDAV method:
+//
+//	r.Any("/webhooks/{id}", forward)
+//	r.POST("/webhooks/{id}", record)   // POST reaches record, everything else forward
+//
+// An explicit method always wins, whichever of the two registrations came
+// first. Because such a route answers every method, it never produces a 405
+// and never contributes to an Allow header; [Router.Routes] reports it once,
+// under the method "*".
 func (r *Router[C]) Any(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
-	for _, m := range stdMethods {
-		r.Handle(m, pattern, h, mws...)
-	}
+	r.Handle(anyMethod, pattern, h, mws...)
 }
 
 // Match registers a handler for each of the named methods.
@@ -248,8 +361,12 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 // Use adds middleware to this scope. It applies to every route that the scope
 // registers afterwards, and to every scope below it.
 //
-// Use panics after the scope registers its first route, because middleware that
-// arrives later would silently skip the routes above it.
+// Use panics after the scope registers its first route, because the router
+// resolves the middleware of a scope when it compiles, so middleware that
+// arrives later would silently wrap the routes above it as well. A route that
+// [Router.Name], [Router.Meta] or [Router.With] registered counts as a route of
+// the scope that opened them, so r.Name("u").GET(...) closes r to Use the way
+// r.GET(...) does. Open a [Router.Group] for middleware that comes later.
 func (r *Router[C]) Use(mws ...Middleware[C]) {
 	if r.hasRoutes {
 		panic("router: Use must come before the routes of a scope; open a Group for later middleware")
@@ -300,7 +417,94 @@ func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 //
 //	r.With(rateLimit).POST("/login", login)
 func (r *Router[C]) With(mws ...Middleware[C]) *Router[C] {
-	return r.newChild("", slices.Clone(mws))
+	c := r.newChild("", slices.Clone(mws))
+	c.owner = r
+	return c
+}
+
+// Pre adds middleware that runs before the router matches. It may replace the
+// request with [Base.SetRequest], which is how a path rewrite changes what the
+// trie sees:
+//
+//	r.Pre(func(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
+//		return func(c *app.Context) error {
+//			req := c.Request()
+//			if rest, ok := strings.CutPrefix(req.URL.Path, "/old/"); ok {
+//				rewritten := req.Clone(req.Context())
+//				rewritten.URL.Path = "/new/" + rest
+//				c.SetRequest(rewritten)
+//			}
+//			return next(c)
+//		}
+//	})
+//
+// The stage runs on the context, before the host and the path match, so
+// [Base.RoutePattern] and [Base.Param] are still empty inside it, and an error
+// that a Pre middleware returns reaches the error handler of the root, because
+// no host has been resolved yet.
+//
+// The matcher normalizes the path it receives, so a rewrite decides what
+// [Router.RedirectTrailingSlash] sees: the trailing slash of the rewritten
+// path is the one that answers 301, and the redirect points at the rewritten
+// URL rather than at the one the client sent. A rewrite that means to keep the
+// original URL visible has to redirect itself instead.
+//
+// Only the root accepts Pre, because a scope cannot own a stage that runs
+// before matching picks the scope. It panics on a scope, the way [Router.Use]
+// panics once a scope has routes.
+func (r *Router[C]) Pre(mws ...Middleware[C]) {
+	if r.root != r {
+		panic("router: Pre belongs to the root router, because it runs before matching picks a scope")
+	}
+	r.mustNotBeServing("the pre-routing middleware")
+	r.preMws = append(r.preMws, mws...)
+}
+
+// Name opens a scope whose next route carries the name, which [Router.URL]
+// then builds a path from:
+//
+//	r.Name("user").GET("/users/{id}", getUser)
+//	r.URL("user", map[string]string{"id": "7"})   // "/users/7"
+//
+// A second route on the same scope, and a name that another route already
+// carries, are both registration errors.
+func (r *Router[C]) Name(name string) *Router[C] {
+	if name == "" {
+		panic("router: Name needs a name")
+	}
+	c := r.tag()
+	c.name = name
+	return c
+}
+
+// Meta opens a scope whose next routes carry v, which [Router.Routes] reports
+// back. The router never reads it, so it holds whatever a generator outside
+// this module puts on a route:
+//
+//	r.Meta(openapi.Op{Summary: "read a user"}).GET("/users/{id}", getUser)
+//
+// It composes with [Router.Name], in either order:
+//
+//	r.Name("user").Meta(op).GET("/users/{id}", getUser)
+func (r *Router[C]) Meta(v any) *Router[C] {
+	c := r.tag()
+	c.meta = v
+	return c
+}
+
+// tag returns the scope that the next route registers on: r itself when
+// [Router.Name] or [Router.Meta] already opened one, so that the two of them
+// describe one route, and a new scope otherwise.
+func (r *Router[C]) tag() *Router[C] {
+	if r.root.started.Load() {
+		panic("router: cannot name or tag a route after the router started serving")
+	}
+	if r.tagged {
+		return r
+	}
+	c := r.newChild("", nil)
+	c.tagged, c.owner = true, r
+	return c
 }
 
 // ---------------------------------------------------------------------------
@@ -493,11 +697,16 @@ func (r *Router[C]) mustNotBeServing(what string) {
 }
 
 // NotFound sets the handler for a request that matches no route. The
-// middleware of the root applies to it.
+// middleware of the scope applies to it.
 //
 // It takes precedence over the error handler: once set, a request that matches
 // no route goes to this handler and never reaches [Router.ErrorHandler].
 // Without it the router returns [ErrNotFound], which the error handler renders.
+//
+// The handler answers the scope that set it. On the root, and on a scope that
+// carries no prefix of its own, that is every path; on a scope under a prefix
+// it is the paths of that prefix, and the scopes below inherit it. So an API
+// branch answers a miss as JSON while the pages around it keep their own page.
 func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 	r.mustNotBeServing("the not-found handler")
 	r.notFound = h
@@ -508,7 +717,8 @@ func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 // the handler.
 //
 // It takes precedence over the error handler in the same way [Router.NotFound]
-// does. Without it the router returns [ErrMethodNotAllowed].
+// does, and it answers the scope that set it in the same way. Without it the
+// router returns [ErrMethodNotAllowed].
 func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 	r.mustNotBeServing("the method-not-allowed handler")
 	r.methodNotAllowed = h
@@ -525,6 +735,11 @@ func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 // The last two reach it only while [Router.NotFound] and
 // [Router.MethodNotAllowed] are unset. A handler set there answers the request
 // itself and wins.
+//
+// The handler renders the scope that set it, the way [Router.NotFound] does:
+// a handler that a scope under a prefix installs answers the paths of that
+// prefix alone, so one that exposes the internal cause of a failure never
+// renders the failure of a route outside it.
 //
 // The default is [DefaultErrorHandler]. A panic inside the error handler is
 // logged and answered with a bare 500, so a broken renderer cannot loop.
@@ -547,6 +762,37 @@ func (r *Router[C]) MaxBodyBytes(n int64) {
 	r.root.maxBody = n
 }
 
+// MaxMultipartMemory caps the memory that a multipart body uses before the
+// rest of it spills into a temporary file. The default is 32 MiB, the one that
+// [http.Request.ParseMultipartForm] applies.
+//
+// [Router.MaxBodyBytes] still caps the body as a whole, so this setting only
+// decides where the parts live while the handler reads them.
+func (r *Router[C]) MaxMultipartMemory(n int64) {
+	r.mustNotBeServing("the multipart memory limit")
+	r.root.maxMultipart = n
+}
+
+// StrictBind makes [Base.Bind] and its variants fill only the fields that a
+// form, query, json, param or header tag names. It is off by default, so a
+// field that no tag names reads the key that its own name spells and a request
+// reaches a field the type never meant to expose.
+func (r *Router[C]) StrictBind(on bool) {
+	r.mustNotBeServing("the strict binding setting")
+	r.root.strictBind = on
+}
+
+// Logger sets the logger that the router writes its own records to. The
+// default error handler reports an internal cause through it, and a handler
+// reads it back with [Base.Logger]. Without one the router writes to
+// [slog.Default].
+//
+//	r.Logger(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+func (r *Router[C]) Logger(l *slog.Logger) {
+	r.mustNotBeServing("the logger")
+	r.root.logger = l
+}
+
 // JSONOptions sets the encoding/json/v2 options that [Base.JSON] and
 // [Base.BindJSON] apply by default. A per-call option overrides them.
 //
@@ -564,11 +810,39 @@ func (r *Router[C]) RedirectTrailingSlash(on bool) {
 	r.root.redirectSlash = on
 }
 
+// Observe sets the function that the router calls once per request, after the
+// request is answered:
+//
+//	r.Observe(func(c router.Context, status int, size int64, d time.Duration, err error) {
+//		requests.WithLabelValues(c.RoutePattern(), strconv.Itoa(status)).Observe(d.Seconds())
+//	})
+//
+// It runs for every request, including one that matched no route, one whose
+// method no route answers, and one whose handler panicked, which is what a
+// route-level metric needs and what wrapping each handler cannot give. status
+// is the one the client saw, which [ResolveStatus] reads from the response or
+// from err, size is the number of body bytes, and err is the error that
+// reached the error handler, nil when none did.
+//
+// The observer runs after the error handler wrote the response, so it must not
+// write to it. It reads the context as a [Context], because one observer
+// serves any router; read the route with [Base.RoutePattern] and the request
+// with [Base.Request].
+//
+// [http.ErrAbortHandler] passes through untouched and reports nothing, because
+// it asks the server to drop the connection without a record of the request.
+//
+// A router without an observer pays a single nil check per request.
+func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Duration, err error)) {
+	r.mustNotBeServing("the observer")
+	r.root.observer = fn
+}
+
 // Routes returns every registered route, sorted by host and then by pattern.
 // It compiles the trie if the router has not served a request yet.
 func (r *Router[C]) Routes() []Route {
 	root := r.root
-	root.once.Do(root.build)
+	root.build()
 	return slices.Clone(root.routes)
 }
 
@@ -576,13 +850,51 @@ func (r *Router[C]) Routes() []Route {
 // Build
 // ---------------------------------------------------------------------------
 
+// Build compiles the trie now and reports a malformed or conflicting pattern
+// instead of panicking:
+//
+//	if err := r.Build(); err != nil {
+//		return fmt.Errorf("route table: %w", err)
+//	}
+//
+// Reach for it when the route table comes from configuration, or in a test
+// that asserts a conflict without recover. ServeHTTP calls it implicitly and
+// panics on failure, which is the right default for a table written by hand.
+//
+// Build compiles once. A later call returns the same result and registers
+// nothing new, because the router refuses a route after it compiled.
+func (r *Router[C]) Build() error { return r.root.compile() }
+
+// compile builds the trie once and remembers the outcome, so that a failed
+// [Router.Build] still reaches the request that follows it.
+func (r *Router[C]) compile() error {
+	r.once.Do(func() { r.compileErr = r.buildErr() })
+	return r.compileErr
+}
+
 // build compiles the scopes into one trie. It panics on a malformed or
 // conflicting pattern, because a route that never matches is a programming
 // error and not a request error.
 func (r *Router[C]) build() {
-	// Publish the trie and the fallbacks first. A malformed pattern panics
-	// below, and a caller that recovers must not then meet a nil trie.
+	if err := r.compile(); err != nil {
+		panic(err.Error())
+	}
+}
+
+// buildErr compiles the scopes into one trie and reports a malformed or
+// conflicting pattern.
+func (r *Router[C]) buildErr() error {
+	// Publish the trie, the settings and the fallbacks first. A malformed
+	// pattern fails below, and a caller that carries on must not then meet a
+	// nil trie.
 	r.tree = new(node[C])
+	r.ropts = &routerOpts{
+		jsonOpts:     r.jsonOpts,
+		logger:       r.logger,
+		maxBody:      r.maxBody,
+		maxMultipart: r.maxMultipart,
+		strictBind:   r.strictBind,
+	}
 	r.notFoundChain = chain(r.notFound, r.mws)
 	r.notAllowedChain = chain(r.methodNotAllowed, r.mws)
 	r.optionsChain = chain(autoOptions[C], r.mws)
@@ -590,10 +902,17 @@ func (r *Router[C]) build() {
 
 	open := make(map[*Router[C]]bool)
 
-	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C])
-	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C]) {
+	// pending collects the path scopes and the fallbacks that a host scope
+	// set. Both are resolved after the walk, because a scope below may still
+	// replace the fallback of the root that they fall back to.
+	var pending []pendingScope[C]
+	rawNotFound := map[*hostEntry[C]]HandlerFunc[C]{}
+	rawNotAllowed := map[*hostEntry[C]]HandlerFunc[C]{}
+
+	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error
+	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error {
 		if open[rt] {
-			panic("router: a router is mounted inside itself")
+			return errors.New("router: a router is mounted inside itself")
 		}
 		open[rt] = true
 		defer delete(open, rt)
@@ -616,7 +935,7 @@ func (r *Router[C]) build() {
 			e := host
 			if len(rt.hosts) > 0 {
 				if host != nil {
-					panic("router: a host scope cannot sit inside another host scope")
+					return errors.New("router: a host scope cannot sit inside another host scope")
 				}
 				e = r.hostEntry(rt.hosts[i])
 				// The fallbacks of the host wrap in the middleware of the
@@ -636,42 +955,87 @@ func (r *Router[C]) build() {
 				r.anyHostRoutes = true
 			}
 
-			// A fallback that the scope sets belongs to the host it sits in,
-			// or to the root when it sits outside every host scope.
-			notFound, notAllowed, errh := r.fallbacks(e)
-			if rt.notFound != nil {
-				*notFound = chain(rt.notFound, m)
-				if e == nil {
-					r.notFound = rt.notFound // what a host inherits
+			// A fallback belongs to the scope that set it. A scope that covers
+			// a whole host, or the whole router, writes into the slots that
+			// answer for it. A scope that sits under a prefix keeps its own,
+			// so that the 404 of an API branch never answers a page outside
+			// it and a handler that exposes an internal cause never renders
+			// the failure of an unrelated route.
+			own := inherited
+			switch {
+			case rt != r && rt.root == rt:
+				// A router that [Router.Mount] attached is a root of its own,
+				// and the root that serves the request supplies the
+				// fallbacks. The defaults that New left on the mounted router
+				// are skipped rather than written over the ones that the
+				// application chose.
+
+			case len(rt.hosts) > 0 || normalizePattern(p) == "/":
+				notFound, notAllowed, errh := r.fallbacks(e)
+				if rt.notFound != nil {
+					*notFound = chain(rt.notFound, m)
+					rawNotFound[e] = rt.notFound
+					if e == nil {
+						r.notFound = rt.notFound // what a host inherits
+					}
 				}
-			}
-			if rt.methodNotAllowed != nil {
-				*notAllowed = chain(rt.methodNotAllowed, m)
-				if e == nil {
-					r.methodNotAllowed = rt.methodNotAllowed
+				if rt.methodNotAllowed != nil {
+					*notAllowed = chain(rt.methodNotAllowed, m)
+					rawNotAllowed[e] = rt.methodNotAllowed
+					if e == nil {
+						r.methodNotAllowed = rt.methodNotAllowed
+					}
 				}
-			}
-			if rt.errHandler != nil {
-				*errh = rt.errHandler
+				if rt.errHandler != nil {
+					*errh = rt.errHandler
+				}
+			default:
+				sets := own.take(rt)
+				// A scope that carries a prefix owns the fallbacks below it,
+				// so that a 404 under /api still runs the middleware of /api.
+				// A scope without a prefix of its own needs an entry as soon
+				// as it sets one, because the fallback then answers for the
+				// prefix that the scope sits under.
+				if normalizePattern(rt.prefix) != "/" || sets {
+					pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m, depth: depth, fb: own})
+				}
 			}
 
 			for i, reg := range rt.regs {
-				if err := tree.insert(reg.method, joinPattern(p, reg.pattern), names, handlers[i]); err != nil {
-					panic(err.Error())
+				full := joinPattern(p, reg.pattern)
+				if err := tree.insert(reg.method, full, names, handlers[i]); err != nil {
+					return err
+				}
+				if err := r.describe(reg, e, normalizePattern(full)); err != nil {
+					return err
 				}
 			}
 			for _, ch := range rt.children {
-				walk(ch, p, m, e)
+				if err := walk(ch, p, m, e, depth+1, own); err != nil {
+					return err
+				}
 			}
 		}
+		return nil
 	}
-	walk(r, "", nil, nil)
+	if err := walk(r, "", nil, nil, 0, scopeFallbacks[C]{}); err != nil {
+		return err
+	}
 
 	r.collectRoutes()
+	if len(r.preMws) > 0 {
+		r.preChain = chain(r.preTerminal, r.preMws)
+	}
+	// r.notFound and r.methodNotAllowed are final now, so a host and a path
+	// scope that set no fallback of their own inherit the one the application
+	// chose, wherever the scope that chose it sat.
+	resolve := func(raw map[*hostEntry[C]]HandlerFunc[C], e *hostEntry[C], root HandlerFunc[C]) HandlerFunc[C] {
+		if h, ok := raw[e]; ok {
+			return h
+		}
+		return root
+	}
 	if r.hostSet != nil {
-		// r.notFound and r.methodNotAllowed are final now, so a host that set
-		// no fallback of its own inherits the one the application chose,
-		// wherever the scope that chose it sat.
 		for _, e := range r.hostSet.all {
 			if e.optionsChain == nil {
 				e.optionsChain = chain(autoOptions[C], e.mws)
@@ -687,6 +1051,238 @@ func (r *Router[C]) build() {
 			return lessSpecific(&a.hostSpec, &b.hostSpec)
 		})
 	}
+	for _, ps := range pending {
+		s := &scopeFallback[C]{prefix: ps.prefix, hostIdx: -1, depth: ps.depth}
+		if ps.host != nil {
+			s.hostIdx = ps.host.idx
+		}
+		s.segs, s.statics = countSegments(ps.prefix)
+		// The scope answers with its own handler, with the one of the scope
+		// that encloses it, or with the one of its host or of the root.
+		notFound, notAllowed := ps.fb.notFound, ps.fb.notAllowed
+		if notFound == nil {
+			notFound = resolve(rawNotFound, ps.host, r.notFound)
+		}
+		if notAllowed == nil {
+			notAllowed = resolve(rawNotAllowed, ps.host, r.methodNotAllowed)
+		}
+		s.notFoundChain = chain(notFound, ps.mws)
+		s.notAllowedChain = chain(notAllowed, ps.mws)
+		s.optionsChain = chain(autoOptions[C], ps.mws)
+		s.errHandler = ps.fb.errHandler
+		r.scopes = append(r.scopes, s)
+	}
+	// Most specific first, so that the first prefix that covers a path is the
+	// innermost scope that registered it. Two scopes that cover the same
+	// prefix rank the deeper one first, which is what puts a group inside
+	// /api ahead of the scope that opened /api. The sort is stable, so two
+	// scopes that share both keep registration order and the outer one wins.
+	slices.SortStableFunc(r.scopes, func(a, b *scopeFallback[C]) int {
+		if a.segs != b.segs {
+			return b.segs - a.segs
+		}
+		if a.statics != b.statics {
+			return b.statics - a.statics
+		}
+		return b.depth - a.depth
+	})
+	for _, s := range r.scopes {
+		if s.errHandler != nil {
+			r.errScopes = append(r.errScopes, s)
+		}
+	}
+	r.compiled.Store(true)
+	return nil
+}
+
+// describe records the name and the value that a scope attached to a route.
+// Both live beside the trie, so the matcher never reads them.
+func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) error {
+	if reg.name == "" && reg.meta == nil {
+		return nil
+	}
+	host := ""
+	if e != nil {
+		host = e.pattern
+	}
+	if reg.name != "" {
+		// A scope that names several hosts registers one route per host, so
+		// the same name reaching the same pattern is that scope and not a
+		// clash.
+		if prev, ok := r.named[reg.name]; ok && prev.pattern != pattern {
+			return fmt.Errorf("router: the route name %q names both %q and %q", reg.name, prev.pattern, pattern)
+		}
+		if r.named == nil {
+			r.named = make(map[string]namedRoute)
+		}
+		nr := namedRoute{pattern: pattern, parts: parseURLTemplate(pattern)}
+		// The pattern reached the trie first, so it parses again without an
+		// error. The segments are what a built path is read back against.
+		if segs, _, err := parsePattern(pattern); err == nil {
+			nr.segs, nr.recheck = segs, needsRoundTrip(segs)
+		}
+		r.named[reg.name] = nr
+	}
+	if r.info == nil {
+		r.info = make(map[routeKey]routeInfo)
+	}
+	r.info[routeKey{host: host, method: reg.method, pattern: pattern}] = routeInfo{name: reg.name, meta: reg.meta}
+	return nil
+}
+
+// preTerminal ends the chain of [Router.Pre]. It matches the request as the
+// chain left it, which is what lets a Pre middleware rewrite the path.
+func (r *Router[C]) preTerminal(c C) error { return r.route(c, c.base().req) }
+
+// pendingScope is a path scope that the walk found, before the fallbacks that
+// it wraps are final.
+type pendingScope[C Context] struct {
+	prefix string
+	host   *hostEntry[C]
+	mws    []Middleware[C]
+
+	// fb holds the fallbacks that the scope owns, and depth is how deeply the
+	// scope is nested, which ranks two scopes that cover the same prefix.
+	fb    scopeFallbacks[C]
+	depth int
+}
+
+// scopeFallbacks holds the fallbacks that one path scope owns, as the
+// application wrote them. A scope inside another one inherits the ones that it
+// leaves unset, so a miss under /api/v1 reaches the handler that /api
+// installed. Each one is nil until a path scope sets it, and the host or the
+// root answers for it while it is.
+type scopeFallbacks[C Context] struct {
+	notFound   HandlerFunc[C]
+	notAllowed HandlerFunc[C]
+	errHandler ErrorHandlerFunc[C]
+}
+
+// take copies the fallbacks that the scope sets over the inherited ones, and
+// reports whether the scope set any.
+func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
+	set := false
+	if rt.notFound != nil {
+		f.notFound, set = rt.notFound, true
+	}
+	if rt.methodNotAllowed != nil {
+		f.notAllowed, set = rt.methodNotAllowed, true
+	}
+	if rt.errHandler != nil {
+		f.errHandler, set = rt.errHandler, true
+	}
+	return set
+}
+
+// scopeFallback answers a request that no route of a path scope took. Each
+// scope that carries a prefix gets one, so that the middleware of the scope
+// runs around its own 404 and 405 the way the middleware of a host does.
+type scopeFallback[C Context] struct {
+	// prefix is the joined prefix of the scope, normalized and never "/".
+	prefix string
+
+	// segs is the number of segments of the prefix and statics is how many of
+	// them carry no parameter. The two rank one scope against another, and
+	// depth breaks a tie between two scopes that cover the same prefix.
+	segs    int
+	statics int
+	depth   int
+
+	// hostIdx is the host that the scope sits in, or -1 for a scope outside
+	// every host scope.
+	hostIdx int32
+
+	notFoundChain   HandlerFunc[C]
+	notAllowedChain HandlerFunc[C]
+	optionsChain    HandlerFunc[C]
+
+	// errHandler is the error handler that the scope set, nil for a scope that
+	// set none. It carries no middleware, the way the one of a host does.
+	errHandler ErrorHandlerFunc[C]
+}
+
+// covers reports whether path lies inside the prefix of the scope. A segment
+// of the prefix that holds a parameter takes any one segment of the path, so
+// the scope of /t/{tenant} still owns the 404 of /t/acme/typo.
+func (s *scopeFallback[C]) covers(path string) bool {
+	prefix := s.prefix
+	for prefix != "" {
+		if path == "" {
+			return false
+		}
+		want, prest := cutSegment(prefix)
+		got, rest := cutSegment(path)
+		if got == "" || !segmentCovers(want, got) {
+			return false
+		}
+		prefix, path = prest, rest
+	}
+	return true
+}
+
+// segmentCovers matches one segment of a scope prefix against one segment of a
+// path. A segment that holds a parameter or a catch-all takes any text,
+// because the value is the caller's and not the scope's.
+func segmentCovers(want, got string) bool {
+	if want == "*" || strings.IndexByte(want, '{') >= 0 {
+		return true
+	}
+	return want == got
+}
+
+// cutSegment splits "/a/b" into "a" and "/b". Both patterns and paths reach it
+// normalized, so each one starts with a separator and ends without one.
+func cutSegment(p string) (seg, rest string) {
+	p = p[1:] // the leading separator
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		return p[:i], p[i:]
+	}
+	return p, ""
+}
+
+// countSegments returns the number of segments of a normalized pattern and how
+// many of them are literal text.
+func countSegments(p string) (segs, statics int) {
+	for p != "" {
+		seg, rest := cutSegment(p)
+		segs++
+		if seg != "*" && strings.IndexByte(seg, '{') < 0 {
+			statics++
+		}
+		p = rest
+	}
+	return segs, statics
+}
+
+// scopeFor returns the innermost path scope that owns the path, or nil when no
+// scope claims it.
+func (r *Router[C]) scopeFor(host *hostEntry[C], path string) *scopeFallback[C] {
+	if len(r.scopes) == 0 {
+		return nil
+	}
+	idx := int32(-1)
+	if host != nil {
+		idx = host.idx
+	}
+	for _, s := range r.scopes {
+		if s.hostIdx == idx && s.covers(path) {
+			return s
+		}
+	}
+	return nil
+}
+
+// fallbackChains returns the chains that answer a request that no route took:
+// the ones of the innermost path scope that owns the path, else the ones of
+// the matched host, else the ones of the root.
+func (r *Router[C]) fallbackChains(host *hostEntry[C], path string) (notFound, notAllowed, options HandlerFunc[C]) {
+	if s := r.scopeFor(host, path); s != nil {
+		return s.notFoundChain, s.notAllowedChain, s.optionsChain
+	}
+	if host != nil {
+		return host.notFoundChain, host.notAllowedChain, host.optionsChain
+	}
+	return r.notFoundChain, r.notAllowedChain, r.optionsChain
 }
 
 // autoOptions answers an OPTIONS request that no route handles. The Allow
@@ -731,11 +1327,26 @@ func (r *Router[C]) hostEntry(spec hostSpec) *hostEntry[C] {
 	return e
 }
 
+// routeKey identifies one registered route, which is what carries the name and
+// the value of [Router.Meta] back to [Router.Routes].
+type routeKey struct{ host, method, pattern string }
+
+// routeInfo is the free-form part of a route. It sits beside the trie, so a
+// request never pays for it.
+type routeInfo struct {
+	name string
+	meta any
+}
+
 // collectRoutes fills the route table that [Router.Routes] returns.
 func (r *Router[C]) collectRoutes() {
 	add := func(host string) func(pattern, method string) {
 		return func(pattern, method string) {
-			r.routes = append(r.routes, Route{Host: host, Method: method, Pattern: pattern})
+			rt := Route{Host: host, Method: method, Pattern: pattern}
+			if info, ok := r.info[routeKey{host: host, method: method, pattern: pattern}]; ok {
+				rt.Name, rt.Meta = info.name, info.meta
+			}
+			r.routes = append(r.routes, rt)
 		}
 	}
 	r.tree.walk(add(""))
@@ -775,14 +1386,60 @@ func concatMiddleware[C Context](a, b []Middleware[C]) []Middleware[C] {
 // Serving
 // ---------------------------------------------------------------------------
 
-// ServeHTTP implements [http.Handler].
+// ServeHTTP implements [http.Handler]. It compiles the trie on the first
+// request and panics on a malformed or conflicting pattern; [Router.Build]
+// reports the same failure as an error instead.
 func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	root := r.root
-	root.once.Do(root.build)
-
+	if !root.compiled.Load() {
+		root.build()
+	}
+	if root.observer != nil {
+		root.serveObserved(w, req)
+		return
+	}
 	c := root.acquire(w, req)
 	defer root.release(c)
+	if root.preChain != nil {
+		//nolint:errcheck // The error handler already ran inside dispatch; the
+		// return value is there for serveObserved, which reports it.
+		root.dispatch(c, root.preChain)
+		return
+	}
+	//nolint:errcheck // Same as above.
 	root.route(c, req)
+}
+
+// serveObserved serves one request and reports it to the observer. It repeats
+// the shape of ServeHTTP rather than adding to it, because the observer needs
+// the clock, the error and the response that the plain path never reads, and
+// the plain path is measured.
+func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
+	start := time.Now()
+	c := r.acquire(w, req)
+	var err error
+	defer func() {
+		rec := recover()
+		if rec == http.ErrAbortHandler {
+			panic(rec)
+		}
+		if rec != nil {
+			err = PanicError(rec)
+			r.handleError(c, err)
+		}
+		b := c.base()
+		r.observer(c, ResolveStatus(b.res, err), b.res.Size, time.Since(start), err)
+		// A panic leaves the context in an unknown state, so it is dropped
+		// rather than pooled, and only after the observer has read it.
+		if rec == nil {
+			r.recycle(c)
+		}
+	}()
+	if r.preChain != nil {
+		err = r.dispatch(c, r.preChain)
+		return
+	}
+	err = r.route(c, req)
 }
 
 // acquire returns a context that is bound to the request. It takes one from
@@ -796,8 +1453,10 @@ func (r *Router[C]) acquire(w http.ResponseWriter, req *http.Request) C {
 	}
 	b := c.base()
 	b.init(w, req)
-	b.maxBody = r.maxBody
-	b.jsonOpts = r.jsonOpts
+	// One store binds the context to every setting of the router, so a
+	// context that comes back out of the pool carries the settings of the
+	// router that serves it.
+	b.ropts = r.ropts
 	return c
 }
 
@@ -816,14 +1475,31 @@ func (r *Router[C]) release(c C) {
 		r.handleError(c, PanicError(rec))
 		return
 	}
+	// This repeats the body of recycle. The two calls in it hold recycle over
+	// the inline budget of the compiler, and every request that answers
+	// without a panic reaches this line, so a call here costs a frame each
+	// time.
 	if r.pool != nil {
 		r.reset(c)
 		r.pool.Put(c)
 	}
 }
 
-// route matches the request and runs the handler that answers it.
-func (r *Router[C]) route(c C, req *http.Request) {
+// recycle returns a context to the pool. It does nothing for a router that
+// [New] built, which allocates one context per request.
+//
+// [Router.release] carries the same three lines, because it runs on the path
+// that the benchmarks measure and a call would cost it a frame.
+func (r *Router[C]) recycle(c C) {
+	if r.pool != nil {
+		r.reset(c)
+		r.pool.Put(c)
+	}
+}
+
+// route matches the request and runs the handler that answers it. It returns
+// the error that reached the error handler, so that an observer reports it.
+func (r *Router[C]) route(c C, req *http.Request) error {
 	b := c.base()
 
 	path, escaped := requestPath(req.URL)
@@ -860,7 +1536,7 @@ func (r *Router[C]) route(c C, req *http.Request) {
 
 	if r.redirectSlash && trimmed != path && r.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):]) {
 		redirectTo(b.res, req, trimmed, escaped)
-		return
+		return nil
 	}
 
 	var (
@@ -895,7 +1571,11 @@ func (r *Router[C]) route(c C, req *http.Request) {
 			unescapeParams(vals[nHost:])
 		}
 		b.setRoute(n.pattern, n.names, vals)
-		r.dispatch(c, n.handler(req.Method))
+		// Publish the route on the request as well, so that standard
+		// middleware reached through [WrapMiddleware] labels its span with the
+		// pattern instead of the raw URL, whose cardinality is unbounded.
+		req.Pattern = n.pattern
+		return r.dispatch(c, n.handler(req.Method))
 
 	case hostSt.pathMatch != nil || anySt.pathMatch != nil:
 		match, matched, skip := hostSt.pathMatch, hostSt.pathVals, len(hostVals)
@@ -910,49 +1590,29 @@ func (r *Router[C]) route(c C, req *http.Request) {
 			unescapeParams(matched[skip:])
 		}
 		b.setRoute(match.pattern, match.names, matched)
-		b.res.Header().Set(HeaderAllow, allowHeader(hostSt.pathMatch, anySt.pathMatch))
+		req.Pattern = match.pattern
+		b.res.Header().Set(HeaderAllow, allowHeader(&hostSt, &anySt))
 
+		_, notAllowed, options := r.fallbackChains(host, trimmed)
 		if req.Method == http.MethodOptions && r.autoOptions {
-			// The middleware of the root runs here too, so that a CORS
+			// The middleware of the scope runs here too, so that a CORS
 			// preflight reaches the CORS middleware.
-			options := r.optionsChain
-			if host != nil {
-				options = host.optionsChain
-			}
-			r.dispatch(c, options)
-			return
+			return r.dispatch(c, options)
 		}
-		notAllowed := r.notAllowedChain
-		if host != nil {
-			notAllowed = host.notAllowedChain
-		}
-		r.dispatch(c, notAllowed)
+		return r.dispatch(c, notAllowed)
 
 	default:
-		notFound := r.notFoundChain
-		if host != nil {
-			notFound = host.notFoundChain
-		}
-		r.dispatch(c, notFound)
+		notFound, _, _ := r.fallbackChains(host, trimmed)
+		return r.dispatch(c, notFound)
 	}
 }
 
-// allowHeader joins the methods that the matched nodes answer. Two nodes reach
-// it when a host tree and the host-free tree both hold the path under
-// different methods.
-func allowHeader[C Context](a, b *node[C]) string {
-	switch {
-	case a == nil:
-		return strings.Join(b.allowed(), ", ")
-	case b == nil:
-		return strings.Join(a.allowed(), ", ")
-	}
-	out := a.allowed()
-	for _, m := range b.allowed() {
-		if !slices.Contains(out, m) {
-			out = append(out, m)
-		}
-	}
+// allowHeader joins the methods that every node whose pattern matched the path
+// answers: the ones of the walk over the tree of the matched host, and the ones
+// of the walk over the tree that answers every host.
+func allowHeader[C Context](host, anyHost *matchState[C]) string {
+	out := host.allowedMethods(nil)
+	out = anyHost.allowedMethods(out)
 	slices.Sort(out)
 	return strings.Join(out, ", ")
 }
@@ -977,11 +1637,14 @@ func requestPath(u *url.URL) (path string, escaped bool) {
 	return u.Path, false
 }
 
-// dispatch runs a handler and hands any error to the error handler.
-func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) {
-	if err := h(c); err != nil {
+// dispatch runs a handler and hands any error to the error handler. It returns
+// the error as well, which is what [Router.Observe] reports.
+func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
+	err := h(c)
+	if err != nil {
 		r.handleError(c, err)
 	}
+	return err
 }
 
 // handleError runs the error handler. It catches a panic from that handler
@@ -996,7 +1659,7 @@ func (r *Router[C]) handleError(c C, err error) {
 			panic(rec)
 		}
 		b := c.base()
-		slog.ErrorContext(b.req.Context(), "router: the error handler panicked",
+		b.Logger().ErrorContext(b.req.Context(), "router: the error handler panicked",
 			slog.Any("panic", rec), slog.Any("error", err))
 		if !b.res.Committed {
 			b.res.WriteHeader(http.StatusInternalServerError)
@@ -1005,15 +1668,48 @@ func (r *Router[C]) handleError(c C, err error) {
 	r.errorHandlerFor(c.base())(c, err)
 }
 
-// errorHandlerFor returns the error handler of the matched host, or the one of
-// the root.
+// errorHandlerFor returns the error handler that renders this failure: the one
+// of the innermost path scope that owns the path, then the one of the matched
+// host, then the one of the root.
+//
+// It reads the path off the request rather than off the match, because a
+// failure of a middleware and a panic both arrive before a route is known.
 func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
+	var host *hostEntry[C]
 	if b.hostIdx >= 0 && r.hostSet != nil {
-		if h := r.hostSet.all[b.hostIdx].errHandler; h != nil {
+		host = r.hostSet.all[b.hostIdx]
+	}
+	if len(r.errScopes) > 0 {
+		if h := r.scopeErrorHandler(host, b.req.URL); h != nil {
 			return h
 		}
 	}
+	if host != nil && host.errHandler != nil {
+		return host.errHandler
+	}
 	return r.errHandler
+}
+
+// scopeErrorHandler returns the handler of the innermost path scope that owns
+// the path and carries one, or nil when no such scope claims it.
+func (r *Router[C]) scopeErrorHandler(host *hostEntry[C], u *url.URL) ErrorHandlerFunc[C] {
+	path, _ := requestPath(u)
+	if path == "" || path[0] != '/' {
+		path = "/" + path
+	}
+	for len(path) > 1 && path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
+	}
+	idx := int32(-1)
+	if host != nil {
+		idx = host.idx
+	}
+	for _, s := range r.errScopes {
+		if s.hostIdx == idx && s.covers(path) {
+			return s.errHandler
+		}
+	}
+	return nil
 }
 
 // canMatch reports whether the path has a route for the method, on the matched
@@ -1037,7 +1733,16 @@ func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []
 // redirectTo points the client at the same URL with a new path. It answers 308
 // for a method other than GET or HEAD, because a 301 makes some clients repeat
 // the request as a GET and drop the body.
+//
+// A path that begins with a second separator collapses to one. The client
+// sends the request target verbatim, and net/url reads no authority out of it,
+// so "//evil.com/" arrives as a path; a Location that kept it is a
+// network-path reference, which the browser resolves against the current
+// scheme and follows to another origin.
 func redirectTo(w http.ResponseWriter, req *http.Request, path string, escaped bool) {
+	for len(path) > 1 && path[1] == '/' {
+		path = path[1:]
+	}
 	u := *req.URL
 	u.Path, u.RawPath = path, ""
 	if escaped {
