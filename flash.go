@@ -77,6 +77,11 @@ func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 		return fmt.Errorf("router: encode the flash messages: %w", err)
 	}
 
+	// The answer carries a Set-Cookie built from the cookie that the request
+	// sent, so a shared cache that keyed it on the URL alone would hand the next
+	// user this list of messages.
+	b.Vary(HeaderCookie)
+
 	c := b.flashTemplate()
 	c.MaxAge = int(FlashMaxAge / time.Second)
 	c.Value = cc.encode(c.Name, data, signedExpiry(cc, c, time.Now()))
@@ -110,7 +115,7 @@ func (b *Base) Flashes(cc *CookieCodec) []Flash {
 	if !ok || raw == "" {
 		return nil
 	}
-	b.res.Header().Add(HeaderVary, HeaderCookie)
+	b.Vary(HeaderCookie)
 	b.clearFlashCookie()
 	return decodeFlashes(cc, raw)
 }
