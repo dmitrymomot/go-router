@@ -491,8 +491,11 @@ func (b *Base) QueryAs[T any](name string) (T, error) {
 // QueryAsDefault returns a query parameter parsed into T, or def when the
 // parameter is absent, empty, or does not parse.
 func (b *Base) QueryAsDefault[T any](name string, def T) T {
+	if b.Query(name) == "" {
+		return def
+	}
 	v, err := b.QueryAs[T](name)
-	if err != nil || b.Query(name) == "" {
+	if err != nil {
 		return def
 	}
 	return v
