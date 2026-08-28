@@ -508,31 +508,37 @@ func AssertEvents(tb testing.TB, r *Response, want ...Event) {
 	}
 }
 
-// updateFlagName is the flag that rewrites a golden file.
-const updateFlagName = "update"
+// updateFlagName is the flag that rewrites a golden file. It carries the name
+// of this package, because a flag name is global to the test binary: a plain
+// "update" would take the name that a test package commonly declares for
+// golden files of its own, and that package, which initializes after
+// everything it imports, would then panic with "flag redefined: update".
+const updateFlagName = "routertest.update"
 
-// updateGolden is the value of the -update flag. The package registers one
-// only when nothing has registered it yet, and [AssertGolden] reads whichever
-// one is there, so a binary that already carries an update flag keeps it.
-//
-// A flag that a test package declares itself arrives after this one, because a
-// package is initialized after everything it imports. Read this flag rather
-// than declaring a second one, which the flag package refuses anyway.
-var updateGolden = registerUpdateFlag()
+// plainUpdateFlagName is the flag that a test package declares for its own
+// golden files. [AssertGolden] reads it when the binary carries one, so that a
+// project which already spells the rewrite -update keeps one switch for every
+// golden file of the run.
+const plainUpdateFlagName = "update"
 
-// registerUpdateFlag returns the value of the -update flag, after it registers
-// the flag that no other package did.
-func registerUpdateFlag() flag.Value {
-	if f := flag.Lookup(updateFlagName); f != nil {
-		return f.Value
+// updateGolden is the value of the flag that this package registers. Read it
+// through [goldenUpdate], which also answers to the flag of the test package.
+var updateGolden = flag.Bool(updateFlagName, false,
+	"rewrite the golden files that routertest.AssertGolden reads")
+
+// goldenUpdate reports whether this run rewrites the golden files.
+func goldenUpdate() bool {
+	if *updateGolden {
+		return true
 	}
-	flag.Bool(updateFlagName, false, "rewrite the golden files that routertest.AssertGolden reads")
-	return flag.Lookup(updateFlagName).Value
+	f := flag.Lookup(plainUpdateFlagName)
+	return f != nil && f.Value.String() == "true"
 }
 
 // AssertGolden fails the test when got differs from the file testdata/name.
-// Run the test with -update to write the file instead, which is how the output
-// of a template becomes the golden file that later runs compare against:
+// Run the test with -routertest.update to write the file instead, which is how
+// the output of a template becomes the golden file that later runs compare
+// against:
 //
 //	var buf bytes.Buffer
 //	if err := view.Order(order).Render(t.Context(), &buf); err != nil {
@@ -540,17 +546,21 @@ func registerUpdateFlag() flag.Value {
 //	}
 //	routertest.AssertGolden(t, "order.html", buf.Bytes())
 //
-//	go test ./view -update
+//	go test ./view -routertest.update
+//
+// The flag carries the name of this package, so that a test package keeps the
+// plain -update for golden files of its own. A binary that declares one is
+// read too, and the two spellings then do the same thing.
 //
 // The name is a slash separated path under testdata and nothing more, because
 // go test runs a test with the directory of its package as the working
-// directory. Read the rewritten file before you commit it: -update accepts
+// directory. Read the rewritten file before you commit it: the flag accepts
 // whatever the code renders, including the change that broke it.
 func AssertGolden(tb testing.TB, name string, got []byte) {
 	tb.Helper()
 
 	file := filepath.Join("testdata", filepath.FromSlash(name))
-	if updateGolden.String() == "true" {
+	if goldenUpdate() {
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 			tb.Fatalf("routertest: make the golden directory: %v", err)
 		}
@@ -561,12 +571,12 @@ func AssertGolden(tb testing.TB, name string, got []byte) {
 	}
 	want, err := os.ReadFile(file)
 	if err != nil {
-		tb.Fatalf("routertest: read %s: %v; run the test with -update to write it", file, err)
+		tb.Fatalf("routertest: read %s: %v; run the test with -%s to write it", file, err, updateFlagName)
 		return
 	}
 	if !bytes.Equal(got, want) {
-		tb.Fatalf("%s differs; run the test with -update to accept the change\ngot:\n%s\nwant:\n%s",
-			file, got, want)
+		tb.Fatalf("%s differs; run the test with -%s to accept the change\ngot:\n%s\nwant:\n%s",
+			file, updateFlagName, got, want)
 	}
 }
 

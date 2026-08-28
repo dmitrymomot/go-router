@@ -564,14 +564,14 @@ func TestMultipartBodyEscapesTheNames(t *testing.T) {
 // it.
 const goldenPage = "<div class=\"order\">\n  <h1>Order 7</h1>\n</div>\n"
 
-// setUpdate sets the -update flag for one test and restores it afterwards. A
+// setUpdate sets the rewrite flag for one test and restores it afterwards. A
 // run of the suite with the flag would otherwise rewrite the very files that
 // these tests compare against.
 func setUpdate(tb testing.TB, on bool) {
 	tb.Helper()
-	f := flag.Lookup("update")
+	f := flag.Lookup("routertest.update")
 	if f == nil {
-		tb.Fatal("routertest registered no update flag")
+		tb.Fatal("routertest registered no routertest.update flag")
 	}
 	old := f.Value.String()
 	if err := f.Value.Set(strconv.FormatBool(on)); err != nil {
@@ -582,6 +582,30 @@ func setUpdate(tb testing.TB, on bool) {
 			tb.Fatalf("restore the update flag: %v", err)
 		}
 	})
+}
+
+// plainUpdate is the -update flag that a test package declares for golden
+// files of its own. Declaring it here is the case that used to panic with
+// "flag redefined": routertest initializes first, and a flag it registered
+// under this name would have taken it.
+var plainUpdate = flag.Bool("update", false, "rewrite the golden files of this package")
+
+// TestAssertGoldenReadsThePlainUpdateFlag pins that the two spellings do the
+// same thing, so a project that already runs go test -update keeps one switch.
+func TestAssertGoldenReadsThePlainUpdateFlag(t *testing.T) {
+	const name = "plain/page.html"
+	file := filepath.Join("testdata", filepath.FromSlash(name))
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(file)) })
+
+	setUpdate(t, false)
+	old := *plainUpdate
+	*plainUpdate = true
+	t.Cleanup(func() { *plainUpdate = old })
+
+	routertest.AssertGolden(t, name, []byte(goldenPage))
+	if got, err := os.ReadFile(file); err != nil || string(got) != goldenPage {
+		t.Fatalf("read the written file: %q, %v", got, err)
+	}
 }
 
 func TestAssertGoldenAcceptsTheFile(t *testing.T) {
@@ -610,7 +634,7 @@ func TestAssertGoldenReportsADifference(t *testing.T) {
 			if !tb.failed {
 				t.Fatalf("AssertGolden accepted %s", tt.name)
 			}
-			if !strings.Contains(tb.msg, "-update") {
+			if !strings.Contains(tb.msg, "-routertest.update") {
 				t.Errorf("message = %q; it has to name the flag that rewrites the file", tb.msg)
 			}
 		})
