@@ -94,6 +94,20 @@ type Config struct {
 	// that SPA falls back to. It defaults to [DefaultIndex].
 	Index string
 
+	// RedirectDir answers a request for a directory whose URL carries no
+	// trailing slash with a 301 to the same path and a slash. "/docs" and
+	// "/docs/" are different bases for a relative link, so an index that
+	// writes "assets/app.css" reaches the wrong file under the unslashed one.
+	//
+	// The Location is relative, so it keeps the prefix that [http.StripPrefix]
+	// and the MountHandler method of the router removed from the path before
+	// this package saw it.
+	//
+	// It answers only for a directory that holds Index. A directory without
+	// one keeps its 404, and SPA keeps answering it with the index of the
+	// application, which is what makes this safe to set there.
+	RedirectDir bool
+
 	// SPA answers a request that matches no file with Index and status 200.
 	//
 	// The fallback answers a navigation only: the path carries no file
@@ -163,6 +177,9 @@ type Assets struct {
 	cache string
 
 	spa bool
+
+	// redirectDir is Config.RedirectDir.
+	redirectDir bool
 }
 
 // New returns the asset set that cfg describes. It reports an error when the
@@ -184,6 +201,7 @@ func New(cfg Config) (*Assets, error) {
 		index:        cfg.Index,
 		cache:        "no-cache",
 		spa:          cfg.SPA,
+		redirectDir:  cfg.RedirectDir,
 	}
 	if a.notFound == nil {
 		a.notFound = http.NotFoundHandler()

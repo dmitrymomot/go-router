@@ -1,9 +1,17 @@
 package routertest_test
 
 import (
+	"encoding/json/v2"
+	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,8 +19,18 @@ import (
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
+// appContext is the context of the application under test. DB stands for the
+// fields that an application carries and that a handler reads.
 type appContext struct {
 	router.Base
+	DB string
+}
+
+// newContext is the context factory of the application. It fills the
+// application fields and leaves the request state to the router, the way the
+// factory of a real application does.
+func newContext(http.ResponseWriter, *http.Request) *appContext {
+	return &appContext{DB: "primary"}
 }
 
 type user struct {
@@ -20,10 +38,16 @@ type user struct {
 	Age  int    `json:"age"`
 }
 
+// upload is what the multipart routes report back about the body they read.
+type upload struct {
+	Name        string   `json:"name"`
+	Filenames   []string `json:"filenames"`
+	ContentType string   `json:"content_type"`
+	Content     string   `json:"content"`
+}
+
 func newRouter() *router.Router[*appContext] {
-	r := router.New(func(http.ResponseWriter, *http.Request) *appContext {
-		return new(appContext)
-	})
+	r := router.New(newContext)
 	r.POST("/users", func(c *appContext) error {
 		in, err := c.Bind[user]()
 		if err != nil {
@@ -42,6 +66,43 @@ func newRouter() *router.Router[*appContext] {
 		}
 		c.SetHeader("X-Who", in.Name)
 		return c.NoContent(http.StatusNoContent)
+	})
+	// The avatar route reads one file the way a handler that takes a single
+	// upload does.
+	r.POST("/avatars", func(c *appContext) error {
+		f, fh, err := c.FormFile("avatar")
+		if err != nil {
+			return err
+		}
+		//nolint:errcheck // The part is read only.
+		defer f.Close()
+		body, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, upload{
+			Name:        c.FormValue("name"),
+			Filenames:   []string{fh.Filename},
+			ContentType: fh.Header.Get("Content-Type"),
+			Content:     string(body),
+		})
+	})
+	// The documents route reads every file of one field, and the values of the
+	// same body through the parsed form.
+	r.POST("/documents", func(c *appContext) error {
+		fhs, err := c.FormFiles("docs")
+		if err != nil {
+			return err
+		}
+		form, err := c.MultipartForm()
+		if err != nil {
+			return err
+		}
+		out := upload{Name: strings.Join(form.Value["name"], ",")}
+		for _, fh := range fhs {
+			out.Filenames = append(out.Filenames, fh.Filename)
+		}
+		return c.JSON(http.StatusOK, out)
 	})
 	return r
 }
@@ -169,4 +230,417 @@ func TestEventsParsing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// NewContext
+// ---------------------------------------------------------------------------
+
+// getUser is a handler under test. It reads a path parameter, which is the
+// state that a context outside a router carries only once NewContext seeds it.
+func getUser(c *appContext) error {
+	id, err := c.ParamAs[int]("id")
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, user{Name: c.DB, Age: id})
+}
+
+func TestNewContextRunsAHandlerWithoutARouter(t *testing.T) {
+	c, rec := routertest.NewContext(t, newContext,
+		routertest.WithPattern("/users/{id}"),
+		routertest.WithParams(map[string]string{"id": "7"}))
+
+	if err := getUser(c); err != nil {
+		t.Fatalf("getUser: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body)
+	}
+	var got user
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The name carries the application field, which proves that the handler
+	// received the context of the application and not one of this package.
+	if got != (user{Name: "primary", Age: 7}) {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestNewContextOptions(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        []routertest.ContextOption
+		wantPattern string
+		wantID      string
+		wantMethod  string
+		wantPath    string
+	}{
+		{
+			name:       "no option",
+			wantMethod: http.MethodGet,
+			wantPath:   "/",
+		},
+		{
+			name:        "a pattern",
+			opts:        []routertest.ContextOption{routertest.WithPattern("/users/{id}")},
+			wantPattern: "/users/{id}",
+			wantMethod:  http.MethodGet,
+			wantPath:    "/",
+		},
+		{
+			name:       "parameters",
+			opts:       []routertest.ContextOption{routertest.WithParams(map[string]string{"id": "7"})},
+			wantID:     "7",
+			wantMethod: http.MethodGet,
+			wantPath:   "/",
+		},
+		{
+			name: "a request",
+			opts: []routertest.ContextOption{
+				routertest.WithRequest(routertest.Request(http.MethodPost, "/users/7?tab=orders")),
+			},
+			wantMethod: http.MethodPost,
+			wantPath:   "/users/7",
+		},
+		{
+			name: "all of them",
+			opts: []routertest.ContextOption{
+				routertest.WithPattern("/users/{id}"),
+				routertest.WithParams(map[string]string{"id": "7"}),
+				routertest.WithRequest(routertest.Request(http.MethodDelete, "/users/7")),
+			},
+			wantPattern: "/users/{id}",
+			wantID:      "7",
+			wantMethod:  http.MethodDelete,
+			wantPath:    "/users/7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := routertest.NewContext(t, newContext, tt.opts...)
+
+			if got := c.RoutePattern(); got != tt.wantPattern {
+				t.Errorf("pattern = %q, want %q", got, tt.wantPattern)
+			}
+			// The router publishes the pattern on the request too, so a
+			// middleware that reads it there reads the same one.
+			if got := c.Request().Pattern; got != tt.wantPattern {
+				t.Errorf("request pattern = %q, want %q", got, tt.wantPattern)
+			}
+			if got := c.Param("id"); got != tt.wantID {
+				t.Errorf("id = %q, want %q", got, tt.wantID)
+			}
+			if got := c.Method(); got != tt.wantMethod {
+				t.Errorf("method = %q, want %q", got, tt.wantMethod)
+			}
+			if got := c.Path(); got != tt.wantPath {
+				t.Errorf("path = %q, want %q", got, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestNewContextNamesEveryParameter(t *testing.T) {
+	c, _ := routertest.NewContext(t, newContext,
+		routertest.WithParams(map[string]string{"tab": "orders", "id": "7"}))
+
+	// A map holds no order, so the names come back sorted.
+	if got := c.ParamNames(); !slices.Equal(got, []string{"id", "tab"}) {
+		t.Errorf("names = %v, want [id tab]", got)
+	}
+	if got := c.Param("tab"); got != "orders" {
+		t.Errorf("tab = %q, want orders", got)
+	}
+	if _, ok := c.ParamOK("absent"); ok {
+		t.Error("ParamOK reported a parameter that the options never named")
+	}
+}
+
+func TestNewContextRecordsTheAnswer(t *testing.T) {
+	c, rec := routertest.NewContext(t, newContext)
+
+	if err := c.JSON(http.StatusCreated, user{Name: "ann", Age: 30}); err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Errorf("recorder status = %d, want 201", rec.Code)
+	}
+	// The context and the recorder answer for one response, so middleware that
+	// reads the status after the handler reads the one that went out.
+	if got := c.Response().Status; got != http.StatusCreated {
+		t.Errorf("response status = %d, want 201", got)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Errorf("content type = %q", got)
+	}
+}
+
+func TestNewContextCarriesTheRequestBody(t *testing.T) {
+	c, _ := routertest.NewContext(t, newContext,
+		routertest.WithRequest(routertest.Request(http.MethodPost, "/users",
+			routertest.JSONBody(user{Name: "ann", Age: 30}))))
+
+	got, err := c.Bind[user]()
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if got != (user{Name: "ann", Age: 30}) {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// pointerContext embeds the request state through a pointer, which is the
+// other way an application spells its context.
+type pointerContext struct {
+	*router.Base
+}
+
+func TestNewContextFillsAPointerBase(t *testing.T) {
+	c, _ := routertest.NewContext(t,
+		func(w http.ResponseWriter, r *http.Request) *pointerContext {
+			return &pointerContext{Base: router.NewBase(w, r)}
+		},
+		routertest.WithParams(map[string]string{"id": "7"}))
+
+	if got := c.Param("id"); got != "7" {
+		t.Errorf("id = %q, want 7", got)
+	}
+}
+
+func TestNewContextReportsANilBase(t *testing.T) {
+	tb := new(recordingTB)
+
+	routertest.NewContext(tb, func(http.ResponseWriter, *http.Request) *pointerContext {
+		// The factory forgot router.NewBase, so the context carries no state.
+		return new(pointerContext)
+	})
+
+	if !tb.failed {
+		t.Fatal("NewContext accepted a context whose router.Base is nil")
+	}
+	if !strings.Contains(tb.msg, "router.NewBase") {
+		t.Errorf("message = %q; it has to name the fix", tb.msg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MultipartBody
+// ---------------------------------------------------------------------------
+
+func TestMultipartBodyPostsAFile(t *testing.T) {
+	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
+		routertest.MultipartBody(
+			url.Values{"name": {"ann"}},
+			routertest.FilePart{
+				Field:       "avatar",
+				Filename:    "a.png",
+				ContentType: "image/png",
+				Content:     []byte("png bytes"),
+			},
+		))
+	res.AssertStatus(t, http.StatusOK)
+
+	got, err := res.JSON[upload]()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := upload{
+		Name:        "ann",
+		Filenames:   []string{"a.png"},
+		ContentType: "image/png",
+		Content:     "png bytes",
+	}
+	if got.Name != want.Name || got.ContentType != want.ContentType || got.Content != want.Content ||
+		!slices.Equal(got.Filenames, want.Filenames) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestMultipartBodyDefaultsTheFilePart(t *testing.T) {
+	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
+		routertest.MultipartBody(nil, routertest.FilePart{Field: "avatar", Content: []byte("x")}))
+	// A part that named no file would read back as a form value, and the
+	// handler would answer 400 instead.
+	res.AssertStatus(t, http.StatusOK)
+
+	got, err := res.JSON[upload]()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.Equal(got.Filenames, []string{"avatar"}) {
+		t.Errorf("filenames = %v, want the field name", got.Filenames)
+	}
+	if got.ContentType != "application/octet-stream" {
+		t.Errorf("content type = %q, want application/octet-stream", got.ContentType)
+	}
+}
+
+func TestMultipartBodyPostsMoreThanOneFile(t *testing.T) {
+	res := routertest.Do(newRouter(), http.MethodPost, "/documents",
+		routertest.MultipartBody(
+			url.Values{"name": {"ann"}},
+			routertest.FilePart{Field: "docs", Filename: "one.txt", Content: []byte("one")},
+			routertest.FilePart{Field: "docs", Filename: "two.txt", Content: []byte("two")},
+		))
+	res.AssertStatus(t, http.StatusOK)
+
+	got, err := res.JSON[upload]()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.Equal(got.Filenames, []string{"one.txt", "two.txt"}) {
+		t.Errorf("filenames = %v, want both files in order", got.Filenames)
+	}
+	if got.Name != "ann" {
+		t.Errorf("name = %q; the parsed form carries the values too", got.Name)
+	}
+}
+
+func TestMultipartBodyIsMissingWithoutAFile(t *testing.T) {
+	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
+		routertest.MultipartBody(url.Values{"name": {"ann"}}))
+	res.AssertStatus(t, http.StatusBadRequest)
+}
+
+func TestMultipartBodyWritesTheFieldsInNameOrder(t *testing.T) {
+	req := routertest.Request(http.MethodPost, "/documents",
+		routertest.MultipartBody(url.Values{"c": {"3"}, "a": {"1"}, "b": {"2"}}))
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read the body: %v", err)
+	}
+	a := strings.Index(string(body), `name="a"`)
+	b := strings.Index(string(body), `name="b"`)
+	c := strings.Index(string(body), `name="c"`)
+	if a < 0 || a > b || b > c {
+		t.Errorf("the fields land at %d, %d and %d, want them in name order", a, b, c)
+	}
+	if got := req.Header.Get("Content-Type"); !strings.HasPrefix(got, "multipart/form-data; boundary=") {
+		t.Errorf("content type = %q", got)
+	}
+	if req.ContentLength != int64(len(body)) {
+		t.Errorf("content length = %d, want %d", req.ContentLength, len(body))
+	}
+}
+
+func TestMultipartBodyEscapesTheNames(t *testing.T) {
+	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
+		routertest.MultipartBody(nil, routertest.FilePart{
+			Field:    "avatar",
+			Filename: `a"b.png`,
+			Content:  []byte("x"),
+		}))
+	res.AssertStatus(t, http.StatusOK)
+
+	got, err := res.JSON[upload]()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.Equal(got.Filenames, []string{`a"b.png`}) {
+		t.Errorf("filenames = %v, want the quoted name back", got.Filenames)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AssertGolden
+// ---------------------------------------------------------------------------
+
+// goldenPage is the content of testdata/page.html, the way a template renders
+// it.
+const goldenPage = "<div class=\"order\">\n  <h1>Order 7</h1>\n</div>\n"
+
+// setUpdate sets the -update flag for one test and restores it afterwards. A
+// run of the suite with the flag would otherwise rewrite the very files that
+// these tests compare against.
+func setUpdate(tb testing.TB, on bool) {
+	tb.Helper()
+	f := flag.Lookup("update")
+	if f == nil {
+		tb.Fatal("routertest registered no update flag")
+	}
+	old := f.Value.String()
+	if err := f.Value.Set(strconv.FormatBool(on)); err != nil {
+		tb.Fatalf("set the update flag: %v", err)
+	}
+	tb.Cleanup(func() {
+		if err := f.Value.Set(old); err != nil {
+			tb.Fatalf("restore the update flag: %v", err)
+		}
+	})
+}
+
+func TestAssertGoldenAcceptsTheFile(t *testing.T) {
+	setUpdate(t, false)
+
+	routertest.AssertGolden(t, "page.html", []byte(goldenPage))
+}
+
+func TestAssertGoldenReportsADifference(t *testing.T) {
+	setUpdate(t, false)
+
+	tests := []struct {
+		name string
+		file string
+		got  string
+	}{
+		{"another body", "page.html", "<div>other</div>\n"},
+		{"one byte more", "page.html", goldenPage + "\n"},
+		{"a file that nothing wrote", "absent.html", goldenPage},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tb := new(recordingTB)
+			routertest.AssertGolden(tb, tt.file, []byte(tt.got))
+			if !tb.failed {
+				t.Fatalf("AssertGolden accepted %s", tt.name)
+			}
+			if !strings.Contains(tb.msg, "-update") {
+				t.Errorf("message = %q; it has to name the flag that rewrites the file", tb.msg)
+			}
+		})
+	}
+}
+
+func TestAssertGoldenWritesTheFileWithUpdate(t *testing.T) {
+	// The name carries a directory, so the write covers the one that no
+	// checkout holds yet.
+	const name = "written/page.html"
+	file := filepath.Join("testdata", filepath.FromSlash(name))
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(file)) })
+
+	setUpdate(t, true)
+	routertest.AssertGolden(t, name, []byte(goldenPage))
+
+	got, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read the written file: %v", err)
+	}
+	if string(got) != goldenPage {
+		t.Errorf("wrote %q", got)
+	}
+	// Without the flag the same call reads the file back, which is what the
+	// run after the rewrite does.
+	setUpdate(t, false)
+	routertest.AssertGolden(t, name, []byte(goldenPage))
+}
+
+// recordingTB records the failure of a helper instead of ending the test. The
+// embedded interface is nil, so a method that no helper here calls panics
+// rather than answering something made up.
+type recordingTB struct {
+	testing.TB
+	failed bool
+	msg    string
+}
+
+func (tb *recordingTB) Helper() {}
+
+func (tb *recordingTB) Fatalf(format string, args ...any) {
+	tb.failed = true
+	tb.msg = fmt.Sprintf(format, args...)
 }

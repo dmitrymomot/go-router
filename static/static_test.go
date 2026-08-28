@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -770,5 +771,146 @@ func TestURLEscapesTheName(t *testing.T) {
 	}
 	if got := a.URL("css/app.css"); got != "/static/v1/css/app.css" {
 		t.Errorf("URL = %q, want the plain name untouched", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RedirectDir
+// ---------------------------------------------------------------------------
+
+// resolve reads a Location header the way a browser does, against the URL that
+// the request named.
+func resolve(tb testing.TB, target, location string) string {
+	tb.Helper()
+	base, err := url.Parse(target)
+	if err != nil {
+		tb.Fatalf("parse the target: %v", err)
+	}
+	ref, err := url.Parse(location)
+	if err != nil {
+		tb.Fatalf("parse the Location header: %v", err)
+	}
+	return base.ResolveReference(ref).String()
+}
+
+func TestRedirectDirAnswersADirectoryWithoutASlash(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), RedirectDir: true})
+
+	rec := get(a, "/sub")
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "./sub/" {
+		t.Errorf("location = %q, want a relative one", got)
+	}
+	if got := resolve(t, "/sub", rec.Header().Get("Location")); got != "/sub/" {
+		t.Errorf("the browser reads the location as %q, want /sub/", got)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want none", rec.Body.String())
+	}
+}
+
+func TestRedirectDirAnswersOnlyADirectoryThatHoldsAnIndex(t *testing.T) {
+	tests := []struct {
+		name     string
+		target   string
+		opts     []reqOption
+		wantCode int
+		wantBody string
+	}{
+		{"a directory", "/sub", nil, http.StatusMovedPermanently, ""},
+		{"a HEAD of a directory", "/sub", []reqOption{method(http.MethodHead)}, http.StatusMovedPermanently, ""},
+		{"the slashed form", "/sub/", nil, http.StatusOK, subIndex},
+		{"a directory without an index", "/css", nil, http.StatusNotFound, ""},
+		{"a file", "/css/app.css", nil, http.StatusOK, appCSS},
+		{"the root", "/", nil, http.StatusOK, rootIndex},
+		{"a name that nothing holds", "/absent", nil, http.StatusNotFound, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := newAssets(t, static.Config{FS: assetFS(), RedirectDir: true})
+
+			rec := get(a, tt.target, tt.opts...)
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantCode)
+			}
+			if tt.wantBody != "" && rec.Body.String() != tt.wantBody {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestRedirectDirIsOffByDefault(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS()})
+
+	rec := get(a, "/sub")
+	if rec.Code != http.StatusOK || rec.Body.String() != subIndex {
+		t.Fatalf("status = %d, body = %q, want the index of the directory", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRedirectDirKeepsTheQuery(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), RedirectDir: true})
+
+	rec := get(a, "/sub?page=2&sort=name")
+	if got := rec.Header().Get("Location"); got != "./sub/?page=2&sort=name" {
+		t.Errorf("location = %q, want the query with it", got)
+	}
+}
+
+func TestRedirectDirKeepsThePrefix(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static", RedirectDir: true})
+
+	// The route of the router reads the whole path, and http.StripPrefix hands
+	// over one without the prefix. A relative Location resolves to the same
+	// place under both, which an absolute one built from the path could not.
+	r := newRouter()
+	static.Mount(r, a)
+
+	for _, h := range []http.Handler{r, http.StripPrefix("/static", a)} {
+		rec := get(h, "/static/sub")
+		if rec.Code != http.StatusMovedPermanently {
+			t.Fatalf("status = %d, want 301", rec.Code)
+		}
+		if got := resolve(t, "/static/sub", rec.Header().Get("Location")); got != "/static/sub/" {
+			t.Errorf("the browser reads the location as %q, want /static/sub/", got)
+		}
+	}
+}
+
+func TestRedirectDirNeverAnswersTheSPAFallback(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), SPA: true, RedirectDir: true})
+
+	// A path of the application matches no file, so the index answers it. A
+	// redirect there would send the browser to a route that the application
+	// never named.
+	for _, target := range []string{"/dashboard", "/orders/7/edit", "/css"} {
+		rec := get(a, target)
+		if rec.Code != http.StatusOK || rec.Body.String() != rootIndex {
+			t.Errorf("%s: status = %d, body = %q, want the index", target, rec.Code, rec.Body.String())
+		}
+	}
+	// A directory that holds an index is a page of its own, and it redirects
+	// like any other.
+	if rec := get(a, "/sub"); rec.Code != http.StatusMovedPermanently {
+		t.Errorf("status = %d, want 301 for a directory that holds an index", rec.Code)
+	}
+}
+
+func TestDirModeRedirectsADirectory(t *testing.T) {
+	a := newAssets(t, static.Config{Dir: assetDir(t), RedirectDir: true})
+
+	rec := get(a, "/sub")
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "./sub/" {
+		t.Errorf("location = %q", got)
+	}
+	if rec := get(a, "/css"); rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; the directory holds no index", rec.Code)
 	}
 }
