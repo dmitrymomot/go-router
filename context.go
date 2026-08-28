@@ -409,11 +409,20 @@ func (b *Base) IsTLS() bool { return b.req.TLS != nil }
 // Trust the header only as far as you trust the proxy in front of the server. A
 // server that clients reach directly must not read it at all, because the
 // client sends it just as easily.
-func (b *Base) Scheme() string {
-	if b.req.TLS != nil {
+func (b *Base) Scheme() string { return SchemeOf(b.req) }
+
+// SchemeOf returns the scheme that r reached the server over, "http" or
+// "https". [Base.Scheme] is this for the request in flight.
+//
+// Every reader of the scheme goes through it, in this package and in the
+// middleware, so that a change to how a forwarded scheme is read reaches the
+// absolute redirect, the HSTS header and the Secure flag of a cookie in one
+// step.
+func SchemeOf(r *http.Request) string {
+	if r.TLS != nil {
 		return "https"
 	}
-	proto, _, _ := strings.Cut(b.req.Header.Get(HeaderXForwardedProto), ",")
+	proto, _, _ := strings.Cut(r.Header.Get(HeaderXForwardedProto), ",")
 	if strings.EqualFold(strings.TrimSpace(proto), "https") {
 		return "https"
 	}

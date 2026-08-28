@@ -204,7 +204,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 					Path:     cfg.CookiePath,
 					Domain:   cfg.CookieDomain,
 					MaxAge:   maxAge,
-					Secure:   alwaysSecure || overTLS(c.Request()),
+					Secure:   alwaysSecure || router.SchemeOf(c.Request()) == "https",
 					HttpOnly: cfg.CookieHTTPOnly,
 					SameSite: cfg.CookieSameSite,
 				})
