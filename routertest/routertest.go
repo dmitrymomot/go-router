@@ -64,13 +64,10 @@ func FormBody(values url.Values) RequestOption {
 }
 
 type FilePart struct {
-	Field string
-
-	Filename string
-
+	Field       string
+	Filename    string
 	ContentType string
-
-	Content []byte
+	Content     []byte
 }
 
 func MultipartBody(fields url.Values, files ...FilePart) RequestOption {
@@ -207,9 +204,7 @@ func paramSlices(params map[string]string) (names, vals []string) {
 
 type Response struct {
 	*http.Response
-
-	Body []byte
-
+	Body     []byte
 	Recorder *httptest.ResponseRecorder
 }
 
@@ -265,10 +260,8 @@ func NewServer(tb testing.TB, h http.Handler) *httptest.Server {
 }
 
 type Event struct {
-	ID string
-
+	ID   string
 	Name string
-
 	Data string
 }
 

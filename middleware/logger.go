@@ -8,20 +8,13 @@ import (
 )
 
 type LoggerConfig struct {
-	Skip func(c router.Context) bool
-
-	Logger *slog.Logger
-
-	Attrs func(c router.Context, err error) []slog.Attr
-
-	Level slog.Leveler
-
+	Skip             func(c router.Context) bool
+	Logger           *slog.Logger
+	Attrs            func(c router.Context, err error) []slog.Attr
+	Level            slog.Leveler
 	ClientErrorLevel slog.Leveler
-
 	ServerErrorLevel slog.Leveler
-
-	Message string
-
+	Message          string
 	DisableUserAgent bool
 }
 

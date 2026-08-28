@@ -22,47 +22,32 @@ const DefaultIndex = "index.html"
 const immutableCacheControl = "public, max-age=31536000, immutable"
 
 type Config struct {
-	FS fs.FS
-
-	Dir string
-
-	Root string
-
-	Prefix string
-
-	Build string
-
-	Index string
-
+	FS          fs.FS
+	Dir         string
+	Root        string
+	Prefix      string
+	Build       string
+	Index       string
 	RedirectDir bool
-
-	SPA bool
-
-	Fallback func(r *http.Request) bool
-
-	MaxAge time.Duration
-
-	NotFound http.Handler
+	SPA         bool
+	Fallback    func(r *http.Request) bool
+	MaxAge      time.Duration
+	NotFound    http.Handler
 }
 
 type Assets struct {
-	fsys     fs.FS
-	notFound http.Handler
-
-	etags map[string]string
-
+	fsys         fs.FS
+	notFound     http.Handler
+	etags        map[string]string
 	isNavigation func(r *http.Request) bool
 
-	prefix string
-	build  string
-	index  string
-
+	prefix  string
+	build   string
+	index   string
 	urlBase string
+	cache   string
 
-	cache string
-
-	spa bool
-
+	spa         bool
 	redirectDir bool
 }
 

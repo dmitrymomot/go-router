@@ -8,8 +8,7 @@ import (
 )
 
 type MethodOverrideConfig struct {
-	Skip func(c router.Context) bool
-
+	Skip   func(c router.Context) bool
 	Getter func(c router.Context) string
 }
 

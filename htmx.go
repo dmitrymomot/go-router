@@ -12,43 +12,27 @@ import (
 )
 
 const (
-	HeaderHXRequest = "Hx-Request"
-
-	HeaderHXBoosted = "Hx-Boosted"
-
-	HeaderHXCurrentURL = "Hx-Current-Url"
-
+	HeaderHXRequest               = "Hx-Request"
+	HeaderHXBoosted               = "Hx-Boosted"
+	HeaderHXCurrentURL            = "Hx-Current-Url"
 	HeaderHXHistoryRestoreRequest = "Hx-History-Restore-Request"
-
-	HeaderHXPrompt = "Hx-Prompt"
-
-	HeaderHXTarget = "Hx-Target"
-
-	HeaderHXTriggerName = "Hx-Trigger-Name"
-
-	HeaderHXTrigger = "Hx-Trigger"
+	HeaderHXPrompt                = "Hx-Prompt"
+	HeaderHXTarget                = "Hx-Target"
+	HeaderHXTriggerName           = "Hx-Trigger-Name"
+	HeaderHXTrigger               = "Hx-Trigger"
 )
 
 const (
-	HeaderHXLocation = "Hx-Location"
-
-	HeaderHXPushURL = "Hx-Push-Url"
-
-	HeaderHXRedirect = "Hx-Redirect"
-
-	HeaderHXRefresh = "Hx-Refresh"
-
-	HeaderHXReplaceURL = "Hx-Replace-Url"
-
-	HeaderHXReswap = "Hx-Reswap"
-
-	HeaderHXRetarget = "Hx-Retarget"
-
-	HeaderHXReselect = "Hx-Reselect"
-
+	HeaderHXLocation           = "Hx-Location"
+	HeaderHXPushURL            = "Hx-Push-Url"
+	HeaderHXRedirect           = "Hx-Redirect"
+	HeaderHXRefresh            = "Hx-Refresh"
+	HeaderHXReplaceURL         = "Hx-Replace-Url"
+	HeaderHXReswap             = "Hx-Reswap"
+	HeaderHXRetarget           = "Hx-Retarget"
+	HeaderHXReselect           = "Hx-Reselect"
 	HeaderHXTriggerAfterSettle = "Hx-Trigger-After-Settle"
-
-	HeaderHXTriggerAfterSwap = "Hx-Trigger-After-Swap"
+	HeaderHXTriggerAfterSwap   = "Hx-Trigger-After-Swap"
 )
 
 const (
@@ -65,20 +49,13 @@ const (
 
 // betteralign:check
 type HTMXRequest struct {
-	CurrentURL string
-
-	Prompt string
-
-	Target string
-
-	Trigger string
-
-	TriggerName string
-
-	Request bool
-
-	Boosted bool
-
+	CurrentURL     string
+	Prompt         string
+	Target         string
+	Trigger        string
+	TriggerName    string
+	Request        bool
+	Boosted        bool
 	HistoryRestore bool
 }
 
@@ -125,28 +102,19 @@ func HTMXPartial[C Context](partial, page HandlerFunc[C]) HandlerFunc[C] {
 
 type HXEvent struct {
 	Detail any
-
-	Name string
+	Name   string
 }
 
 type HXLocation struct {
-	Path string `json:"path"`
-
-	Target string `json:"target,omitzero"`
-
-	Swap string `json:"swap,omitzero"`
-
-	Select string `json:"select,omitzero"`
-
-	Source string `json:"source,omitzero"`
-
-	Event string `json:"event,omitzero"`
-
-	Handler string `json:"handler,omitzero"`
-
+	Path    string            `json:"path"`
+	Target  string            `json:"target,omitzero"`
+	Swap    string            `json:"swap,omitzero"`
+	Select  string            `json:"select,omitzero"`
+	Source  string            `json:"source,omitzero"`
+	Event   string            `json:"event,omitzero"`
+	Handler string            `json:"handler,omitzero"`
 	Headers map[string]string `json:"headers,omitzero"`
-
-	Values map[string]string `json:"values,omitzero"`
+	Values  map[string]string `json:"values,omitzero"`
 }
 
 func (l HXLocation) isPathOnly() bool {

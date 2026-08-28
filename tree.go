@@ -15,8 +15,7 @@ type methodHandler[C Context] struct {
 }
 
 type node[C Context] struct {
-	prefix string
-
+	prefix  string
 	indices string
 	statics []*node[C]
 
@@ -24,15 +23,13 @@ type node[C Context] struct {
 	regexes   []*node[C]
 	param     *node[C]
 	wildcard  *node[C]
+	kind      edgeKind
+	name      string
+	re        *regexp.Regexp
+	parts     []segPart
+	raw       string
 
-	kind  edgeKind
-	name  string
-	re    *regexp.Regexp
-	parts []segPart
-	raw   string
-
-	routes []methodHandler[C]
-
+	routes   []methodHandler[C]
 	catchAll HandlerFunc[C]
 
 	pattern string
@@ -224,10 +221,8 @@ func (n *node[C]) cacheAllow(dst map[*node[C]]string) {
 
 type matchState[C Context] struct {
 	pathMatch *node[C]
-
-	pathVals []string
-
-	rest *[]*node[C]
+	pathVals  []string
+	rest      *[]*node[C]
 }
 
 func (st *matchState[C]) record(n *node[C], vals []string) {

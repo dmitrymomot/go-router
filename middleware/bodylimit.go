@@ -7,8 +7,7 @@ import (
 )
 
 type BodyLimitConfig struct {
-	Skip func(c router.Context) bool
-
+	Skip  func(c router.Context) bool
 	Limit int64
 }
 

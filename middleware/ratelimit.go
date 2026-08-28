@@ -18,13 +18,10 @@ type RateLimitStore[C router.Context] interface {
 }
 
 type RateLimitConfig[C router.Context] struct {
-	Skip func(c router.Context) bool
-
-	Store RateLimitStore[C]
-
+	Skip    func(c router.Context) bool
+	Store   RateLimitStore[C]
 	KeyFunc func(c C) (string, error)
-
-	OnDeny func(c C, id string, retryAfter time.Duration) error
+	OnDeny  func(c C, id string, retryAfter time.Duration) error
 }
 
 func RateLimit[C router.Context](store RateLimitStore[C]) router.Middleware[C] {
@@ -94,8 +91,7 @@ func NewMemoryStore[C router.Context](rate float64, burst int, expiresIn time.Du
 }
 
 type bucket struct {
-	seen time.Time
-
+	seen   time.Time
 	tokens float64
 }
 

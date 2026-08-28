@@ -22,7 +22,6 @@ const DefaultCookieMaxAge = 24 * time.Hour
 
 var (
 	ErrCookieInvalid = errors.New("router: the signed cookie does not verify")
-
 	ErrCookieExpired = errors.New("router: the signed cookie expired")
 )
 

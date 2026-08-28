@@ -13,12 +13,9 @@ import (
 )
 
 type Event struct {
-	ID string
-
-	Name string
-
-	Data string
-
+	ID    string
+	Name  string
+	Data  string
 	Retry time.Duration
 }
 
@@ -46,16 +43,13 @@ func SSEClose(e Event) SSEOption {
 const sseHeartbeatText = "ping"
 
 type SSEWriter struct {
-	b   *Base
-	rc  *http.ResponseController
-	err error
-
-	buf bytes.Buffer
-
+	b     *Base
+	rc    *http.ResponseController
+	err   error
+	buf   bytes.Buffer
 	lines sseLines
 
-	cfg sseConfig
-
+	cfg  sseConfig
 	head bool
 }
 
@@ -247,12 +241,9 @@ func canFlush(w http.ResponseWriter) bool {
 type sseLines struct {
 	buf    *bytes.Buffer
 	prefix string
-
-	open bool
-
-	cr bool
-
-	wrote bool
+	open   bool
+	cr     bool
+	wrote  bool
 }
 
 func (w *sseLines) Write(p []byte) (int, error) {

@@ -19,29 +19,18 @@ const DefaultShutdownTimeout = 10 * time.Second
 const DefaultReadHeaderTimeout = 10 * time.Second
 
 type Config struct {
-	Addr string
-
-	Network string
-
-	Listener net.Listener
-
-	TLSConfig *tls.Config
-
+	Addr              string
+	Network           string
+	Listener          net.Listener
+	TLSConfig         *tls.Config
 	ReadHeaderTimeout time.Duration
-
-	ReadTimeout time.Duration
-
-	WriteTimeout time.Duration
-
-	IdleTimeout time.Duration
-
-	ShutdownTimeout time.Duration
-
-	Logger *slog.Logger
-
-	OnListen func(net.Addr)
-
-	OnServer func(*http.Server) error
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
+	Logger            *slog.Logger
+	OnListen          func(net.Addr)
+	OnServer          func(*http.Server) error
 }
 
 type Option func(*options) error

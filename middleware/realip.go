@@ -13,12 +13,9 @@ import (
 )
 
 type RealIPConfig struct {
-	Skip func(c router.Context) bool
-
-	Trust *TrustSet
-
-	Headers []string
-
+	Skip     func(c router.Context) bool
+	Trust    *TrustSet
+	Headers  []string
 	Leftmost bool
 }
 

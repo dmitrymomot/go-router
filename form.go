@@ -59,14 +59,10 @@ func decodeStruct(vals url.Values, rv reflect.Value, tag string, strict bool, fi
 }
 
 type fieldInfo struct {
-	keys []string
-
-	layout string
-
-	index int
-
-	tagged bool
-
+	keys     []string
+	layout   string
+	index    int
+	tagged   bool
 	embedded bool
 }
 

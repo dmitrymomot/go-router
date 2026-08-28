@@ -14,12 +14,9 @@ import (
 type Response struct {
 	http.ResponseWriter
 
-	before []func()
-
-	Status int
-
-	Size int64
-
+	before    []func()
+	Status    int
+	Size      int64
 	Committed bool
 }
 

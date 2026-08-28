@@ -12,23 +12,15 @@ import (
 const SecureOmit = "-"
 
 type SecureConfig struct {
-	Skip func(c router.Context) bool
-
-	ContentTypeNosniff string
-
-	FrameOptions string
-
+	Skip                  func(c router.Context) bool
+	ContentTypeNosniff    string
+	FrameOptions          string
 	ContentSecurityPolicy string
-
-	CSPReportOnly bool
-
-	ReferrerPolicy string
-
-	HSTSMaxAge time.Duration
-
+	CSPReportOnly         bool
+	ReferrerPolicy        string
+	HSTSMaxAge            time.Duration
 	HSTSIncludeSubdomains bool
-
-	HSTSPreload bool
+	HSTSPreload           bool
 }
 
 func Secure[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {

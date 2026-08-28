@@ -17,23 +17,14 @@ import (
 
 type Context interface {
 	context.Context
-
 	Request() *http.Request
-
 	SetRequest(r *http.Request)
-
 	Response() *Response
-
 	Set(key string, value any)
-
 	Get(key string) (any, bool)
-
 	Param(name string) string
-
 	RoutePattern() string
-
 	Host() string
-
 	RouteHost() string
 
 	base() *Base
@@ -46,33 +37,25 @@ type Base struct {
 	req *http.Request
 	res *Response
 
-	store    map[string]any
-	paramArr [maxInlineParams]string
-
+	store      map[string]any
+	paramArr   [maxInlineParams]string
 	queryCache url.Values
 
-	pattern string
-
-	host string
-
+	pattern     string
+	host        string
 	hostPattern string
-
-	rawTail string
+	rawTail     string
 
 	paramNames []string
 	paramVals  []string
-
-	ropts *routerOpts
+	ropts      *routerOpts
 
 	// One word rather than two error fields, which would push Base from 360 to
 	// 384 bytes and its embedder into the next size class.
-	deferred   *deferredErrors
-	resStorage Response
-
-	hostIdx int32
-
-	hostKnown bool
-
+	deferred    *deferredErrors
+	resStorage  Response
+	hostIdx     int32
+	hostKnown   bool
 	pathEscaped bool
 }
 
@@ -119,8 +102,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 
 type deferredErrors struct {
 	form error
-
-	hx error
+	hx   error
 }
 
 func (b *Base) deferrals() *deferredErrors {

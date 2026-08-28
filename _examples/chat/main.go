@@ -16,9 +16,7 @@ import (
 
 type Context struct {
 	router.Base
-
 	Room *room
-
 	User string
 }
 

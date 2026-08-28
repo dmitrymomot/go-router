@@ -21,7 +21,6 @@ type segment struct {
 	kind  segKind
 	value string
 	re    *regexp.Regexp
-
 	parts []segPart
 }
 
@@ -328,11 +327,9 @@ type edgeKind uint8
 
 const (
 	edgeLiteral edgeKind = iota
-
 	edgeTemplate
 	edgeRegex
 	edgeParam
-
 	edgeWildcard
 )
 

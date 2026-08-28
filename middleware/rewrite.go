@@ -8,8 +8,7 @@ import (
 
 type RewriteRule struct {
 	Match string
-
-	To string
+	To    string
 }
 
 func Rewrite[C router.Context](rules ...RewriteRule) router.Middleware[C] {

@@ -12,14 +12,10 @@ import (
 const DefaultTimeout = 30 * time.Second
 
 type TimeoutConfig struct {
-	Skip func(c router.Context) bool
-
-	Duration time.Duration
-
-	Status int
-
-	Message string
-
+	Skip      func(c router.Context) bool
+	Duration  time.Duration
+	Status    int
+	Message   string
 	OnTimeout func(c router.Context, err error) error
 }
 

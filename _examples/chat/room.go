@@ -84,7 +84,6 @@ func (r *room) close() {
 
 type view struct {
 	message
-
 	Own bool
 }
 

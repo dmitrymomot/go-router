@@ -13,13 +13,10 @@ import (
 )
 
 type HTTPError struct {
-	Status int
-
+	Status  int
 	Message string
-
 	Details any
-
-	Err error
+	Err     error
 }
 
 func NewHTTPError(status int, message ...string) *HTTPError {
@@ -67,8 +64,7 @@ func (e *HTTPError) WithError(err error) *HTTPError {
 }
 
 type FieldError struct {
-	Field string `json:"field"`
-
+	Field   string `json:"field"`
 	Message string `json:"message"`
 }
 
@@ -103,10 +99,8 @@ const DefaultStackSize = 8 << 10
 
 type PanicValue struct {
 	Value any
-
 	Stack []byte
-
-	Err error
+	Err   error
 }
 
 func (e *PanicValue) Error() string {

@@ -8,8 +8,7 @@ import (
 )
 
 type HTMXRedirectConfig struct {
-	Skip func(c router.Context) bool
-
+	Skip     func(c router.Context) bool
 	Location bool
 }
 
@@ -53,9 +52,7 @@ func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Mid
 
 type hxRedirectWriter struct {
 	http.ResponseWriter
-
-	header string
-
+	header    string
 	converted bool
 }
 

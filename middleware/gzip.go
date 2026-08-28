@@ -14,10 +14,8 @@ import (
 const DefaultGzipMinLength = 1024
 
 type GzipConfig struct {
-	Skip func(c router.Context) bool
-
-	Level int
-
+	Skip      func(c router.Context) bool
+	Level     int
 	MinLength int
 }
 
@@ -76,14 +74,11 @@ const (
 
 type gzipWriter struct {
 	http.ResponseWriter
-
 	res *router.Response
 
-	pool *sync.Pool
-	gz   *gzip.Writer
-
-	buf []byte
-
+	pool    *sync.Pool
+	gz      *gzip.Writer
+	buf     []byte
 	written int64
 
 	min   int

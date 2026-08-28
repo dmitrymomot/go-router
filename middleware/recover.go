@@ -9,10 +9,8 @@ import (
 )
 
 type RecoverConfig struct {
-	Skip func(c router.Context) bool
-
-	StackSize int
-
+	Skip         func(c router.Context) bool
+	StackSize    int
 	DisableStack bool
 }
 

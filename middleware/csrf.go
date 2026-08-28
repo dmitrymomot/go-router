@@ -33,26 +33,16 @@ var defaultCSRFSources = []TokenSource{
 }
 
 type CSRFConfig struct {
-	Skip func(c router.Context) bool
-
-	TokenSources []TokenSource
-
-	CookieName string
-
-	CookiePath string
-
-	CookieDomain string
-
-	CookieMaxAge time.Duration
-
-	CookieSecure bool
-
-	CookieHTTPOnly bool
-
-	CookieSameSite http.SameSite
-
-	TrustedOrigins []string
-
+	Skip              func(c router.Context) bool
+	TokenSources      []TokenSource
+	CookieName        string
+	CookiePath        string
+	CookieDomain      string
+	CookieMaxAge      time.Duration
+	CookieSecure      bool
+	CookieHTTPOnly    bool
+	CookieSameSite    http.SameSite
+	TrustedOrigins    []string
 	AllowSecFetchSite func(c router.Context) (bool, error)
 }
 

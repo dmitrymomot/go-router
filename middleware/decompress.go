@@ -14,8 +14,7 @@ import (
 const DefaultMaxDecompressedSize int64 = 100 << 20
 
 type DecompressConfig struct {
-	Skip func(c router.Context) bool
-
+	Skip                func(c router.Context) bool
 	MaxDecompressedSize int64
 }
 

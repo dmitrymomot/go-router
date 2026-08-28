@@ -17,12 +17,9 @@ import (
 type Route struct {
 	Method  string
 	Pattern string
-
-	Host string
-
-	Name string
-
-	Meta any
+	Host    string
+	Name    string
+	Meta    any
 }
 
 const MethodQuery = "QUERY"
@@ -35,9 +32,8 @@ type registration[C Context] struct {
 	pattern string
 	handler HandlerFunc[C]
 	mws     []Middleware[C]
-
-	name string
-	meta any
+	name    string
+	meta    any
 }
 
 type Router[C Context] struct {
@@ -45,67 +41,52 @@ type Router[C Context] struct {
 	prefix string
 	mws    []Middleware[C]
 
-	regs      []registration[C]
-	children  []*Router[C]
-	hasRoutes bool
-
-	name     string
-	meta     any
-	tagged   bool
-	nameUsed bool
-
-	hosts []hostSpec
-
-	inHost bool
-
+	regs             []registration[C]
+	children         []*Router[C]
+	hasRoutes        bool
+	name             string
+	meta             any
+	tagged           bool
+	nameUsed         bool
+	hosts            []hostSpec
+	inHost           bool
 	notFound         HandlerFunc[C]
 	methodNotAllowed HandlerFunc[C]
 	errHandler       ErrorHandlerFunc[C]
-
-	newCtx          func(http.ResponseWriter, *http.Request) C
-	pool            *sync.Pool
-	reset           func(C)
-	once            sync.Once
-	started         atomic.Bool
-	tree            *node[C]
-	hostSet         *hostSet[C]
-	routes          []Route
-	notFoundChain   HandlerFunc[C]
-	notAllowedChain HandlerFunc[C]
-	optionsChain    HandlerFunc[C]
-	autoOptions     bool
-	redirectSlash   bool
-
-	anyHostRoutes bool
-
-	ropts *routerOpts
-
-	maxBody      int64
-	maxMultipart int64
-	strictBind   bool
-	logger       *slog.Logger
-	jsonOpts     []json.Options
-
-	compiled atomic.Bool
-
-	preChain HandlerFunc[C]
-
-	observer func(c Context, status int, size int64, d time.Duration, err error)
+	newCtx           func(http.ResponseWriter, *http.Request) C
+	pool             *sync.Pool
+	reset            func(C)
+	once             sync.Once
+	started          atomic.Bool
+	tree             *node[C]
+	hostSet          *hostSet[C]
+	routes           []Route
+	notFoundChain    HandlerFunc[C]
+	notAllowedChain  HandlerFunc[C]
+	optionsChain     HandlerFunc[C]
+	autoOptions      bool
+	redirectSlash    bool
+	anyHostRoutes    bool
+	ropts            *routerOpts
+	maxBody          int64
+	maxMultipart     int64
+	strictBind       bool
+	logger           *slog.Logger
+	jsonOpts         []json.Options
+	compiled         atomic.Bool
+	preChain         HandlerFunc[C]
+	observer         func(c Context, status int, size int64, d time.Duration, err error)
 
 	preMws     []Middleware[C]
 	compileErr error
-
-	scopes []*scopeFallback[C]
+	scopes     []*scopeFallback[C]
 
 	// Allow header per node, joined at build time and never written again.
 	allowCache map[*node[C]]string
-
-	errScopes []*scopeFallback[C]
-
-	named map[string]namedRoute
-	info  map[routeKey]routeInfo
-
-	owner *Router[C]
+	errScopes  []*scopeFallback[C]
+	named      map[string]namedRoute
+	info       map[routeKey]routeInfo
+	owner      *Router[C]
 }
 
 func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Router[C] {
@@ -667,9 +648,8 @@ type pendingScope[C Context] struct {
 	prefix string
 	host   *hostEntry[C]
 	mws    []Middleware[C]
-
-	fb    scopeFallbacks[C]
-	depth int
+	fb     scopeFallbacks[C]
+	depth  int
 }
 
 type scopeFallbacks[C Context] struct {
@@ -693,19 +673,16 @@ func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
 }
 
 type scopeFallback[C Context] struct {
-	prefix string
-
+	prefix  string
 	segs    int
 	statics int
 	depth   int
-
 	hostIdx int32
 
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
-
-	errHandler ErrorHandlerFunc[C]
+	errHandler      ErrorHandlerFunc[C]
 }
 
 func (s *scopeFallback[C]) covers(path string) bool {

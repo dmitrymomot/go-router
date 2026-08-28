@@ -12,21 +12,14 @@ import (
 )
 
 type CORSConfig struct {
-	Skip func(c router.Context) bool
-
-	AllowOrigins []string
-
-	AllowOriginFunc func(c router.Context, origin string) (bool, error)
-
-	AllowMethods []string
-
-	AllowHeaders []string
-
-	ExposeHeaders []string
-
+	Skip             func(c router.Context) bool
+	AllowOrigins     []string
+	AllowOriginFunc  func(c router.Context, origin string) (bool, error)
+	AllowMethods     []string
+	AllowHeaders     []string
+	ExposeHeaders    []string
 	AllowCredentials bool
-
-	MaxAge time.Duration
+	MaxAge           time.Duration
 }
 
 func CORS[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {

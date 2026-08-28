@@ -9,19 +9,14 @@ import (
 
 type namedRoute struct {
 	pattern string
-
-	parts []urlPart
-
-	segs []segment
-
+	parts   []urlPart
+	segs    []segment
 	recheck bool
 }
 
 type urlPart struct {
-	lit string
-
+	lit  string
 	name string
-
 	rest bool
 }
 

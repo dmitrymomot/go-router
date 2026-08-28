@@ -26,14 +26,10 @@ func SecureCompare(a, b string) bool {
 }
 
 type KeyAuthConfig[C router.Context] struct {
-	Skip func(c router.Context) bool
-
-	Sources []TokenSource
-
-	Validator func(c C, key string) (bool, error)
-
-	OnError func(c C, err error) error
-
+	Skip                   func(c router.Context) bool
+	Sources                []TokenSource
+	Validator              func(c C, key string) (bool, error)
+	OnError                func(c C, err error) error
 	ContinueOnIgnoredError bool
 }
 
@@ -94,11 +90,9 @@ func KeyAuthWithConfig[C router.Context](cfg KeyAuthConfig[C]) router.Middleware
 }
 
 type BasicAuthConfig[C router.Context] struct {
-	Skip func(c router.Context) bool
-
+	Skip      func(c router.Context) bool
 	Validator func(c C, user, pass string) (bool, error)
-
-	Realm string
+	Realm     string
 }
 
 func BasicAuth[C router.Context](v func(c C, user, pass string) (bool, error)) router.Middleware[C] {

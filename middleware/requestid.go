@@ -9,12 +9,9 @@ import (
 const RequestIDKey = "request_id"
 
 type RequestIDConfig struct {
-	Skip func(c router.Context) bool
-
-	Header string
-
-	Generator func() string
-
+	Skip          func(c router.Context) bool
+	Header        string
+	Generator     func() string
 	IgnoreInbound bool
 }
 
