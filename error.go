@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"runtime/debug"
+	"runtime"
 	"strings"
 )
 
@@ -21,8 +21,9 @@ type HTTPError struct {
 	// Message is the text that the client sees.
 	Message string
 
-	// Details holds an optional payload, such as a map of field errors. The
-	// default error handler writes it to the response body.
+	// Details holds an optional payload. The router itself puts a
+	// [][FieldError] there, which is what the binder reports, and the default
+	// error handler writes it to the response body.
 	Details any
 
 	// Err is the internal cause. The default error handler logs it and never
@@ -83,6 +84,42 @@ func (e *HTTPError) WithError(err error) *HTTPError {
 	return &c
 }
 
+// FieldError names one field of a request that did not fit. The binder reports
+// a slice of them, and a handler puts one in [HTTPError.Details] to tell the
+// client which field to correct:
+//
+//	return router.ErrUnprocessableEntity.WithDetails([]router.FieldError{
+//		{Field: "email", Message: "is not an address"},
+//	})
+type FieldError struct {
+	// Field is the name of the field, as the request spells it.
+	Field string `json:"field"`
+
+	// Message is the text that the client sees.
+	Message string `json:"message"`
+}
+
+// Error implements the error interface, so that a slice of field errors joins
+// into one error with [errors.Join].
+func (e FieldError) Error() string { return e.Field + ": " + e.Message }
+
+// StatusCoder is an error that names the status of its own answer. A package
+// that does not import the router implements it to choose one:
+//
+//	func (e *NotFoundError) StatusCode() int { return http.StatusNotFound }
+//
+// [StatusOf] reads it after [HTTPError]. The message of such an error still
+// never reaches the client, because only an [HTTPError] carries text that is
+// meant for it.
+//
+// The interface embeds error. [StatusOf] only ever looks for it inside an
+// error chain, so every value it can find is an error already, and naming that
+// here lets the lookup use errors.AsType.
+type StatusCoder interface {
+	error
+	StatusCode() int
+}
+
 // Sentinel errors for the common status codes. Compare a returned error
 // against one of them with errors.Is, and build a variant with
 // [HTTPError.WithMessage] or [HTTPError.WithError].
@@ -106,24 +143,79 @@ var (
 	ErrGatewayTimeout       = NewHTTPError(http.StatusGatewayTimeout)
 )
 
+// DefaultStackSize is the stack that [PanicError] keeps. The frames at the top
+// name the fault, and a runaway recursion would otherwise write megabytes into
+// one log record.
+const DefaultStackSize = 8 << 10
+
+// PanicValue carries a recovered panic and the stack of the goroutine that
+// raised it. [PanicError] puts one in the internal cause of the error it
+// returns, so that an error tracker reads the value and the stack as fields
+// instead of cutting them out of a message:
+//
+//	if pv, ok := errors.AsType[*router.PanicValue](err); ok {
+//		tracker.Report(pv.Value, pv.Stack)
+//	}
+type PanicValue struct {
+	// Value is the value that reached panic.
+	Value any
+
+	// Stack is the stack of the goroutine that panicked, cut off at the size
+	// that the caller asked for.
+	Stack []byte
+
+	// Err is Value as an error, which is what Unwrap returns. A panic with a
+	// value that is not an error gets one that reads as the value does.
+	Err error
+}
+
+// Error implements the error interface. It reads as the report that the
+// runtime prints for a panic that nothing recovered.
+func (e *PanicValue) Error() string {
+	return fmt.Sprintf("panic: %v\n\n%s", e.Value, e.Stack)
+}
+
+// Unwrap returns the panic value as an error, so that errors.Is reaches an
+// error that a handler passed to panic.
+func (e *PanicValue) Unwrap() error { return e.Err }
+
 // PanicError turns a recovered panic value into a 500 error whose internal
-// cause carries the panic and the stack. The router calls it for a panic that
-// escapes the handler chain, and [middleware.Recover] calls it for one that it
-// catches inside the chain.
+// cause is a [PanicValue] carrying the panic and the stack. The router calls it
+// for a panic that escapes the handler chain, and [middleware.Recover] calls it
+// for one that it catches inside the chain.
 //
 // The stack reaches the error handler, which logs it. It never reaches the
 // client.
 func PanicError(recovered any) *HTTPError {
+	return PanicErrorSize(recovered, DefaultStackSize)
+}
+
+// PanicErrorSize is [PanicError] with the size of the stack buffer, which a
+// middleware takes from its config. A size of zero or less uses
+// [DefaultStackSize].
+func PanicErrorSize(recovered any, stackSize int) *HTTPError {
+	if stackSize <= 0 {
+		stackSize = DefaultStackSize
+	}
+	buf := make([]byte, stackSize)
+	// The panicking goroutine is the one that matters, and the stacks of every
+	// other request would bury it.
+	n := runtime.Stack(buf, false)
+
 	cause, ok := recovered.(error)
 	if !ok {
-		cause = fmt.Errorf("%v", recovered)
+		cause = errors.New(fmt.Sprint(recovered))
 	}
-	return ErrInternalServerError.WithError(
-		fmt.Errorf("panic: %w\n\n%s", cause, debug.Stack()))
+	return ErrInternalServerError.WithError(&PanicValue{
+		Value: recovered,
+		Stack: buf[:n],
+		Err:   cause,
+	})
 }
 
 // StatusOf returns the status code that [DefaultErrorHandler] writes for err:
-// the status of an [HTTPError], 500 for any other error, and 200 for nil.
+// the status of an [HTTPError], the code of a [StatusCoder], 500 for any other
+// error, and 200 for nil.
 //
 // Middleware uses it to report the status of a request whose handler returned
 // an error, because the error handler runs after the middleware chain unwinds
@@ -135,72 +227,103 @@ func StatusOf(err error) int {
 	if he, ok := errors.AsType[*HTTPError](err); ok {
 		return he.Status
 	}
+	if sc, ok := errors.AsType[StatusCoder](err); ok {
+		if status := sc.StatusCode(); status != 0 {
+			return status
+		}
+	}
 	return http.StatusInternalServerError
+}
+
+// ResolveStatus reports the status the client sees: the committed status when
+// the handler already wrote one, otherwise the status that err produces.
+//
+// A logging or a metrics middleware needs both halves, because the error
+// handler runs after the middleware chain unwinds and the response is still
+// uncommitted while the middleware reads it:
+//
+//	err := next(c)
+//	status := router.ResolveStatus(c.Response(), err)
+func ResolveStatus(res *Response, err error) int {
+	if res != nil && res.Status != 0 {
+		return res.Status
+	}
+	return StatusOf(err)
 }
 
 // ErrorHandlerFunc renders an error that a handler or a middleware returned.
 // Set one on the router with [Router.ErrorHandler].
 type ErrorHandlerFunc[C Context] func(c C, err error)
 
-// errorBody is the JSON shape that [DefaultErrorHandler] writes.
+// errorBody is the JSON shape that [DefaultErrorHandler] writes. Cause comes
+// last, because the fields above it are the documented wire shape and only
+// [ErrorHandler] with exposeCause fills it.
 type errorBody struct {
 	Status  int    `json:"status"`
 	Error   string `json:"error"`
 	Details any    `json:"details,omitempty"`
+	Cause   string `json:"cause,omitempty"`
 }
 
 // DefaultErrorHandler writes the error to the response. It reads the status
-// and the message from an [HTTPError] and reports any other error as a 500
-// with the standard status text, so an internal message never reaches the
-// client. It logs the internal cause with [slog.Default], at error level, or
-// at debug level when the client cancelled the request.
+// and the message from an [HTTPError], and reports any other error with the
+// standard text of the status that [StatusOf] gives it, so an internal message
+// never reaches the client. It logs the internal cause with the logger of the
+// router, at error level, or at debug level when the client cancelled the
+// request.
 //
 // It writes JSON unless the client asked for text. A client that sends no
 // Accept header gets JSON, because a service that calls another service
 // usually sends none and still wants a machine readable answer.
 func DefaultErrorHandler[C Context](c C, err error) {
+	writeError(c.base(), err, false)
+}
+
+// ErrorHandler returns an error handler that also writes the internal cause
+// into the body. Use it in development only:
+//
+//	if dev {
+//		r.ErrorHandler(router.ErrorHandler[*app.Context](true))
+//	}
+//
+// With exposeCause false it is [DefaultErrorHandler], down to the bytes.
+func ErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
+	return func(c C, err error) { writeError(c.base(), err, exposeCause) }
+}
+
+// writeError is the one implementation behind [DefaultErrorHandler] and
+// [ErrorHandler].
+func writeError(b *Base, err error, exposeCause bool) {
 	if err == nil {
 		return
 	}
-	b := c.base()
 
 	he, ok := errors.AsType[*HTTPError](err)
 	if !ok {
-		he = ErrInternalServerError.WithError(err)
+		// A StatusCoder names the status. Its message stays internal all the
+		// same, so the client reads the standard text of that status.
+		he = NewHTTPError(StatusOf(err)).WithError(err)
 	}
 
 	if he.Status >= http.StatusInternalServerError || he.Err != nil {
-		// A client that went away is not a server fault. A long streamed page
-		// fails that way whenever a reader closes the tab, so report it at
-		// debug level and keep it out of the 5xx alerts.
-		level := slog.LevelError
-		if errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled) {
-			level = slog.LevelDebug
-		}
-		slog.Log(b.req.Context(), level, "router: request failed",
-			slog.String("method", b.req.Method),
-			slog.String("path", b.req.URL.Path),
-			slog.String("route", b.pattern),
-			slog.Int("status", he.Status),
-			slog.Any("error", err),
-		)
+		logFailure(b, err, he.Status)
 	}
-
-	// The client is gone, or the handler already wrote the response.
-	if b.res.Committed || errors.Is(err, context.Canceled) {
+	if !writableFailure(b, err, he.Status) {
 		return
 	}
 
-	if b.req.Method == http.MethodHead {
-		b.res.WriteHeader(he.Status)
-		return
+	cause := ""
+	if exposeCause && he.Err != nil {
+		cause = he.Err.Error()
 	}
 
 	if acceptsJSON(b.req) {
 		b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
 		b.res.WriteHeader(he.Status)
 		//nolint:errcheck // The connection is already failing; nothing to report.
-		json.MarshalWrite(b.res, errorBody{Status: he.Status, Error: he.Message, Details: he.Details})
+		json.MarshalWrite(b.res, errorBody{
+			Status: he.Status, Error: he.Message, Details: he.Details, Cause: cause,
+		})
 		return
 	}
 
@@ -208,19 +331,69 @@ func DefaultErrorHandler[C Context](c C, err error) {
 	b.res.WriteHeader(he.Status)
 	//nolint:errcheck // Same as above.
 	b.res.WriteString(he.Message)
+	if cause != "" {
+		//nolint:errcheck // Same as above.
+		b.res.WriteString("\n\n" + cause)
+	}
 }
+
+// logFailure logs the internal cause of a failed request. Every error handler
+// of this package reports a failure through it, so the record reads the same
+// whichever one renders the answer.
+//
+// A client that went away is not a server fault. A long streamed page fails
+// that way whenever a reader closes the tab, so report it at debug level and
+// keep it out of the 5xx alerts.
+func logFailure(b *Base, err error, status int) {
+	level := slog.LevelError
+	if errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled) {
+		level = slog.LevelDebug
+	}
+	b.Logger().Log(b.req.Context(), level, "router: request failed",
+		slog.String("method", b.req.Method),
+		slog.String("path", b.req.URL.Path),
+		slog.String("route", b.pattern),
+		slog.Int("status", status),
+		slog.Any("error", err),
+	)
+}
+
+// writableFailure reports whether an error handler still has a body to write.
+//
+// A committed response and a client that went away leave nothing to answer. A
+// HEAD request takes the status alone, which this writes before it says no.
+func writableFailure(b *Base, err error, status int) bool {
+	if b.res.Committed || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if b.req.Method == http.MethodHead {
+		b.res.WriteHeader(status)
+		return false
+	}
+	return true
+}
+
+// jsonOffers is the offer list that acceptsJSON negotiates with.
+var jsonOffers = []string{MIMEApplicationJSON}
 
 // acceptsJSON reports whether the client takes a JSON body. It answers yes
 // unless the client named the types it takes and every one of them is a text
 // type.
+//
+// It is more forgiving than [Base.Accepts] on purpose, because the answer it
+// governs is an error and every client is better off with one it can read.
 func acceptsJSON(r *http.Request) bool {
 	accept := r.Header.Get(HeaderAccept)
 	switch {
-	case accept == "",
-		strings.Contains(accept, "json"),
-		strings.Contains(accept, "*/*"):
+	case accept == "", negotiate(accept, jsonOffers) != "":
+		return true
+	case strings.Contains(accept, "json"), strings.Contains(accept, "*/*"):
+		// A "+json" flavour that no offer fits, and a client that takes any
+		// type at all, both take the JSON body.
 		return true
 	default:
+		// The client named the types it takes, so it gets JSON unless every one
+		// of them is a text type.
 		return !strings.Contains(accept, "text/")
 	}
 }

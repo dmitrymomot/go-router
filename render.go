@@ -73,11 +73,12 @@ func (b *Base) JSON(status int, v any, opts ...json.Options) error {
 // jsonOptions puts the options of the router in front of the per-call ones, so
 // that a call can override a default.
 func (b *Base) jsonOptions(opts []json.Options) []json.Options {
-	if len(b.jsonOpts) == 0 {
+	def := b.opts().jsonOpts
+	if len(def) == 0 {
 		return opts
 	}
-	out := make([]json.Options, 0, len(b.jsonOpts)+len(opts))
-	out = append(out, b.jsonOpts...)
+	out := make([]json.Options, 0, len(def)+len(opts))
+	out = append(out, def...)
 	return append(out, opts...)
 }
 
@@ -115,10 +116,13 @@ func (b *Base) Redirect(status int, location string) error {
 }
 
 // Attachment writes the body with a Content-Disposition header, so that the
-// browser saves it under the given file name.
+// browser saves it under the given file name. A name outside ASCII reaches the
+// client through the RFC 5987 form of that header, next to an ASCII fallback.
+//
+// It writes the whole body. [Base.AttachmentFile] streams a file from disk
+// instead, which is what a large export wants.
 func (b *Base) Attachment(status int, contentType, filename string, data []byte) error {
-	b.res.Header().Set(HeaderContentDisposition,
-		fmt.Sprintf("attachment; filename=%q", filename))
+	b.res.Header().Set(HeaderContentDisposition, contentDisposition(dispositionAttachment, filename))
 	return b.Blob(status, contentType, data)
 }
 

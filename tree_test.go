@@ -2,6 +2,8 @@ package router
 
 import (
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -144,5 +146,112 @@ func TestRadixKeepsRoutesAcrossASplit(t *testing.T) {
 		t.Errorf("status = %d, want 405", rec.Code)
 	} else if got := rec.Header().Get(HeaderAllow); got != "GET, HEAD, OPTIONS, POST" {
 		t.Errorf("Allow = %q", got)
+	}
+}
+
+// TestNodeHandlerPrefersTheExactMethod walks the three probes that a node
+// performs, in the order that decides which handler answers.
+func TestNodeHandlerPrefersTheExactMethod(t *testing.T) {
+	tests := []struct {
+		name    string
+		routes  []string // the methods that the node carries
+		request string
+		want    string // the method whose handler answers, or "" for none
+	}{
+		{"the exact method", []string{"GET", "POST"}, "POST", "POST"},
+		{"HEAD falls back to GET", []string{"GET"}, "HEAD", "GET"},
+		{"an explicit HEAD wins over GET", []string{"GET", "HEAD"}, "HEAD", "HEAD"},
+		{"no method fits", []string{"GET"}, "POST", ""},
+		{"the sentinel answers what is left", []string{"GET", anyMethod}, "PUT", anyMethod},
+		{"the exact method beats the sentinel", []string{"GET", anyMethod}, "GET", "GET"},
+		{"the exact method beats a sentinel that came first", []string{anyMethod, "POST"}, "POST", "POST"},
+		{"GET beats the sentinel for a HEAD", []string{anyMethod, "GET"}, "HEAD", "GET"},
+		{"the sentinel answers a HEAD without a GET", []string{anyMethod, "POST"}, "HEAD", anyMethod},
+		{"the sentinel answers a method no list holds", []string{anyMethod}, "PROPFIND", anyMethod},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each handler names the entry it was registered under, which
+			// is what the assertion reads back.
+			answered := ""
+			n := new(node[*tctx])
+			for _, m := range tc.routes {
+				h := func(*tctx) error { answered = m; return nil }
+				n.routes = append(n.routes, methodHandler[*tctx]{method: m, handler: h})
+				if m == anyMethod {
+					// insert files the sentinel in a field of its own too,
+					// which is where handler reads it back.
+					n.catchAll = h
+				}
+			}
+
+			h := n.handler(tc.request)
+			if tc.want == "" {
+				if h != nil {
+					t.Fatal("a handler answered, want none")
+				}
+				return
+			}
+			if h == nil {
+				t.Fatalf("no handler answered, want the one of %q", tc.want)
+			}
+			if err := h(nil); err != nil {
+				t.Fatalf("handler = %v", err)
+			}
+			if answered != tc.want {
+				t.Errorf("the handler of %q answered, want the one of %q", answered, tc.want)
+			}
+		})
+	}
+}
+
+// TestAllowedLeavesTheSentinelOut pins the Allow header of a node that carries
+// both an explicit method and the entry of Any. Such a node answers every
+// method and so never produces a 405, but nothing may claim a method that the
+// router cannot name.
+func TestAllowedLeavesTheSentinelOut(t *testing.T) {
+	n := new(node[*tctx])
+	for _, m := range []string{http.MethodGet, anyMethod, http.MethodPost} {
+		n.routes = append(n.routes, methodHandler[*tctx]{method: m})
+	}
+
+	want := []string{http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPost}
+	if got := n.allowed(); !slices.Equal(got, want) {
+		t.Errorf("allowed() = %q, want %q", got, want)
+	}
+}
+
+// TestAnySharesANodeWithAnExplicitMethod checks the insert side: the sentinel
+// is an entry like any other, so it neither conflicts with an explicit method
+// nor loses the pattern of the node.
+func TestAnySharesANodeWithAnExplicitMethod(t *testing.T) {
+	r := newTestRouter()
+	r.Any("/orders/{id}", func(c *tctx) error { return c.String(http.StatusOK, "any "+c.Param("id")) })
+	r.POST("/orders/{id}", func(c *tctx) error { return c.String(http.StatusOK, "post "+c.Param("id")) })
+
+	for _, tc := range []struct{ method, want string }{
+		{http.MethodPost, "post 7"},
+		{http.MethodPut, "any 7"},
+		{"PROPFIND", "any 7"},
+	} {
+		rec := do(r, tc.method, "/orders/7")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", tc.method, rec.Code)
+		}
+		if got := rec.Body.String(); got != tc.want {
+			t.Errorf("%s: body = %q, want %q", tc.method, got, tc.want)
+		}
+	}
+}
+
+// TestDuplicateAnyConflicts checks that two Any registrations on one pattern
+// are the same clash that two GET registrations are.
+func TestDuplicateAnyConflicts(t *testing.T) {
+	r := newTestRouter()
+	r.Any("/x", echoRoute)
+	r.Any("/x", echoRoute)
+
+	if err := r.Build(); err == nil || !strings.Contains(err.Error(), "already registered") {
+		t.Errorf("Build() = %v, want the clash of two Any routes", err)
 	}
 }

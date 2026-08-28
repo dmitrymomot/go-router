@@ -50,7 +50,13 @@ type node[C Context] struct {
 	parts []segPart
 	raw   string
 
-	routes  []methodHandler[C]
+	routes []methodHandler[C]
+
+	// catchAll is the handler of the entry that [Router.Any] registered, nil
+	// for a node that carries none. It sits beside routes rather than in
+	// them, so that a lookup for an explicit method never scans for it.
+	catchAll HandlerFunc[C]
+
 	pattern string
 	names   []string
 }
@@ -96,6 +102,9 @@ func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFu
 		}
 	}
 	cur.routes = append(cur.routes, methodHandler[C]{method: method, handler: h})
+	if method == anyMethod {
+		cur.catchAll = h
+	}
 	return nil
 }
 
@@ -191,8 +200,14 @@ func namingConflict(existing, want string) error {
 	return fmt.Errorf("the parameter at this position is already named %q, not %q", existing, want)
 }
 
-// handler returns the handler for the method. A HEAD request falls back to the
-// GET handler, as net/http does.
+// handler returns the handler for the method. The exact method wins; a HEAD
+// request then falls back to the GET handler, as net/http does, and any method
+// falls back to the entry that [Router.Any] registered.
+//
+// The entry of Any keeps a field of its own instead of a place among the
+// routes, because every request runs this lookup: a node that carries no such
+// entry then answers with a nil field, and one that does never slows the
+// method it names outright.
 func (n *node[C]) handler(method string) HandlerFunc[C] {
 	for _, mh := range n.routes {
 		if mh.method == method {
@@ -206,14 +221,21 @@ func (n *node[C]) handler(method string) HandlerFunc[C] {
 			}
 		}
 	}
-	return nil
+	return n.catchAll
 }
 
 // allowed returns the methods that the node answers, in a stable order and
 // with the implied HEAD and OPTIONS entries.
+//
+// The entry of [Router.Any] contributes nothing, because the router cannot
+// name every method that it answers. A node that carries one never reaches
+// this point anyway: it answers whatever arrives, so it produces no 405.
 func (n *node[C]) allowed() []string {
 	out := make([]string, 0, len(n.routes)+2)
 	for _, mh := range n.routes {
+		if mh.method == anyMethod {
+			continue
+		}
 		out = append(out, mh.method)
 	}
 	if slices.Contains(out, http.MethodGet) && !slices.Contains(out, http.MethodHead) {
