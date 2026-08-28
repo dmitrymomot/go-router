@@ -190,21 +190,21 @@ func (cfg CORSConfig) allows(c router.Context, origin string) (bool, error) {
 // list holds "*".
 func checkCORSOrigins(origins []string, credentials bool) bool {
 	wildcard := false
-	for _, o := range origins {
-		switch o {
-		case "*":
+	for i, o := range origins {
+		if o == "*" {
 			if credentials {
 				panic(`middleware: CORS cannot combine the origin "*" with AllowCredentials, ` +
 					`because that lets every site read the answers of a signed-in user; ` +
 					`name the origins that may send credentials`)
 			}
 			wildcard = true
-		default:
-			if _, ok := originOf(o); !ok {
-				panic("middleware: CORS got " + strconv.Quote(o) + " in AllowOrigins, which is not an origin; " +
-					`write a scheme and a host, as in "https://app.example", and reach anything else through AllowOriginFunc`)
-			}
+			continue
 		}
+		// The canonical form goes back into the list, which the caller has
+		// already cloned, so that allows compares against the form the check
+		// read rather than against whatever the config spelled.
+		origins[i] = checkOrigin("CORSConfig.AllowOrigins", o,
+			", and reach anything else through AllowOriginFunc")
 	}
 	return wildcard
 }

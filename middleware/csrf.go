@@ -3,7 +3,6 @@ package middleware
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -179,7 +178,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 		// CSRF middleware whose cookie never arrives refuses every request.
 		alwaysSecure = true
 	}
-	trusted := checkOrigins(cfg.TrustedOrigins)
+	trusted := checkTrustedOrigins(cfg.TrustedOrigins)
 	if cfg.AllowSecFetchSite == nil {
 		cfg.AllowSecFetchSite = secFetchSite(trusted)
 	}
@@ -325,19 +324,14 @@ func secFetchSite(trusted []string) func(router.Context) (bool, error) {
 	}
 }
 
-// checkOrigins returns the trusted origins in the form that the comparison
-// reads, and panics on an entry that is not an origin. An origin with a path
-// or a trailing slash matches nothing, so it is a typo that would otherwise
-// stay silent until a client hit it.
-func checkOrigins(origins []string) []string {
+// checkTrustedOrigins returns the trusted origins in the form that the
+// comparison reads, and panics on an entry that is not an origin. An origin
+// with a path or a trailing slash matches nothing, so it is a typo that would
+// otherwise stay silent until a client hit it.
+func checkTrustedOrigins(origins []string) []string {
 	out := make([]string, len(origins))
 	for i, origin := range origins {
-		canonical, ok := originOf(origin)
-		if !ok {
-			panic(fmt.Sprintf("middleware: CSRFConfig has a malformed trusted origin %q, "+
-				"which reads as a scheme and a host, such as %q", origin, "https://app.example"))
-		}
-		out[i] = canonical
+		out[i] = checkOrigin("CSRFConfig.TrustedOrigins", origin, "")
 	}
 	return out
 }

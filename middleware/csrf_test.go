@@ -327,7 +327,7 @@ func TestCSRFMalformedTrustedOriginPanics(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mustPanicContaining(t, "malformed trusted origin", func() {
+			mustPanicContaining(t, "CSRFConfig.TrustedOrigins", func() {
 				middleware.CSRFWithConfig[*appContext](middleware.CSRFConfig{
 					TrustedOrigins: []string{tt.origin},
 				})
