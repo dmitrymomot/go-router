@@ -170,9 +170,10 @@ func TestProblemErrorHandlerExposesTheCause(t *testing.T) {
 	}
 }
 
-// It logs the internal cause at error level, a client that went away at debug
-// level, and every failure from 500 up. A problem that a handler described
-// carries no internal cause, so one below 500 reaches no log.
+// It logs the internal cause at the level that the status names, a client that
+// went away at debug level, and every failure from 500 up. A problem that a
+// handler described carries no internal cause, so one below 500 reaches no
+// log.
 func TestProblemErrorHandlerLogsTheInternalCause(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -181,7 +182,7 @@ func TestProblemErrorHandlerLogsTheInternalCause(t *testing.T) {
 		want   []slog.Level
 	}{
 		{"a server fault", false, errors.New("write: broken pipe"), []slog.Level{slog.LevelError}},
-		{"an internal cause", false, ErrBadRequest.WithError(errors.New("sql: no rows")), []slog.Level{slog.LevelError}},
+		{"an internal cause", false, ErrBadRequest.WithError(errors.New("sql: no rows")), []slog.Level{slog.LevelWarn}},
 		{"a plain client error", false, ErrNotFound, nil},
 		{"a problem that a handler described", false, &ProblemError{Status: http.StatusConflict}, nil},
 		{"a problem that is a server fault", false, &ProblemError{Status: http.StatusBadGateway}, []slog.Level{slog.LevelError}},
@@ -228,7 +229,7 @@ func TestProblemErrorHandlerSkipsTheLogOfADescribedProblem(t *testing.T) {
 		want    []slog.Level
 	}{
 		{"the problem handler", ProblemErrorHandler[*tctx](false), nil},
-		{"the default handler", DefaultErrorHandler[*tctx], []slog.Level{slog.LevelError}},
+		{"the default handler", DefaultErrorHandler[*tctx], []slog.Level{slog.LevelWarn}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

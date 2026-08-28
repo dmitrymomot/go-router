@@ -107,8 +107,8 @@ func (p problemBody) withDefaults() problemBody {
 //
 // The status is always the one that [StatusOf] reads, which is the status that
 // [DefaultErrorHandler] writes for the same error. It logs the internal cause
-// with the logger of the router, at error level, or at debug level when the
-// client cancelled the request, and it logs every failure from 500 up.
+// with the logger of the router at the level that the status names, the way
+// [DefaultErrorHandler] does, and it logs every failure from 500 up.
 //
 // A [ProblemError] describes its own failure, so nothing of it is internal and
 // one below 500 reaches no log. That record is the one thing this handler and

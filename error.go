@@ -270,7 +270,8 @@ type errorBody struct {
 // and the message from an [HTTPError], and reports any other error with the
 // standard text of the status that [StatusOf] gives it, so an internal message
 // never reaches the client. It logs the internal cause with the logger of the
-// router, at error level, or at debug level when the client cancelled the
+// router: at error level for a 5xx, at warning level for a 4xx, which is the
+// client and not the server, and at debug level when the client cancelled the
 // request.
 //
 // It writes JSON unless the client asked for text. A client that sends no
@@ -365,13 +366,22 @@ func writeError(b *Base, err error, exposeCause bool) {
 // of this package reports a failure through it, so the record reads the same
 // whichever one renders the answer.
 //
-// A client that went away is not a server fault. A long streamed page fails
-// that way whenever a reader closes the tab, so report it at debug level and
-// keep it out of the 5xx alerts.
+// The status picks the level, the way [middleware.LoggerConfig] does: a 5xx is
+// a server fault and reads at error level, and a 4xx is a client that sent
+// something the server refused and reads at warning level. A malformed body,
+// an unreadable form field and a body over the limit are all ordinary traffic,
+// and a client that repeats one would otherwise fill the error stream and every
+// alert keyed on it.
+//
+// A client that went away is not a fault at all. A long streamed page fails
+// that way whenever a reader closes the tab, so report it at debug level.
 func logFailure(b *Base, err error, status int) {
 	level := slog.LevelError
-	if errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled) {
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled):
 		level = slog.LevelDebug
+	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
+		level = slog.LevelWarn
 	}
 	b.Logger().Log(b.req.Context(), level, "router: request failed",
 		slog.String("method", b.req.Method),
@@ -422,9 +432,9 @@ func acceptsJSON(r *http.Request) bool {
 	switch {
 	case accept == "", negotiate(accept, jsonOffers) != "":
 		return true
-	case strings.Contains(accept, "json"), strings.Contains(accept, "*/*"):
-		// A "+json" flavour that no offer fits, and a client that takes any
-		// type at all, both take the JSON body.
+	case strings.Contains(accept, "*/*"):
+		// A client that takes any type at all takes the JSON body. A "+json"
+		// flavour that no offer fits already answered above.
 		return true
 	default:
 		// The client named the types it takes, so it gets JSON unless every one
