@@ -29,18 +29,58 @@
 // request and [router.Context.RoutePattern] for the matched route.
 package middleware
 
-import "github.com/dmitrymomot/go-router"
+import (
+	"errors"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/dmitrymomot/go-router"
+)
 
 // statusOf returns the status that the client sees, whether the handler wrote
 // it or an error will produce it.
 func statusOf[C router.Context](c C, err error) int {
-	if st := c.Response().Status; st != 0 {
-		return st
-	}
-	return router.StatusOf(err)
+	return router.ResolveStatus(c.Response(), err)
 }
 
 // skipped reports whether the config asks to pass this request through.
 func skipped[C router.Context](skip func(router.Context) bool, c C) bool {
 	return skip != nil && skip(c)
+}
+
+// originOf returns s as a bare origin, a scheme and a host and nothing else,
+// and reports whether it is one. The origin comes back lowercased, which is
+// the form that a comparison against the Origin header reads.
+//
+// A browser sends that header as a scheme and a host, and every comparison
+// against it here is exact, so an entry that carries a path, or that leaves
+// the scheme out, or that puts a wildcard in the host, matches no request that
+// ever arrives. [CORSWithConfig] and [CSRFWithConfig] both refuse one at
+// construction rather than let it fail as a blocked request in production.
+func originOf(s string) (string, bool) {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Opaque != "" || u.Host == "" || u.User != nil ||
+		u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		strings.Contains(u.Host, "*") {
+		return "", false
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host), true
+}
+
+// tooLarge maps an [http.MaxBytesError] that reached a middleware from a
+// handler onto [router.ErrPayloadTooLarge], so that errors.Is finds the same
+// error whether Bind hit the cap or the handler read past it itself.
+//
+// An error that already names a status keeps it: Bind writes its own 413, and
+// a handler that turned the read into a failure of its own has said what the
+// client reads. Every other error passes through untouched.
+func tooLarge(err error, message string, limit int64) error {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); !ok {
+		return err
+	}
+	if _, named := errors.AsType[*router.HTTPError](err); named {
+		return err
+	}
+	return router.ErrPayloadTooLarge.WithMessage(message, limit).WithError(err)
 }
