@@ -161,8 +161,10 @@ func (w *gzipWriter) Flush() {
 		//nolint:errcheck // Flush reports nothing, as [http.Flusher] does.
 		w.commit(true)
 	case gzipOn:
-		//nolint:errcheck // Same as above.
-		w.gz.Flush()
+		if w.gz != nil {
+			//nolint:errcheck // Same as above.
+			w.gz.Flush()
+		}
 	}
 	//nolint:errcheck // A writer that cannot flush says so and changes nothing.
 	http.NewResponseController(w.ResponseWriter).Flush()
