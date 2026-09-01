@@ -31,12 +31,13 @@ type node[C Context] struct {
 
 	routes   []methodHandler[C]
 	catchAll HandlerFunc[C]
+	allow    string
 
 	pattern string
 	names   []string
 }
 
-func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C]) error {
+func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool) error {
 	segs, names, err := parsePattern(pattern)
 	if err != nil {
 		return err
@@ -76,6 +77,7 @@ func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFu
 	if method == anyMethod {
 		cur.catchAll = h
 	}
+	cur.allow = strings.Join(cur.allowed(autoOptions), ", ")
 	return nil
 }
 
@@ -196,26 +198,26 @@ func (n *node[C]) allowed(autoOptions bool) []string {
 	return out
 }
 
-// Called once at build time: the serving goroutines read the map without a
-// lock, so a lazy fill on the first 405 would race them.
-func (n *node[C]) cacheAllow(dst map[*node[C]]string, autoOptions bool) {
+// insert keeps every node's Allow string current, so this only runs when the
+// OPTIONS setting changes after some routes are already in.
+func (n *node[C]) recacheAllow(autoOptions bool) {
 	if len(n.routes) > 0 {
-		dst[n] = strings.Join(n.allowed(autoOptions), ", ")
+		n.allow = strings.Join(n.allowed(autoOptions), ", ")
 	}
 	for _, c := range n.statics {
-		c.cacheAllow(dst, autoOptions)
+		c.recacheAllow(autoOptions)
 	}
 	for _, c := range n.templates {
-		c.cacheAllow(dst, autoOptions)
+		c.recacheAllow(autoOptions)
 	}
 	for _, c := range n.regexes {
-		c.cacheAllow(dst, autoOptions)
+		c.recacheAllow(autoOptions)
 	}
 	if n.param != nil {
-		n.param.cacheAllow(dst, autoOptions)
+		n.param.recacheAllow(autoOptions)
 	}
 	if n.wildcard != nil {
-		n.wildcard.cacheAllow(dst, autoOptions)
+		n.wildcard.recacheAllow(autoOptions)
 	}
 }
 

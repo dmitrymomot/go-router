@@ -77,9 +77,7 @@ type Router[C Context] struct {
 	compileErr error
 	scopes     []*scopeFallback[C]
 
-	// Allow header per node, joined at build time and never written again.
-	allowCache map[*node[C]]string
-	errScopes  []*scopeFallback[C]
+	errScopes []*scopeFallback[C]
 	named      map[string]namedRoute
 	info       map[routeKey]routeInfo
 	owner      *Router[C]
@@ -164,14 +162,14 @@ func (r *Router[C]) install(reg registration[C]) {
 	entries := r.hostEntries()
 	if len(entries) == 0 {
 		root.anyHostRoutes = true
-		if err := root.tree.insert(reg.method, full, nil, handler); err != nil {
+		if err := root.tree.insert(reg.method, full, nil, handler, root.autoOptions); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, nil, full)
 		return
 	}
 	for _, e := range entries {
-		if err := e.tree.insert(reg.method, full, e.names, handler); err != nil {
+		if err := e.tree.insert(reg.method, full, e.names, handler, root.autoOptions); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, e, full)
@@ -522,7 +520,14 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 
 func (r *Router[C]) HandleOPTIONS(on bool) {
 	r.mustNotBeServing("the OPTIONS setting")
-	r.root.autoOptions = on
+	root := r.root
+	root.autoOptions = on
+	root.tree.recacheAllow(on)
+	if root.hostSet != nil {
+		for _, e := range root.hostSet.all {
+			e.tree.recacheAllow(on)
+		}
+	}
 }
 
 func (r *Router[C]) MaxBodyBytes(n int64) {
@@ -682,13 +687,6 @@ func (r *Router[C]) buildErr() error {
 	}
 
 	r.collectRoutes()
-	r.allowCache = map[*node[C]]string{}
-	r.tree.cacheAllow(r.allowCache, r.autoOptions)
-	if r.hostSet != nil {
-		for _, e := range r.hostSet.all {
-			e.tree.cacheAllow(r.allowCache, r.autoOptions)
-		}
-	}
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
 	}
@@ -1203,10 +1201,8 @@ func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
 		case anyHost.pathMatch != nil && host.pathMatch == nil:
 			only = anyHost.pathMatch
 		}
-		if only != nil {
-			if s, ok := r.allowCache[only]; ok {
-				return s
-			}
+		if only != nil && only.allow != "" {
+			return only.allow
 		}
 	}
 	out := host.allowedMethods(nil, r.autoOptions)
