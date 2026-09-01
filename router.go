@@ -78,9 +78,9 @@ type Router[C Context] struct {
 	scopes     []*scopeFallback[C]
 
 	errScopes []*scopeFallback[C]
-	named      map[string]namedRoute
-	info       map[routeKey]routeInfo
-	owner      *Router[C]
+	named     map[string]namedRoute
+	info      map[routeKey]routeInfo
+	owner     *Router[C]
 }
 
 func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Router[C] {
