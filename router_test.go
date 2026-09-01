@@ -2612,3 +2612,46 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 		t.Errorf("scope 404 under a host = %q, want %q", got, "sub=acme tid=42")
 	}
 }
+
+// A registrar that installs more than one tree entry is still one route to the
+// caller. The name guard counted entries, so naming a mount or a multi-method
+// Match panicked on the second one, advising a second Name scope that the
+// caller has no way to open.
+func TestOneRegistrarCallHoldsOneName(t *testing.T) {
+	t.Run("MountHandler", func(t *testing.T) {
+		r := newTestRouter()
+		r.Name("assets").MountHandler("/static", http.NotFoundHandler())
+		got, err := r.URL("assets", nil)
+		if err != nil {
+			t.Fatalf("URL(assets) = %v", err)
+		}
+		if got != "/static" {
+			t.Errorf("URL(assets) = %q, want %q", got, "/static")
+		}
+	})
+
+	t.Run("Match", func(t *testing.T) {
+		r := newTestRouter()
+		r.Name("save").Match([]string{http.MethodPost, http.MethodPut}, "/items", echoRoute)
+		got, err := r.URL("save", nil)
+		if err != nil {
+			t.Fatalf("URL(save) = %v", err)
+		}
+		if got != "/items" {
+			t.Errorf("URL(save) = %q, want %q", got, "/items")
+		}
+		for _, m := range []string{http.MethodPost, http.MethodPut} {
+			if code := do(r, m, "/items").Code; code != http.StatusOK {
+				t.Errorf("%s /items = %d, want 200", m, code)
+			}
+		}
+	})
+
+	// A named scope still holds one route, not two.
+	t.Run("two routes still panic", func(t *testing.T) {
+		r := newTestRouter()
+		named := r.Name("twice")
+		named.GET("/a", echoRoute)
+		mustPanicContaining(t, "already registered a route", func() { named.GET("/b", echoRoute) })
+	})
+}

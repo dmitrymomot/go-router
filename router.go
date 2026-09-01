@@ -77,6 +77,7 @@ type Router[C Context] struct {
 	owner            *Router[C]
 	hasRoutes        bool
 	closed           bool
+	routeBatch       int
 	name             string
 	meta             any
 	tagged           bool
@@ -137,6 +138,22 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 }
 
 func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
+	r.handleNamed(method, pattern, h, mws, r.name)
+}
+
+// inOneRoute groups the registrations that a single registrar call makes, so a
+// Name scope can hold all of them. MountHandler installs two patterns and Match
+// one per method; the caller wrote one route and named it once.
+func (r *Router[C]) inOneRoute(fn func()) {
+	r.routeBatch++
+	fn()
+	r.routeBatch--
+	if r.routeBatch == 0 && r.name != "" {
+		r.nameUsed = true
+	}
+}
+
+func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []Middleware[C], name string) {
 	if r.root.started.Load() {
 		panic("router: cannot register " + method + " " + pattern + " after the router started serving")
 	}
@@ -152,7 +169,11 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 		if r.nameUsed {
 			panic("router: the scope named " + r.name + " already registered a route; open another Name scope for " + method + " " + pattern)
 		}
-		r.nameUsed = true
+		// Inside a batch the flag waits for the last registration, so that one
+		// registrar call does not trip over its own earlier entries.
+		if r.routeBatch == 0 {
+			r.nameUsed = true
+		}
 	}
 	for s := r; s != nil; s = s.owner {
 		s.hasRoutes = true
@@ -162,7 +183,7 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 		pattern: pattern,
 		handler: h,
 		mws:     slices.Clone(mws),
-		name:    r.name,
+		name:    name,
 		meta:    r.meta,
 	}
 	r.regs = append(r.regs, reg)
@@ -302,9 +323,11 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 			panic("router: Match needs non-empty methods")
 		}
 	}
-	for _, m := range methods {
-		r.handle(m, pattern, h, mws)
-	}
+	r.inOneRoute(func() {
+		for _, m := range methods {
+			r.handle(m, pattern, h, mws)
+		}
+	})
 }
 
 func (r *Router[C]) Use(mws ...Middleware[C]) {
@@ -555,8 +578,13 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 		h.ServeHTTP(b.res, req)
 		return nil
 	}
-	r.handle(anyMethod, prefix, handler, nil)
-	r.handle(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil)
+	r.inOneRoute(func() {
+		r.handle(anyMethod, prefix, handler, nil)
+		// The two patterns are one mount. The name belongs to the prefix, which
+		// is what URL should resolve; naming the catch-all as well would read
+		// as one name standing for two different routes.
+		r.handleNamed(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil, "")
+	})
 }
 
 func stripMountPrefix(r *http.Request, tail string, escaped, tailSlash bool) *http.Request {
