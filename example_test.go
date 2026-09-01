@@ -249,10 +249,6 @@ func TestReadmeContracts(t *testing.T) {
 	sub := router.New(newContext)
 	sub.GET("/users/{id}", func(c *Context) error { return c.NoContent(http.StatusOK) })
 	r.Mount("/api", sub)
-	if err := r.Build(); err != nil {
-		t.Fatal(err)
-	}
-
 	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
 	req.Header.Set(router.HeaderXForwardedProto, "HTTPS, http")
 	if got := router.SchemeOf(req); got != "https" {

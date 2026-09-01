@@ -21,10 +21,7 @@ type urlPart struct {
 }
 
 func (r *Router[C]) URL(name string, params map[string]string) (string, error) {
-	root := r.root
-	if err := root.compile(); err != nil {
-		return "", err
-	}
+	root := r.top()
 	nr, ok := root.named[name]
 	if !ok {
 		return "", fmt.Errorf("router: no route is named %q", name)

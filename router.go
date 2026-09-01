@@ -2,7 +2,6 @@ package router
 
 import (
 	"encoding/json/v2"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -60,7 +59,6 @@ type Router[C Context] struct {
 	started            atomic.Bool
 	tree               *node[C]
 	hostSet            *hostSet[C]
-	routes             []Route
 	notFoundChain      HandlerFunc[C]
 	notAllowedChain    HandlerFunc[C]
 	optionsChain       HandlerFunc[C]
@@ -97,6 +95,12 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 		ropts:            &routerOpts{maxBody: DefaultMaxBodyBytes},
 	}
 	r.root = r
+	// A router that never calls a setter still has to answer, so the fallbacks
+	// start out as the defaults and refresh only replaces them.
+	r.notFoundChain = defaultNotFound[C]
+	r.notAllowedChain = defaultMethodNotAllowed[C]
+	r.optionsChain = autoOptions[C]
+	r.compiledErrHandler = DefaultErrorHandler[C]
 	return r
 }
 
@@ -294,7 +298,12 @@ func (r *Router[C]) Use(mws ...Middleware[C]) {
 		panic("router: cannot add middleware after the router started serving")
 	}
 	r.mws = append(r.mws, mws...)
+	r.settingChanged()
 }
+
+// settingChanged rebuilds the derived state so the router is ready to serve the
+// moment the setter returns.
+func (r *Router[C]) settingChanged() { r.top().refresh() }
 
 func validateMiddleware[C Context](mws []Middleware[C]) {
 	for _, mw := range mws {
@@ -309,8 +318,14 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 	if r.root.started.Load() {
 		panic("router: cannot create a scope after the router started serving")
 	}
+	if _, _, err := parsePattern(prefix); err != nil {
+		panic(err.Error())
+	}
 	c := &Router[C]{root: r.root, owner: r, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
 	r.children = append(r.children, c)
+	if normalizePattern(prefix) != "/" {
+		c.settingChanged()
+	}
 	return c
 }
 
@@ -341,6 +356,7 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 	r.mustNotBeServing("the pre-routing middleware")
 	validateMiddleware(mws)
 	r.preMws = append(r.preMws, mws...)
+	r.settingChanged()
 }
 
 func (r *Router[C]) Name(name string) *Router[C] {
@@ -402,6 +418,7 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	if fn != nil {
 		fn(c)
 	}
+	c.settingChanged()
 	return c
 }
 
@@ -433,6 +450,7 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	sub.owner = shim
 	sub.installSubtree()
 	freezeRouterGraph(sub, make(map[*Router[C]]bool))
+	r.settingChanged()
 }
 
 func (r *Router[C]) installSubtree() {
@@ -500,6 +518,7 @@ func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 	}
 	r.mustNotBeServing("the not-found handler")
 	r.notFound = h
+	r.settingChanged()
 }
 
 func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
@@ -508,6 +527,7 @@ func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 	}
 	r.mustNotBeServing("the method-not-allowed handler")
 	r.methodNotAllowed = h
+	r.settingChanged()
 }
 
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
@@ -516,6 +536,7 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 	}
 	r.mustNotBeServing("the error handler")
 	r.errHandler = h
+	r.settingChanged()
 }
 
 func (r *Router[C]) HandleOPTIONS(on bool) {
@@ -528,6 +549,7 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 			e.tree.recacheAllow(on)
 		}
 	}
+	root.refresh()
 }
 
 func (r *Router[C]) MaxBodyBytes(n int64) {
@@ -565,20 +587,12 @@ func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Du
 	r.root.observer = fn
 }
 
-func (r *Router[C]) Routes() []Route {
-	root := r.root
-	root.build()
-	return slices.Clone(root.routes)
-}
+// Routes reports the table as it stands. Registration stays open afterwards.
+func (r *Router[C]) Routes() []Route { return r.top().collectRoutes() }
 
-func (r *Router[C]) Build() error { return r.root.compile() }
-
-func (r *Router[C]) compile() error {
-	r.once.Do(func() {
-		freezeRouterGraph(r, make(map[*Router[C]]bool))
-		r.compileErr = r.buildErr()
-	})
-	return r.compileErr
+// freeze closes the graph for registration on the first request.
+func (r *Router[C]) freeze() {
+	r.once.Do(func() { freezeRouterGraph(r, make(map[*Router[C]]bool)) })
 }
 
 func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
@@ -592,13 +606,19 @@ func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
 	}
 }
 
-func (r *Router[C]) build() {
-	if err := r.compile(); err != nil {
-		panic(err.Error())
+// refresh rebuilds everything the request path reads that is not a route: the
+// fallback chains, the scope table and the host order. Every setter that can
+// change one of them calls it, so the router is ready to serve the moment the
+// setter returns. Routes never reach here; install puts those in the trie.
+func (r *Router[C]) refresh() {
+	r.scopes, r.errScopes = nil, nil
+	if r.hostSet != nil {
+		for _, e := range r.hostSet.all {
+			e.mws, e.haveMWs = nil, false
+			e.notFoundChain, e.notAllowedChain, e.optionsChain = nil, nil, nil
+			e.errHandler, e.rawNotFound, e.rawNotAllowed = nil, nil, nil
+		}
 	}
-}
-
-func (r *Router[C]) buildErr() error {
 	rootNotFound := r.notFound
 	rootNotAllowed := r.methodNotAllowed
 	rootErrHandler := r.errHandler
@@ -609,10 +629,10 @@ func (r *Router[C]) buildErr() error {
 
 	var pending []pendingScope[C]
 
-	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error
-	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) error {
+	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C])
+	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) {
 		if open[rt] {
-			return errors.New("router: a router is mounted inside itself")
+			panic("router: a router is mounted inside itself")
 		}
 		open[rt] = true
 		defer delete(open, rt)
@@ -625,13 +645,9 @@ func (r *Router[C]) buildErr() error {
 			e := host
 			if len(rt.hosts) > 0 {
 				if host != nil {
-					return errors.New("router: a host scope cannot sit inside another host scope")
+					panic("router: a host scope cannot sit inside another host scope")
 				}
-				var err error
-				e, err = r.hostEntry(rt.hosts[i])
-				if err != nil {
-					return err
-				}
+				e = r.mustHostEntry(rt.hosts[i])
 				if !e.haveMWs {
 					e.mws, e.haveMWs = m, true
 				}
@@ -675,18 +691,12 @@ func (r *Router[C]) buildErr() error {
 			}
 
 			for _, ch := range rt.children {
-				if err := walk(ch, p, m, e, depth+1, own); err != nil {
-					return err
-				}
+				walk(ch, p, m, e, depth+1, own)
 			}
 		}
-		return nil
 	}
-	if err := walk(r, "", nil, nil, 0, scopeFallbacks[C]{}); err != nil {
-		return err
-	}
+	walk(r, "", nil, nil, 0, scopeFallbacks[C]{})
 
-	r.collectRoutes()
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
 	}
@@ -707,10 +717,7 @@ func (r *Router[C]) buildErr() error {
 		})
 	}
 	for _, ps := range pending {
-		segs, _, err := parsePattern(ps.prefix)
-		if err != nil {
-			return err
-		}
+		segs, _, _ := parsePattern(ps.prefix) //nolint:errcheck // newChild rejected a bad prefix already.
 		s := &scopeFallback[C]{prefix: ps.prefix, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
@@ -758,7 +765,6 @@ func (r *Router[C]) buildErr() error {
 	}
 	r.compiledErrHandler = rootErrHandler
 	r.compiled.Store(true)
-	return nil
 }
 
 func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) error {
@@ -893,6 +899,14 @@ func (r *Router[C]) fallbackChains(host *hostEntry[C], path string, escaped bool
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
 
+func (r *Router[C]) mustHostEntry(spec hostSpec) *hostEntry[C] {
+	e, err := r.hostEntry(spec)
+	if err != nil {
+		panic(err.Error())
+	}
+	return e
+}
+
 func (r *Router[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
 	if r.hostSet == nil {
 		r.hostSet = new(hostSet[C])
@@ -930,14 +944,15 @@ type routeInfo struct {
 	meta any
 }
 
-func (r *Router[C]) collectRoutes() {
+func (r *Router[C]) collectRoutes() []Route {
+	var out []Route
 	add := func(host string) func(pattern, method string) {
 		return func(pattern, method string) {
 			rt := Route{Host: host, Method: method, Pattern: pattern}
 			if info, ok := r.info[routeKey{host: host, method: method, pattern: pattern}]; ok {
 				rt.Name, rt.Meta = info.name, info.meta
 			}
-			r.routes = append(r.routes, rt)
+			out = append(out, rt)
 		}
 	}
 	r.tree.walk(add(""))
@@ -946,7 +961,7 @@ func (r *Router[C]) collectRoutes() {
 			e.tree.walk(add(e.pattern))
 		}
 	}
-	slices.SortFunc(r.routes, func(a, b Route) int {
+	slices.SortFunc(out, func(a, b Route) int {
 		if c := strings.Compare(a.Host, b.Host); c != 0 {
 			return c
 		}
@@ -955,6 +970,7 @@ func (r *Router[C]) collectRoutes() {
 		}
 		return strings.Compare(a.Method, b.Method)
 	})
+	return out
 }
 
 func concatMiddleware[C Context](a, b []Middleware[C]) []Middleware[C] {
@@ -972,8 +988,8 @@ func concatMiddleware[C Context](a, b []Middleware[C]) []Middleware[C] {
 
 func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	root := r.root
-	if !root.compiled.Load() {
-		root.build()
+	if !root.started.Load() {
+		root.freeze()
 	}
 	if root.observer != nil {
 		root.serveObserved(w, req)

@@ -1288,19 +1288,13 @@ func TestAValidTableRegistersWithoutPanicking(t *testing.T) {
 	}
 }
 
-func TestBuildCompilesTheTableItself(t *testing.T) {
+func TestTheFirstRequestClosesRegistration(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/a", echoRoute)
-
-	if err := r.Build(); err != nil {
-		t.Fatalf("Build() = %v", err)
+	if rec := do(r, http.MethodGet, "/a"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	defer func() {
-		if rec := recover(); rec == nil {
-			t.Error("no panic, want one that refuses a route after the router compiled")
-		}
-	}()
-	r.GET("/b", echoRoute)
+	mustPanicContaining(t, "after the router started serving", func() { r.GET("/b", echoRoute) })
 }
 
 type record struct {
@@ -1777,8 +1771,8 @@ func TestUseBeforeAGroupIsAllowed(t *testing.T) {
 	r := newTestRouter()
 	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
 	r.Group(func(g *Router[*tctx]) { g.GET("/a", echoRoute) })
-	if err := r.Build(); err != nil {
-		t.Fatalf("Build: %v", err)
+	if rec := do(r, http.MethodGet, "/a"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 }
 
@@ -2063,14 +2057,13 @@ func TestScopedHandlersIgnoreInvalidRawPath(t *testing.T) {
 	}
 }
 
-func TestBuildValidatesFallbackOnlyPrefixes(t *testing.T) {
+func TestAScopeValidatesItsPrefix(t *testing.T) {
 	r := newTestRouter()
-	r.Route("/bad/{", func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.NoContent(http.StatusNotFound) })
+	mustPanicContaining(t, "unbalanced", func() {
+		r.Route("/bad/{", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error { return c.NoContent(http.StatusNotFound) })
+		})
 	})
-	if err := r.Build(); err == nil || !strings.Contains(err.Error(), "unbalanced") {
-		t.Fatalf("Build() = %v, want an unbalanced-pattern error", err)
-	}
 }
 
 func TestEscapedSegmentsAreDecodedOnceForMatching(t *testing.T) {
@@ -2119,13 +2112,10 @@ func TestMountedRouterFreezesWithParent(t *testing.T) {
 	first.Mount("/one", sub)
 	second.Mount("/two", sub)
 
-	if err := first.Build(); err != nil {
-		t.Fatalf("first.Build() = %v", err)
-	}
 	func() {
 		defer func() {
 			if recover() == nil {
-				t.Error("mounted router accepted a route after its parent built")
+				t.Error("mounted router accepted a route after it was mounted")
 			}
 		}()
 		sub.GET("/late", echoRoute)
@@ -2133,13 +2123,13 @@ func TestMountedRouterFreezesWithParent(t *testing.T) {
 	if got := do(second, http.MethodGet, "/two/ready").Code; got != http.StatusOK {
 		t.Errorf("second parent status = %d, want 200", got)
 	}
+	if got := do(first, http.MethodGet, "/one/ready").Code; got != http.StatusOK {
+		t.Errorf("first parent status = %d, want 200", got)
+	}
 
-	defer func() {
-		if recover() == nil {
-			t.Error("parent accepted Mount after serving")
-		}
-	}()
-	first.Mount("/late", newTestRouter())
+	mustPanicContaining(t, "after the router started serving", func() {
+		first.Mount("/late", newTestRouter())
+	})
 }
 
 func TestParentsSharingAMountBuildConcurrently(t *testing.T) {
@@ -2150,17 +2140,17 @@ func TestParentsSharingAMountBuildConcurrently(t *testing.T) {
 	right.Mount("/right", sub)
 
 	start := make(chan struct{})
-	errs := make(chan error, 2)
+	done := make(chan int, 2)
 	for _, r := range []*Router[*tctx]{left, right} {
 		go func() {
 			<-start
-			errs <- r.Build()
+			done <- do(r, http.MethodGet, "/nowhere").Code
 		}()
 	}
 	close(start)
 	for range 2 {
-		if err := <-errs; err != nil {
-			t.Fatalf("Build() = %v", err)
+		if code := <-done; code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", code)
 		}
 	}
 	if do(left, http.MethodGet, "/left/ready").Code != http.StatusOK ||

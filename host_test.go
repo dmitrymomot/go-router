@@ -848,3 +848,44 @@ func TestHostNestedScopePanicsAtRegistration(t *testing.T) {
 		})
 	}
 }
+
+func TestPerHostErrorHandlersIgnoreSetterOrder(t *testing.T) {
+	build := func(late bool) *Router[*tctx] {
+		r := newTestRouter()
+		if !late {
+			r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root") })
+		}
+		r.Host("api.example.com", func(h *Router[*tctx]) {
+			h.GET("/boom", func(*tctx) error { return ErrForbidden })
+			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api") })
+		})
+		r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
+			h.GET("/boom", func(*tctx) error { return ErrForbidden })
+			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), c.Param("tenant")) })
+		})
+		if late {
+			r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root") })
+		}
+		return r
+	}
+
+	for _, late := range []bool{false, true} {
+		name := "root handler first"
+		if late {
+			name = "root handler last"
+		}
+		t.Run(name, func(t *testing.T) {
+			r := build(late)
+			for _, tc := range []struct{ host, path, want string }{
+				{"api.example.com", "/boom", "api"},
+				{"acme.example.com", "/boom", "acme"},
+				{"other.com", "/boom", "root"},
+				{"api.example.com", "/nope", "api"},
+			} {
+				if got := doHost(r, http.MethodGet, tc.host, tc.path).Body.String(); got != tc.want {
+					t.Errorf("%s%s = %q, want %q", tc.host, tc.path, got, tc.want)
+				}
+			}
+		})
+	}
+}
