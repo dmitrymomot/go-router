@@ -108,8 +108,14 @@ type Validator interface {
 	Validate() error
 }
 
-func validate(v any) error {
-	sv, ok := v.(Validator)
+// validate is handed &v so that a Validator with a pointer receiver is found.
+// When T is itself a pointer that makes **T, whose method set is empty, so the
+// value has to be tried as well or Validate never runs for Bind[*User].
+func validate[T any](v *T) error {
+	sv, ok := any(v).(Validator)
+	if !ok {
+		sv, ok = any(*v).(Validator)
+	}
 	if !ok {
 		return nil
 	}

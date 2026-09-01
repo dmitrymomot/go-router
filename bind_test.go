@@ -1283,3 +1283,35 @@ func TestFieldErrorsReachesThroughAnErrorTree(t *testing.T) {
 		})
 	}
 }
+
+type pointerValidated struct {
+	Name string `json:"name"`
+}
+
+func (p *pointerValidated) Validate() error { return errors.New("validate ran") }
+
+// validate is handed &v, which is **T when T is a pointer, and a pointer to a
+// pointer has an empty method set. Bind[*User] therefore skipped Validate
+// entirely while Bind[User] ran it.
+func TestValidateRunsForAPointerTypeArgument(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/ptr", func(c *tctx) error {
+		if _, err := c.Bind[*pointerValidated](); err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, "ok")
+	})
+	r.POST("/val", func(c *tctx) error {
+		if _, err := c.Bind[pointerValidated](); err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, "ok")
+	})
+
+	for _, path := range []string{"/ptr", "/val"} {
+		rec := doBody(r, http.MethodPost, path, MIMEApplicationJSON, `{"name":"x"}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("POST %s = %d, want 422", path, rec.Code)
+		}
+	}
+}
