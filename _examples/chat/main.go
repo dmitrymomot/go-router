@@ -61,9 +61,10 @@ func newRouter(rm *room) *router.Router[Ctx] {
 		return &Context{Room: rm}
 	})
 
+	// Logger wraps Recover, so the request line carries the recovered panic.
 	r.Use(
-		middleware.Recover[Ctx],
 		middleware.Logger[Ctx],
+		middleware.Recover[Ctx],
 		middleware.Secure[Ctx],
 		middleware.BodyLimit[Ctx](maxBodyBytes),
 		middleware.CSRFWithConfig[Ctx](middleware.CSRFConfig{
