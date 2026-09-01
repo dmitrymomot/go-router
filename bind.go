@@ -263,7 +263,11 @@ func (b *Base) limitedBody() io.ReadCloser {
 	if limit <= 0 {
 		return b.req.Body
 	}
-	return http.MaxBytesReader(b.res, b.req.Body, limit)
+	// MaxBytesReader tells the server to close the connection through an
+	// unexported method on the writer it is handed. *Response cannot have that
+	// method and net/http does not unwrap, so the writer net/http gave us goes
+	// in: with the wrapper a 413 left the connection open and drained the rest.
+	return http.MaxBytesReader(b.res.ResponseWriter, b.req.Body, limit)
 }
 
 func (b *Base) parseForm() error {

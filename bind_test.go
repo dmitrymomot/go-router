@@ -1425,3 +1425,37 @@ func TestHTTPErrorWithoutAStatusIsAnInternalError(t *testing.T) {
 	}
 }
 
+// MaxBytesReader signals "close this connection" through an unexported method
+// on the writer it is handed. *Response cannot have that method and net/http
+// does not unwrap, so a 413 used to leave the connection open and drain the
+// rest of the body.
+func TestOversizedBodyClosesTheConnection(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(16)
+	r.POST("/b", func(c *tctx) error {
+		_, err := c.Bind[map[string]any]()
+		return err
+	})
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body := `{"k":"` + strings.Repeat("a", 4096) + `"}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/b", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // The test is done with it.
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	if !resp.Close {
+		t.Error("the server kept the connection open after a 413")
+	}
+}
