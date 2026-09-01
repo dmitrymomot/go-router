@@ -2247,7 +2247,7 @@ func TestJSONOptionsClonesCallerSlice(t *testing.T) {
 	opts := []json.Options{json.RejectUnknownMembers(true)}
 	r.JSONOptions(opts...)
 	opts[0] = nil
-	if len(r.jsonOpts) != 1 || r.jsonOpts[0] == nil {
+	if len(r.ropts.jsonOpts) != 1 || r.ropts.jsonOpts[0] == nil {
 		t.Fatal("JSONOptions retained the caller's slice backing array")
 	}
 }

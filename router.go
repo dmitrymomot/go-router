@@ -69,11 +69,6 @@ type Router[C Context] struct {
 	redirectSlash      bool
 	anyHostRoutes      bool
 	ropts              *routerOpts
-	maxBody            int64
-	maxMultipart       int64
-	strictBind         bool
-	logger             *slog.Logger
-	jsonOpts           []json.Options
 	compiled           atomic.Bool
 	preChain           HandlerFunc[C]
 	observer           func(c Context, status int, size int64, d time.Duration, err error)
@@ -100,7 +95,8 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 		methodNotAllowed: defaultMethodNotAllowed[C],
 		errHandler:       DefaultErrorHandler[C],
 		autoOptions:      true,
-		maxBody:          DefaultMaxBodyBytes,
+		tree:             new(node[C]),
+		ropts:            &routerOpts{maxBody: DefaultMaxBodyBytes},
 	}
 	r.root = r
 	return r
@@ -421,27 +417,27 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 
 func (r *Router[C]) MaxBodyBytes(n int64) {
 	r.mustNotBeServing("the body limit")
-	r.root.maxBody = n
+	r.root.ropts.maxBody = n
 }
 
 func (r *Router[C]) MaxMultipartMemory(n int64) {
 	r.mustNotBeServing("the multipart memory limit")
-	r.root.maxMultipart = n
+	r.root.ropts.maxMultipart = n
 }
 
 func (r *Router[C]) StrictBind(on bool) {
 	r.mustNotBeServing("the strict binding setting")
-	r.root.strictBind = on
+	r.root.ropts.strictBind = on
 }
 
 func (r *Router[C]) Logger(l *slog.Logger) {
 	r.mustNotBeServing("the logger")
-	r.root.logger = l
+	r.root.ropts.logger = l
 }
 
 func (r *Router[C]) JSONOptions(opts ...json.Options) {
 	r.mustNotBeServing("the JSON options")
-	r.root.jsonOpts = slices.Clone(opts)
+	r.root.ropts.jsonOpts = slices.Clone(opts)
 }
 
 func (r *Router[C]) RedirectTrailingSlash(on bool) {
@@ -491,14 +487,6 @@ func (r *Router[C]) buildErr() error {
 	rootNotFound := r.notFound
 	rootNotAllowed := r.methodNotAllowed
 	rootErrHandler := r.errHandler
-	r.tree = new(node[C])
-	r.ropts = &routerOpts{
-		jsonOpts:     r.jsonOpts,
-		logger:       r.logger,
-		maxBody:      r.maxBody,
-		maxMultipart: r.maxMultipart,
-		strictBind:   r.strictBind,
-	}
 	r.notFoundChain = chain(rootNotFound, r.mws)
 	r.notAllowedChain = chain(rootNotAllowed, r.mws)
 	r.optionsChain = chain(autoOptions[C], r.mws)
