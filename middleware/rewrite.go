@@ -29,7 +29,7 @@ func Rewrite[C router.Context](rules ...RewriteRule) router.Middleware[C] {
 		return func(c C) error {
 			req := c.Request()
 			for _, rule := range compiled {
-				to, ok := rule.apply(canonicalEscapedPath(req.URL.EscapedPath()))
+				to, ok := rule.apply(decodeUnreservedEscapes(req.URL.EscapedPath()))
 				if !ok {
 					continue
 				}
@@ -79,7 +79,12 @@ func escapeRewriteTemplate(s string) string {
 	return b.String()
 }
 
-func canonicalEscapedPath(s string) string {
+// decodeUnreservedEscapes decodes the escapes standing for an unreserved
+// character and leaves every other one alone, so a rule sees one spelling of
+// the path it matches. The router has its own canonicalEscapedPath, which keeps
+// only the escapes for a separator, a backslash and a percent: this one is the
+// narrower rule, and the two are not interchangeable.
+func decodeUnreservedEscapes(s string) string {
 	if !strings.Contains(s, "%") {
 		return s
 	}
