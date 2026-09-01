@@ -1315,3 +1315,53 @@ func TestValidateRunsForAPointerTypeArgument(t *testing.T) {
 		}
 	}
 }
+
+type optionOnlyTags struct {
+	Name  string `json:"name"`
+	Email string `json:",omitempty"`
+	Age   int    `json:",string"`
+}
+
+// encoding/json reads an empty tag name with options as "this field, under its
+// Go name". StrictBind read it as untagged and zeroed the field after decoding
+// it, so an annotated field came back empty and nothing said why.
+func TestStrictBindKeepsFieldsTaggedWithOptionsOnly(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		r := newTestRouter()
+		r.StrictBind(strict)
+		r.POST("/x", func(c *tctx) error {
+			v, err := c.Bind[optionOnlyTags]()
+			if err != nil {
+				return err
+			}
+			return c.String(http.StatusOK, fmt.Sprintf("%s/%s/%d", v.Name, v.Email, v.Age))
+		})
+		got := doBody(r, http.MethodPost, "/x", MIMEApplicationJSON,
+			`{"name":"bo","Email":"bo@x","Age":"7"}`).Body.String()
+		if got != "bo/bo@x/7" {
+			t.Errorf("StrictBind(%v) = %q, want %q", strict, got, "bo/bo@x/7")
+		}
+	}
+}
+
+// Untagged fields are still stripped: the allowlist is what StrictBind is for.
+func TestStrictBindStillStripsUntaggedFields(t *testing.T) {
+	type mixed struct {
+		Name  string `json:"name"`
+		Admin bool
+	}
+	r := newTestRouter()
+	r.StrictBind(true)
+	r.POST("/x", func(c *tctx) error {
+		v, err := c.Bind[mixed]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%v", v.Name, v.Admin))
+	})
+	if got := doBody(r, http.MethodPost, "/x", MIMEApplicationJSON,
+		`{"name":"bo","Admin":true}`).Body.String(); got != "bo/false" {
+		t.Errorf("untagged field = %q, want %q", got, "bo/false")
+	}
+}
+
