@@ -12,6 +12,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/routertest"
 )
 
 var gzipLongBody = strings.Repeat("<p>the quick brown fox</p>", 100)
@@ -271,21 +272,53 @@ func TestGzipFlushBeforeTheFirstWriteReachesTheClient(t *testing.T) {
 	}
 }
 
-func TestGzipSkipsAHeadRequest(t *testing.T) {
+func TestGzipHeadUsesTheGetRepresentationHeadersWithoutABody(t *testing.T) {
 	r := gzipRouter(middleware.GzipConfig{})
+	getRec := gzipGet(r, "/long", "gzip")
 
 	req := httptest.NewRequest(http.MethodHead, "/long", nil)
 	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
 	rec := do(r, req)
 
-	if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
-		t.Errorf("content encoding = %q, want none", got)
+	if got, want := rec.Header().Get(router.HeaderContentEncoding),
+		getRec.Header().Get(router.HeaderContentEncoding); got != want {
+		t.Errorf("content encoding = %q, want GET's %q", got, want)
 	}
-	if got := rec.Header().Get(router.HeaderContentLength); got == "" {
-		t.Error("the length of the body that a GET answers with is gone")
+	if got, want := rec.Header().Get(router.HeaderContentLength),
+		getRec.Header().Get(router.HeaderContentLength); got != want {
+		t.Errorf("content length = %q, want GET's %q", got, want)
+	}
+	if got, want := rec.Header().Get(router.HeaderContentType),
+		getRec.Header().Get(router.HeaderContentType); got != want {
+		t.Errorf("content type = %q, want GET's %q", got, want)
 	}
 	if got := rec.Header().Get(router.HeaderVary); got != router.HeaderAcceptEncoding {
 		t.Errorf("vary = %q, want %q", got, router.HeaderAcceptEncoding)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD body is %d bytes, want none", rec.Body.Len())
+	}
+}
+
+func TestGzipHeadKeepsAShortRepresentationPlain(t *testing.T) {
+	r := gzipRouter(middleware.GzipConfig{})
+	getRec := gzipGet(r, "/short", "gzip")
+
+	req := httptest.NewRequest(http.MethodHead, "/short", nil)
+	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+	rec := do(r, req)
+
+	for _, name := range []string{
+		router.HeaderContentEncoding,
+		router.HeaderContentLength,
+		router.HeaderContentType,
+	} {
+		if got, want := rec.Header().Get(name), getRec.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want GET's %q", name, got, want)
+		}
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD body is %d bytes, want none", rec.Body.Len())
 	}
 }
 
@@ -554,6 +587,59 @@ func TestGzipCommitsASwitchingProtocols(t *testing.T) {
 			}
 			if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
 				t.Errorf("content encoding = %q, want none on an upgraded connection", got)
+			}
+		})
+	}
+}
+
+// The nil gzip.Writer crash lived here: HEAD stopped being short-circuited, so
+// a handler that flushed reached a writer that had never been opened. The rule
+// is routertest.AssertHEADMatchesGET's — the reply carries the headers of the
+// GET, compressed ones included, and no body.
+func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
+	tests := []struct {
+		name     string
+		handler  router.HandlerFunc[*appContext]
+		encoding string
+	}{
+		{"the handler writes a body", func(c *appContext) error {
+			return c.HTML(http.StatusOK, gzipLongBody)
+		}, "gzip"},
+		{"the handler flushes", func(c *appContext) error {
+			if err := c.HTML(http.StatusOK, gzipLongBody); err != nil {
+				return err
+			}
+			c.Response().Flush()
+			return nil
+		}, "gzip"},
+		// A flush with nothing written yet: on HEAD the writer is never opened,
+		// which is the shape that used to dereference a nil gzip.Writer.
+		{"the handler flushes before writing anything", func(c *appContext) error {
+			c.Response().WriteHeader(http.StatusOK)
+			c.Response().Flush()
+			return nil
+		}, "gzip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var failed error
+			r := newRouter()
+			// The status line is already out by the time a flush panics, so the
+			// reply stays a 200 with no body and matches its GET. Only the
+			// error handler sees the panic.
+			r.ErrorHandler(func(_ *appContext, err error) { failed = err })
+			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
+			r.GET("/x", tt.handler)
+
+			get := routertest.Get(r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
+			if got := get.Header.Get(router.HeaderContentEncoding); got != tt.encoding {
+				t.Fatalf("the GET sent Content-Encoding %q, want %q; this case no longer reaches the path it names", got, tt.encoding)
+			}
+
+			routertest.AssertHEADMatchesGET(t, r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
+			if failed != nil {
+				t.Errorf("the request failed: %v", failed)
 			}
 		})
 	}

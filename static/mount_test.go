@@ -31,6 +31,28 @@ func TestMountServesTheAssets(t *testing.T) {
 	res.AssertHeader(t, "Cache-Control", "public, max-age=31536000, immutable")
 }
 
+func TestHandlerAndMountRejectNilDependencies(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS()})
+	tests := []struct {
+		name string
+		call func()
+	}{
+		{name: "handler asset set", call: func() { static.Handler[*appContext](nil) }},
+		{name: "mount router", call: func() { static.Mount[*appContext](nil, a) }},
+		{name: "mount asset set", call: func() { static.Mount(newRouter(), nil) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("call accepted a nil dependency")
+				}
+			}()
+			tt.call()
+		})
+	}
+}
+
 func TestMountAnswersTheBarePrefixWithTheIndex(t *testing.T) {
 	r := newRouter()
 	static.Mount(r, newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"}))
@@ -143,4 +165,16 @@ func TestMountInsideAHostScope(t *testing.T) {
 
 	routertest.Get(r, a.URL("css/app.css"), routertest.Host("other.invalid")).
 		AssertStatus(t, http.StatusNotFound)
+}
+
+// The asset server decides HEAD in two places, its own method check and the
+// reader it hands to http.ServeContent. Both answer
+// routertest.AssertHEADMatchesGET's rule.
+func TestMountAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
+	r := newRouter()
+	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"})
+	static.Mount(r, a)
+
+	routertest.AssertHEADMatchesGET(t, r, a.URL("css/app.css"))
+	routertest.AssertHEADMatchesGET(t, r, "/static/missing.css")
 }

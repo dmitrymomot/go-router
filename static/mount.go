@@ -12,6 +12,9 @@ import (
 const PathParam = "assetpath"
 
 func Handler[C router.Context](a *Assets) router.HandlerFunc[C] {
+	if a == nil {
+		panic("static: Handler needs an asset set")
+	}
 	return func(c C) error {
 		res := c.Response()
 		err := a.serve(res, c.Request(), assetPath(a, c))
@@ -44,6 +47,12 @@ func assetPath(a *Assets, c router.Context) string {
 }
 
 func Mount[C router.Context](r *router.Router[C], a *Assets) {
+	if r == nil {
+		panic("static: Mount needs a router")
+	}
+	if a == nil {
+		panic("static: Mount needs an asset set")
+	}
 	h := Handler[C](a)
 	prefix := a.Prefix()
 	sub := path.Join(prefix, "{"+PathParam+"...}")

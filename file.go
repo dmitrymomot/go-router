@@ -1,7 +1,6 @@
 package router
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +10,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/dmitrymomot/go-router/internal/nonseek"
 )
 
 const (
@@ -43,8 +44,11 @@ func (b *Base) Inline(status int, contentType, filename string, data []byte) err
 }
 
 func (b *Base) serveFile(name string, fsys fs.FS, kind, filename string) error {
+	if !safeFileName(name) {
+		return ErrNotFound
+	}
 	clean := cleanFileName(name)
-	if !fs.ValidPath(clean) {
+	if clean == "." || !fs.ValidPath(clean) {
 		return ErrNotFound
 	}
 
@@ -88,17 +92,32 @@ func fileNotFound(err error) error {
 }
 
 func (b *Base) sendFile(name string, f fs.File, info fs.FileInfo) error {
+	req := b.req
 	rs, ok := f.(io.ReadSeeker)
 	if !ok {
-		data, err := io.ReadAll(f)
+		req = nonseek.Request(req, info.Size())
+		var err error
+		rs, err = nonseek.ReadSeeker("", b.res.Header(), req, name, f, info.Size())
 		if err != nil {
 			return ErrInternalServerError.WithError(fmt.Errorf("router: read the file: %w", err))
 		}
-		rs = bytes.NewReader(data)
 	}
 
-	http.ServeContent(b.res, b.req, path.Base(name), info.ModTime(), rs)
+	http.ServeContent(b.res, req, path.Base(name), info.ModTime(), rs)
 	return nil
+}
+
+func safeFileName(name string) bool {
+	if name == "" || name == "." || path.IsAbs(name) || filepath.IsAbs(name) ||
+		filepath.VolumeName(name) != "" || strings.ContainsRune(name, '\\') {
+		return false
+	}
+	for part := range strings.SplitSeq(name, "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func cleanFileName(name string) string {

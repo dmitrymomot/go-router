@@ -1,5 +1,6 @@
 {{define "join" -}}
-<form id="join" hx-post="/join" hx-swap="outerHTML" autocomplete="off">
+<form id="join" action="/join" method="post" hx-post="/join" hx-swap="outerHTML" autocomplete="off">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 	<input name="name" value="{{.Name}}" placeholder="Your name" maxlength="24" required autofocus>
 	<button type="submit">Join the room</button>
 	{{- with .Error}}

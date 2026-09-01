@@ -63,6 +63,9 @@ func CertPEM(cert, key []byte) Option {
 
 func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 	return func(o *options) error {
+		if fsys == nil {
+			return errors.New("serve: CertFS needs a file system")
+		}
 		cert, err := fs.ReadFile(fsys, certPath)
 		if err != nil {
 			return fmt.Errorf("serve: read the certificate %q: %w", certPath, err)
@@ -81,6 +84,9 @@ func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 }
 
 func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error {
+	if ctx == nil {
+		return errors.New("serve: Run needs a context")
+	}
 	if h == nil {
 		return errors.New("serve: Run needs a handler")
 	}
@@ -89,7 +95,10 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	}
 
 	var o options
-	for _, opt := range opts {
+	for i, opt := range opts {
+		if opt == nil {
+			return fmt.Errorf("serve: option %d is nil", i)
+		}
 		if err := opt(&o); err != nil {
 			return err
 		}
@@ -147,16 +156,36 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	}()
 
 	err = serveOn(srv, ln)
+	var closeErr error
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if closeErr = srv.Close(); closeErr != nil {
+			closeErr = fmt.Errorf("serve: close connections after serving failed: %w", closeErr)
+		}
+	}
 	close(stopped)
 	<-drained
 
 	if errors.Is(err, http.ErrServerClosed) {
 		err = nil
 	}
-	if err != nil {
-		return err
+	return joinErrors(err, closeErr, drainErr)
+}
+
+func joinErrors(errs ...error) error {
+	nonNil := errs[:0]
+	for _, err := range errs {
+		if err != nil {
+			nonNil = append(nonNil, err)
+		}
 	}
-	return drainErr
+	switch len(nonNil) {
+	case 0:
+		return nil
+	case 1:
+		return nonNil[0]
+	default:
+		return errors.Join(nonNil...)
+	}
 }
 
 func listen(ctx context.Context, cfg Config) (net.Listener, error) {

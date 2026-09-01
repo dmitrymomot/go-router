@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -189,6 +190,116 @@ func TestRenderStreamHEADWritesNoBody(t *testing.T) {
 
 	if n := do(r, http.MethodHead, "/").Body.Len(); n != 0 {
 		t.Errorf("body length = %d, want 0", n)
+	}
+}
+
+func TestJSONPretty(t *testing.T) {
+	type payload struct {
+		Name string `json:"name"`
+		Age  int    `json:"age"`
+	}
+
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.JSONPretty(http.StatusAccepted, payload{Name: "Ada", Age: 37}, "\t")
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationJSONCharsetUTF8 {
+		t.Errorf("Content-Type = %q, want %q", got, MIMEApplicationJSONCharsetUTF8)
+	}
+	want := "{\n\t\"name\": \"Ada\",\n\t\"age\": 37\n}"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+type readCounter struct{ reads int }
+
+func (r *readCounter) Read([]byte) (int, error) {
+	r.reads++
+	return 0, io.EOF
+}
+
+func TestStream(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.Stream(http.StatusAccepted, "application/x-lines", strings.NewReader("one\ntwo\n"))
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if got := rec.Header().Get(HeaderContentType); got != "application/x-lines" {
+		t.Errorf("Content-Type = %q, want %q", got, "application/x-lines")
+	}
+	if got := rec.Body.String(); got != "one\ntwo\n" {
+		t.Errorf("body = %q, want %q", got, "one\ntwo\n")
+	}
+}
+
+func TestStreamHEADDoesNotReadTheSource(t *testing.T) {
+	source := new(readCounter)
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.Stream(http.StatusOK, MIMEOctetStream, source)
+	})
+
+	rec := do(r, http.MethodHead, "/")
+	if source.reads != 0 {
+		t.Errorf("source was read %d times, want 0", source.reads)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMEOctetStream {
+		t.Errorf("Content-Type = %q, want %q", got, MIMEOctetStream)
+	}
+}
+
+func TestRedirectAcceptsOnlyDefinedRedirectStatuses(t *testing.T) {
+	valid := map[int]bool{
+		http.StatusMultipleChoices:   true,
+		http.StatusMovedPermanently:  true,
+		http.StatusFound:             true,
+		http.StatusSeeOther:          true,
+		http.StatusTemporaryRedirect: true,
+		http.StatusPermanentRedirect: true,
+	}
+
+	for status := 299; status <= 309; status++ {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			b := NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			err := b.Redirect(status, "/next")
+
+			if valid[status] {
+				if err != nil {
+					t.Fatalf("Redirect(%d) = %v", status, err)
+				}
+				if rec.Code != status {
+					t.Errorf("status = %d, want %d", rec.Code, status)
+				}
+				if got := rec.Header().Get(HeaderLocation); got != "/next" {
+					t.Errorf("Location = %q, want %q", got, "/next")
+				}
+				return
+			}
+
+			if !errors.Is(err, ErrInternalServerError) {
+				t.Errorf("Redirect(%d) = %v, want an internal error", status, err)
+			}
+			if b.Response().Committed {
+				t.Error("an invalid redirect committed the response")
+			}
+			if got := rec.Header().Get(HeaderLocation); got != "" {
+				t.Errorf("Location = %q, want empty", got)
+			}
+		})
 	}
 }
 

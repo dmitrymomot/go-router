@@ -28,6 +28,8 @@ type sseConfig struct {
 
 type SSEOption func(*sseConfig)
 
+const nilSSEOptionError = "router: an SSE option cannot be nil"
+
 func SSEHeartbeat(d time.Duration) SSEOption {
 	return func(c *sseConfig) { c.heartbeat = d }
 }
@@ -54,6 +56,9 @@ type SSEWriter struct {
 }
 
 func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {
+	if err := validateSSEOptions(opts); err != nil {
+		return nil, ErrInternalServerError.WithError(err)
+	}
 	if !canFlush(b.res.ResponseWriter) {
 		return nil, ErrInternalServerError.WithError(
 			errors.New("router: the response writer cannot flush, which a server-sent event stream needs"))
@@ -90,6 +95,15 @@ func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {
 		}
 	}
 	return s, nil
+}
+
+func validateSSEOptions(opts []SSEOption) error {
+	for _, opt := range opts {
+		if opt == nil {
+			return errors.New(nilSSEOptionError)
+		}
+	}
+	return nil
 }
 
 func (b *Base) LastEventID() string { return b.req.Header.Get(HeaderLastEventID) }
@@ -183,6 +197,10 @@ func (s *SSEWriter) retryField(d time.Duration) bool {
 func (s *SSEWriter) field(name, value string) error {
 	if value == "" {
 		return nil
+	}
+	if name == "id" && strings.ContainsRune(value, '\x00') {
+		return ErrInternalServerError.WithError(
+			fmt.Errorf("router: the %s of a server-sent event holds a null character: %q", name, value))
 	}
 	if strings.ContainsAny(value, "\r\n") {
 		return ErrInternalServerError.WithError(
@@ -327,6 +345,9 @@ func SSEText[T any](name string) SSESender[T] {
 }
 
 func SSEComponent[T any, C Component](name string, view func(T) C) SSESender[T] {
+	if view == nil {
+		panic("router: SSEComponent needs a view")
+	}
 	return func(s *SSEWriter, v T) error { return s.SendComponent(name, view(v)) }
 }
 
@@ -382,6 +403,9 @@ type SSEStream[T any] struct {
 func NewSSEStream[T any](send SSESender[T], opts ...SSEOption) *SSEStream[T] {
 	if send == nil {
 		panic("router: NewSSEStream needs a sender")
+	}
+	if validateSSEOptions(opts) != nil {
+		panic("router: NewSSEStream needs non-nil options")
 	}
 	return &SSEStream[T]{send: send, opts: slices.Clone(opts)}
 }

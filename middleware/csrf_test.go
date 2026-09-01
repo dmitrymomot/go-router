@@ -453,6 +453,19 @@ func TestCSRFTokenReachesAComponent(t *testing.T) {
 	}
 }
 
+func TestCSRFCopiesConfiguredTokenSources(t *testing.T) {
+	sources := []middleware.TokenSource{middleware.FromHeader("X-Original-CSRF", "")}
+	r := csrfRouter(middleware.CSRFConfig{TokenSources: sources})
+	sources[0] = middleware.FromHeader("X-Replaced-CSRF", "")
+
+	token, cookie := csrfSession(t, r)
+	req := withCookie(httptest.NewRequest(http.MethodPost, "/", nil), cookie)
+	req.Header.Set("X-Original-CSRF", token)
+	if rec := do(r, req); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 after the caller mutated its source slice", rec.Code)
+	}
+}
+
 func TestCSRFSkip(t *testing.T) {
 	r := csrfRouter(middleware.CSRFConfig{Skip: skipPath("/")})
 

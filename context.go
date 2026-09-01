@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -30,7 +31,13 @@ type Context interface {
 	base() *Base
 }
 
-const maxInlineParams = 8
+// Route parameters live inside Base up to this many, so a request that stays
+// under it answers without a second allocation. Host parameters count too: a
+// "{tenant}.example.com" scope spends one before the path spends any. Going
+// over is not an error, it costs one allocation per request, and on a pooled
+// router that is the difference between zero and one. Router.Params and
+// InlineParamBudget let a route table assert it stays under.
+const maxInlineParams = 4
 
 // betteralign:check
 type Base struct {
@@ -52,11 +59,14 @@ type Base struct {
 
 	// One word rather than two error fields, which would push Base from 360 to
 	// 384 bytes and its embedder into the next size class.
-	deferred    *deferredErrors
-	resStorage  Response
-	hostIdx     int32
-	hostKnown   bool
-	pathEscaped bool
+	deferred      *deferredErrors
+	resStorage    Response
+	hostIdx       int32
+	errorScopeIdx int32
+	hostKnown     bool
+	pathEscaped   bool
+	errorRouted   bool
+	needsCleanup  bool
 }
 
 type routerOpts struct {
@@ -77,6 +87,12 @@ func (b *Base) opts() *routerOpts {
 }
 
 func NewBase(w http.ResponseWriter, r *http.Request) *Base {
+	if w == nil {
+		panic("router: NewBase needs a response writer")
+	}
+	if r == nil {
+		panic("router: NewBase needs a request")
+	}
 	b := new(Base)
 	b.init(w, r)
 	return b
@@ -94,10 +110,29 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.pattern, b.rawTail = "", ""
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
-	b.hostIdx, b.pathEscaped = -1, false
+	b.hostIdx = -1
+	b.pathEscaped, b.errorRouted = false, false
 	b.queryCache = nil
 	b.deferred = nil
-	clear(b.store)
+	// clear on a map is a runtime call even when the map is nil, and most
+	// requests never set anything.
+	if len(b.store) > 0 {
+		clear(b.store)
+	}
+}
+
+func (b *Base) clearRequestSlow() {
+	b.resStorage.before = nil
+	clear(b.paramArr[:])
+	clear(b.paramVals[:cap(b.paramVals)])
+	b.paramVals = nil
+	b.queryCache = nil
+	if len(b.store) > 0 {
+		clear(b.store)
+	}
+	b.deferred = nil
+	b.host, b.rawTail = "", ""
+	b.needsCleanup = false
 }
 
 type deferredErrors struct {
@@ -108,6 +143,7 @@ type deferredErrors struct {
 func (b *Base) deferrals() *deferredErrors {
 	if b.deferred == nil {
 		b.deferred = new(deferredErrors)
+		b.needsCleanup = true
 	}
 	return b.deferred
 }
@@ -144,6 +180,10 @@ func (b *Base) setRoute(pattern string, names, vals []string) {
 }
 
 func SetRouteForTest(b *Base, pattern string, names, vals []string) {
+	if b == nil {
+		panic("router: SetRouteForTest needs a Base")
+	}
+	b.needsCleanup = true
 	b.setRoute(pattern, names, vals)
 }
 
@@ -152,8 +192,12 @@ func (b *Base) base() *Base { return b }
 func (b *Base) Request() *http.Request { return b.req }
 
 func (b *Base) SetRequest(r *http.Request) {
+	if r == nil {
+		panic("router: SetRequest needs a request")
+	}
 	b.req = r
 	b.queryCache = nil
+	b.host, b.hostKnown = "", false
 }
 
 func (b *Base) Logger() *slog.Logger {
@@ -197,6 +241,7 @@ func (b *Base) Set(key string, val any) {
 		b.store = make(map[string]any, 4)
 	}
 	b.store[key] = val
+	b.needsCleanup = true
 }
 
 func (b *Base) Get(key string) (any, bool) {
@@ -211,6 +256,7 @@ func (b *Base) RouteHost() string { return b.hostPattern }
 func (b *Base) Host() string {
 	if !b.hostKnown {
 		b.host, b.hostKnown = normalizeHost(b.req.Host), true
+		b.needsCleanup = b.needsCleanup || b.host != ""
 	}
 	return b.host
 }
@@ -252,7 +298,7 @@ func (b *Base) ParamOK(name string) (string, bool) {
 	return "", false
 }
 
-func (b *Base) ParamNames() []string { return b.paramNames }
+func (b *Base) ParamNames() []string { return slices.Clone(b.paramNames) }
 
 func (b *Base) Method() string { return b.req.Method }
 
@@ -281,6 +327,7 @@ func AddVary(h http.Header, names ...string) {
 func (b *Base) queryValues() url.Values {
 	if b.queryCache == nil {
 		b.queryCache = b.req.URL.Query()
+		b.needsCleanup = true
 	}
 	return b.queryCache
 }

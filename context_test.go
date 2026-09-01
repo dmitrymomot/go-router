@@ -1,12 +1,14 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newBase(target string) *Base {
@@ -80,6 +82,86 @@ func TestUserAgentAndReferer(t *testing.T) {
 	}
 }
 
+func TestRequestAndResponseAccessors(t *testing.T) {
+	deadline := time.Now().Add(time.Hour)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPatch, "/orders/7?view=full", nil).WithContext(ctx)
+	req.Header.Set("X-Test", "value")
+	req.Header.Set("Connection", "keep-alive, Upgrade")
+	req.Header.Set("Upgrade", "WebSocket")
+	req.AddCookie(&http.Cookie{Name: "session", Value: "abc"})
+	rec := httptest.NewRecorder()
+	b := NewBase(rec, req)
+
+	if got, ok := b.Deadline(); !ok || !got.Equal(deadline) {
+		t.Errorf("Deadline() = %s/%v, want %s/true", got, ok, deadline)
+	}
+	if err := b.Err(); err != nil {
+		t.Errorf("Err() = %v before cancellation", err)
+	}
+	if got := b.Method(); got != http.MethodPatch {
+		t.Errorf("Method() = %q, want %q", got, http.MethodPatch)
+	}
+	if b.URL() != req.URL {
+		t.Error("URL() did not return the request URL")
+	}
+	if got := b.Header().Get("X-Test"); got != "value" {
+		t.Errorf("Header().Get(X-Test) = %q, want value", got)
+	}
+	cookie, err := b.Cookie("session")
+	if err != nil || cookie.Value != "abc" {
+		t.Fatalf("Cookie(session) = %#v, %v", cookie, err)
+	}
+	if !b.IsWebSocket() {
+		t.Error("IsWebSocket() rejected case-insensitive upgrade tokens")
+	}
+	b.SetCookie(&http.Cookie{Name: "theme", Value: "dark", Path: "/"})
+	if got := rec.Header().Get("Set-Cookie"); !strings.Contains(got, "theme=dark") {
+		t.Errorf("Set-Cookie = %q, want theme=dark", got)
+	}
+	cancel()
+	if err := b.Err(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Err() = %v after cancellation, want context.Canceled", err)
+	}
+}
+
+func TestSetRouteForTestPublishesRouteState(t *testing.T) {
+	b := newBase("/users/7")
+	SetRouteForTest(b, "/users/{id}", []string{"id"}, []string{"7"})
+	if got := b.RoutePattern(); got != "/users/{id}" {
+		t.Errorf("RoutePattern() = %q", got)
+	}
+	if got := b.Param("id"); got != "7" {
+		t.Errorf("Param(id) = %q", got)
+	}
+	if !b.needsCleanup {
+		t.Error("SetRouteForTest did not mark the context for cleanup")
+	}
+}
+
+func TestContextConstructionRejectsNilInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		call func()
+	}{
+		{name: "response writer", call: func() { NewBase(nil, httptest.NewRequest(http.MethodGet, "/", nil)) }},
+		{name: "request", call: func() { NewBase(httptest.NewRecorder(), nil) }},
+		{name: "replacement request", call: func() { newBase("/").SetRequest(nil) }},
+		{name: "route base", call: func() { SetRouteForTest(nil, "/", nil, nil) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("call accepted a nil input")
+				}
+			}()
+			tt.call()
+		})
+	}
+}
+
 func TestQueryOKTellsAbsentFromEmpty(t *testing.T) {
 	b := newBase("/search?q=go&empty=&multi=a&multi=b")
 
@@ -132,6 +214,38 @@ func TestSetRequestDropsTheParsedQuery(t *testing.T) {
 	b.SetRequest(httptest.NewRequest(http.MethodGet, "/search?q=rust", nil))
 	if got := b.Query("q"); got != "rust" {
 		t.Errorf("Query(%q) = %q, want the value of the new request", "q", got)
+	}
+}
+
+func TestSetRequestDropsTheCachedHost(t *testing.T) {
+	b := newBase("/")
+	b.Request().Host = "old.example.com"
+	if got := b.Host(); got != "old.example.com" {
+		t.Fatalf("Host() = %q", got)
+	}
+	b.hostPattern, b.hostIdx = "{tenant}.example.com", 3
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "new.example.net"
+	b.SetRequest(req)
+	if got := b.Host(); got != "new.example.net" {
+		t.Errorf("Host() after SetRequest = %q, want new.example.net", got)
+	}
+	if b.RouteHost() != "{tenant}.example.com" || b.hostIdx != 3 {
+		t.Error("SetRequest changed the already-matched route host identity")
+	}
+}
+
+func TestParamNamesReturnsACopy(t *testing.T) {
+	b := newBase("/")
+	b.setRoute("/users/{id}", []string{"id"}, []string{"7"})
+	names := b.ParamNames()
+	names[0] = "corrupt"
+	if got := b.Param("id"); got != "7" {
+		t.Errorf("Param(id) = %q after caller mutated ParamNames", got)
+	}
+	if got := b.ParamNames()[0]; got != "id" {
+		t.Errorf("ParamNames()[0] = %q, want id", got)
 	}
 }
 

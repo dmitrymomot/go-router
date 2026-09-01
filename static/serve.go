@@ -1,14 +1,16 @@
 package static
 
 import (
-	"bytes"
 	"errors"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/dmitrymomot/go-router/internal/nonseek"
 )
 
 var errNoFile = errors.New("static: the asset set holds no such file")
@@ -38,7 +40,7 @@ func (a *Assets) serve(w http.ResponseWriter, r *http.Request, upath string) err
 
 	name, versioned := a.resolve(upath)
 	err := a.write(w, r, name, versioned)
-	if !errors.Is(err, errNoFile) || !a.fallback(r, name) {
+	if !errors.Is(err, errNoFile) || !a.fallback(w, r, name) {
 		return err
 	}
 	return a.write(w, r, a.index, false)
@@ -64,41 +66,109 @@ func cutSegment(name, seg string) (string, bool) {
 	return strings.CutPrefix(name, seg+"/")
 }
 
-func (a *Assets) fallback(r *http.Request, name string) bool {
+func (a *Assets) fallback(w http.ResponseWriter, r *http.Request, name string) bool {
 	if !a.spa || name == a.index {
 		return false
 	}
 	if a.isNavigation != nil {
+		w.Header().Set("Vary", "*")
 		return a.isNavigation(r)
 	}
-	if path.Ext(name) == "" {
-		return true
+	addVary(w.Header(), "Accept")
+	accept := strings.Join(r.Header.Values("Accept"), ",")
+	if strings.TrimSpace(accept) == "" {
+		return path.Ext(name) == ""
 	}
-	for v := range strings.SplitSeq(r.Header.Get("Accept"), ",") {
-		media, _, _ := strings.Cut(v, ";")
-		if strings.EqualFold(strings.TrimSpace(media), "text/html") {
-			return true
+	specificity, quality := htmlPreference(accept)
+	if path.Ext(name) == "" {
+		return specificity >= 0 && quality > 0
+	}
+	return specificity == 2 && quality > 0
+}
+
+func htmlPreference(accept string) (int, float64) {
+	bestSpecificity, bestQuality := -1, 0.0
+	for v := range strings.SplitSeq(accept, ",") {
+		media, params, err := mime.ParseMediaType(strings.TrimSpace(v))
+		if err != nil {
+			continue
+		}
+		var specificity int
+		switch strings.ToLower(media) {
+		case "text/html":
+			specificity = 2
+		case "text/*":
+			specificity = 1
+		case "*/*":
+			specificity = 0
+		default:
+			continue
+		}
+		quality := 1.0
+		if raw, ok := params["q"]; ok {
+			quality, err = strconv.ParseFloat(raw, 64)
+			if err != nil || quality < 0 || quality > 1 {
+				continue
+			}
+		}
+		if specificity > bestSpecificity || specificity == bestSpecificity && quality > bestQuality {
+			bestSpecificity, bestQuality = specificity, quality
 		}
 	}
-	return false
+	return bestSpecificity, bestQuality
+}
+
+func addVary(h http.Header, name string) {
+	if h.Get("Vary") == "*" {
+		return
+	}
+	for value := range strings.SplitSeq(h.Get("Vary"), ",") {
+		if strings.EqualFold(strings.TrimSpace(value), name) {
+			return
+		}
+	}
+	h.Add("Vary", name)
 }
 
 func (a *Assets) write(w http.ResponseWriter, r *http.Request, name string, versioned bool) error {
+	return a.writePath(w, r, name, versioned, true)
+}
+
+func (a *Assets) writePath(
+	w http.ResponseWriter,
+	r *http.Request,
+	name string,
+	versioned bool,
+	allowDirectoryIndex bool,
+) error {
 	f, info, err := a.openFile(name)
 	if err != nil {
-		return errNoFile
+		return classifyFileError(name, err)
 	}
 	//nolint:errcheck // The file is read only.
 	defer f.Close()
 	if info.IsDir() {
+		if !allowDirectoryIndex {
+			return errNoFile
+		}
 		idx := path.Join(name, a.index)
+		if idx == name {
+			return errNoFile
+		}
 		if a.redirectDir && !strings.HasSuffix(r.URL.Path, "/") && a.Has(idx) {
 			redirectDir(w, r)
 			return nil
 		}
-		return a.write(w, r, idx, versioned)
+		return a.writePath(w, r, idx, versioned, false)
 	}
 	return a.send(w, r, name, f, info, versioned)
+}
+
+func classifyFileError(name string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) || !fs.ValidPath(name) && errors.Is(err, fs.ErrInvalid) {
+		return errNoFile
+	}
+	return err
 }
 
 func redirectDir(w http.ResponseWriter, r *http.Request) {
@@ -111,22 +181,24 @@ func redirectDir(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Assets) send(w http.ResponseWriter, r *http.Request, name string, f fs.File, info fs.FileInfo, versioned bool) error {
-	rs, ok := f.(io.ReadSeeker)
-	if !ok {
-		data, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		rs = bytes.NewReader(data)
-	}
-
 	h := w.Header()
 	if tag := a.etag(name, info); tag != "" {
 		h.Set("Etag", tag)
 	}
 	h.Set("Cache-Control", a.cacheControl(name, versioned))
 
-	http.ServeContent(w, r, path.Base(name), info.ModTime(), rs)
+	req := r
+	rs, ok := f.(io.ReadSeeker)
+	if !ok {
+		req = nonseek.Request(req, info.Size())
+		var err error
+		rs, err = nonseek.ReadSeeker("static: ", w.Header(), req, name, f, info.Size())
+		if err != nil {
+			return err
+		}
+	}
+
+	http.ServeContent(w, req, path.Base(name), info.ModTime(), rs)
 	return nil
 }
 

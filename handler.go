@@ -11,12 +11,20 @@ type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 
 func chain[C Context](h HandlerFunc[C], mws []Middleware[C]) HandlerFunc[C] {
 	for _, mw := range slices.Backward(mws) {
-		h = mw(h)
+		if mw == nil {
+			panic("router: middleware must not be nil")
+		}
+		if h = mw(h); h == nil {
+			panic("router: middleware returned a nil handler")
+		}
 	}
 	return h
 }
 
 func WrapHandler[C Context](h http.Handler) HandlerFunc[C] {
+	if h == nil {
+		panic("router: WrapHandler needs a handler")
+	}
 	return func(c C) error {
 		b := c.base()
 		b.publishParams()
@@ -26,11 +34,20 @@ func WrapHandler[C Context](h http.Handler) HandlerFunc[C] {
 }
 
 func WrapHandlerFunc[C Context](h http.HandlerFunc) HandlerFunc[C] {
+	if h == nil {
+		panic("router: WrapHandlerFunc needs a handler")
+	}
 	return WrapHandler[C](h)
 }
 
 func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] {
+	if m == nil {
+		panic("router: WrapMiddleware needs middleware")
+	}
 	return func(next HandlerFunc[C]) HandlerFunc[C] {
+		if next == nil {
+			panic("router: WrapMiddleware needs a next handler")
+		}
 		return func(c C) error {
 			b := c.base()
 			b.publishParams()
@@ -45,7 +62,11 @@ func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] 
 				err = next(c)
 			})
 
-			m(inner).ServeHTTP(outer, b.req)
+			wrapped := m(inner)
+			if wrapped == nil {
+				panic("router: wrapped HTTP middleware returned a nil handler")
+			}
+			wrapped.ServeHTTP(outer, b.req)
 
 			if b.res != outer {
 				if !outer.Committed {

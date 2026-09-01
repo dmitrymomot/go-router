@@ -1,7 +1,7 @@
 package static_test
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -65,6 +65,14 @@ type reqOption func(*http.Request)
 
 func header(key, value string) reqOption {
 	return func(r *http.Request) { r.Header.Set(key, value) }
+}
+
+func acceptHeaders(values ...string) reqOption {
+	return func(r *http.Request) {
+		for _, value := range values {
+			r.Header.Add("Accept", value)
+		}
+	}
 }
 
 func method(m string) reqOption {
@@ -243,6 +251,18 @@ func TestADirectoryWithoutAnIndexIsNotFound(t *testing.T) {
 
 	if rec := get(a, "/css"); rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; the package lists no directory", rec.Code)
+	}
+}
+
+func TestADirectoryValuedNestedIndexIsNotFound(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html":             {Data: []byte(rootIndex)},
+		"sub/index.html/file.js": {Data: []byte(appJS)},
+	}
+	a := newAssets(t, static.Config{FS: fsys})
+
+	if rec := get(a, "/sub"); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a directory-valued index", rec.Code)
 	}
 }
 
@@ -550,15 +570,39 @@ func TestMustPanicsOnABrokenConfig(t *testing.T) {
 
 type plainFile struct {
 	io.Reader
-	info fs.FileInfo
+	info     fs.FileInfo
+	closer   io.Closer
+	reads    *atomic.Int64
+	cancel   context.CancelFunc
+	cancelAt int64
+}
+
+func (f plainFile) Read(p []byte) (int, error) {
+	var reads int64
+	if f.reads != nil {
+		reads = f.reads.Add(1)
+	}
+	n, err := f.Reader.Read(p)
+	if f.cancel != nil && reads >= f.cancelAt {
+		f.cancel()
+	}
+	return n, err
 }
 
 func (f plainFile) Stat() (fs.FileInfo, error) { return f.info, nil }
-func (f plainFile) Close() error               { return nil }
+func (f plainFile) Close() error {
+	if f.closer != nil {
+		return f.closer.Close()
+	}
+	return nil
+}
 
 type plainFS struct {
 	fs.FS
-	broken atomic.Bool
+	broken   atomic.Bool
+	reads    atomic.Int64
+	cancel   context.CancelFunc
+	cancelAt int64
 }
 
 func (p *plainFS) Open(name string) (fs.File, error) {
@@ -570,28 +614,220 @@ func (p *plainFS) Open(name string) (fs.File, error) {
 	if err != nil || info.IsDir() {
 		return f, err
 	}
-	data, err := io.ReadAll(f)
-	//nolint:errcheck // The file is read only.
-	f.Close()
-	if err != nil {
-		return nil, err
-	}
 	if p.broken.Load() {
-		return plainFile{Reader: errReader{}, info: info}, nil
+		return plainFile{
+			Reader: errReader{}, info: info, closer: f, reads: &p.reads, cancel: p.cancel, cancelAt: p.cancelAt,
+		}, nil
 	}
-	return plainFile{Reader: bytes.NewReader(data), info: info}, nil
+	return plainFile{
+		Reader: f, info: info, closer: f, reads: &p.reads, cancel: p.cancel, cancelAt: p.cancelAt,
+	}, nil
 }
 
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
 
+type faultFS struct {
+	fs.FS
+	err      error
+	openFail atomic.Bool
+	statFail atomic.Bool
+}
+
+func (f *faultFS) Open(name string) (fs.File, error) {
+	if f.openFail.Load() {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: f.err}
+	}
+	file, err := f.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if f.statFail.Load() {
+		return statErrorFile{File: file, err: f.err}, nil
+	}
+	return file, nil
+}
+
+type statErrorFile struct {
+	fs.File
+	err error
+}
+
+func (f statErrorFile) Stat() (fs.FileInfo, error) { return nil, f.err }
+
 func TestAFileSystemWithoutSeekStillAnswers(t *testing.T) {
-	a := newAssets(t, static.Config{FS: &plainFS{FS: assetFS()}})
+	fsys := &plainFS{FS: assetFS()}
+	a := newAssets(t, static.Config{FS: fsys})
+	fsys.reads.Store(0)
 
 	rec := get(a, "/css/app.css")
 	if rec.Code != http.StatusOK || rec.Body.String() != appCSS {
 		t.Fatalf("status = %d, body = %q, want the file", rec.Code, rec.Body.String())
+	}
+
+	fsys.reads.Store(0)
+	rec = get(a, "/css/app.css", method(http.MethodHead))
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("HEAD status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	if got := fsys.reads.Load(); got != 0 {
+		t.Errorf("HEAD read the non-seekable file %d times", got)
+	}
+
+	fsys.reads.Store(0)
+	rec = get(a, "/css/app.css", header("Range", "bytes=5-9"))
+	if rec.Code != http.StatusPartialContent || rec.Body.String() != "color" {
+		t.Fatalf("range status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+
+	rec = get(a, "/css/app.css", header("Range", "bytes=0-1,5-6"))
+	if rec.Code != http.StatusOK || rec.Body.String() != appCSS {
+		t.Fatalf("multipart range status = %d, body = %q; non-seekable files should ignore it", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNonSeekableFilesHandleRangeSyntax(t *testing.T) {
+	fsys := &plainFS{FS: assetFS()}
+	a := newAssets(t, static.Config{FS: fsys})
+	tests := []struct {
+		name        string
+		rangeHeader string
+		status      int
+		body        string
+	}{
+		{name: "suffix longer than the file", rangeHeader: "bytes=-999", status: http.StatusPartialContent, body: appCSS},
+		{name: "missing dash", rangeHeader: "bytes=4", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "double dash", rangeHeader: "bytes=--1", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "non-numeric suffix", rangeHeader: "bytes=-many", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "non-numeric start", rangeHeader: "bytes=x-2", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "reversed", rangeHeader: "bytes=8-4", status: http.StatusRequestedRangeNotSatisfiable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := get(a, "/css/app.css", header("Range", tt.rangeHeader))
+			if rec.Code != tt.status {
+				t.Fatalf("status = %d, want %d; body = %q", rec.Code, tt.status, rec.Body.String())
+			}
+			if tt.body != "" && rec.Body.String() != tt.body {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tt.body)
+			}
+		})
+	}
+}
+
+func TestAConditionalRequestDoesNotReadANonSeekableFile(t *testing.T) {
+	fsys := &plainFS{FS: assetFS()}
+	a := newAssets(t, static.Config{FS: fsys})
+	fsys.reads.Store(0)
+	tag := get(a, "/css/app.css", method(http.MethodHead)).Header().Get("Etag")
+	if tag == "" {
+		t.Fatal("HEAD returned no ETag")
+	}
+	if got := fsys.reads.Load(); got != 0 {
+		t.Fatalf("HEAD read the non-seekable file %d times", got)
+	}
+
+	rec := get(a, "/css/app.css", header("If-None-Match", tag))
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+	if got := fsys.reads.Load(); got != 0 {
+		t.Errorf("conditional request read the non-seekable file %d times", got)
+	}
+}
+
+func TestExtensionlessHEADOmitsUnknowableTypeWithoutReading(t *testing.T) {
+	fsys := &plainFS{FS: fstest.MapFS{
+		"index.html": {Data: []byte(rootIndex)},
+		"LICENSE":    {Data: []byte("plain text")},
+	}}
+	a := newAssets(t, static.Config{FS: fsys})
+	fsys.reads.Store(0)
+
+	getRec := get(a, "/LICENSE")
+	if got := getRec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("GET Content-Type = %q, want text/plain; charset=utf-8", got)
+	}
+	fsys.reads.Store(0)
+
+	headRec := get(a, "/LICENSE", method(http.MethodHead))
+	if headRec.Code != http.StatusOK || headRec.Body.Len() != 0 {
+		t.Fatalf("HEAD status = %d, body = %q", headRec.Code, headRec.Body.String())
+	}
+	if got := headRec.Header().Get("Content-Type"); got != "" {
+		t.Errorf("HEAD Content-Type = %q, want omitted", got)
+	}
+	for _, name := range []string{"Content-Length", "Accept-Ranges", "Etag", "Cache-Control", "Last-Modified"} {
+		if got, want := headRec.Header().Get(name), getRec.Header().Get(name); got != want {
+			t.Errorf("HEAD %s = %q, want GET value %q", name, got, want)
+		}
+	}
+	if got := fsys.reads.Load(); got != 0 {
+		t.Errorf("HEAD read the non-seekable file %d times", got)
+	}
+}
+
+func TestALateRangeOnANonSeekableFileIsIgnored(t *testing.T) {
+	data := strings.Repeat("x", 1<<20+32)
+	fsys := &plainFS{FS: fstest.MapFS{
+		"index.html": {Data: []byte(rootIndex)},
+		"large.bin":  {Data: []byte(data)},
+	}}
+	a := newAssets(t, static.Config{FS: fsys})
+	fsys.reads.Store(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name        string
+		rangeHeader string
+		status      int
+	}{
+		{name: "late start", rangeHeader: "bytes=1048580-1048589", status: http.StatusOK},
+		{name: "late suffix", rangeHeader: "bytes=-10", status: http.StatusOK},
+		{name: "unsatisfiable", rangeHeader: "bytes=1048608-1048617", status: http.StatusRequestedRangeNotSatisfiable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys.reads.Store(0)
+			req := httptest.NewRequest(http.MethodGet, "/large.bin", nil).WithContext(ctx)
+			req.Header.Set("Range", tt.rangeHeader)
+			rec := httptest.NewRecorder()
+			a.ServeHTTP(rec, req)
+			if rec.Code != tt.status {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.status)
+			}
+			if got := fsys.reads.Load(); got != 0 {
+				t.Errorf("Read called %d times after cancellation, want zero", got)
+			}
+		})
+	}
+}
+
+func TestRangeDiscardStopsAtRequestCancellation(t *testing.T) {
+	data := strings.Repeat("x", 1<<17)
+	fsys := &plainFS{FS: fstest.MapFS{
+		"index.html": {Data: []byte(rootIndex)},
+		"large.bin":  {Data: []byte(data)},
+	}}
+	a := newAssets(t, static.Config{FS: fsys})
+	ctx, cancel := context.WithCancel(context.Background())
+	fsys.cancel = cancel
+	fsys.cancelAt = 2
+	fsys.reads.Store(0)
+	req := httptest.NewRequest(http.MethodGet, "/large.bin", nil).WithContext(ctx)
+	req.Header.Set("Range", "bytes=65536-65545")
+	rec := httptest.NewRecorder()
+
+	a.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206", rec.Code)
+	}
+	if got := fsys.reads.Load(); got != 2 {
+		t.Errorf("Read called %d times, want two before cancellation", got)
 	}
 }
 
@@ -606,6 +842,47 @@ func TestAnUnreadableFileAnswers500(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "" {
 		t.Errorf("cache control = %q; a proxy would keep the failure", got)
+	}
+}
+
+func TestOperationalFileSystemFailuresNeverBecomeSPAFallbacks(t *testing.T) {
+	boom := errors.New("storage failed")
+	tests := []struct {
+		name string
+		err  error
+		stat bool
+		spa  bool
+	}{
+		{name: "permission on open", err: fs.ErrPermission},
+		{name: "invalid from backend", err: fs.ErrInvalid},
+		{name: "arbitrary open failure", err: boom},
+		{name: "permission on open with SPA", err: fs.ErrPermission, spa: true},
+		{name: "arbitrary open failure with SPA", err: boom, spa: true},
+		{name: "stat failure", err: boom, stat: true},
+		{name: "stat failure during SPA fallback", err: boom, stat: true, spa: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys := &faultFS{FS: assetFS(), err: tt.err}
+			a := newAssets(t, static.Config{FS: fsys, SPA: tt.spa})
+			if tt.stat {
+				fsys.statFail.Store(true)
+			} else {
+				fsys.openFail.Store(true)
+			}
+			target := "/css/app.css"
+			if tt.spa {
+				target = "/dashboard"
+			}
+			rec := get(a, target, header("Accept", "text/html"))
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body = %q", rec.Code, rec.Body.String())
+			}
+			if rec.Body.String() == rootIndex {
+				t.Fatal("operational failure was replaced by the SPA index")
+			}
+		})
 	}
 }
 
@@ -681,10 +958,16 @@ func TestVersionedIndexStillRevalidates(t *testing.T) {
 }
 
 func TestNewRefusesAnIndexOutsideTheSet(t *testing.T) {
-	for _, index := range []string{"/index.html", "../index.html", "./"} {
+	for _, index := range []string{"/index.html", "../index.html", "./", "."} {
 		if _, err := static.New(static.Config{FS: assetFS(), Index: index}); err == nil {
 			t.Errorf("New accepted the index %q", index)
 		}
+	}
+}
+
+func TestNewRefusesADirectoryAsTheIndex(t *testing.T) {
+	if _, err := static.New(static.Config{FS: assetFS(), Index: "css"}); err == nil {
+		t.Fatal("New accepted a directory as the index")
 	}
 }
 
@@ -708,6 +991,71 @@ func TestFallbackReplacesTheNavigationTest(t *testing.T) {
 	}
 	if rec := get(a, "/api/absent", header("Accept", "text/html")); rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 for a path the fallback refuses", rec.Code)
+	}
+	if got := get(a, "/reports/2026.01").Header().Get("Vary"); got != "*" {
+		t.Errorf("Vary = %q, want * for a fallback that may inspect any header", got)
+	}
+}
+
+func TestSPAFallbackNegotiatesHTMLAndVariesOnAccept(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), SPA: true})
+	tests := []struct {
+		name   string
+		target string
+		accept string
+		code   int
+	}{
+		{name: "HTML", target: "/report.csv", accept: "text/html", code: http.StatusOK},
+		{name: "mixed case", target: "/report.csv", accept: "Text/HTML;Q=0.8", code: http.StatusOK},
+		{name: "refused HTML", target: "/report.csv", accept: "text/html;q=0, */*;q=1", code: http.StatusNotFound},
+		{name: "JSON navigation", target: "/dashboard", accept: "application/json", code: http.StatusNotFound},
+		{name: "wildcard navigation", target: "/dashboard", accept: "*/*", code: http.StatusOK},
+		{name: "wildcard asset", target: "/app.js", accept: "*/*", code: http.StatusNotFound},
+		{name: "malformed then HTML", target: "/report.csv", accept: "garbage, text/html", code: http.StatusOK},
+		{name: "type wildcard navigation", target: "/dashboard", accept: "text/*", code: http.StatusOK},
+		{name: "invalid quality", target: "/dashboard", accept: "text/html;q=2", code: http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := get(a, tt.target, header("Accept", tt.accept))
+			if rec.Code != tt.code {
+				t.Fatalf("status = %d, want %d; body = %q", rec.Code, tt.code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Vary"); got != "Accept" {
+				t.Errorf("Vary = %q, want Accept", got)
+			}
+		})
+	}
+}
+
+func TestSPAFallbackCombinesRepeatedAcceptFields(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), SPA: true})
+	tests := []struct {
+		name    string
+		target  string
+		accepts []string
+		code    int
+	}{
+		{name: "JSON then HTML", target: "/report.csv", accepts: []string{"application/json", "text/html;q=0.4"}, code: http.StatusOK},
+		{name: "HTML then JSON", target: "/report.csv", accepts: []string{"text/html;q=0.4", "application/json"}, code: http.StatusOK},
+		{name: "wildcard then refused HTML", target: "/dashboard", accepts: []string{"*/*;q=1", "text/html;q=0"}, code: http.StatusNotFound},
+		{name: "refused HTML then wildcard", target: "/dashboard", accepts: []string{"text/html;q=0", "*/*;q=1"}, code: http.StatusNotFound},
+		{name: "JSON then wildcard navigation", target: "/dashboard", accepts: []string{"application/json", "*/*;q=0.2"}, code: http.StatusOK},
+		{name: "specific HTML after preferred wildcard", target: "/report.csv", accepts: []string{"*/*;q=1", "text/html;q=0.2"}, code: http.StatusOK},
+		{name: "wildcard does not answer an asset", target: "/report.csv", accepts: []string{"application/json", "*/*;q=1"}, code: http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := get(a, tt.target, acceptHeaders(tt.accepts...))
+			if rec.Code != tt.code {
+				t.Fatalf("status = %d, want %d; body = %q", rec.Code, tt.code, rec.Body.String())
+			}
+			if got := rec.Header().Values("Vary"); len(got) != 1 || got[0] != "Accept" {
+				t.Errorf("Vary = %q, want [Accept]", got)
+			}
+		})
 	}
 }
 

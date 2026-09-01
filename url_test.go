@@ -160,13 +160,21 @@ func TestMustURLPanicsOnAMistake(t *testing.T) {
 	}
 }
 
-func TestURLReportsABrokenRouteTable(t *testing.T) {
+func TestURLChecksRegexesAgainstDecodedValues(t *testing.T) {
 	r := newTestRouter()
-	r.Name("dup").GET("/a", echoRoute)
-	r.GET("/a", echoRoute)
+	r.Name("file").GET("/files/{name:[a-z]+}", echoRoute)
+	if got, err := r.URL("file", map[string]string{"name": "a/b"}); err == nil {
+		t.Fatalf("URL(file) = %q, want regex mismatch", got)
+	}
 
-	if _, err := r.URL("dup", nil); err == nil || !strings.Contains(err.Error(), "already registered") {
-		t.Errorf("URL = %v, want the conflict that Build reports", err)
+	r2 := newTestRouter()
+	r2.Name("encoded").GET("/encoded/{value:.*}", echoRoute)
+	got, err := r2.URL("encoded", map[string]string{"value": "%2F"})
+	if err != nil {
+		t.Fatalf("URL(encoded) = %v", err)
+	}
+	if got != "/encoded/%252F" {
+		t.Errorf("URL(encoded) = %q, want exactly-once encoding", got)
 	}
 }
 

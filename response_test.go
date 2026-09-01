@@ -377,3 +377,12 @@ func TestReadFromReachesTheWriterUnderneath(t *testing.T) {
 		t.Errorf("fallback: Size = %d, err = %v; want 5, nil", res.Size, err)
 	}
 }
+
+func TestResponseBeforeRejectsNil(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("want panic")
+		}
+	}()
+	new(Response).Before(nil)
+}

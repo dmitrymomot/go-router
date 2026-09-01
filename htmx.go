@@ -92,7 +92,7 @@ func HTMXPartial[C Context](partial, page HandlerFunc[C]) HandlerFunc[C] {
 	}
 	return func(c C) error {
 		b := c.base()
-		b.Vary(HeaderHXRequest, HeaderHXBoosted)
+		b.Vary(HeaderHXRequest, HeaderHXBoosted, HeaderHXHistoryRestoreRequest)
 		if HTMXWantsPartial(b.req) {
 			return partial(c)
 		}

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"io"
 	"io/fs"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -186,11 +188,16 @@ func TestFileSymlinkOutOfTheRootAnswersNotFound(t *testing.T) {
 func TestFileFS(t *testing.T) {
 	fsys := fstest.MapFS{
 		"docs/readme.txt": &fstest.MapFile{Data: []byte("from the tree")},
+		"secret.txt":      &fstest.MapFile{Data: []byte("secret")},
 	}
 	r := newTestRouter()
 	r.GET("/f", func(c *tctx) error { return c.FileFS("docs/readme.txt", fsys) })
 	r.GET("/miss", func(c *tctx) error { return c.FileFS("nope.txt", fsys) })
 	r.GET("/escape", func(c *tctx) error { return c.FileFS("../secret.txt", fsys) })
+	r.GET("/middle", func(c *tctx) error { return c.FileFS("docs/../secret.txt", fsys) })
+	r.GET("/absolute", func(c *tctx) error { return c.FileFS("/secret.txt", fsys) })
+	r.GET("/backslash", func(c *tctx) error { return c.FileFS(`docs\..\secret.txt`, fsys) })
+	r.GET("/encoded", func(c *tctx) error { return c.FileFS("docs%2F..%2Fsecret.txt", fsys) })
 	r.GET("/nil", func(c *tctx) error { return c.FileFS("docs/readme.txt", nil) })
 
 	rec := do(r, http.MethodGet, "/f")
@@ -207,8 +214,10 @@ func TestFileFS(t *testing.T) {
 	if got := do(r, http.MethodGet, "/miss").Code; got != http.StatusNotFound {
 		t.Errorf("a missing file answers %d, want 404", got)
 	}
-	if got := do(r, http.MethodGet, "/escape").Code; got != http.StatusNotFound {
-		t.Errorf("a name that tries to leave the tree answers %d, want 404", got)
+	for _, target := range []string{"/escape", "/middle", "/absolute", "/backslash", "/encoded"} {
+		if rec := do(r, http.MethodGet, target); rec.Code != http.StatusNotFound || rec.Body.String() == "secret" {
+			t.Errorf("%s answers %d %q, want 404 without the root-level file", target, rec.Code, rec.Body.String())
+		}
 	}
 
 	captureLogs(t)
@@ -220,6 +229,8 @@ func TestFileFS(t *testing.T) {
 type plainFS struct {
 	files   map[string]string
 	failing bool
+	reads   *atomic.Int64
+	modTime time.Time
 }
 
 func (f plainFS) Open(name string) (fs.File, error) {
@@ -227,34 +238,44 @@ func (f plainFS) Open(name string) (fs.File, error) {
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
-	return &plainFile{name: name, body: strings.NewReader(body), failing: f.failing}, nil
+	return &plainFile{
+		name: name, body: strings.NewReader(body), failing: f.failing, reads: f.reads, modTime: f.modTime,
+	}, nil
 }
 
 type plainFile struct {
 	name    string
 	body    *strings.Reader
 	failing bool
+	reads   *atomic.Int64
+	modTime time.Time
 }
 
 func (f *plainFile) Read(p []byte) (int, error) {
+	if f.reads != nil {
+		f.reads.Add(1)
+	}
 	if f.failing {
 		return 0, io.ErrUnexpectedEOF
 	}
 	return f.body.Read(p)
 }
 
-func (f *plainFile) Close() error               { return nil }
-func (f *plainFile) Stat() (fs.FileInfo, error) { return plainInfo{f.name, f.body.Size()}, nil }
+func (f *plainFile) Close() error { return nil }
+func (f *plainFile) Stat() (fs.FileInfo, error) {
+	return plainInfo{name: f.name, size: f.body.Size(), modTime: f.modTime}, nil
+}
 
 type plainInfo struct {
-	name string
-	size int64
+	name    string
+	size    int64
+	modTime time.Time
 }
 
 func (i plainInfo) Name() string       { return i.name }
 func (i plainInfo) Size() int64        { return i.size }
 func (i plainInfo) Mode() fs.FileMode  { return 0o444 }
-func (i plainInfo) ModTime() time.Time { return time.Time{} }
+func (i plainInfo) ModTime() time.Time { return i.modTime }
 func (i plainInfo) IsDir() bool        { return false }
 func (i plainInfo) Sys() any           { return nil }
 
@@ -272,6 +293,224 @@ func TestFileFSReadsAFileThatCannotSeek(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != "hi</h" {
 		t.Errorf("body = %q, want %q", got, "hi</h")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/f", nil)
+	req.Header.Set("Range", "bytes=0-1,4-5")
+	rec = doReq(r, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "<h1>hi</h1>" {
+		t.Errorf("multipart range status = %d, body = %q; non-seekable files should ignore it", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFileFSHandlesNonSeekableRangeSyntax(t *testing.T) {
+	const body = "<h1>hi</h1>"
+	fsys := plainFS{files: map[string]string{"page.html": body}}
+	r := newTestRouter()
+	r.GET("/f", func(c *tctx) error { return c.FileFS("page.html", fsys) })
+	tests := []struct {
+		name        string
+		rangeHeader string
+		status      int
+		body        string
+	}{
+		{name: "suffix longer than the file", rangeHeader: "bytes=-99", status: http.StatusPartialContent, body: body},
+		{name: "missing dash", rangeHeader: "bytes=4", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "double dash", rangeHeader: "bytes=--1", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "non-numeric suffix", rangeHeader: "bytes=-many", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "non-numeric start", rangeHeader: "bytes=x-2", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "reversed", rangeHeader: "bytes=8-4", status: http.StatusRequestedRangeNotSatisfiable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/f", nil)
+			req.Header.Set("Range", tt.rangeHeader)
+			rec := doReq(r, req)
+			if rec.Code != tt.status {
+				t.Fatalf("status = %d, want %d; body = %q", rec.Code, tt.status, rec.Body.String())
+			}
+			if tt.body != "" && rec.Body.String() != tt.body {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tt.body)
+			}
+		})
+	}
+}
+
+func TestFileFSHEADDoesNotReadANonSeekableFile(t *testing.T) {
+	var reads atomic.Int64
+	fsys := plainFS{files: map[string]string{"page.html": "<h1>hi</h1>"}, reads: &reads}
+	r := newTestRouter()
+	r.GET("/f", func(c *tctx) error { return c.FileFS("page.html", fsys) })
+
+	rec := do(r, http.MethodHead, "/f")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+	if got := rec.Header().Get(HeaderContentLength); got != "11" {
+		t.Errorf("Content-Length = %q, want 11", got)
+	}
+	if got := reads.Load(); got != 0 {
+		t.Errorf("Read called %d times, want zero", got)
+	}
+}
+
+func TestFileFSConditionalRequestDoesNotReadANonSeekableFile(t *testing.T) {
+	var reads atomic.Int64
+	modTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	fsys := plainFS{
+		files: map[string]string{"page": "plain text"}, reads: &reads, modTime: modTime,
+	}
+	r := newTestRouter()
+	r.GET("/f", func(c *tctx) error { return c.FileFS("page", fsys) })
+	req := httptest.NewRequest(http.MethodGet, "/f", nil)
+	req.Header.Set("If-Modified-Since", modTime.Format(http.TimeFormat))
+
+	rec := doReq(r, req)
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+	if got := reads.Load(); got != 0 {
+		t.Errorf("Read called %d times, want zero", got)
+	}
+}
+
+func TestFileFSHEADOfExtensionlessFileOmitsUnknowableTypeWithoutReading(t *testing.T) {
+	var reads atomic.Int64
+	fsys := plainFS{files: map[string]string{"LICENSE": "plain text"}, reads: &reads}
+	r := newTestRouter()
+	r.GET("/f", func(c *tctx) error { return c.FileFS("LICENSE", fsys) })
+
+	getRec := do(r, http.MethodGet, "/f")
+	if got := getRec.Header().Get(HeaderContentType); got != MIMETextPlainCharsetUTF8 {
+		t.Fatalf("GET Content-Type = %q, want %q", got, MIMETextPlainCharsetUTF8)
+	}
+	reads.Store(0)
+
+	headRec := do(r, http.MethodHead, "/f")
+	if headRec.Code != http.StatusOK || headRec.Body.Len() != 0 {
+		t.Fatalf("HEAD status = %d, body = %q", headRec.Code, headRec.Body.String())
+	}
+	if got := headRec.Header().Get(HeaderContentType); got != "" {
+		t.Errorf("HEAD Content-Type = %q, want omitted", got)
+	}
+	for _, name := range []string{HeaderContentLength, "Accept-Ranges", "Last-Modified"} {
+		if got, want := headRec.Header().Get(name), getRec.Header().Get(name); got != want {
+			t.Errorf("HEAD %s = %q, want GET value %q", name, got, want)
+		}
+	}
+	if got := reads.Load(); got != 0 {
+		t.Errorf("Read called %d times, want zero", got)
+	}
+}
+
+type endlessFS struct {
+	reads    *atomic.Int64
+	cancel   context.CancelFunc
+	cancelAt int64
+}
+
+func (f endlessFS) Open(name string) (fs.File, error) {
+	if name != "large.bin" {
+		return nil, fs.ErrNotExist
+	}
+	return endlessFile(f), nil
+}
+
+type endlessFile struct {
+	reads    *atomic.Int64
+	cancel   context.CancelFunc
+	cancelAt int64
+}
+
+func (f endlessFile) Read(p []byte) (int, error) {
+	reads := f.reads.Add(1)
+	for i := range p {
+		p[i] = 'x'
+	}
+	if f.cancel != nil && reads >= f.cancelAt {
+		f.cancel()
+	}
+	return len(p), nil
+}
+
+func (endlessFile) Close() error { return nil }
+
+func (endlessFile) Stat() (fs.FileInfo, error) {
+	return plainInfo{name: "large.bin", size: 1 << 40}, nil
+}
+
+func TestFileFSBoundsReadsFromANonSeekableFile(t *testing.T) {
+	var reads atomic.Int64
+	r := newTestRouter()
+	r.GET("/f", func(c *tctx) error { return c.FileFS("large.bin", endlessFS{reads: &reads}) })
+	req := httptest.NewRequest(http.MethodGet, "/f", nil)
+	req.Header.Set("Range", "bytes=100-109")
+
+	rec := doReq(r, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206", rec.Code)
+	}
+	if got := rec.Body.String(); got != strings.Repeat("x", 10) {
+		t.Errorf("body = %q, want ten bytes", got)
+	}
+	if got := reads.Load(); got > 3 {
+		t.Errorf("Read called %d times for a ten-byte range; the source was buffered without a bound", got)
+	}
+}
+
+func TestFileFSIgnoresALateRangeOnANonSeekableFile(t *testing.T) {
+	var reads atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := newTestRouter()
+	r.GET("/f", func(c *tctx) error { return c.FileFS("large.bin", endlessFS{reads: &reads}) })
+	tests := []struct {
+		name        string
+		rangeHeader string
+		status      int
+	}{
+		{name: "late start", rangeHeader: "bytes=1073741824-1073741833", status: http.StatusOK},
+		{name: "late suffix", rangeHeader: "bytes=-10", status: http.StatusOK},
+		{name: "unsatisfiable", rangeHeader: "bytes=1099511627776-1099511627785", status: http.StatusRequestedRangeNotSatisfiable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reads.Store(0)
+			req := httptest.NewRequest(http.MethodGet, "/f", nil).WithContext(ctx)
+			req.Header.Set("Range", tt.rangeHeader)
+			rec := doReq(r, req)
+			if rec.Code != tt.status {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.status)
+			}
+			if got := reads.Load(); got != 0 {
+				t.Errorf("Read called %d times after cancellation, want zero", got)
+			}
+		})
+	}
+}
+
+func TestFileFSRangeDiscardStopsAtRequestCancellation(t *testing.T) {
+	var reads atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	r := newTestRouter()
+	r.GET("/f", func(c *tctx) error {
+		return c.FileFS("large.bin", endlessFS{reads: &reads, cancel: cancel, cancelAt: 2})
+	})
+	req := httptest.NewRequest(http.MethodGet, "/f", nil).WithContext(ctx)
+	req.Header.Set("Range", "bytes=65536-65545")
+
+	rec := doReq(r, req)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206", rec.Code)
+	}
+	if got := reads.Load(); got != 2 {
+		t.Errorf("Read called %d times, want two before cancellation", got)
 	}
 }
 
@@ -486,5 +725,18 @@ func TestCleanFileName(t *testing.T) {
 				t.Errorf("cleanFileName(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSafeFileNameRejectsAmbiguousRootsAndTraversal(t *testing.T) {
+	for _, name := range []string{"", ".", "/secret.txt", "../secret.txt", "docs/../secret.txt", `docs\..\secret.txt`} {
+		if safeFileName(name) {
+			t.Errorf("safeFileName(%q) = true", name)
+		}
+	}
+	for _, name := range []string{"docs/readme.txt", "./docs/readme.txt", "docs//readme.txt"} {
+		if !safeFileName(name) {
+			t.Errorf("safeFileName(%q) = false", name)
+		}
 	}
 }

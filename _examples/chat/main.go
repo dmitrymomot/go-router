@@ -24,6 +24,8 @@ type Ctx = *Context
 
 const addr = "localhost:8080"
 
+const maxBodyBytes = 8 << 10
+
 func main() {
 	rm := newRoom()
 	r := newRouter(rm)
@@ -32,6 +34,9 @@ func main() {
 		Addr:              addr,
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       time.Minute,
+		MaxHeaderBytes:    16 << 10,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -56,11 +61,21 @@ func newRouter(rm *room) *router.Router[Ctx] {
 		return &Context{Room: rm}
 	})
 
-	r.Use(middleware.Recover[Ctx], middleware.Logger[Ctx])
+	// Logger wraps Recover, so the request line carries the recovered panic.
+	r.Use(
+		middleware.Logger[Ctx],
+		middleware.Recover[Ctx],
+		middleware.Secure[Ctx],
+		middleware.BodyLimit[Ctx](maxBodyBytes),
+		middleware.CSRFWithConfig[Ctx](middleware.CSRFConfig{
+			CookieHTTPOnly: true,
+			CookieSameSite: http.SameSiteLaxMode,
+		}),
+	)
 
 	r.GET("/", index)
 	r.POST("/join", join)
-	r.GET("/leave", leave)
+	r.POST("/leave", leave)
 
 	r.Group(func(g *router.Router[Ctx]) {
 		g.Use(requireUser)
@@ -77,7 +92,9 @@ func index(c Ctx) error {
 	if _, ok := readUser(c); ok {
 		return c.Redirect(http.StatusSeeOther, "/chat")
 	}
-	return c.Render(http.StatusOK, tmpl("index", joinForm{}))
+	return c.Render(http.StatusOK, tmpl("index", joinForm{
+		CSRFToken: middleware.CSRFTokenFrom(c),
+	}))
 }
 
 type joinInput struct {
@@ -85,8 +102,9 @@ type joinInput struct {
 }
 
 type joinForm struct {
-	Name  string
-	Error string
+	CSRFToken string
+	Name      string
+	Error     string
 }
 
 func join(c Ctx) error {
@@ -98,8 +116,9 @@ func join(c Ctx) error {
 	name := cleanName(in.Name)
 	if name == "" {
 		return c.Render(http.StatusOK, tmpl("join", joinForm{
-			Name:  in.Name,
-			Error: "Type a name of 1 to " + maxNameRunesText + " characters.",
+			CSRFToken: middleware.CSRFTokenFrom(c),
+			Name:      in.Name,
+			Error:     "Type a name of 1 to " + maxNameRunesText + " characters.",
 		}))
 	}
 
@@ -114,11 +133,15 @@ func leave(c Ctx) error {
 }
 
 type chatPage struct {
-	Name string
+	CSRFToken string
+	Name      string
 }
 
 func chat(c Ctx) error {
-	return c.Render(http.StatusOK, tmpl("chat", chatPage{Name: c.User}))
+	return c.Render(http.StatusOK, tmpl("chat", chatPage{
+		CSRFToken: middleware.CSRFTokenFrom(c),
+		Name:      c.User,
+	}))
 }
 
 type messageInput struct {

@@ -284,6 +284,27 @@ func TestSSEFieldWithALineBreak(t *testing.T) {
 	}
 }
 
+func TestSSEEventIDWithNull(t *testing.T) {
+	for _, id := range []string{"\x00", "7\x00x"} {
+		t.Run(fmt.Sprintf("%q", id), func(t *testing.T) {
+			rec := sseServe(sseOpen(func(s *SSEWriter) error {
+				err := s.Send(Event{ID: id, Data: "x"})
+				if err == nil {
+					t.Errorf("Send took ID %q", id)
+				}
+				if got := StatusOf(err); got != http.StatusInternalServerError {
+					t.Errorf("status of the error = %d, want 500", got)
+				}
+				return s.SendData("still open")
+			}), sseReq())
+
+			if got, want := rec.Body.String(), "data: still open\n\n"; got != want {
+				t.Errorf("body = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestSSESendAfterAFailure(t *testing.T) {
 	want := errors.New("connection reset")
 	var first, second error
@@ -682,6 +703,49 @@ func TestNewSSEStreamWithoutASender(t *testing.T) {
 		}
 	}()
 	NewSSEStream[string](nil)
+}
+
+func TestSSERejectsANilOptionBeforeCommitting(t *testing.T) {
+	rec := httptest.NewRecorder()
+	b := NewBase(rec, sseReq())
+
+	_, err := b.SSE(http.StatusOK, nil)
+	if cause := errors.Unwrap(err); cause == nil || cause.Error() != nilSSEOptionError {
+		t.Errorf("SSE cause = %v, want %q", cause, nilSSEOptionError)
+	}
+	if b.Response().Committed {
+		t.Error("SSE committed the response before rejecting the option")
+	}
+}
+
+func TestServeSSERejectsANilOption(t *testing.T) {
+	var got error
+	sseServe(func(c *tctx) error {
+		got = ServeSSE(c, closedChan("one"), SSEText[string]("msg"), nil)
+		return got
+	}, sseReq())
+
+	if cause := errors.Unwrap(got); cause == nil || cause.Error() != nilSSEOptionError {
+		t.Errorf("ServeSSE cause = %v, want %q", cause, nilSSEOptionError)
+	}
+}
+
+func TestNewSSEStreamRejectsANilOption(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("NewSSEStream took a nil option")
+		}
+	}()
+	NewSSEStream(SSEText[string]("msg"), nil)
+}
+
+func TestSSEComponentNeedsAView(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("SSEComponent took a nil view")
+		}
+	}()
+	_ = SSEComponent[string, Component]("row", nil)
 }
 
 func TestSSEOverAServer(t *testing.T) {

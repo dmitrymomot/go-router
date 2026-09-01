@@ -526,6 +526,70 @@ func TestDecodeValuesFillsAnEmbeddedPointer(t *testing.T) {
 	}
 }
 
+func TestDecodeValuesLeavesAnUnusedEmbeddedPointerNil(t *testing.T) {
+	type Page struct {
+		Offset int `query:"offset"`
+	}
+	type filter struct {
+		*Page
+		Term string `query:"q"`
+	}
+
+	var got filter
+	fields, err := decodeValues(url.Values{"q": {"go"}}, &got, "query", false)
+	if err != nil || len(fields) != 0 {
+		t.Fatalf("decode: %v, %+v", err, fields)
+	}
+	if got.Page != nil {
+		t.Errorf("Page = %+v, want nil when none of its fields is present", got.Page)
+	}
+	if got.Term != "go" {
+		t.Errorf("Term = %q, want go", got.Term)
+	}
+}
+
+func TestDecodeValuesStopsAtARecursiveEmbeddedPointer(t *testing.T) {
+	type Node struct {
+		*Node
+		Value string `query:"value"`
+	}
+
+	var got Node
+	fields, err := decodeValues(url.Values{"value": {"root"}}, &got, "query", false)
+	if err != nil || len(fields) != 0 {
+		t.Fatalf("decode: %v, %+v", err, fields)
+	}
+	if got.Node != nil {
+		t.Errorf("embedded Node = %+v, want the recursive edge left nil", got.Node)
+	}
+	if got.Value != "root" {
+		t.Errorf("Value = %q, want root", got.Value)
+	}
+}
+
+func TestDecodeValuesStopsAtAMutualEmbeddingCycle(t *testing.T) {
+	var got MutuallyEmbeddedA
+	fields, err := decodeValues(url.Values{"name": {"leaf"}}, &got, "query", false)
+	if err != nil || len(fields) != 0 {
+		t.Fatalf("decode: %v, %+v", err, fields)
+	}
+	if got.MutuallyEmbeddedB == nil || got.Name != "leaf" {
+		t.Fatalf("B = %+v, want the populated non-cyclic descendant", got.MutuallyEmbeddedB)
+	}
+	if got.MutuallyEmbeddedA != nil {
+		t.Errorf("cycle edge = %+v, want nil", got.MutuallyEmbeddedA)
+	}
+}
+
+type MutuallyEmbeddedA struct {
+	*MutuallyEmbeddedB
+}
+
+type MutuallyEmbeddedB struct {
+	*MutuallyEmbeddedA
+	Name string `query:"name"`
+}
+
 func TestDecodeValuesLeavesAnUnexportedEmbeddedPointerAlone(t *testing.T) {
 	type filter struct {
 		*hiddenPage

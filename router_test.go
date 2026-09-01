@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -185,6 +186,16 @@ func TestAutomaticHeadAndOptions(t *testing.T) {
 	r2.GET("/users", echoRoute)
 	if rec := do(r2, http.MethodOptions, "/users"); rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("disabled OPTIONS status = %d, want 405", rec.Code)
+	} else if got := rec.Header().Get(HeaderAllow); got != "GET, HEAD" {
+		t.Errorf("disabled OPTIONS Allow = %q, want %q", got, "GET, HEAD")
+	}
+
+	r3 := newTestRouter()
+	r3.HandleOPTIONS(false)
+	r3.GET("/users", echoRoute)
+	r3.OPTIONS("/users", echoRoute)
+	if rec := do(r3, http.MethodDelete, "/users"); rec.Header().Get(HeaderAllow) != "GET, HEAD, OPTIONS" {
+		t.Errorf("explicit OPTIONS Allow = %q, want %q", rec.Header().Get(HeaderAllow), "GET, HEAD, OPTIONS")
 	}
 }
 
@@ -319,6 +330,57 @@ func TestEscapedParameter(t *testing.T) {
 
 	if got := do(r, http.MethodGet, "/files/a%2Fb").Body.String(); got != "a/b" {
 		t.Errorf("param = %q, want %q", got, "a/b")
+	}
+}
+
+func TestPercentEscapeCanonicalization(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/alpha", func(c *tctx) error { return c.String(http.StatusOK, "alpha") })
+	r.GET("/café", func(c *tctx) error { return c.String(http.StatusOK, "café") })
+	r.GET("/slash/a%2Fb", func(c *tctx) error { return c.String(http.StatusOK, "escaped slash") })
+	r.GET("/slash/a/b", func(c *tctx) error { return c.String(http.StatusOK, "split slash") })
+	r.GET("/backslash/a%5Cb", func(c *tctx) error { return c.String(http.StatusOK, "escaped backslash") })
+	r.GET(`/backslash/a\b`, func(c *tctx) error { return c.String(http.StatusOK, "plain backslash") })
+	r.GET("/value/{value}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
+
+	tests := []struct{ path, want string }{
+		{"/%61lpha", "alpha"},
+		{"/caf%C3%A9", "café"},
+		{"/caf%c3%a9", "café"},
+		{"/slash/a%2Fb", "escaped slash"},
+		{"/slash/a%2fb", "escaped slash"},
+		{"/backslash/a%5Cb", "escaped backslash"},
+		{"/backslash/a%5cb", "escaped backslash"},
+		{"/value/a%2Fb", "a/b"},
+		{"/value/a%5Cb", `a\b`},
+		{"/value/%252F", "%2F"},
+		{"/value/%255C", "%5C"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := do(r, http.MethodGet, tc.path)
+			if rec.Code != http.StatusOK || rec.Body.String() != tc.want {
+				t.Errorf("GET %s = %d %q, want %d %q", tc.path, rec.Code, rec.Body.String(), http.StatusOK, tc.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalEscapedPath(t *testing.T) {
+	tests := []struct{ path, want string }{
+		{"/plain", "/plain"},
+		{"/%41lpha", "/Alpha"},
+		{"/caf%c3%a9", "/café"},
+		{"/a%2fb%5cc", "/a%2Fb%5Cc"},
+		{"/%252f", "/%252f"},
+		{"/%", "/%"},
+		{"/%2", "/%2"},
+		{"/%zz", "/%zz"},
+	}
+	for _, tc := range tests {
+		if got := canonicalEscapedPath(tc.path); got != tc.want {
+			t.Errorf("canonicalEscapedPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }
 
@@ -1005,7 +1067,7 @@ func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	want := []Route{
 		{Method: http.MethodGet, Pattern: "/health"},
 		{Method: http.MethodPost, Pattern: "/users", Meta: op{Summary: "create a user"}},
-		{Method: http.MethodGet, Pattern: "/users/{id}", Name: "user", Meta: op{Summary: "read a user"}},
+		{Method: http.MethodGet, Pattern: "/users/{id}", Name: "user", Meta: op{Summary: "read a user"}, Params: 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
@@ -1176,16 +1238,12 @@ func TestBindReadsTheQueryOfAQueryRequest(t *testing.T) {
 	}
 }
 
-func TestBuildReportsWhatTheRouterWouldPanicOn(t *testing.T) {
+func TestRegistrationPanicsOnABadTable(t *testing.T) {
 	tests := []struct {
 		name  string
 		build func(*Router[*tctx])
 		want  string
 	}{
-		{"a valid table", func(r *Router[*tctx]) {
-			r.GET("/users/{id}", echoRoute)
-			r.POST("/users", echoRoute)
-		}, ""},
 		{"a duplicate route", func(r *Router[*tctx]) {
 			r.GET("/a", echoRoute)
 			r.GET("/a", echoRoute)
@@ -1193,6 +1251,9 @@ func TestBuildReportsWhatTheRouterWouldPanicOn(t *testing.T) {
 		{"a malformed pattern", func(r *Router[*tctx]) {
 			r.GET("/files/{path...}/x", echoRoute)
 		}, "catch-all must be the last segment"},
+		{"an unbalanced brace", func(r *Router[*tctx]) {
+			r.GET("/users/{id", echoRoute)
+		}, "unbalanced"},
 		{"conflicting parameter names", func(r *Router[*tctx]) {
 			r.GET("/users/{id}", echoRoute)
 			r.GET("/users/{uid}/posts", echoRoute)
@@ -1204,60 +1265,36 @@ func TestBuildReportsWhatTheRouterWouldPanicOn(t *testing.T) {
 			r.Name("dup").GET("/a", echoRoute)
 			r.Name("dup").GET("/b", echoRoute)
 		}, `the route name "dup" names both`},
+		{"a route on a mounted subrouter", func(r *Router[*tctx]) {
+			sub := newTestRouter()
+			sub.GET("/a", echoRoute)
+			r.Mount("/sub", sub)
+			sub.GET("/b", echoRoute)
+		}, "after the router started serving"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newTestRouter()
-			tc.build(r)
-
-			err := r.Build()
-			switch {
-			case tc.want == "" && err != nil:
-				t.Fatalf("Build() = %v, want nil", err)
-			case tc.want == "":
-				return
-			case err == nil:
-				t.Fatalf("Build() = nil, want an error that mentions %q", tc.want)
-			case !strings.Contains(err.Error(), tc.want):
-				t.Errorf("Build() = %v, want an error that mentions %q", err, tc.want)
-			}
-			if again := r.Build(); again == nil || again.Error() != err.Error() {
-				t.Errorf("the second Build() = %v, want the first one, %v", again, err)
-			}
+			mustPanicContaining(t, tc.want, func() { tc.build(newTestRouter()) })
 		})
 	}
 }
 
-func TestBuildCompilesTheTableItself(t *testing.T) {
+func TestAValidTableRegistersWithoutPanicking(t *testing.T) {
 	r := newTestRouter()
-	r.GET("/a", echoRoute)
-
-	if err := r.Build(); err != nil {
-		t.Fatalf("Build() = %v", err)
+	r.GET("/users/{id}", echoRoute)
+	r.POST("/users", echoRoute)
+	if rec := do(r, http.MethodGet, "/users/7"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	defer func() {
-		if rec := recover(); rec == nil {
-			t.Error("no panic, want one that refuses a route after the router compiled")
-		}
-	}()
-	r.GET("/b", echoRoute)
 }
 
-func TestServeHTTPPanicsOnATableThatBuildRejects(t *testing.T) {
+func TestTheFirstRequestClosesRegistration(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/a", echoRoute)
-	r.GET("/a", echoRoute)
-
-	defer func() {
-		got := recover()
-		if got == nil {
-			t.Fatal("no panic, want the conflict")
-		}
-		if msg := fmt.Sprint(got); !strings.Contains(msg, "already registered") {
-			t.Errorf("panic = %q, want the conflict", msg)
-		}
-	}()
-	do(r, http.MethodGet, "/a")
+	if rec := do(r, http.MethodGet, "/a"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	mustPanicContaining(t, "after the router started serving", func() { r.GET("/b", echoRoute) })
 }
 
 type record struct {
@@ -1422,6 +1459,12 @@ func TestRegistrationPanics(t *testing.T) {
 			named.POST("/b", echoRoute)
 		}, "already registered a route"},
 		{"an empty name", func() { newTestRouter().Name("") }, "Name needs a name"},
+		{"Match with no methods", func() {
+			newTestRouter().Match(nil, "/x", echoRoute)
+		}, "Match needs at least one method"},
+		{"Match with an empty method", func() {
+			newTestRouter().Match([]string{""}, "/x", echoRoute)
+		}, "Match needs non-empty methods"},
 		{"a duplicate name", func() {
 			r := newTestRouter()
 			r.Name("dup").GET("/a", echoRoute)
@@ -1713,6 +1756,8 @@ func TestUseAfterATaggedRoutePanics(t *testing.T) {
 		"Meta":  func(r *Router[*tctx]) { r.Meta("op").GET("/u", echoRoute) },
 		"With":  func(r *Router[*tctx]) { r.With().GET("/u", echoRoute) },
 		"plain": func(r *Router[*tctx]) { r.GET("/u", echoRoute) },
+		"Group": func(r *Router[*tctx]) { r.Group(func(g *Router[*tctx]) { g.GET("/u", echoRoute) }) },
+		"Route": func(r *Router[*tctx]) { r.Route("/g", func(g *Router[*tctx]) { g.GET("/u", echoRoute) }) },
 	}
 	for name, add := range register {
 		t.Run(name, func(t *testing.T) {
@@ -1728,11 +1773,609 @@ func TestUseAfterATaggedRoutePanics(t *testing.T) {
 	}
 }
 
-func TestUseAfterAGroupIsAllowed(t *testing.T) {
+func TestUseBeforeAGroupIsAllowed(t *testing.T) {
 	r := newTestRouter()
-	r.Group(func(g *Router[*tctx]) { g.GET("/a", echoRoute) })
 	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
-	if err := r.Build(); err != nil {
-		t.Fatalf("Build: %v", err)
+	r.Group(func(g *Router[*tctx]) { g.GET("/a", echoRoute) })
+	if rec := do(r, http.MethodGet, "/a"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestPreDispatchesEachErrorOnce(t *testing.T) {
+	r := newTestRouter()
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+	calls := 0
+	r.ErrorHandler(func(c *tctx, err error) {
+		calls++
+		_ = c.NoContent(StatusOf(err))
+	})
+	r.GET("/fail", func(*tctx) error { return ErrConflict })
+
+	for _, path := range []string{"/fail", "/missing"} {
+		before := calls
+		do(r, http.MethodGet, path)
+		if calls != before+1 {
+			t.Errorf("GET %s invoked the error handler %d times, want 1", path, calls-before)
+		}
+	}
+}
+
+func TestErrorScopeIsSelectedByRouting(t *testing.T) {
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root") })
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			if c.Path() == "/debug/pre" {
+				return ErrConflict
+			}
+			return next(c)
+		}
+	})
+	r.Route("/debug", func(g *Router[*tctx]) {
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "debug") })
+		g.GET("/mutate", func(c *tctx) error {
+			req := c.Request().Clone(c.Request().Context())
+			req.URL.Path = "/outside"
+			req.URL.RawPath = ""
+			c.SetRequest(req)
+			return ErrConflict
+		})
+	})
+
+	if got := do(r, http.MethodGet, "/debug/pre").Body.String(); got != "root" {
+		t.Errorf("pre-routing error used %q, want root handler", got)
+	}
+	if got := do(r, http.MethodGet, "/debug/mutate").Body.String(); got != "debug" {
+		t.Errorf("routed error after URL mutation used %q, want debug handler", got)
+	}
+}
+
+func TestScopedFallbackUsesParsedPrefix(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			addPlain := func() {
+				r.Route("/t/{value}", func(g *Router[*tctx]) {
+					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "plain") })
+				})
+			}
+			addNumeric := func() {
+				r.Route("/t/{value:[0-9]+}", func(g *Router[*tctx]) {
+					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "numeric") })
+				})
+			}
+			if reverse {
+				addNumeric()
+				addPlain()
+			} else {
+				addPlain()
+				addNumeric()
+			}
+
+			if got := do(r, http.MethodGet, "/t/42/missing").Body.String(); got != "numeric" {
+				t.Errorf("numeric prefix chose %q", got)
+			}
+			if got := do(r, http.MethodGet, "/t/nope/missing").Body.String(); got != "plain" {
+				t.Errorf("plain prefix chose %q", got)
+			}
+		})
+	}
+
+	r := newTestRouter()
+	r.Route("/reports/report-{id:[0-9]+}.csv", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "report") })
+	})
+	if got := do(r, http.MethodGet, "/reports/report-7.csv/missing").Body.String(); got != "report" {
+		t.Errorf("template scope chose %q", got)
+	}
+	if got := do(r, http.MethodGet, "/reports/report-no.csv/missing").Body.String(); got == "report" {
+		t.Error("template scope covered a value rejected by its regex")
+	}
+}
+
+func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			register := func(prefix, name string) {
+				r.Route(prefix, func(g *Router[*tctx]) {
+					g.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+						return func(c *tctx) error {
+							c.SetHeader("X-Scope", name)
+							return next(c)
+						}
+					})
+					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, name+" 404") })
+					g.MethodNotAllowed(func(c *tctx) error {
+						return c.String(http.StatusMethodNotAllowed, name+" 405")
+					})
+					g.ErrorHandler(func(c *tctx, err error) {
+						_ = c.String(http.StatusTeapot, name+" error")
+					})
+				})
+			}
+			if reverse {
+				register("/{x}/b", "parameter-first")
+				register("/a/{x}", "static-first")
+			} else {
+				register("/a/{x}", "static-first")
+				register("/{x}/b", "parameter-first")
+			}
+			r.GET("/a/b/method", echoRoute)
+			r.GET("/a/b/error", func(*tctx) error { return errors.New("boom") })
+
+			if rec := do(r, http.MethodGet, "/a/b/missing"); rec.Code != http.StatusNotFound || rec.Body.String() != "static-first 404" {
+				t.Errorf("404 = %d %q", rec.Code, rec.Body.String())
+			}
+			if rec := do(r, http.MethodPost, "/a/b/method"); rec.Code != http.StatusMethodNotAllowed || rec.Body.String() != "static-first 405" {
+				t.Errorf("405 = %d %q", rec.Code, rec.Body.String())
+			}
+			if rec := do(r, http.MethodOptions, "/a/b/method"); rec.Code != http.StatusNoContent || rec.Header().Get("X-Scope") != "static-first" {
+				t.Errorf("OPTIONS = %d scope %q", rec.Code, rec.Header().Get("X-Scope"))
+			}
+			if rec := do(r, http.MethodGet, "/a/b/error"); rec.Code != http.StatusTeapot || rec.Body.String() != "static-first error" {
+				t.Errorf("error = %d %q", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func registerScopedHandlers(r *Router[*tctx], prefix, name string) {
+	r.Route(prefix, func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, name+" 404") })
+		g.MethodNotAllowed(func(c *tctx) error {
+			return c.String(http.StatusMethodNotAllowed, name+" 405")
+		})
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, name+" error") })
+		g.GET("/method", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
+		g.GET("/error", func(*tctx) error { return errors.New("boom") })
+	})
+}
+
+func TestEscapedStaticScopeKeepsItsFallbacksAndErrorHandler(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			static := func() { registerScopedHandlers(r, "/x/a%2Fb", "static") }
+			dynamic := func() { registerScopedHandlers(r, "/x/{value}", "dynamic") }
+			if reverse {
+				dynamic()
+				static()
+			} else {
+				static()
+				dynamic()
+			}
+
+			tests := []struct {
+				method string
+				path   string
+				code   int
+				body   string
+			}{
+				{http.MethodGet, "/x/a%2Fb/missing", http.StatusNotFound, "static 404"},
+				{http.MethodGet, "/x/a%2fb/missing", http.StatusNotFound, "static 404"},
+				{http.MethodPost, "/x/a%2Fb/method", http.StatusMethodNotAllowed, "static 405"},
+				{http.MethodPost, "/x/a%2fb/method", http.StatusMethodNotAllowed, "static 405"},
+				{http.MethodGet, "/x/a%2Fb/error", http.StatusTeapot, "static error"},
+				{http.MethodGet, "/x/a%2fb/error", http.StatusTeapot, "static error"},
+			}
+			for _, tc := range tests {
+				rec := do(r, tc.method, tc.path)
+				if rec.Code != tc.code || rec.Body.String() != tc.body {
+					t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.path, rec.Code, rec.Body.String(), tc.code, tc.body)
+				}
+			}
+		})
+	}
+}
+
+func TestScopedHandlersMatchCanonicalAndDynamicEscapes(t *testing.T) {
+	t.Run("unreserved static", func(t *testing.T) {
+		r := newTestRouter()
+		registerScopedHandlers(r, "/x/alpha", "static")
+		if got := do(r, http.MethodGet, "/x/%61lpha/missing").Body.String(); got != "static 404" {
+			t.Errorf("fallback = %q, want %q", got, "static 404")
+		}
+		if got := do(r, http.MethodGet, "/x/%61lpha/error").Body.String(); got != "static error" {
+			t.Errorf("error = %q, want %q", got, "static error")
+		}
+	})
+
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("template and regex reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			template := func() { registerScopedHandlers(r, "/x/pre-{value}-post", "template") }
+			regex := func() { registerScopedHandlers(r, "/x/{value:.+}", "regex") }
+			if reverse {
+				regex()
+				template()
+			} else {
+				template()
+				regex()
+			}
+			if got := do(r, http.MethodGet, "/x/pre-a%2Fb-post/missing").Body.String(); got != "template 404" {
+				t.Errorf("fallback = %q, want %q", got, "template 404")
+			}
+			if got := do(r, http.MethodGet, "/x/pre-a%2Fb-post/error").Body.String(); got != "template error" {
+				t.Errorf("error = %q, want %q", got, "template error")
+			}
+		})
+	}
+
+	r := newTestRouter()
+	registerScopedHandlers(r, "/x/{value:.+}", "regex")
+	if got := do(r, http.MethodGet, "/x/a%2Fb/missing").Body.String(); got != "regex 404" {
+		t.Errorf("regex fallback = %q, want %q", got, "regex 404")
+	}
+	if got := do(r, http.MethodGet, "/x/a%2Fb/error").Body.String(); got != "regex error" {
+		t.Errorf("regex error = %q, want %q", got, "regex error")
+	}
+}
+
+func TestScopeCoverageRejectsInvalidDynamicEscapes(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		{"/x/%zz", "/x/%zz/missing", true},
+		{"/x/{value}", "/x/%zz/missing", false},
+		{"/x/pre-{value}", "/x/pre-%zz/missing", false},
+		{"/x/{value:.+}", "/x/%zz/missing", false},
+		{"/x/{rest...}", "/x", true},
+		{"/x/y", "/x", false},
+	}
+	for _, tc := range tests {
+		segs, _, err := parsePattern(tc.pattern)
+		if err != nil {
+			t.Fatalf("parsePattern(%q) = %v", tc.pattern, err)
+		}
+		scope := scopeFallback[*tctx]{pattern: segs}
+		if got := scope.covers(tc.path, true); got != tc.want {
+			t.Errorf("%q covers %q = %v, want %v", tc.pattern, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestScopedHandlersIgnoreInvalidRawPath(t *testing.T) {
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusInternalServerError, "root error") })
+	registerScopedHandlers(r, "/x/safe", "scope")
+	r.GET("/outside/error", func(*tctx) error { return errors.New("boom") })
+
+	tests := []struct {
+		path string
+		body string
+	}{
+		{"/outside/missing", "root 404"},
+		{"/outside/error", "root error"},
+	}
+	for _, tc := range tests {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.URL.RawPath = "/x/safe/%zz"
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != tc.body {
+			t.Errorf("GET %s with invalid RawPath = %q, want %q", tc.path, got, tc.body)
+		}
+	}
+}
+
+func TestAScopeValidatesItsPrefix(t *testing.T) {
+	r := newTestRouter()
+	mustPanicContaining(t, "unbalanced", func() {
+		r.Route("/bad/{", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error { return c.NoContent(http.StatusNotFound) })
+		})
+	})
+}
+
+func TestEscapedSegmentsAreDecodedOnceForMatching(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/digits/1", func(c *tctx) error { return c.String(http.StatusOK, "static") })
+	r.GET("/digits/{id:[0-9]+}", func(c *tctx) error { return c.String(http.StatusOK, "numeric "+c.Param("id")) })
+	r.GET("/files/{name:[a-z]+}", func(c *tctx) error { return c.String(http.StatusOK, "safe "+c.Param("name")) })
+	r.GET("/files/{name}", func(c *tctx) error { return c.String(http.StatusOK, "plain "+c.Param("name")) })
+	r.GET("/encoded/{value:.*}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
+	r.GET("/report/report-{id:[0-9]+}.csv", func(c *tctx) error { return c.String(http.StatusOK, c.Param("id")) })
+
+	tests := []struct{ path, want string }{
+		{"/digits/%31", "static"},
+		{"/files/a%2Fb", "plain a/b"},
+		{"/encoded/%252F", "%2F"},
+		{"/report/report-%31.csv", "1"},
+	}
+	for _, tc := range tests {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestInconsistentRawPathIsIgnored(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/admin", func(c *tctx) error { return c.String(http.StatusOK, "admin") })
+	r.GET("/public", func(c *tctx) error { return c.String(http.StatusOK, "public") })
+
+	for _, raw := range []string{"/public", "/%zz"} {
+		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		req.URL.RawPath = raw
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != "admin" {
+			t.Errorf("RawPath %q routed to %q, want Path /admin", raw, got)
+		}
+	}
+}
+
+func TestMountedRouterFreezesWithParent(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/ready", echoRoute)
+	first := newTestRouter()
+	second := newTestRouter()
+	first.Mount("/one", sub)
+	second.Mount("/two", sub)
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("mounted router accepted a route after it was mounted")
+			}
+		}()
+		sub.GET("/late", echoRoute)
+	}()
+	if got := do(second, http.MethodGet, "/two/ready").Code; got != http.StatusOK {
+		t.Errorf("second parent status = %d, want 200", got)
+	}
+	if got := do(first, http.MethodGet, "/one/ready").Code; got != http.StatusOK {
+		t.Errorf("first parent status = %d, want 200", got)
+	}
+
+	mustPanicContaining(t, "after the router started serving", func() {
+		first.Mount("/late", newTestRouter())
+	})
+}
+
+func TestParentsSharingAMountBuildConcurrently(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/ready", echoRoute)
+	left, right := newTestRouter(), newTestRouter()
+	left.Mount("/left", sub)
+	right.Mount("/right", sub)
+
+	start := make(chan struct{})
+	done := make(chan int, 2)
+	for _, r := range []*Router[*tctx]{left, right} {
+		go func() {
+			<-start
+			done <- do(r, http.MethodGet, "/nowhere").Code
+		}()
+	}
+	close(start)
+	for range 2 {
+		if code := <-done; code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", code)
+		}
+	}
+	if do(left, http.MethodGet, "/left/ready").Code != http.StatusOK ||
+		do(right, http.MethodGet, "/right/ready").Code != http.StatusOK {
+		t.Fatal("a concurrently built parent omitted the shared mount")
+	}
+}
+
+func TestJSONOptionsClonesCallerSlice(t *testing.T) {
+	r := newTestRouter()
+	opts := []json.Options{json.RejectUnknownMembers(true)}
+	r.JSONOptions(opts...)
+	opts[0] = nil
+	if len(r.ropts.jsonOpts) != 1 || r.ropts.jsonOpts[0] == nil {
+		t.Fatal("JSONOptions retained the caller's slice backing array")
+	}
+}
+
+func mustPanicContaining(t *testing.T, want string, fn func()) {
+	t.Helper()
+	defer func() {
+		t.Helper()
+		switch v := recover().(type) {
+		case nil:
+			t.Errorf("no panic, want one that reads %q", want)
+		case string:
+			if !strings.Contains(v, want) {
+				t.Errorf("panic = %q, want one that holds %q", v, want)
+			}
+		default:
+			t.Errorf("panic = %v of type %T, want a string", v, v)
+		}
+	}()
+	fn()
+}
+
+// Route.Params is what a route table asserts against InlineParamBudget, so the
+// count has to be exactly what the request path puts in Base: host parameters
+// and path parameters together.
+func TestRouteParamsCountsHostAndPathTogether(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/health", echoRoute)
+	r.GET("/users/{id}", echoRoute)
+	r.GET("/files/{path...}", echoRoute)
+	r.GET("/f/{name}.{ext}", echoRoute)
+	r.GET("/assets/*", echoRoute)
+	r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
+		h.GET("/o/{oid}/t/{tid}/m/{mid}", echoRoute)
+		h.GET("/o/{oid}/t/{tid}/m/{mid}/r/{rid}", echoRoute)
+	})
+	r.Host("{env}.{region}.{tenant}.example.net", func(h *Router[*tctx]) {
+		h.GET("/o/{oid}", echoRoute)
+	})
+
+	want := map[string]int{
+		"|/health":          0,
+		"|/users/{id}":      1,
+		"|/files/{path...}": 1,
+		"|/f/{name}.{ext}":  2,
+		"|/assets/*":        1,
+		"{tenant}.example.com|/o/{oid}/t/{tid}/m/{mid}":         4,
+		"{tenant}.example.com|/o/{oid}/t/{tid}/m/{mid}/r/{rid}": 5,
+		"{env}.{region}.{tenant}.example.net|/o/{oid}":          4,
+	}
+	for _, rt := range r.Routes() {
+		key := rt.Host + "|" + rt.Pattern
+		w, ok := want[key]
+		if !ok {
+			t.Errorf("unexpected route %q", key)
+			continue
+		}
+		if rt.Params != w {
+			t.Errorf("%s: Params = %d, want %d", key, rt.Params, w)
+		}
+		delete(want, key)
+	}
+	for key := range want {
+		t.Errorf("route %q never appeared", key)
+	}
+}
+
+// The library's own fixtures must stay inside the budget too, so a change to
+// maxInlineParams that the sample tables cannot afford fails here.
+func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
+	for name, build := range map[string]func() *Router[*tctx]{
+		"siteRouter":  siteRouter,
+		"namedRouter": namedRouter,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, rt := range build().Routes() {
+				if rt.Params > InlineParamBudget {
+					t.Errorf("%s %s%s carries %d parameters, over the budget of %d",
+						rt.Method, rt.Host, rt.Pattern, rt.Params, InlineParamBudget)
+				}
+			}
+		})
+	}
+}
+
+// scopeAnswering registers one fallback scope per prefix, each reporting its
+// own prefix, so a 404 names the scope that answered it.
+func scopeAnswering(r *Router[*tctx], prefix string) {
+	r.Route(prefix, func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, prefix) })
+	})
+}
+
+// Overlapping scopes are ordered by comparing their prefixes segment by
+// segment. The first position where two disagree decides it: a static segment
+// beats a template, a template beats a regex, and a regex beats a plain
+// parameter. Only when every shared position ties does the longer prefix win,
+// then the deeper scope, then the lower prefix.
+//
+// This is the order the trie already uses to choose a route, so the scope that
+// answers a miss is the scope the matching route would have sat in. It is not
+// "the prefix with the most segments wins": /api answers /api/b/c even though
+// /{p}/b/c constrains all three segments and /api constrains one.
+func TestScopeFallbackPrecedenceIsLeftmostMostSpecificSegment(t *testing.T) {
+	// The prefixes in each case are chosen so that the last tie-break, the
+	// lower prefix, disagrees with specificity. A case that stops testing the
+	// rule stops passing.
+	cases := []struct {
+		name   string
+		scopes []string
+		probe  string
+		want   string
+	}{
+		{
+			name:   "a static first segment beats a parameter that matches more segments",
+			scopes: []string{"/api", "/{p}/b/c"},
+			probe:  "/api/b/c",
+			want:   "/api",
+		},
+		{
+			name:   "a template beats a regex and a parameter",
+			scopes: []string{"/{z}q", "/{n:[0-9]+}", "/{a}"},
+			probe:  "/5q/missing",
+			want:   "/{z}q",
+		},
+		{
+			name:   "a regex beats a parameter",
+			scopes: []string{"/{z}q", "/{n:[0-9]+}", "/{a}"},
+			probe:  "/7/missing",
+			want:   "/{n:[0-9]+}",
+		},
+		{
+			name:   "a parameter answers what neither the template nor the regex covers",
+			scopes: []string{"/{z}q", "/{n:[0-9]+}", "/{a}"},
+			probe:  "/zz/missing",
+			want:   "/{a}",
+		},
+		{
+			name:   "the longer prefix wins once every shared segment ties",
+			scopes: []string{"/a", "/a/b"},
+			probe:  "/a/b/missing",
+			want:   "/a/b",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Both registration orders: the order is the sort's, not the
+			// caller's.
+			for _, reverse := range []bool{false, true} {
+				t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+					r := newTestRouter()
+					scopes := slices.Clone(tc.scopes)
+					if reverse {
+						slices.Reverse(scopes)
+					}
+					for _, prefix := range scopes {
+						scopeAnswering(r, prefix)
+					}
+					rec := do(r, http.MethodGet, tc.probe)
+					if rec.Code != http.StatusNotFound || rec.Body.String() != tc.want {
+						t.Errorf("%s = %d %q, want 404 %q", tc.probe, rec.Code, rec.Body.String(), tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Two scopes can carry the same prefix by different routes. The deeper one
+// wins, so a fallback set on an inner group is not shadowed by an outer group
+// that happens to spell out the same path.
+func TestScopeFallbackPrefersTheDeeperScopeOnAnEqualPrefix(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/a/b", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "flat") })
+	})
+	r.Route("/a", func(g *Router[*tctx]) {
+		g.Route("/b", func(h *Router[*tctx]) {
+			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "nested") })
+		})
+	})
+
+	if got := do(r, http.MethodGet, "/a/b/missing").Body.String(); got != "nested" {
+		t.Errorf("body = %q, want %q", got, "nested")
+	}
+}
+
+// The host comes first, before any of the specificity above: a scope belongs to
+// the host it was declared under, and scopeFallback.hostIdx keeps it there. A
+// request that matched a host never reaches an any-host scope, however much
+// more specific that scope's prefix is.
+func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
+	r := newTestRouter()
+	scopeAnswering(r, "/a")
+	r.Host("api.example.com", func(h *Router[*tctx]) {
+		h.Route("/{p}", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "host /{p}") })
+		})
+	})
+
+	if got := doHost(r, http.MethodGet, "api.example.com", "/a/missing").Body.String(); got != "host /{p}" {
+		t.Errorf("host request answered by %q, want %q", got, "host /{p}")
+	}
+	if got := do(r, http.MethodGet, "/a/missing").Body.String(); got != "/a" {
+		t.Errorf("any-host request answered by %q, want %q", got, "/a")
 	}
 }

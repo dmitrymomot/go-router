@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -151,8 +152,9 @@ func TestHTMXPartial(t *testing.T) {
 			if got := rec.Body.String(); got != tc.want {
 				t.Errorf("body = %q, want %q", got, tc.want)
 			}
-			if got := rec.Header().Values(HeaderVary); len(got) != 2 {
-				t.Errorf("Vary = %v, want the two htmx headers", got)
+			wantVary := []string{HeaderHXRequest, HeaderHXBoosted, HeaderHXHistoryRestoreRequest}
+			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, wantVary) {
+				t.Errorf("Vary = %v, want %v", got, wantVary)
 			}
 		})
 	}

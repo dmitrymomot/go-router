@@ -36,7 +36,7 @@ type node[C Context] struct {
 	names   []string
 }
 
-func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C]) error {
+func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string) error {
 	segs, names, err := parsePattern(pattern)
 	if err != nil {
 		return err
@@ -76,6 +76,7 @@ func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFu
 	if method == anyMethod {
 		cur.catchAll = h
 	}
+	allow[cur] = strings.Join(cur.allowed(autoOptions), ", ")
 	return nil
 }
 
@@ -178,7 +179,7 @@ func (n *node[C]) handler(method string) HandlerFunc[C] {
 	return n.catchAll
 }
 
-func (n *node[C]) allowed() []string {
+func (n *node[C]) allowed(autoOptions bool) []string {
 	out := make([]string, 0, len(n.routes)+2)
 	for _, mh := range n.routes {
 		if mh.method == anyMethod {
@@ -189,33 +190,33 @@ func (n *node[C]) allowed() []string {
 	if slices.Contains(out, http.MethodGet) && !slices.Contains(out, http.MethodHead) {
 		out = append(out, http.MethodHead)
 	}
-	if !slices.Contains(out, http.MethodOptions) {
+	if autoOptions && !slices.Contains(out, http.MethodOptions) {
 		out = append(out, http.MethodOptions)
 	}
 	slices.Sort(out)
 	return out
 }
 
-// Called once at build time: the serving goroutines read the map without a
-// lock, so a lazy fill on the first 405 would race them.
-func (n *node[C]) cacheAllow(dst map[*node[C]]string) {
+// insert keeps every entry current, so this only runs when the OPTIONS setting
+// changes after some routes are already in.
+func (n *node[C]) recacheAllow(autoOptions bool, allow map[*node[C]]string) {
 	if len(n.routes) > 0 {
-		dst[n] = strings.Join(n.allowed(), ", ")
+		allow[n] = strings.Join(n.allowed(autoOptions), ", ")
 	}
 	for _, c := range n.statics {
-		c.cacheAllow(dst)
+		c.recacheAllow(autoOptions, allow)
 	}
 	for _, c := range n.templates {
-		c.cacheAllow(dst)
+		c.recacheAllow(autoOptions, allow)
 	}
 	for _, c := range n.regexes {
-		c.cacheAllow(dst)
+		c.recacheAllow(autoOptions, allow)
 	}
 	if n.param != nil {
-		n.param.cacheAllow(dst)
+		n.param.recacheAllow(autoOptions, allow)
 	}
 	if n.wildcard != nil {
-		n.wildcard.cacheAllow(dst)
+		n.wildcard.recacheAllow(autoOptions, allow)
 	}
 }
 
@@ -245,12 +246,12 @@ func (st *matchState[C]) record(n *node[C], vals []string) {
 	}
 }
 
-func (st *matchState[C]) allowedMethods(dst []string) []string {
+func (st *matchState[C]) allowedMethods(dst []string, autoOptions bool) []string {
 	if st.pathMatch == nil {
 		return dst
 	}
 	add := func(n *node[C]) {
-		for _, m := range n.allowed() {
+		for _, m := range n.allowed(autoOptions) {
 			if !slices.Contains(dst, m) {
 				dst = append(dst, m)
 			}
@@ -265,7 +266,7 @@ func (st *matchState[C]) allowedMethods(dst []string) []string {
 	return dst
 }
 
-func search[C Context](n *node[C], rest, method string, vals []string, st *matchState[C]) (*node[C], []string) {
+func search[C Context](n *node[C], rest, method string, vals []string, st *matchState[C], escaped bool) (*node[C], []string) {
 	if rest == "" {
 		if n.handler(method) != nil {
 			return n, vals
@@ -277,6 +278,7 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 				return n.wildcard, w
 			}
 			st.record(n.wildcard, w)
+			clear(w[len(vals):])
 		}
 		return nil, nil
 	}
@@ -287,7 +289,7 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 			continue
 		}
 		if c := n.statics[i]; strings.HasPrefix(rest, c.prefix) {
-			if m, v := search(c, rest[len(c.prefix):], method, vals, st); m != nil {
+			if m, v := search(c, rest[len(c.prefix):], method, vals, st, escaped); m != nil {
 				return m, v
 			}
 		}
@@ -304,25 +306,39 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 		if i := strings.IndexByte(body, '/'); i >= 0 {
 			seg, tail = body[:i], body[i:]
 		}
+		decoded := seg
+		if escaped {
+			var ok bool
+			decoded, ok = decodePathSegment(seg, true)
+			if !ok {
+				return nil, nil
+			}
+		}
 
 		for _, c := range n.templates {
-			if w, ok := appendTemplateValues(vals, c.parts, seg); ok {
-				if m, v := search(c, tail, method, w, st); m != nil {
+			w, ok := appendTemplateValues(vals, c.parts, decoded)
+			if ok {
+				if m, v := search(c, tail, method, w, st, escaped); m != nil {
 					return m, v
 				}
 			}
+			clear(w[len(vals):])
 		}
 		for _, c := range n.regexes {
-			if c.re.MatchString(seg) {
-				if m, v := search(c, tail, method, append(vals, seg), st); m != nil {
+			if c.re.MatchString(decoded) {
+				w := append(vals, decoded)
+				if m, v := search(c, tail, method, w, st, escaped); m != nil {
 					return m, v
 				}
+				clear(w[len(vals):])
 			}
 		}
-		if n.param != nil && seg != "" {
-			if m, v := search(n.param, tail, method, append(vals, seg), st); m != nil {
+		if n.param != nil && decoded != "" {
+			w := append(vals, decoded)
+			if m, v := search(n.param, tail, method, w, st, escaped); m != nil {
 				return m, v
 			}
+			clear(w[len(vals):])
 		}
 	}
 
@@ -332,14 +348,15 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 			return n.wildcard, w
 		}
 		st.record(n.wildcard, w)
+		clear(w[len(vals):])
 	}
 	return nil, nil
 }
 
-func (n *node[C]) walk(fn func(pattern, method string)) {
+func (n *node[C]) walk(fn func(pattern, method string, params int)) {
 	if n.pattern != "" {
 		for _, mh := range n.routes {
-			fn(n.pattern, mh.method)
+			fn(n.pattern, mh.method, len(n.names))
 		}
 	}
 	for _, c := range n.statics {
@@ -359,13 +376,10 @@ func (n *node[C]) walk(fn func(pattern, method string)) {
 	}
 }
 
-func unescapeParams(vals []string) {
-	for i, v := range vals {
-		if strings.IndexByte(v, '%') < 0 {
-			continue
-		}
-		if u, err := url.PathUnescape(v); err == nil {
-			vals[i] = u
-		}
+func decodePathSegment(seg string, escaped bool) (string, bool) {
+	if !escaped || strings.IndexByte(seg, '%') < 0 {
+		return seg, true
 	}
+	decoded, err := url.PathUnescape(seg)
+	return decoded, err == nil
 }

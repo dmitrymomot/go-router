@@ -1,6 +1,7 @@
 package router
 
 import (
+	"math"
 	"strconv"
 	"strings"
 )
@@ -126,10 +127,10 @@ func quality(params string) float64 {
 			continue
 		}
 		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil || q < 0 {
+		if err != nil || math.IsNaN(q) || math.IsInf(q, 0) || q < 0 || q > 1 {
 			return 0
 		}
-		return min(q, 1)
+		return q
 	}
 	return 1
 }

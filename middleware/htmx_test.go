@@ -78,8 +78,14 @@ func TestHTMXRedirect(t *testing.T) {
 			if got := rec.Header().Get(router.HeaderLocation); got != tc.location {
 				t.Errorf("%s = %q, want %q", router.HeaderLocation, got, tc.location)
 			}
-			if got := rec.Header().Get(router.HeaderVary); got != router.HeaderHXRequest {
-				t.Errorf("%s = %q, want %q", router.HeaderVary, got, router.HeaderHXRequest)
+			for _, name := range []string{
+				router.HeaderHXRequest,
+				router.HeaderHXBoosted,
+				router.HeaderHXHistoryRestoreRequest,
+			} {
+				if got := rec.Header().Values(router.HeaderVary); !containsFold(got, name) {
+					t.Errorf("%s = %q, want %q", router.HeaderVary, got, name)
+				}
 			}
 		})
 	}

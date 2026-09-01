@@ -62,7 +62,7 @@ func writeProblem(b *Base, err error, exposeCause bool) {
 		logFailure(b, err, p.Status)
 	}
 
-	if !writableFailure(b, err, p.Status) {
+	if !writableFailure(b, err) {
 		return
 	}
 
@@ -71,6 +71,9 @@ func writeProblem(b *Base, err error, exposeCause bool) {
 	}
 	b.res.Header().Set(HeaderContentType, MIMEApplicationProblemJSON)
 	b.res.WriteHeader(p.Status)
+	if b.req.Method == http.MethodHead {
+		return
+	}
 	//nolint:errcheck // The connection is already failing; nothing to report.
 	json.MarshalWrite(b.res, p)
 }

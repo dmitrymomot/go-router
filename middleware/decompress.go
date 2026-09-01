@@ -20,6 +20,8 @@ type DecompressConfig struct {
 
 var gzipReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
 
+const emptyGzipStream = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
 func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return DecompressWithConfig[C](DecompressConfig{})(next)
 }
@@ -40,7 +42,7 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 
 			zr := gzipReaders.Get().(*gzip.Reader)
 			if err := zr.Reset(req.Body); err != nil {
-				gzipReaders.Put(zr)
+				putGzipReader(zr)
 				if errors.Is(err, io.EOF) {
 					return next(c)
 				}
@@ -52,7 +54,7 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 			defer func() {
 				body.zr = nil
 				if done {
-					gzipReaders.Put(zr)
+					putGzipReader(zr)
 				}
 			}()
 
@@ -73,6 +75,15 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 			return tooLarge(err, "the expanded request body is limited to %d bytes", limit)
 		}
 	}
+}
+
+func putGzipReader(zr *gzip.Reader) {
+	detachGzipReader(zr)
+	gzipReaders.Put(zr)
+}
+
+func detachGzipReader(zr *gzip.Reader) {
+	_ = zr.Reset(strings.NewReader(emptyGzipStream))
 }
 
 type decompressedBody struct {

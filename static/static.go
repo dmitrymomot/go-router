@@ -78,7 +78,7 @@ func New(cfg Config) (*Assets, error) {
 	if strings.Contains(a.build, "/") {
 		return nil, fmt.Errorf("static: the build tag %q spans more than one path segment", cfg.Build)
 	}
-	if !fs.ValidPath(a.index) {
+	if a.index == "." || !fs.ValidPath(a.index) {
 		return nil, fmt.Errorf("static: the index %q is not a file name inside the asset set", cfg.Index)
 	}
 
@@ -95,6 +95,9 @@ func New(cfg Config) (*Assets, error) {
 			return nil, fmt.Errorf("static: %s is not a directory", dir)
 		}
 		a.fsys = liveFS(dir)
+		if err := validateIndex(a.fsys, a.index); err != nil {
+			return nil, err
+		}
 		a.setURLBase()
 		return a, nil
 	}
@@ -106,6 +109,9 @@ func New(cfg Config) (*Assets, error) {
 			return nil, fmt.Errorf("static: open the asset root %q: %w", cfg.Root, err)
 		}
 		a.fsys = sub
+	}
+	if err := validateIndex(a.fsys, a.index); err != nil {
+		return nil, err
 	}
 	etags, sum, err := index(a.fsys)
 	if err != nil {
@@ -120,6 +126,18 @@ func New(cfg Config) (*Assets, error) {
 	}
 	a.setURLBase()
 	return a, nil
+}
+
+func validateIndex(fsys fs.FS, name string) error {
+	info, err := fs.Stat(fsys, name)
+	switch {
+	case err == nil && info.IsDir():
+		return fmt.Errorf("static: the index %q is a directory", name)
+	case err == nil, errors.Is(err, fs.ErrNotExist):
+		return nil
+	default:
+		return fmt.Errorf("static: inspect the index %q: %w", name, err)
+	}
 }
 
 func (a *Assets) setURLBase() {

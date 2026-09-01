@@ -57,6 +57,14 @@ func joinPattern(prefix, pattern string) string {
 	return prefix + pattern
 }
 
+// ValidatePattern reports whether Handle would accept pattern. Registration
+// panics on a bad pattern, so a table that comes from configuration can check
+// each entry here first.
+func ValidatePattern(pattern string) error {
+	_, _, err := parsePattern(pattern)
+	return err
+}
+
 func parsePattern(pattern string) ([]segment, []string, error) {
 	pattern = normalizePattern(pattern)
 	if pattern == "/" {
@@ -270,6 +278,36 @@ func setTemplateValue(dst []string, i int, p segPart, value string) bool {
 	}
 	dst[i] = value
 	return true
+}
+
+func segmentMatches(seg segment, value string) bool {
+	switch seg.kind {
+	case segStatic:
+		return value == seg.value
+	case segTemplate:
+		return matchTemplate(make([]string, templateArity(seg.parts)), seg.parts, value)
+	case segRegex:
+		return seg.re.MatchString(value)
+	case segParam:
+		return value != ""
+	default:
+		return true
+	}
+}
+
+func segmentSpecificity(kind segKind) int {
+	switch kind {
+	case segStatic:
+		return 4
+	case segTemplate:
+		return 3
+	case segRegex:
+		return 2
+	case segParam:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func templateSkeleton(parts []segPart) string {
