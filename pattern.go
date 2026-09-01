@@ -57,6 +57,14 @@ func joinPattern(prefix, pattern string) string {
 	return prefix + pattern
 }
 
+// ValidatePattern reports whether Handle would accept pattern. Registration
+// panics on a bad pattern, so a table that comes from configuration can check
+// each entry here first.
+func ValidatePattern(pattern string) error {
+	_, _, err := parsePattern(pattern)
+	return err
+}
+
 func parsePattern(pattern string) ([]segment, []string, error) {
 	pattern = normalizePattern(pattern)
 	if pattern == "/" {

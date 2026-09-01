@@ -40,40 +40,38 @@ type Router[C Context] struct {
 	prefix string
 	mws    []Middleware[C]
 
-	regs               []registration[C]
-	children           []*Router[C]
-	hasRoutes          bool
-	name               string
-	meta               any
-	tagged             bool
-	nameUsed           bool
-	hosts              []hostSpec
-	inHost             bool
-	notFound           HandlerFunc[C]
-	methodNotAllowed   HandlerFunc[C]
-	errHandler         ErrorHandlerFunc[C]
-	newCtx             func(http.ResponseWriter, *http.Request) C
-	pool               *sync.Pool
-	reset              func(C)
-	once               sync.Once
-	started            atomic.Bool
-	tree               *node[C]
-	hostSet            *hostSet[C]
-	notFoundChain      HandlerFunc[C]
-	notAllowedChain    HandlerFunc[C]
-	optionsChain       HandlerFunc[C]
-	compiledErrHandler ErrorHandlerFunc[C]
-	autoOptions        bool
-	redirectSlash      bool
-	anyHostRoutes      bool
-	ropts              *routerOpts
-	compiled           atomic.Bool
-	preChain           HandlerFunc[C]
-	observer           func(c Context, status int, size int64, d time.Duration, err error)
+	regs             []registration[C]
+	children         []*Router[C]
+	hasRoutes        bool
+	name             string
+	meta             any
+	tagged           bool
+	nameUsed         bool
+	hosts            []hostSpec
+	inHost           bool
+	notFound         HandlerFunc[C]
+	methodNotAllowed HandlerFunc[C]
+	errHandler       ErrorHandlerFunc[C]
+	newCtx           func(http.ResponseWriter, *http.Request) C
+	pool             *sync.Pool
+	reset            func(C)
+	once             sync.Once
+	started          atomic.Bool
+	tree             *node[C]
+	hostSet          *hostSet[C]
+	notFoundChain    HandlerFunc[C]
+	notAllowedChain  HandlerFunc[C]
+	optionsChain     HandlerFunc[C]
+	rootErrorHandler ErrorHandlerFunc[C]
+	autoOptions      bool
+	redirectSlash    bool
+	anyHostRoutes    bool
+	ropts            *routerOpts
+	preChain         HandlerFunc[C]
+	observer         func(c Context, status int, size int64, d time.Duration, err error)
 
-	preMws     []Middleware[C]
-	compileErr error
-	scopes     []*scopeFallback[C]
+	preMws []Middleware[C]
+	scopes []*scopeFallback[C]
 
 	errScopes []*scopeFallback[C]
 	named     map[string]namedRoute
@@ -100,7 +98,7 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	r.notFoundChain = defaultNotFound[C]
 	r.notAllowedChain = defaultMethodNotAllowed[C]
 	r.optionsChain = autoOptions[C]
-	r.compiledErrHandler = DefaultErrorHandler[C]
+	r.rootErrorHandler = DefaultErrorHandler[C]
 	return r
 }
 
@@ -763,8 +761,7 @@ func (r *Router[C]) refresh() {
 			r.errScopes = append(r.errScopes, s)
 		}
 	}
-	r.compiledErrHandler = rootErrHandler
-	r.compiled.Store(true)
+	r.rootErrorHandler = rootErrHandler
 }
 
 func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) error {
@@ -1328,7 +1325,7 @@ func (r *Router[C]) handleError(c C, err error) {
 
 func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 	if !b.errorRouted {
-		return r.compiledErrHandler
+		return r.rootErrorHandler
 	}
 	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(r.errScopes) {
 		return r.errScopes[b.errorScopeIdx].errHandler
@@ -1340,7 +1337,7 @@ func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 	if host != nil && host.errHandler != nil {
 		return host.errHandler
 	}
-	return r.compiledErrHandler
+	return r.rootErrorHandler
 }
 
 func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
