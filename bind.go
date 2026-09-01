@@ -37,7 +37,10 @@ func (b *Base) Bind[T any]() (T, error) {
 	case ct == MIMEApplicationForm, ct == MIMEMultipartForm:
 		return b.BindForm[T]()
 	case ct == "":
-		return b.BindQuery[T]()
+		// GET, HEAD, DELETE and QUERY already returned above, so this is a
+		// method that carries a body and does not say what it is. Binding the
+		// query string instead left the body unread and reported nothing.
+		return v, ErrUnsupportedMediaType.WithMessage("a %s body needs a Content-Type", b.req.Method)
 	default:
 		return v, ErrUnsupportedMediaType.WithMessage("cannot decode a %s body", ct)
 	}

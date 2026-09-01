@@ -1391,3 +1391,22 @@ func TestFormFileSurvivesAnEarlierParseForm(t *testing.T) {
 	}
 }
 
+// A method that carries a body and does not say what it is used to bind the
+// query string, so the body went unread with no error.
+func TestBindRefusesABodyWithNoContentType(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/x", func(c *tctx) error {
+		v, err := c.Bind[struct {
+			Name string `json:"name"`
+		}]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, v.Name)
+	})
+	rec := doBody(r, http.MethodPost, "/x?name=fromquery", "", `{"name":"frombody"}`)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("POST with no Content-Type = %d %q, want 415", rec.Code, rec.Body.String())
+	}
+}
+
