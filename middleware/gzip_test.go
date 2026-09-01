@@ -5,13 +5,16 @@ import (
 	"compress/gzip"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/routertest"
 )
 
 var gzipLongBody = strings.Repeat("<p>the quick brown fox</p>", 100)
@@ -586,6 +589,78 @@ func TestGzipCommitsASwitchingProtocols(t *testing.T) {
 			}
 			if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
 				t.Errorf("content encoding = %q, want none on an upgraded connection", got)
+			}
+		})
+	}
+}
+
+// assertHEADMatchesGET is the rule stated in the root package's head_test.go: a
+// HEAD reply carries the status and the headers its GET would carry, and no
+// body. Each package keeps its own copy, because routertest cannot hold one.
+func assertHEADMatchesGET(t *testing.T, h http.Handler, target string, opts ...routertest.RequestOption) {
+	t.Helper()
+	get := routertest.Do(h, http.MethodGet, target, opts...)
+	head := routertest.Do(h, http.MethodHead, target, opts...)
+
+	if head.StatusCode != get.StatusCode {
+		t.Errorf("HEAD %s: status = %d, want the %d of the GET", target, head.StatusCode, get.StatusCode)
+	}
+	if len(head.Body) != 0 {
+		t.Errorf("HEAD %s: body = %q, want none", target, head.Body)
+	}
+	if !maps.EqualFunc(head.Header, get.Header, slices.Equal) {
+		t.Errorf("HEAD %s: headers = %v, want the %v of the GET", target, head.Header, get.Header)
+	}
+}
+
+// The nil gzip.Writer crash lived here: HEAD stopped being short-circuited, so
+// a handler that flushed reached a writer that had never been opened. The rule
+// is assertHEADMatchesGET's — the reply carries the headers of the
+// GET, compressed ones included, and no body.
+func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
+	tests := []struct {
+		name     string
+		handler  router.HandlerFunc[*appContext]
+		encoding string
+	}{
+		{"the handler writes a body", func(c *appContext) error {
+			return c.HTML(http.StatusOK, gzipLongBody)
+		}, "gzip"},
+		{"the handler flushes", func(c *appContext) error {
+			if err := c.HTML(http.StatusOK, gzipLongBody); err != nil {
+				return err
+			}
+			c.Response().Flush()
+			return nil
+		}, "gzip"},
+		// A flush with nothing written yet: on HEAD the writer is never opened,
+		// which is the shape that used to dereference a nil gzip.Writer.
+		{"the handler flushes before writing anything", func(c *appContext) error {
+			c.Response().WriteHeader(http.StatusOK)
+			c.Response().Flush()
+			return nil
+		}, "gzip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var failed error
+			r := newRouter()
+			// The status line is already out by the time a flush panics, so the
+			// reply stays a 200 with no body and matches its GET. Only the
+			// error handler sees the panic.
+			r.ErrorHandler(func(_ *appContext, err error) { failed = err })
+			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
+			r.GET("/x", tt.handler)
+
+			get := routertest.Get(r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
+			if got := get.Header.Get(router.HeaderContentEncoding); got != tt.encoding {
+				t.Fatalf("the GET sent Content-Encoding %q, want %q; this case no longer reaches the path it names", got, tt.encoding)
+			}
+
+			assertHEADMatchesGET(t, r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
+			if failed != nil {
+				t.Errorf("the request failed: %v", failed)
 			}
 		})
 	}
