@@ -114,7 +114,11 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.pathEscaped, b.errorRouted = false, false
 	b.queryCache = nil
 	b.deferred = nil
-	clear(b.store)
+	// clear on a map is a runtime call even when the map is nil, and most
+	// requests never set anything.
+	if len(b.store) > 0 {
+		clear(b.store)
+	}
 }
 
 func (b *Base) clearRequestSlow() {
@@ -123,7 +127,9 @@ func (b *Base) clearRequestSlow() {
 	clear(b.paramVals[:cap(b.paramVals)])
 	b.paramVals = nil
 	b.queryCache = nil
-	clear(b.store)
+	if len(b.store) > 0 {
+		clear(b.store)
+	}
 	b.deferred = nil
 	b.host, b.rawTail = "", ""
 	b.needsCleanup = false
