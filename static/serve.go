@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/dmitrymomot/go-router/internal/nonseek"
 )
@@ -164,8 +165,18 @@ func (a *Assets) writePath(
 	return a.send(w, r, name, f, info, versioned)
 }
 
+// classifyFileError decides whether an open failure means "no such asset" or
+// something the operator needs to hear about. A path that walks through a
+// regular file, or past any limit the filesystem has, is a request for a file
+// that cannot exist -- not a fault. The Dir backend reports those as ENOTDIR
+// and ENAMETOOLONG, where the embedded one just says ErrNotExist; without this
+// the two backends answered the same URL 500 and 404.
 func classifyFileError(name string, err error) error {
-	if errors.Is(err, fs.ErrNotExist) || !fs.ValidPath(name) && errors.Is(err, fs.ErrInvalid) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist),
+		errors.Is(err, syscall.ENOTDIR),
+		errors.Is(err, syscall.ENAMETOOLONG),
+		!fs.ValidPath(name) && errors.Is(err, fs.ErrInvalid):
 		return errNoFile
 	}
 	return err
