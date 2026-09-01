@@ -25,6 +25,13 @@ func Handler[C router.Context](a *Assets) router.HandlerFunc[C] {
 			res.Header().Set(router.HeaderAllow, allowedMethods)
 			return router.ErrMethodNotAllowed
 		case errors.Is(err, errNoFile):
+			// Config.NotFound was read only by Assets.ServeHTTP, so mounting the
+			// asset set on a router silently answered with the router's own 404
+			// and the configured handler never ran.
+			if a.hasNotFound {
+				a.notFound.ServeHTTP(res, c.Request())
+				return nil
+			}
 			return router.ErrNotFound
 		default:
 			return router.ErrInternalServerError.WithError(err)

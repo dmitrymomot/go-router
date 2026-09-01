@@ -47,6 +47,11 @@ type Assets struct {
 	cache        string
 	spa          bool
 	redirectDir  bool
+
+	// notFound always holds a handler so ServeHTTP can call it; this says
+	// whether the caller chose it. Handler answers with router.ErrNotFound
+	// otherwise, so the router's own 404 keeps its place.
+	hasNotFound bool
 }
 
 func New(cfg Config) (*Assets, error) {
@@ -59,6 +64,7 @@ func New(cfg Config) (*Assets, error) {
 
 	a := &Assets{
 		notFound:     cfg.NotFound,
+		hasNotFound:  cfg.NotFound != nil,
 		isNavigation: cfg.Fallback,
 		prefix:       normalizePrefix(cfg.Prefix),
 		build:        strings.Trim(cfg.Build, "/"),
@@ -75,6 +81,13 @@ func New(cfg Config) (*Assets, error) {
 	}
 	if strings.Contains(a.build, "/") {
 		return nil, fmt.Errorf("static: the build tag %q spans more than one path segment", cfg.Build)
+	}
+	// "." and ".." survive Trim and then read as path segments: URL would hand
+	// out /./app.js, which a browser normalises away, so cutSegment never
+	// matched the tag back and the asset was served no-cache instead of
+	// immutable. The index is checked the same way just below.
+	if a.build == "." || a.build == ".." {
+		return nil, fmt.Errorf("static: the build tag %q is not a path segment", cfg.Build)
 	}
 	if a.index == "." || !fs.ValidPath(a.index) {
 		return nil, fmt.Errorf("static: the index %q is not a file name inside the asset set", cfg.Index)
