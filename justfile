@@ -187,5 +187,8 @@ cross:
         (cd "$dir" && env GOOS=linux GOARCH=386 CGO_ENABLED=0 go test -exec=true -count=1 ./...); \
     done
 
+clean-cache:
+    go clean -cache
+
 # Everything: format, lint, analyze, golangci-lint, test
-check: fmt-check lint analyze golangci test cover vuln actionlint fuzz-smoke cross
+check: clean-cache fmt-check lint analyze golangci test cover vuln actionlint fuzz-smoke cross
