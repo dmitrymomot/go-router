@@ -576,10 +576,9 @@ func TestDynamicHostPrecedenceIsStructural(t *testing.T) {
 func TestEquivalentDynamicHostPatternsAreRejected(t *testing.T) {
 	r := newTestRouter()
 	r.Host("{tenant}.example.com", func(h *Router[*tctx]) { h.GET("/a", echoHost) })
-	r.Host("{account}.example.com", func(h *Router[*tctx]) { h.GET("/b", echoHost) })
-	if err := r.Build(); err == nil || !strings.Contains(err.Error(), "same match shape") {
-		t.Fatalf("Build() = %v, want an equivalent-host-pattern error", err)
-	}
+	mustPanicContaining(t, "same match shape", func() {
+		r.Host("{account}.example.com", func(h *Router[*tctx]) { h.GET("/b", echoHost) })
+	})
 }
 
 func TestMalformedAuthoritiesNeverMatchHostScopes(t *testing.T) {

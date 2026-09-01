@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -1239,16 +1238,12 @@ func TestBindReadsTheQueryOfAQueryRequest(t *testing.T) {
 	}
 }
 
-func TestBuildReportsWhatTheRouterWouldPanicOn(t *testing.T) {
+func TestRegistrationPanicsOnABadTable(t *testing.T) {
 	tests := []struct {
 		name  string
 		build func(*Router[*tctx])
 		want  string
 	}{
-		{"a valid table", func(r *Router[*tctx]) {
-			r.GET("/users/{id}", echoRoute)
-			r.POST("/users", echoRoute)
-		}, ""},
 		{"a duplicate route", func(r *Router[*tctx]) {
 			r.GET("/a", echoRoute)
 			r.GET("/a", echoRoute)
@@ -1256,6 +1251,9 @@ func TestBuildReportsWhatTheRouterWouldPanicOn(t *testing.T) {
 		{"a malformed pattern", func(r *Router[*tctx]) {
 			r.GET("/files/{path...}/x", echoRoute)
 		}, "catch-all must be the last segment"},
+		{"an unbalanced brace", func(r *Router[*tctx]) {
+			r.GET("/users/{id", echoRoute)
+		}, "unbalanced"},
 		{"conflicting parameter names", func(r *Router[*tctx]) {
 			r.GET("/users/{id}", echoRoute)
 			r.GET("/users/{uid}/posts", echoRoute)
@@ -1267,27 +1265,26 @@ func TestBuildReportsWhatTheRouterWouldPanicOn(t *testing.T) {
 			r.Name("dup").GET("/a", echoRoute)
 			r.Name("dup").GET("/b", echoRoute)
 		}, `the route name "dup" names both`},
+		{"a route on a mounted subrouter", func(r *Router[*tctx]) {
+			sub := newTestRouter()
+			sub.GET("/a", echoRoute)
+			r.Mount("/sub", sub)
+			sub.GET("/b", echoRoute)
+		}, "after the router started serving"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newTestRouter()
-			tc.build(r)
-
-			err := r.Build()
-			switch {
-			case tc.want == "" && err != nil:
-				t.Fatalf("Build() = %v, want nil", err)
-			case tc.want == "":
-				return
-			case err == nil:
-				t.Fatalf("Build() = nil, want an error that mentions %q", tc.want)
-			case !strings.Contains(err.Error(), tc.want):
-				t.Errorf("Build() = %v, want an error that mentions %q", err, tc.want)
-			}
-			if again := r.Build(); again == nil || again.Error() != err.Error() {
-				t.Errorf("the second Build() = %v, want the first one, %v", again, err)
-			}
+			mustPanicContaining(t, tc.want, func() { tc.build(newTestRouter()) })
 		})
+	}
+}
+
+func TestAValidTableRegistersWithoutPanicking(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/users/{id}", echoRoute)
+	r.POST("/users", echoRoute)
+	if rec := do(r, http.MethodGet, "/users/7"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 }
 
@@ -1304,23 +1301,6 @@ func TestBuildCompilesTheTableItself(t *testing.T) {
 		}
 	}()
 	r.GET("/b", echoRoute)
-}
-
-func TestServeHTTPPanicsOnATableThatBuildRejects(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/a", echoRoute)
-	r.GET("/a", echoRoute)
-
-	defer func() {
-		got := recover()
-		if got == nil {
-			t.Fatal("no panic, want the conflict")
-		}
-		if msg := fmt.Sprint(got); !strings.Contains(msg, "already registered") {
-			t.Errorf("panic = %q, want the conflict", msg)
-		}
-	}()
-	do(r, http.MethodGet, "/a")
 }
 
 type record struct {
@@ -2162,59 +2142,6 @@ func TestMountedRouterFreezesWithParent(t *testing.T) {
 	first.Mount("/late", newTestRouter())
 }
 
-func TestMiddlewareFactoryCanBuildMountedRouter(t *testing.T) {
-	tests := []struct {
-		name    string
-		reenter func(*Router[*tctx]) error
-	}{
-		{"Build", func(r *Router[*tctx]) error { return r.Build() }},
-		{"Routes", func(r *Router[*tctx]) error { r.Routes(); return nil }},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			sub := newTestRouter()
-			sub.GET("/ready", echoRoute)
-			r := newTestRouter()
-			entered := make(chan struct{})
-			release := make(chan struct{})
-			var once sync.Once
-			var reentryErr error
-			r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
-				once.Do(func() {
-					close(entered)
-					<-release
-					reentryErr = tc.reenter(sub)
-				})
-				return next
-			})
-			r.Mount("/sub", sub)
-
-			done := make(chan error, 1)
-			go func() { done <- r.Build() }()
-			select {
-			case <-entered:
-			case <-time.After(2 * time.Second):
-				t.Fatal("middleware factory was not entered")
-			}
-			close(release)
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Fatalf("Build() = %v", err)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("Build() deadlocked during mounted-router re-entry")
-			}
-			if reentryErr != nil {
-				t.Fatalf("mounted router %s = %v", tc.name, reentryErr)
-			}
-			if got := do(r, http.MethodGet, "/sub/ready").Code; got != http.StatusOK {
-				t.Errorf("status = %d, want 200", got)
-			}
-		})
-	}
-}
-
 func TestParentsSharingAMountBuildConcurrently(t *testing.T) {
 	sub := newTestRouter()
 	sub.GET("/ready", echoRoute)
@@ -2250,4 +2177,22 @@ func TestJSONOptionsClonesCallerSlice(t *testing.T) {
 	if len(r.ropts.jsonOpts) != 1 || r.ropts.jsonOpts[0] == nil {
 		t.Fatal("JSONOptions retained the caller's slice backing array")
 	}
+}
+
+func mustPanicContaining(t *testing.T, want string, fn func()) {
+	t.Helper()
+	defer func() {
+		t.Helper()
+		switch v := recover().(type) {
+		case nil:
+			t.Errorf("no panic, want one that reads %q", want)
+		case string:
+			if !strings.Contains(v, want) {
+				t.Errorf("panic = %q, want one that holds %q", v, want)
+			}
+		default:
+			t.Errorf("panic = %v of type %T, want a string", v, v)
+		}
+	}()
+	fn()
 }

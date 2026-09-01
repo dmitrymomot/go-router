@@ -3,7 +3,6 @@ package router
 import (
 	"net/http"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -231,9 +230,5 @@ func TestAnySharesANodeWithAnExplicitMethod(t *testing.T) {
 func TestDuplicateAnyConflicts(t *testing.T) {
 	r := newTestRouter()
 	r.Any("/x", echoRoute)
-	r.Any("/x", echoRoute)
-
-	if err := r.Build(); err == nil || !strings.Contains(err.Error(), "already registered") {
-		t.Errorf("Build() = %v, want the clash of two Any routes", err)
-	}
+	mustPanicContaining(t, "already registered", func() { r.Any("/x", echoRoute) })
 }

@@ -142,14 +142,102 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 	for s := r; s != nil; s = s.owner {
 		s.hasRoutes = true
 	}
-	r.regs = append(r.regs, registration[C]{
+	reg := registration[C]{
 		method:  method,
 		pattern: pattern,
 		handler: h,
 		mws:     slices.Clone(mws),
 		name:    r.name,
 		meta:    r.meta,
-	})
+	}
+	r.regs = append(r.regs, reg)
+	r.install(reg)
+}
+
+// install puts the route in its trie now, so a malformed pattern or a conflict
+// panics at the line that wrote it rather than at the first request.
+func (r *Router[C]) install(reg registration[C]) {
+	full := joinPattern(r.scopePrefix(), reg.pattern)
+	handler := chain(reg.handler, concatMiddleware(r.scopeMiddleware(), reg.mws))
+
+	root := r.top()
+	entries := r.hostEntries()
+	if len(entries) == 0 {
+		root.anyHostRoutes = true
+		if err := root.tree.insert(reg.method, full, nil, handler); err != nil {
+			panic(err.Error())
+		}
+		r.record(reg, nil, full)
+		return
+	}
+	for _, e := range entries {
+		if err := e.tree.insert(reg.method, full, e.names, handler); err != nil {
+			panic(err.Error())
+		}
+		r.record(reg, e, full)
+	}
+}
+
+func (r *Router[C]) record(reg registration[C], e *hostEntry[C], full string) {
+	if err := r.top().describe(reg, e, normalizePattern(full)); err != nil {
+		panic(err.Error())
+	}
+}
+
+// scopePrefix joins the prefixes of every scope between the root and this one.
+func (r *Router[C]) scopePrefix() string {
+	prefix := ""
+	for _, s := range slices.Backward(r.lineage()) {
+		prefix = joinPattern(prefix, s.prefix)
+	}
+	return prefix
+}
+
+func (r *Router[C]) scopeMiddleware() []Middleware[C] {
+	var mws []Middleware[C]
+	for _, s := range slices.Backward(r.lineage()) {
+		mws = concatMiddleware(mws, s.mws)
+	}
+	return mws
+}
+
+// lineage lists this scope and its owners, nearest first.
+func (r *Router[C]) lineage() []*Router[C] {
+	var out []*Router[C]
+	for s := r; s != nil; s = s.owner {
+		out = append(out, s)
+	}
+	return out
+}
+
+// top is the router that owns the trie this scope registers into. It is the
+// root until Mount hands the scope to a parent, and the parent's root after.
+func (r *Router[C]) top() *Router[C] {
+	s := r
+	for s.owner != nil {
+		s = s.owner
+	}
+	return s
+}
+
+// hostEntries returns the entries of the nearest host scope, or none when the
+// route answers on every host.
+func (r *Router[C]) hostEntries() []*hostEntry[C] {
+	for s := r; s != nil; s = s.owner {
+		if len(s.hosts) == 0 {
+			continue
+		}
+		out := make([]*hostEntry[C], 0, len(s.hosts))
+		for _, spec := range s.hosts {
+			e, err := r.top().hostEntry(spec)
+			if err != nil {
+				panic(err.Error())
+			}
+			out = append(out, e)
+		}
+		return out
+	}
+	return nil
 }
 
 func (r *Router[C]) GET(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
@@ -308,6 +396,11 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	}
 	c := r.newChild("", nil)
 	c.hosts = specs
+	for _, spec := range specs {
+		if _, err := r.root.hostEntry(spec); err != nil {
+			panic(err.Error())
+		}
+	}
 	if fn != nil {
 		fn(c)
 	}
@@ -332,8 +425,25 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")
 	}
+	if slices.Contains(r.lineage(), sub) {
+		panic("router: a router is mounted inside itself")
+	}
 	shim := r.newChild(prefix, nil)
 	shim.children = append(shim.children, sub)
+	// The subtree registers into this parent from now on, so replay what it
+	// already holds and close it: a later route would have nowhere to go.
+	sub.owner = shim
+	sub.installSubtree()
+	freezeRouterGraph(sub, make(map[*Router[C]]bool))
+}
+
+func (r *Router[C]) installSubtree() {
+	for _, reg := range r.regs {
+		r.install(reg)
+	}
+	for _, ch := range r.children {
+		ch.installSubtree()
+	}
 }
 
 func (r *Router[C]) MountRouter[D Context](prefix string, sub *Router[D]) {
@@ -505,11 +615,6 @@ func (r *Router[C]) buildErr() error {
 		p := joinPattern(prefix, rt.prefix)
 		m := concatMiddleware(mws, rt.mws)
 
-		handlers := make([]HandlerFunc[C], len(rt.regs))
-		for i, reg := range rt.regs {
-			handlers[i] = chain(reg.handler, concatMiddleware(m, reg.mws))
-		}
-
 		rounds := max(len(rt.hosts), 1)
 		for i := range rounds {
 			e := host
@@ -525,13 +630,6 @@ func (r *Router[C]) buildErr() error {
 				if !e.haveMWs {
 					e.mws, e.haveMWs = m, true
 				}
-			}
-
-			tree, names := r.tree, []string(nil)
-			if e != nil {
-				tree, names = e.tree, e.names
-			} else if len(rt.regs) > 0 {
-				r.anyHostRoutes = true
 			}
 
 			own := inherited
@@ -571,15 +669,6 @@ func (r *Router[C]) buildErr() error {
 				}
 			}
 
-			for i, reg := range rt.regs {
-				full := joinPattern(p, reg.pattern)
-				if err := tree.insert(reg.method, full, names, handlers[i]); err != nil {
-					return err
-				}
-				if err := r.describe(reg, e, normalizePattern(full)); err != nil {
-					return err
-				}
-			}
 			for _, ch := range rt.children {
 				if err := walk(ch, p, m, e, depth+1, own); err != nil {
 					return err

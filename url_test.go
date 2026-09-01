@@ -160,16 +160,6 @@ func TestMustURLPanicsOnAMistake(t *testing.T) {
 	}
 }
 
-func TestURLReportsABrokenRouteTable(t *testing.T) {
-	r := newTestRouter()
-	r.Name("dup").GET("/a", echoRoute)
-	r.GET("/a", echoRoute)
-
-	if _, err := r.URL("dup", nil); err == nil || !strings.Contains(err.Error(), "already registered") {
-		t.Errorf("URL = %v, want the conflict that Build reports", err)
-	}
-}
-
 func TestURLChecksRegexesAgainstDecodedValues(t *testing.T) {
 	r := newTestRouter()
 	r.Name("file").GET("/files/{name:[a-z]+}", echoRoute)
