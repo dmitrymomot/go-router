@@ -76,6 +76,7 @@ type Router[C Context] struct {
 	children         []*Router[C]
 	owner            *Router[C]
 	hasRoutes        bool
+	closed           bool
 	name             string
 	meta             any
 	tagged           bool
@@ -139,6 +140,7 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 	if r.root.started.Load() {
 		panic("router: cannot register " + method + " " + pattern + " after the router started serving")
 	}
+	r.mustBeOpen("register " + method + " " + pattern)
 	if method == "" {
 		panic("router: Handle needs a method")
 	}
@@ -334,6 +336,7 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 	if r.root.started.Load() {
 		panic("router: cannot create a scope after the router started serving")
 	}
+	r.mustBeOpen("open a scope")
 	if _, _, err := parsePattern(prefix); err != nil {
 		panic(err.Error())
 	}
@@ -456,17 +459,72 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")
 	}
+	if sub.root != sub {
+		panic("router: Mount needs a top-level router; a scope of another router cannot be mounted, " +
+			"because closing it would close the router that owns it")
+	}
 	if slices.Contains(r.lineage(), sub) {
 		panic("router: a router is mounted inside itself")
 	}
+	sub.mustNotCarryRootOnlySettings()
+
 	shim := r.newChild(prefix, nil)
 	shim.children = append(shim.children, sub)
 	// The subtree registers into this parent from now on, so replay what it
 	// already holds and close it: a later route would have nowhere to go.
 	sub.owner = shim
+	if sub.hasRoutes {
+		// install does not mark the owners, so a Use above the mount would pass
+		// its guard and then skip every route the subtree brought with it.
+		for s := shim; s != nil; s = s.owner {
+			s.hasRoutes = true
+		}
+	}
 	sub.installSubtree()
-	freezeRouterGraph(sub, make(map[*Router[C]]bool))
+	closeSubtree(sub)
 	r.settingChanged()
+}
+
+// closeSubtree shuts a mounted subtree to further registration. Its routes are
+// already replayed into the parent, so one added afterwards would land in a
+// trie nobody serves. This is per-scope on purpose: the sub keeps its own root
+// pointer, so that one router can be mounted into two parents.
+func closeSubtree[C Context](r *Router[C]) {
+	r.closed = true
+	for _, ch := range r.children {
+		closeSubtree(ch)
+	}
+}
+
+// mustNotCarryRootOnlySettings refuses a mount that would silently lose
+// something. Fallbacks move onto the shim, but these live on the root the
+// request path actually reads, and there is one of those per served router.
+func (r *Router[C]) mustNotCarryRootOnlySettings() {
+	lost := ""
+	switch {
+	case len(r.preMws) > 0:
+		lost = "Pre middleware"
+	case r.observer != nil:
+		lost = "an observer"
+	case !r.autoOptions:
+		lost = "HandleOPTIONS(false)"
+	case r.redirectSlash:
+		lost = "RedirectTrailingSlash(true)"
+	case r.ropts.maxBody != DefaultMaxBodyBytes:
+		lost = "MaxBodyBytes"
+	case r.ropts.maxMultipart != 0:
+		lost = "MaxMultipartMemory"
+	case r.ropts.strictBind:
+		lost = "StrictBind"
+	case r.ropts.logger != nil:
+		lost = "a logger"
+	case len(r.ropts.jsonOpts) > 0:
+		lost = "JSONOptions"
+	default:
+		return
+	}
+	panic("router: the mounted router carries " + lost +
+		", which belongs to the router that serves; set it on the parent instead")
 }
 
 func (r *Router[C]) installSubtree() {
@@ -525,6 +583,15 @@ func stripMountPrefix(r *http.Request, tail string, escaped bool) *http.Request 
 func (r *Router[C]) mustNotBeServing(what string) {
 	if r.root.started.Load() {
 		panic("router: cannot change " + what + " after the router started serving")
+	}
+	r.mustBeOpen("change " + what)
+}
+
+// mustBeOpen rejects work on a subtree that Mount already replayed and closed.
+// Anything added now would sit in a router nobody serves, silently.
+func (r *Router[C]) mustBeOpen(what string) {
+	if r.closed {
+		panic("router: cannot " + what + " on a mounted router; do it before Mount")
 	}
 }
 
@@ -702,8 +769,6 @@ func (r *Router[C]) refresh() {
 
 			own := inherited
 			switch {
-			case rt != r && rt.root == rt:
-
 			// Only the router itself and a host scope own the root fallbacks.
 			// A prefix-less child cannot: it covers everything, so its handler
 			// would displace the root's for the whole tree. mustOwnFallbacks

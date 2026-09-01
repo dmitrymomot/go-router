@@ -1270,7 +1270,7 @@ func TestRegistrationPanicsOnABadTable(t *testing.T) {
 			sub.GET("/a", echoRoute)
 			r.Mount("/sub", sub)
 			sub.GET("/b", echoRoute)
-		}, "after the router started serving"},
+		}, "on a mounted router"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2436,5 +2436,97 @@ func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
 		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
 			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)
 		}
+	}
+}
+
+// install does not run through handle, so the owners of a mounted subtree used
+// to keep hasRoutes false. Use then passed its guard and baked itself into
+// nothing: the mounted routes had already been chained without it.
+func TestUseAfterMountIsRefused(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/ping", echoRoute)
+	r := newTestRouter()
+	r.Mount("/api", sub)
+	mustPanicContaining(t, "Use must come before the routes of a scope", func() {
+		r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+	})
+}
+
+// A mounted router's fallbacks describe the region it was mounted at, so they
+// answer there and leave the rest of the tree to the parent.
+func TestMountKeepsTheFallbacksOfTheMountedRouter(t *testing.T) {
+	api := newTestRouter()
+	api.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+	api.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "api err") })
+	api.GET("/boom", func(*tctx) error { return ErrInternalServerError })
+
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.Mount("/api", api)
+	r.GET("/outside", func(*tctx) error { return ErrInternalServerError })
+
+	for _, tc := range []struct{ path, want string }{
+		{"/api/nope", "api 404"},
+		{"/api/boom", "api err"},
+		{"/nope", "root 404"},
+	} {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+	if got := do(r, http.MethodGet, "/outside").Code; got != http.StatusInternalServerError {
+		t.Errorf("GET /outside outside the mount = %d, want 500", got)
+	}
+}
+
+// These live on the router the request path reads, and there is one of those
+// per served router, so a mount would drop them without a word.
+func TestMountRefusesARouterCarryingRootOnlySettings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		set  func(*Router[*tctx])
+	}{
+		{"Pre", "Pre middleware", func(s *Router[*tctx]) {
+			s.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+		}},
+		{"Observe", "an observer", func(s *Router[*tctx]) {
+			s.Observe(func(Context, int, int64, time.Duration, error) {})
+		}},
+		{"HandleOPTIONS", "HandleOPTIONS(false)", func(s *Router[*tctx]) { s.HandleOPTIONS(false) }},
+		{"RedirectTrailingSlash", "RedirectTrailingSlash(true)", func(s *Router[*tctx]) { s.RedirectTrailingSlash(true) }},
+		{"MaxBodyBytes", "MaxBodyBytes", func(s *Router[*tctx]) { s.MaxBodyBytes(1 << 10) }},
+		{"MaxMultipartMemory", "MaxMultipartMemory", func(s *Router[*tctx]) { s.MaxMultipartMemory(1 << 10) }},
+		{"StrictBind", "StrictBind", func(s *Router[*tctx]) { s.StrictBind(true) }},
+		{"JSONOptions", "JSONOptions", func(s *Router[*tctx]) { s.JSONOptions(json.Deterministic(true)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := newTestRouter()
+			sub.GET("/a", echoRoute)
+			tc.set(sub)
+			mustPanicContaining(t, "the mounted router carries "+tc.want, func() {
+				newTestRouter().Mount("/api", sub)
+			})
+		})
+	}
+}
+
+// Mount repoints the owner of what it is given. Handed a scope, it would tear
+// that scope out of the router that owns it.
+func TestMountRefusesAScopeOfAnotherRouter(t *testing.T) {
+	other := newTestRouter()
+	var scope *Router[*tctx]
+	other.Group(func(g *Router[*tctx]) {
+		scope = g
+		g.GET("/a", echoRoute)
+	})
+
+	mustPanicContaining(t, "Mount needs a top-level router", func() {
+		newTestRouter().Mount("/m", scope)
+	})
+	// The router that owns the scope is untouched and still open.
+	other.GET("/late", echoRoute)
+	if got := do(other, http.MethodGet, "/late").Code; got != http.StatusOK {
+		t.Errorf("GET /late on the owning router = %d, want 200", got)
 	}
 }
