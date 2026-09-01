@@ -431,14 +431,12 @@ func BenchmarkMemoryStoreAtCapacityUniqueIDs(b *testing.B) {
 		}
 	}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		allowed, _, err := s.Allow(nil, strconv.Itoa(i+maxEntries))
 		if err != nil || allowed {
 			b.Fatalf("request %d: allowed = %t, err = %v", i, allowed, err)
 		}
 	}
-	b.StopTimer()
 	if got := memoryStoreSize(s); got != maxEntries {
 		b.Fatalf("the store holds %d buckets, want %d", got, maxEntries)
 	}
