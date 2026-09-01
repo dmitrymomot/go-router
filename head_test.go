@@ -26,10 +26,10 @@ import (
 //	A HEAD reply carries the status and the headers its GET would carry, and
 //	no body.
 //
-// The gzip middleware and the asset server answer the same rule in their own
-// packages, each with its own copy of assertHEADMatchesGET below: they cannot
-// import this one, and routertest cannot hold the helper (golangci-lint v2.13.2
-// crashes in SA4023 as soon as that package gains a function).
+// routertest.AssertHEADMatchesGET spells the same rule for the packages that
+// cannot import this one, and the gzip middleware and the asset server answer
+// it there. assertHEADMatchesGET below is that check again, because routertest
+// imports this package.
 type headCase struct {
 	name   string
 	setup  func(t *testing.T, r *Router[*tctx])

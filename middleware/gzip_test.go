@@ -5,10 +5,8 @@ import (
 	"compress/gzip"
 	"errors"
 	"io"
-	"maps"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 
@@ -594,28 +592,9 @@ func TestGzipCommitsASwitchingProtocols(t *testing.T) {
 	}
 }
 
-// assertHEADMatchesGET is the rule stated in the root package's head_test.go: a
-// HEAD reply carries the status and the headers its GET would carry, and no
-// body. Each package keeps its own copy, because routertest cannot hold one.
-func assertHEADMatchesGET(t *testing.T, h http.Handler, target string, opts ...routertest.RequestOption) {
-	t.Helper()
-	get := routertest.Do(h, http.MethodGet, target, opts...)
-	head := routertest.Do(h, http.MethodHead, target, opts...)
-
-	if head.StatusCode != get.StatusCode {
-		t.Errorf("HEAD %s: status = %d, want the %d of the GET", target, head.StatusCode, get.StatusCode)
-	}
-	if len(head.Body) != 0 {
-		t.Errorf("HEAD %s: body = %q, want none", target, head.Body)
-	}
-	if !maps.EqualFunc(head.Header, get.Header, slices.Equal) {
-		t.Errorf("HEAD %s: headers = %v, want the %v of the GET", target, head.Header, get.Header)
-	}
-}
-
 // The nil gzip.Writer crash lived here: HEAD stopped being short-circuited, so
 // a handler that flushed reached a writer that had never been opened. The rule
-// is assertHEADMatchesGET's — the reply carries the headers of the
+// is routertest.AssertHEADMatchesGET's — the reply carries the headers of the
 // GET, compressed ones included, and no body.
 func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 	tests := []struct {
@@ -658,7 +637,7 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 				t.Fatalf("the GET sent Content-Encoding %q, want %q; this case no longer reaches the path it names", got, tt.encoding)
 			}
 
-			assertHEADMatchesGET(t, r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
+			routertest.AssertHEADMatchesGET(t, r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
 			if failed != nil {
 				t.Errorf("the request failed: %v", failed)
 			}
