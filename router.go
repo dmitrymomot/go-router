@@ -227,7 +227,7 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 	if r.root.started.Load() {
 		panic("router: cannot create a scope after the router started serving")
 	}
-	c := &Router[C]{root: r.root, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
+	c := &Router[C]{root: r.root, owner: r, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
 	r.children = append(r.children, c)
 	return c
 }
@@ -249,9 +249,7 @@ func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 }
 
 func (r *Router[C]) With(mws ...Middleware[C]) *Router[C] {
-	c := r.newChild("", slices.Clone(mws))
-	c.owner = r
-	return c
+	return r.newChild("", slices.Clone(mws))
 }
 
 func (r *Router[C]) Pre(mws ...Middleware[C]) {
@@ -286,7 +284,7 @@ func (r *Router[C]) tag() *Router[C] {
 		return r
 	}
 	c := r.newChild("", nil)
-	c.tagged, c.owner = true, r
+	c.tagged = true
 	return c
 }
 

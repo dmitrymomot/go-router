@@ -1776,6 +1776,8 @@ func TestUseAfterATaggedRoutePanics(t *testing.T) {
 		"Meta":  func(r *Router[*tctx]) { r.Meta("op").GET("/u", echoRoute) },
 		"With":  func(r *Router[*tctx]) { r.With().GET("/u", echoRoute) },
 		"plain": func(r *Router[*tctx]) { r.GET("/u", echoRoute) },
+		"Group": func(r *Router[*tctx]) { r.Group(func(g *Router[*tctx]) { g.GET("/u", echoRoute) }) },
+		"Route": func(r *Router[*tctx]) { r.Route("/g", func(g *Router[*tctx]) { g.GET("/u", echoRoute) }) },
 	}
 	for name, add := range register {
 		t.Run(name, func(t *testing.T) {
@@ -1791,10 +1793,10 @@ func TestUseAfterATaggedRoutePanics(t *testing.T) {
 	}
 }
 
-func TestUseAfterAGroupIsAllowed(t *testing.T) {
+func TestUseBeforeAGroupIsAllowed(t *testing.T) {
 	r := newTestRouter()
-	r.Group(func(g *Router[*tctx]) { g.GET("/a", echoRoute) })
 	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+	r.Group(func(g *Router[*tctx]) { g.GET("/a", echoRoute) })
 	if err := r.Build(); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
