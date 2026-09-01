@@ -64,6 +64,11 @@ type Base struct {
 	pathEscaped   bool
 	errorRouted   bool
 	needsCleanup  bool
+
+	// Routing matches the path with its trailing slash trimmed, so a mounted
+	// handler has to be told the slash was there. Without it every directory
+	// URL reaches the handler one form short of what the client sent.
+	tailSlash bool
 }
 
 type routerOpts struct {
@@ -108,7 +113,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
 	b.hostIdx = -1
-	b.pathEscaped, b.errorRouted = false, false
+	b.pathEscaped, b.errorRouted, b.tailSlash = false, false, false
 	b.queryCache = nil
 	b.deferred = nil
 	// clear on a map is a runtime call even when the map is nil, and most

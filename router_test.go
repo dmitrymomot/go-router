@@ -1,6 +1,8 @@
 package router
 
 import (
+	"os"
+	"path/filepath"
 	"context"
 	"encoding/json/v2"
 	"errors"
@@ -2528,5 +2530,43 @@ func TestMountRefusesAScopeOfAnotherRouter(t *testing.T) {
 	other.GET("/late", echoRoute)
 	if got := do(other, http.MethodGet, "/late").Code; got != http.StatusOK {
 		t.Errorf("GET /late on the owning router = %d, want 200", got)
+	}
+}
+
+// Routing trims the trailing slash before it matches, so the tail handed to a
+// mounted handler used to be one form short of what the client sent. A
+// FileServer answered a directory request with a relative redirect, which the
+// client resolved against the un-trimmed URL and bounced back here.
+func TestMountedHandlerKeepsTheTrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var seen string
+	r := newTestRouter()
+	r.MountHandler("/files", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		seen = req.URL.Path
+		http.FileServer(http.Dir(dir)).ServeHTTP(w, req)
+	}))
+
+	rec := do(r, http.MethodGet, "/files/sub/")
+	if seen != "/sub/" {
+		t.Errorf("path seen by the mounted handler = %q, want %q", seen, "/sub/")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /files/sub/ = %d, want 200 (Location %q)", rec.Code, rec.Header().Get("Location"))
+	}
+	if got := rec.Body.String(); got != "<h1>hi</h1>" {
+		t.Errorf("body = %q, want the index", got)
+	}
+
+	// A request without the slash still arrives without it.
+	do(r, http.MethodGet, "/files/sub/index.html")
+	if seen != "/sub/index.html" {
+		t.Errorf("path without a trailing slash = %q, want %q", seen, "/sub/index.html")
 	}
 }

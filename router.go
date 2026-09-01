@@ -550,7 +550,7 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 	prefix = normalizePattern(prefix)
 	handler := func(c C) error {
 		b := c.base()
-		req := stripMountPrefix(b.req, b.rawTail, b.pathEscaped)
+		req := stripMountPrefix(b.req, b.rawTail, b.pathEscaped, b.tailSlash)
 		b.SetRequest(req)
 		h.ServeHTTP(b.res, req)
 		return nil
@@ -559,7 +559,7 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 	r.handle(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil)
 }
 
-func stripMountPrefix(r *http.Request, tail string, escaped bool) *http.Request {
+func stripMountPrefix(r *http.Request, tail string, escaped, tailSlash bool) *http.Request {
 	r2 := new(http.Request)
 	*r2 = *r
 	u := new(url.URL)
@@ -570,7 +570,13 @@ func stripMountPrefix(r *http.Request, tail string, escaped bool) *http.Request 
 		u.Path, u.RawPath = "/", ""
 		return r2
 	}
+	// The router matched without the trailing slash; the handler below the
+	// mount is a stranger to that and needs the path the client sent, or it
+	// redirects to a directory URL that routes back through here.
 	rest := "/" + tail
+	if tailSlash {
+		rest += "/"
+	}
 	u.Path, u.RawPath = rest, ""
 	if escaped {
 		if unescaped, err := url.PathUnescape(rest); err == nil && unescaped != rest {
@@ -1212,6 +1218,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 	for len(trimmed) > 1 && trimmed[len(trimmed)-1] == '/' {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
+	b.tailSlash = len(trimmed) != len(path)
 
 	var (
 		host     *hostEntry[C]
