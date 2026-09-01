@@ -94,15 +94,16 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	if newContext == nil {
 		panic("router: New needs a context factory")
 	}
+	// The three fallback fields stay nil until a setter fills one, so that
+	// "did the caller choose this?" has an answer everywhere. refresh
+	// substitutes the defaults; Mount needs the distinction to know which
+	// handlers to carry over.
 	r := &Router[C]{
-		newCtx:           newContext,
-		notFound:         defaultNotFound[C],
-		methodNotAllowed: defaultMethodNotAllowed[C],
-		errHandler:       DefaultErrorHandler[C],
-		autoOptions:      true,
-		tree:             new(node[C]),
-		allowCache:       map[*node[C]]string{},
-		ropts:            &routerOpts{maxBody: DefaultMaxBodyBytes},
+		newCtx:      newContext,
+		autoOptions: true,
+		tree:        new(node[C]),
+		allowCache:  map[*node[C]]string{},
+		ropts:       &routerOpts{maxBody: DefaultMaxBodyBytes},
 	}
 	r.root = r
 	// A router that never calls a setter still has to answer, so the fallbacks
@@ -653,9 +654,21 @@ func (r *Router[C]) refresh() {
 			e.errHandler, e.rawNotFound, e.rawNotAllowed = nil, nil, nil
 		}
 	}
-	rootNotFound := r.notFound
-	rootNotAllowed := r.methodNotAllowed
-	rootErrHandler := r.errHandler
+	// A router that never calls a setter still has to answer, so a nil field
+	// reads as the package default here rather than at construction: elsewhere
+	// nil is what tells Mount and refresh that nobody chose a handler.
+	rootNotFound := HandlerFunc[C](defaultNotFound[C])
+	if r.notFound != nil {
+		rootNotFound = r.notFound
+	}
+	rootNotAllowed := HandlerFunc[C](defaultMethodNotAllowed[C])
+	if r.methodNotAllowed != nil {
+		rootNotAllowed = r.methodNotAllowed
+	}
+	rootErrHandler := ErrorHandlerFunc[C](DefaultErrorHandler[C])
+	if r.errHandler != nil {
+		rootErrHandler = r.errHandler
+	}
 	r.notFoundChain = chain(rootNotFound, r.mws)
 	r.notAllowedChain = chain(rootNotAllowed, r.mws)
 	r.optionsChain = chain(autoOptions[C], r.mws)
