@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 
 	"github.com/dmitrymomot/go-router"
 )
@@ -74,7 +74,7 @@ func newChi() http.Handler {
 func newEcho() http.Handler {
 	e := echo.New()
 	for _, rt := range routes {
-		e.GET(rt.echo, func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+		e.GET(rt.echo, func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 	}
 	return e
 }

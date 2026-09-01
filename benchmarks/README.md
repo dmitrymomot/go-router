@@ -1,8 +1,8 @@
 # Router benchmarks
 
-These results were recorded on 2026-08-28 from the worktree based on commit
-`655139c3f9b9`. The worktree included the security and correctness changes in
-the current branch.
+These results were recorded on 2026-09-01 from commit `f5149f8`, after the
+router moved its validation to registration and cut the inline parameter array
+from eight to four.
 
 | Environment | Value |
 |---|---|
@@ -35,34 +35,40 @@ cache-permission differences and do not affect the benchmarked code.
 
 | Case | Router | Median ns/op | Range ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|---:|
-| Static | go-router | 108.6 | 97.1–592.5 | 384 | 1 |
-| Static | go-router pooled | 48.1 | 47.3–51.8 | 0 | 0 |
-| Static | chi 5.3.2 | 146.9 | 137.7–364.5 | 368 | 2 |
-| Static | echo 4.15.4 | 33.4 | 32.9–47.2 | 0 | 0 |
-| Static | `http.ServeMux` | 102.6 | 101.4–107.0 | 0 | 0 |
-| Parameter | go-router | 131.7 | 101.4–640.4 | 384 | 1 |
-| Parameter | go-router pooled | 54.3 | 53.2–93.4 | 0 | 0 |
-| Parameter | chi 5.3.2 | 243.8 | 241.0–249.8 | 704 | 4 |
-| Parameter | echo 4.15.4 | 40.4 | 39.5–42.1 | 0 | 0 |
-| Parameter | `http.ServeMux` | 106.2 | 104.9–120.1 | 16 | 1 |
-| Deep | go-router | 131.9 | 130.3–142.9 | 384 | 1 |
-| Deep | go-router pooled | 81.8 | 81.2–83.0 | 0 | 0 |
-| Deep | chi 5.3.2 | 347.6 | 345.4–353.8 | 704 | 4 |
-| Deep | echo 4.15.4 | 68.3 | 67.8–68.7 | 0 | 0 |
-| Deep | `http.ServeMux` | 276.7 | 272.6–279.2 | 112 | 3 |
+| Static | go-router | 86.6 | 86.1–87.2 | 320 | 1 |
+| Static | go-router pooled | 57.0 | 56.8–57.5 | 0 | 0 |
+| Static | chi 5.3.2 | 121.1 | 120.1–121.5 | 368 | 2 |
+| Static | echo 5.3.1 | 35.4 | 35.3–35.5 | 0 | 0 |
+| Static | `http.ServeMux` | 98.0 | 97.7–99.1 | 0 | 0 |
+| Parameter | go-router | 93.0 | 92.5–94.0 | 320 | 1 |
+| Parameter | go-router pooled | 62.3 | 62.1–64.2 | 0 | 0 |
+| Parameter | chi 5.3.2 | 214.8 | 212.2–217.4 | 704 | 4 |
+| Parameter | echo 5.3.1 | 43.9 | 43.8–44.2 | 0 | 0 |
+| Parameter | `http.ServeMux` | 100.4 | 99.9–101.9 | 16 | 1 |
+| Deep | go-router | 135.6 | 134.9–137.4 | 320 | 1 |
+| Deep | go-router pooled | 101.1 | 100.7–102.1 | 0 | 0 |
+| Deep | chi 5.3.2 | 312.6 | 308.2–314.4 | 704 | 4 |
+| Deep | echo 5.3.1 | 71.4 | 71.0–72.9 | 0 | 0 |
+| Deep | `http.ServeMux` | 262.7 | 260.9–265.9 | 112 | 3 |
 
-Transient scheduler load produced several wide ranges near the start of the
-comparison run. No sample was discarded. The medians summarize that finite run;
-use the commands above on the deployment-class machine that matters to you.
+This run was quiet: every range is within 2% of its median. Do not read the
+table against the previous recording, which ran under transient scheduler load
+and reported ranges as wide as 97.1–592.5 ns. Numbers from two sessions are not
+comparable. Measured within one session against the pre-refactor commit, the
+unpooled cases moved -3.3%, -4.4% and -2.4%, and the pooled cases +1.5%, +1.5%
+and +1.3%, which is the run-to-run band for this suite.
+
+Echo 5.3.1 lands where echo 4.15.4 did on the same machine. The major upgrade
+changed the API, not the speed.
 
 ## Host routing
 
 | Case | Median ns/op | Range ns/op | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Exact | 112.4 | 106.1–120.7 | 384 | 1 |
-| Parameter | 116.2 | 110.3–139.7 | 384 | 1 |
-| Wildcard | 111.8 | 102.1–135.5 | 384 | 1 |
-| Host-free fallback | 103.4 | 102.5–131.9 | 384 | 1 |
+| Exact | 103.5 | 102.5–105.1 | 320 | 1 |
+| Parameter | 108.2 | 107.2–111.7 | 320 | 1 |
+| Wildcard | 99.4 | 99.0–102.6 | 320 | 1 |
+| Host-free fallback | 99.9 | 98.8–100.4 | 320 | 1 |
 
 The host measurements include complete authority validation. The pooled
 measurements include clearing request and response references, alternate
@@ -73,8 +79,8 @@ pooled route path at zero allocations.
 
 ## Dependencies
 
-The comparison uses chi 5.3.2 and Echo 4.15.4. The safe update kept Echo on its
-existing major version and updated the indirect benchmark dependencies to
-`go-isatty` 0.0.24, `x/crypto` 0.55.0, `x/net` 0.58.0, `x/sys` 0.47.0, and
-`x/text` 0.41.0. Moving the comparison to Echo 5 would change the benchmarked
-major API and is intentionally left to a separate methodology change.
+The comparison uses chi 5.3.2 and Echo 5.3.1. Echo 5 makes `Context` a struct,
+so the benchmark handler takes `*echo.Context` rather than the v4 interface.
+The upgrade also collapsed the indirect tree: `gommon`, `go-colorable`,
+`go-isatty`, `fasttemplate`, `bytebufferpool`, `x/crypto`, `x/sys` and `x/text`
+are gone, leaving `x/net` 0.58.0 as the only indirect dependency.
