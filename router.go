@@ -19,7 +19,15 @@ type Route struct {
 	Host    string
 	Name    string
 	Meta    any
+
+	// Params counts the host and path parameters together. A route over
+	// InlineParamBudget costs one allocation per request.
+	Params int
 }
+
+// InlineParamBudget is how many parameters a route carries before its values
+// need a second allocation. See Route.Params.
+const InlineParamBudget = maxInlineParams
 
 const MethodQuery = "QUERY"
 
@@ -949,9 +957,9 @@ type routeInfo struct {
 
 func (r *Router[C]) collectRoutes() []Route {
 	var out []Route
-	add := func(host string) func(pattern, method string) {
-		return func(pattern, method string) {
-			rt := Route{Host: host, Method: method, Pattern: pattern}
+	add := func(host string) func(pattern, method string, params int) {
+		return func(pattern, method string, params int) {
+			rt := Route{Host: host, Method: method, Pattern: pattern, Params: params}
 			if info, ok := r.info[routeKey{host: host, method: method, pattern: pattern}]; ok {
 				rt.Name, rt.Meta = info.name, info.meta
 			}

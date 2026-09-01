@@ -1067,7 +1067,7 @@ func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	want := []Route{
 		{Method: http.MethodGet, Pattern: "/health"},
 		{Method: http.MethodPost, Pattern: "/users", Meta: op{Summary: "create a user"}},
-		{Method: http.MethodGet, Pattern: "/users/{id}", Name: "user", Meta: op{Summary: "read a user"}},
+		{Method: http.MethodGet, Pattern: "/users/{id}", Name: "user", Meta: op{Summary: "read a user"}, Params: 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
@@ -2185,4 +2185,67 @@ func mustPanicContaining(t *testing.T, want string, fn func()) {
 		}
 	}()
 	fn()
+}
+
+// Route.Params is what a route table asserts against InlineParamBudget, so the
+// count has to be exactly what the request path puts in Base: host parameters
+// and path parameters together.
+func TestRouteParamsCountsHostAndPathTogether(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/health", echoRoute)
+	r.GET("/users/{id}", echoRoute)
+	r.GET("/files/{path...}", echoRoute)
+	r.GET("/f/{name}.{ext}", echoRoute)
+	r.GET("/assets/*", echoRoute)
+	r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
+		h.GET("/o/{oid}/t/{tid}/m/{mid}", echoRoute)
+		h.GET("/o/{oid}/t/{tid}/m/{mid}/r/{rid}", echoRoute)
+	})
+	r.Host("{env}.{region}.{tenant}.example.net", func(h *Router[*tctx]) {
+		h.GET("/o/{oid}", echoRoute)
+	})
+
+	want := map[string]int{
+		"|/health":          0,
+		"|/users/{id}":      1,
+		"|/files/{path...}": 1,
+		"|/f/{name}.{ext}":  2,
+		"|/assets/*":        1,
+		"{tenant}.example.com|/o/{oid}/t/{tid}/m/{mid}":         4,
+		"{tenant}.example.com|/o/{oid}/t/{tid}/m/{mid}/r/{rid}": 5,
+		"{env}.{region}.{tenant}.example.net|/o/{oid}":          4,
+	}
+	for _, rt := range r.Routes() {
+		key := rt.Host + "|" + rt.Pattern
+		w, ok := want[key]
+		if !ok {
+			t.Errorf("unexpected route %q", key)
+			continue
+		}
+		if rt.Params != w {
+			t.Errorf("%s: Params = %d, want %d", key, rt.Params, w)
+		}
+		delete(want, key)
+	}
+	for key := range want {
+		t.Errorf("route %q never appeared", key)
+	}
+}
+
+// The library's own fixtures must stay inside the budget too, so a change to
+// maxInlineParams that the sample tables cannot afford fails here.
+func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
+	for name, build := range map[string]func() *Router[*tctx]{
+		"siteRouter":  siteRouter,
+		"namedRouter": namedRouter,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, rt := range build().Routes() {
+				if rt.Params > InlineParamBudget {
+					t.Errorf("%s %s%s carries %d parameters, over the budget of %d",
+						rt.Method, rt.Host, rt.Pattern, rt.Params, InlineParamBudget)
+				}
+			}
+		})
+	}
 }

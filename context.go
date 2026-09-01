@@ -31,7 +31,13 @@ type Context interface {
 	base() *Base
 }
 
-const maxInlineParams = 8
+// Route parameters live inside Base up to this many, so a request that stays
+// under it answers without a second allocation. Host parameters count too: a
+// "{tenant}.example.com" scope spends one before the path spends any. Going
+// over is not an error, it costs one allocation per request, and on a pooled
+// router that is the difference between zero and one. Router.Params and
+// InlineParamBudget let a route table assert it stays under.
+const maxInlineParams = 4
 
 // betteralign:check
 type Base struct {

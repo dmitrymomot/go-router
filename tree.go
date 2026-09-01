@@ -353,10 +353,10 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 	return nil, nil
 }
 
-func (n *node[C]) walk(fn func(pattern, method string)) {
+func (n *node[C]) walk(fn func(pattern, method string, params int)) {
 	if n.pattern != "" {
 		for _, mh := range n.routes {
-			fn(n.pattern, mh.method)
+			fn(n.pattern, mh.method, len(n.names))
 		}
 	}
 	for _, c := range n.statics {
