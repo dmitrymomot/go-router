@@ -15,10 +15,9 @@ type methodHandler[C Context] struct {
 }
 
 type node[C Context] struct {
-	prefix  string
-	indices string
-	statics []*node[C]
-
+	prefix    string
+	indices   string
+	statics   []*node[C]
 	templates []*node[C]
 	regexes   []*node[C]
 	param     *node[C]
@@ -28,12 +27,10 @@ type node[C Context] struct {
 	re        *regexp.Regexp
 	parts     []segPart
 	raw       string
-
-	routes   []methodHandler[C]
-	catchAll HandlerFunc[C]
-
-	pattern string
-	names   []string
+	routes    []methodHandler[C]
+	catchAll  HandlerFunc[C]
+	pattern   string
+	names     []string
 }
 
 func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string) error {

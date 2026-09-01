@@ -16,7 +16,6 @@ import (
 
 type Context struct {
 	router.Base
-
 	DB   *store
 	User *User
 }

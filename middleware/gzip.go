@@ -80,17 +80,15 @@ const (
 
 type gzipWriter struct {
 	http.ResponseWriter
-	res *router.Response
-
+	res     *router.Response
 	pool    *sync.Pool
 	gz      *gzip.Writer
 	buf     []byte
 	written int64
-
-	min   int
-	code  int
-	state uint8
-	head  bool
+	min     int
+	code    int
+	state   uint8
+	head    bool
 }
 
 func (w *gzipWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

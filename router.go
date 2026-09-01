@@ -842,12 +842,11 @@ func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
 }
 
 type scopeFallback[C Context] struct {
-	prefix   string
-	pattern  []segment
-	depth    int
-	hostIdx  int32
-	errorIdx int32
-
+	prefix          string
+	pattern         []segment
+	depth           int
+	hostIdx         int32
+	errorIdx        int32
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
