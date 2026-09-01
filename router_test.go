@@ -2249,3 +2249,127 @@ func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
 		})
 	}
 }
+
+// scopeAnswering registers one fallback scope per prefix, each reporting its
+// own prefix, so a 404 names the scope that answered it.
+func scopeAnswering(r *Router[*tctx], prefix string) {
+	r.Route(prefix, func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, prefix) })
+	})
+}
+
+// Overlapping scopes are ordered by comparing their prefixes segment by
+// segment. The first position where two disagree decides it: a static segment
+// beats a template, a template beats a regex, and a regex beats a plain
+// parameter. Only when every shared position ties does the longer prefix win,
+// then the deeper scope, then the lower prefix.
+//
+// This is the order the trie already uses to choose a route, so the scope that
+// answers a miss is the scope the matching route would have sat in. It is not
+// "the prefix with the most segments wins": /api answers /api/b/c even though
+// /{p}/b/c constrains all three segments and /api constrains one.
+func TestScopeFallbackPrecedenceIsLeftmostMostSpecificSegment(t *testing.T) {
+	// The prefixes in each case are chosen so that the last tie-break, the
+	// lower prefix, disagrees with specificity. A case that stops testing the
+	// rule stops passing.
+	cases := []struct {
+		name   string
+		scopes []string
+		probe  string
+		want   string
+	}{
+		{
+			name:   "a static first segment beats a parameter that matches more segments",
+			scopes: []string{"/api", "/{p}/b/c"},
+			probe:  "/api/b/c",
+			want:   "/api",
+		},
+		{
+			name:   "a template beats a regex and a parameter",
+			scopes: []string{"/{z}q", "/{n:[0-9]+}", "/{a}"},
+			probe:  "/5q/missing",
+			want:   "/{z}q",
+		},
+		{
+			name:   "a regex beats a parameter",
+			scopes: []string{"/{z}q", "/{n:[0-9]+}", "/{a}"},
+			probe:  "/7/missing",
+			want:   "/{n:[0-9]+}",
+		},
+		{
+			name:   "a parameter answers what neither the template nor the regex covers",
+			scopes: []string{"/{z}q", "/{n:[0-9]+}", "/{a}"},
+			probe:  "/zz/missing",
+			want:   "/{a}",
+		},
+		{
+			name:   "the longer prefix wins once every shared segment ties",
+			scopes: []string{"/a", "/a/b"},
+			probe:  "/a/b/missing",
+			want:   "/a/b",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Both registration orders: the order is the sort's, not the
+			// caller's.
+			for _, reverse := range []bool{false, true} {
+				t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+					r := newTestRouter()
+					scopes := slices.Clone(tc.scopes)
+					if reverse {
+						slices.Reverse(scopes)
+					}
+					for _, prefix := range scopes {
+						scopeAnswering(r, prefix)
+					}
+					rec := do(r, http.MethodGet, tc.probe)
+					if rec.Code != http.StatusNotFound || rec.Body.String() != tc.want {
+						t.Errorf("%s = %d %q, want 404 %q", tc.probe, rec.Code, rec.Body.String(), tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Two scopes can carry the same prefix by different routes. The deeper one
+// wins, so a fallback set on an inner group is not shadowed by an outer group
+// that happens to spell out the same path.
+func TestScopeFallbackPrefersTheDeeperScopeOnAnEqualPrefix(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/a/b", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "flat") })
+	})
+	r.Route("/a", func(g *Router[*tctx]) {
+		g.Route("/b", func(h *Router[*tctx]) {
+			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "nested") })
+		})
+	})
+
+	if got := do(r, http.MethodGet, "/a/b/missing").Body.String(); got != "nested" {
+		t.Errorf("body = %q, want %q", got, "nested")
+	}
+}
+
+// The host comes first, before any of the specificity above: a scope belongs to
+// the host it was declared under, and scopeFallback.hostIdx keeps it there. A
+// request that matched a host never reaches an any-host scope, however much
+// more specific that scope's prefix is.
+func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
+	r := newTestRouter()
+	scopeAnswering(r, "/a")
+	r.Host("api.example.com", func(h *Router[*tctx]) {
+		h.Route("/{p}", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "host /{p}") })
+		})
+	})
+
+	if got := doHost(r, http.MethodGet, "api.example.com", "/a/missing").Body.String(); got != "host /{p}" {
+		t.Errorf("host request answered by %q, want %q", got, "host /{p}")
+	}
+	if got := do(r, http.MethodGet, "/a/missing").Body.String(); got != "/a" {
+		t.Errorf("any-host request answered by %q, want %q", got, "/a")
+	}
+}
