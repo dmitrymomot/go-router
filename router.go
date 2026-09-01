@@ -288,6 +288,11 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 	if h == nil {
 		panic("router: Match needs a handler for " + pattern)
 	}
+	// Without this the call registers nothing and says nothing, and the route
+	// is missing at the first request instead of at the line that wrote it.
+	if len(methods) == 0 {
+		panic("router: Match needs at least one method for " + pattern)
+	}
 	validateMiddleware(mws)
 	for _, method := range methods {
 		if method == "" {

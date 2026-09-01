@@ -1459,6 +1459,12 @@ func TestRegistrationPanics(t *testing.T) {
 			named.POST("/b", echoRoute)
 		}, "already registered a route"},
 		{"an empty name", func() { newTestRouter().Name("") }, "Name needs a name"},
+		{"Match with no methods", func() {
+			newTestRouter().Match(nil, "/x", echoRoute)
+		}, "Match needs at least one method"},
+		{"Match with an empty method", func() {
+			newTestRouter().Match([]string{""}, "/x", echoRoute)
+		}, "Match needs non-empty methods"},
 		{"a duplicate name", func() {
 			r := newTestRouter()
 			r.Name("dup").GET("/a", echoRoute)
