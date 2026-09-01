@@ -136,7 +136,13 @@ func StatusOf(err error) int {
 		return http.StatusOK
 	}
 	if he, ok := errors.AsType[*HTTPError](err); ok {
-		return he.Status
+		// HTTPError is a plain struct with exported fields, so a caller can
+		// build one without a status. Passing 0 to WriteHeader panics, and the
+		// recovery loses the message the caller wrote.
+		if he.Status != 0 {
+			return he.Status
+		}
+		return http.StatusInternalServerError
 	}
 	if sc, ok := errors.AsType[StatusCoder](err); ok {
 		if status := sc.StatusCode(); status != 0 {
@@ -180,8 +186,17 @@ func writeError(b *Base, err error, exposeCause bool) {
 		he = NewHTTPError(StatusOf(err)).WithError(err)
 	}
 
-	if he.Status >= http.StatusInternalServerError || he.Err != nil {
-		logFailure(b, err, he.Status)
+	// HTTPError has exported fields, so a caller can build one and never set a
+	// status. WriteHeader panics on 0, handleError recovers and writes a bare
+	// 500, and the Message and Details the caller wrote are lost. Read it once
+	// here rather than mutating the error the caller still holds.
+	status := he.Status
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+
+	if status >= http.StatusInternalServerError || he.Err != nil {
+		logFailure(b, err, status)
 	}
 	if !writableFailure(b, err) {
 		return
@@ -197,18 +212,18 @@ func writeError(b *Base, err error, exposeCause bool) {
 	switch errorRepresentationFor(b.req) {
 	case errorRepresentationJSON:
 		b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
-		b.res.WriteHeader(he.Status)
+		b.res.WriteHeader(status)
 		if b.req.Method == http.MethodHead {
 			return
 		}
 		//nolint:errcheck // The connection is already failing; nothing to report.
 		json.MarshalWrite(b.res, errorBody{
-			Status: he.Status, Error: he.Message, Details: he.Details, Cause: cause,
+			Status: status, Error: he.Message, Details: he.Details, Cause: cause,
 		})
 		return
 	case errorRepresentationHTML:
 		b.res.Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
-		b.res.WriteHeader(he.Status)
+		b.res.WriteHeader(status)
 		if b.req.Method == http.MethodHead {
 			return
 		}
@@ -218,7 +233,7 @@ func writeError(b *Base, err error, exposeCause bool) {
 	}
 
 	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
-	b.res.WriteHeader(he.Status)
+	b.res.WriteHeader(status)
 	if b.req.Method == http.MethodHead {
 		return
 	}

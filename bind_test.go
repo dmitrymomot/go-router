@@ -1410,3 +1410,18 @@ func TestBindRefusesABodyWithNoContentType(t *testing.T) {
 	}
 }
 
+// HTTPError has exported fields, so one can be built without a status.
+// WriteHeader panicked on 0 and the recovery wrote a bare 500, losing the
+// message the caller had written.
+func TestHTTPErrorWithoutAStatusIsAnInternalError(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/z", func(*tctx) error { return &HTTPError{Message: "custom"} })
+	rec := do(r, http.MethodGet, "/z")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "custom") {
+		t.Errorf("body = %q, want it to carry the message", rec.Body.String())
+	}
+}
+
