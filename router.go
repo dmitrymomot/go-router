@@ -36,12 +36,37 @@ type registration[C Context] struct {
 }
 
 type Router[C Context] struct {
-	root   *Router[C]
-	prefix string
-	mws    []Middleware[C]
+	// The request path reads this block on every request, so it stays together
+	// and in front: ServeHTTP walks started, observer, pool and preChain before
+	// route touches the trie and the fallbacks.
+	root     *Router[C]
+	started  atomic.Bool
+	observer func(c Context, status int, size int64, d time.Duration, err error)
+	pool     *sync.Pool
+	preChain HandlerFunc[C]
+	newCtx   func(http.ResponseWriter, *http.Request) C
+	reset    func(C)
+	ropts    *routerOpts
+	tree     *node[C]
+	hostSet  *hostSet[C]
 
+	allowCache       map[*node[C]]string
+	scopes           []*scopeFallback[C]
+	errScopes        []*scopeFallback[C]
+	notFoundChain    HandlerFunc[C]
+	notAllowedChain  HandlerFunc[C]
+	optionsChain     HandlerFunc[C]
+	rootErrorHandler ErrorHandlerFunc[C]
+	autoOptions      bool
+	redirectSlash    bool
+	anyHostRoutes    bool
+
+	// Registration only, from here down.
+	prefix           string
+	mws              []Middleware[C]
 	regs             []registration[C]
 	children         []*Router[C]
+	owner            *Router[C]
 	hasRoutes        bool
 	name             string
 	meta             any
@@ -52,31 +77,10 @@ type Router[C Context] struct {
 	notFound         HandlerFunc[C]
 	methodNotAllowed HandlerFunc[C]
 	errHandler       ErrorHandlerFunc[C]
-	newCtx           func(http.ResponseWriter, *http.Request) C
-	pool             *sync.Pool
-	reset            func(C)
+	preMws           []Middleware[C]
+	named            map[string]namedRoute
+	info             map[routeKey]routeInfo
 	once             sync.Once
-	started          atomic.Bool
-	tree             *node[C]
-	hostSet          *hostSet[C]
-	notFoundChain    HandlerFunc[C]
-	notAllowedChain  HandlerFunc[C]
-	optionsChain     HandlerFunc[C]
-	rootErrorHandler ErrorHandlerFunc[C]
-	autoOptions      bool
-	redirectSlash    bool
-	anyHostRoutes    bool
-	ropts            *routerOpts
-	preChain         HandlerFunc[C]
-	observer         func(c Context, status int, size int64, d time.Duration, err error)
-
-	preMws []Middleware[C]
-	scopes []*scopeFallback[C]
-
-	errScopes []*scopeFallback[C]
-	named     map[string]namedRoute
-	info      map[routeKey]routeInfo
-	owner     *Router[C]
 }
 
 func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Router[C] {
@@ -90,6 +94,7 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 		errHandler:       DefaultErrorHandler[C],
 		autoOptions:      true,
 		tree:             new(node[C]),
+		allowCache:       map[*node[C]]string{},
 		ropts:            &routerOpts{maxBody: DefaultMaxBodyBytes},
 	}
 	r.root = r
@@ -164,14 +169,14 @@ func (r *Router[C]) install(reg registration[C]) {
 	entries := r.hostEntries()
 	if len(entries) == 0 {
 		root.anyHostRoutes = true
-		if err := root.tree.insert(reg.method, full, nil, handler, root.autoOptions); err != nil {
+		if err := root.tree.insert(reg.method, full, nil, handler, root.autoOptions, root.allowCache); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, nil, full)
 		return
 	}
 	for _, e := range entries {
-		if err := e.tree.insert(reg.method, full, e.names, handler, root.autoOptions); err != nil {
+		if err := e.tree.insert(reg.method, full, e.names, handler, root.autoOptions, root.allowCache); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, e, full)
@@ -541,10 +546,10 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 	r.mustNotBeServing("the OPTIONS setting")
 	root := r.root
 	root.autoOptions = on
-	root.tree.recacheAllow(on)
+	root.tree.recacheAllow(on, root.allowCache)
 	if root.hostSet != nil {
 		for _, e := range root.hostSet.all {
-			e.tree.recacheAllow(on)
+			e.tree.recacheAllow(on, root.allowCache)
 		}
 	}
 	root.refresh()
@@ -1214,8 +1219,10 @@ func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
 		case anyHost.pathMatch != nil && host.pathMatch == nil:
 			only = anyHost.pathMatch
 		}
-		if only != nil && only.allow != "" {
-			return only.allow
+		if only != nil {
+			if s, ok := r.allowCache[only]; ok {
+				return s
+			}
 		}
 	}
 	out := host.allowedMethods(nil, r.autoOptions)

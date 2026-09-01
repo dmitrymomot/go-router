@@ -31,13 +31,12 @@ type node[C Context] struct {
 
 	routes   []methodHandler[C]
 	catchAll HandlerFunc[C]
-	allow    string
 
 	pattern string
 	names   []string
 }
 
-func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool) error {
+func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string) error {
 	segs, names, err := parsePattern(pattern)
 	if err != nil {
 		return err
@@ -77,7 +76,7 @@ func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFu
 	if method == anyMethod {
 		cur.catchAll = h
 	}
-	cur.allow = strings.Join(cur.allowed(autoOptions), ", ")
+	allow[cur] = strings.Join(cur.allowed(autoOptions), ", ")
 	return nil
 }
 
@@ -198,26 +197,26 @@ func (n *node[C]) allowed(autoOptions bool) []string {
 	return out
 }
 
-// insert keeps every node's Allow string current, so this only runs when the
-// OPTIONS setting changes after some routes are already in.
-func (n *node[C]) recacheAllow(autoOptions bool) {
+// insert keeps every entry current, so this only runs when the OPTIONS setting
+// changes after some routes are already in.
+func (n *node[C]) recacheAllow(autoOptions bool, allow map[*node[C]]string) {
 	if len(n.routes) > 0 {
-		n.allow = strings.Join(n.allowed(autoOptions), ", ")
+		allow[n] = strings.Join(n.allowed(autoOptions), ", ")
 	}
 	for _, c := range n.statics {
-		c.recacheAllow(autoOptions)
+		c.recacheAllow(autoOptions, allow)
 	}
 	for _, c := range n.templates {
-		c.recacheAllow(autoOptions)
+		c.recacheAllow(autoOptions, allow)
 	}
 	for _, c := range n.regexes {
-		c.recacheAllow(autoOptions)
+		c.recacheAllow(autoOptions, allow)
 	}
 	if n.param != nil {
-		n.param.recacheAllow(autoOptions)
+		n.param.recacheAllow(autoOptions, allow)
 	}
 	if n.wildcard != nil {
-		n.wildcard.recacheAllow(autoOptions)
+		n.wildcard.recacheAllow(autoOptions, allow)
 	}
 }
 
