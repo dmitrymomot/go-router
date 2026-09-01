@@ -527,11 +527,26 @@ func (r *Router[C]) mustNotBeServing(what string) {
 	}
 }
 
+// mustOwnFallbacks rejects a fallback setter on a scope that cannot express
+// one. Scopes are keyed by path prefix, so a prefix-less child covers the whole
+// tree: its handler would answer for routes outside it and would displace the
+// root's own, silently and depending on declaration order. The root, a host
+// scope and any scope with a prefix all name a region the router can match, so
+// they keep their handlers.
+func (r *Router[C]) mustOwnFallbacks(what string) {
+	if r == r.root || len(r.hosts) > 0 || normalizePattern(r.scopePrefix()) != "/" {
+		return
+	}
+	panic("router: a scope without a prefix cannot own " + what +
+		"; set it on the router itself, or open a Route with a prefix")
+}
+
 func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 	if h == nil {
 		panic("router: NotFound needs a handler")
 	}
 	r.mustNotBeServing("the not-found handler")
+	r.mustOwnFallbacks("the not-found handler")
 	r.notFound = h
 	r.settingChanged()
 }
@@ -541,6 +556,7 @@ func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 		panic("router: MethodNotAllowed needs a handler")
 	}
 	r.mustNotBeServing("the method-not-allowed handler")
+	r.mustOwnFallbacks("the method-not-allowed handler")
 	r.methodNotAllowed = h
 	r.settingChanged()
 }
@@ -550,6 +566,7 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 		panic("router: ErrorHandler needs a handler")
 	}
 	r.mustNotBeServing("the error handler")
+	r.mustOwnFallbacks("the error handler")
 	r.errHandler = h
 	r.settingChanged()
 }
@@ -674,7 +691,11 @@ func (r *Router[C]) refresh() {
 			switch {
 			case rt != r && rt.root == rt:
 
-			case len(rt.hosts) > 0 || normalizePattern(p) == "/":
+			// Only the router itself and a host scope own the root fallbacks.
+			// A prefix-less child cannot: it covers everything, so its handler
+			// would displace the root's for the whole tree. mustOwnFallbacks
+			// rejects that at the setter, and this keeps refresh honest.
+			case rt == r || len(rt.hosts) > 0:
 				if e == nil {
 					if rt.notFound != nil {
 						rootNotFound = rt.notFound

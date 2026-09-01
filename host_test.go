@@ -773,10 +773,8 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 
 func TestHostInheritsTheFallbackOfTheRoot(t *testing.T) {
 	r := newTestRouter()
-	r.Group(func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "custom 404") })
-		g.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "custom 405") })
-	})
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "custom 404") })
+	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "custom 405") })
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 
 	if got := doHost(r, http.MethodGet, "other.invalid", "/nope").Body.String(); got != "custom 404" {

@@ -2379,3 +2379,62 @@ func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
 		t.Errorf("any-host request answered by %q, want %q", got, "/a")
 	}
 }
+
+// A scope keyed by nothing covers everything, so a fallback set on one used to
+// displace the root's for the whole tree, depending on declaration order.
+func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		set  func(*Router[*tctx])
+	}{
+		{"NotFound", "the not-found handler", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error { return nil })
+		}},
+		{"MethodNotAllowed", "the method-not-allowed handler", func(g *Router[*tctx]) {
+			g.MethodNotAllowed(func(c *tctx) error { return nil })
+		}},
+		{"ErrorHandler", "the error handler", func(g *Router[*tctx]) {
+			g.ErrorHandler(func(c *tctx, err error) {})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			mustPanicContaining(t, "a scope without a prefix cannot own "+tc.want, func() {
+				r.Group(func(g *Router[*tctx]) { tc.set(g) })
+			})
+		})
+	}
+}
+
+// The root, a host scope and any prefixed scope all name a region the router
+// can match, so each keeps its own fallbacks.
+func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
+	r.GET("/outside", func(c *tctx) error { return ErrInternalServerError })
+	r.Route("/api", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "api err") })
+		g.GET("/inside", func(c *tctx) error { return ErrInternalServerError })
+	})
+	// A nested Group inherits the prefix of its owner, so it may own them too.
+	r.Route("/deep", func(g *Router[*tctx]) {
+		g.Group(func(h *Router[*tctx]) {
+			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "deep 404") })
+		})
+	})
+
+	for _, tc := range []struct{ path, want string }{
+		{"/outside", "root err"},
+		{"/api/inside", "api err"},
+		{"/nowhere", "root 404"},
+		{"/api/nowhere", "api 404"},
+		{"/deep/nowhere", "deep 404"},
+	} {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
