@@ -1365,3 +1365,29 @@ func TestStrictBindStillStripsUntaggedFields(t *testing.T) {
 	}
 }
 
+// http.Request.ParseForm on a multipart body sets PostForm to an empty map and
+// leaves MultipartForm nil, so PostForm alone could not say whether the body
+// had been read. A middleware calling ParseForm cost the handler its uploads.
+func TestFormFileSurvivesAnEarlierParseForm(t *testing.T) {
+	r := newTestRouter()
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			_ = c.Request().ParseForm()
+			return next(c)
+		}
+	})
+	r.POST("/upload", func(c *tctx) error {
+		_, fh, err := c.FormFile("doc")
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, fh.Filename)
+	})
+
+	body := "--B\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\nhello\r\n--B--\r\n"
+	rec := doBody(r, http.MethodPost, "/upload", "multipart/form-data; boundary=B", body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "a.txt" {
+		t.Errorf("upload after ParseForm = %d %q, want 200 %q", rec.Code, rec.Body.String(), "a.txt")
+	}
+}
+

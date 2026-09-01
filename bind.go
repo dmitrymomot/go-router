@@ -267,13 +267,20 @@ func (b *Base) parseForm() error {
 	if err := b.formError(); err != nil {
 		return err
 	}
-	if b.req.PostForm != nil {
+	multipart := false
+	if ct, _, _ := mime.ParseMediaType(b.req.Header.Get(HeaderContentType)); ct == MIMEMultipartForm {
+		multipart = true
+	}
+	// ParseForm on a multipart request fills PostForm with an empty map and
+	// leaves MultipartForm nil, so PostForm alone cannot say whether this body
+	// has been read.
+	if multipart && b.req.MultipartForm != nil || !multipart && b.req.PostForm != nil {
 		return nil
 	}
 	b.req.Body = b.limitedBody()
 
 	var err error
-	if ct, _, _ := mime.ParseMediaType(b.req.Header.Get(HeaderContentType)); ct == MIMEMultipartForm {
+	if multipart {
 		memory := b.opts().maxMultipart
 		if memory <= 0 {
 			memory = defaultMaxMultipartMemory
