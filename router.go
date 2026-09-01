@@ -80,7 +80,6 @@ type Router[C Context] struct {
 	preMws           []Middleware[C]
 	named            map[string]namedRoute
 	info             map[routeKey]routeInfo
-	once             sync.Once
 }
 
 func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Router[C] {
@@ -594,8 +593,10 @@ func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Du
 func (r *Router[C]) Routes() []Route { return r.top().collectRoutes() }
 
 // freeze closes the graph for registration on the first request.
+// Idempotent: it reads the graph and stores a flag, so two first requests can
+// run it at once without a Once to serialize them.
 func (r *Router[C]) freeze() {
-	r.once.Do(func() { freezeRouterGraph(r, make(map[*Router[C]]bool)) })
+	freezeRouterGraph(r, make(map[*Router[C]]bool))
 }
 
 func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
