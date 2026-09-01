@@ -1,8 +1,9 @@
 # Router benchmarks
 
-These results were recorded on 2026-09-01 from commit `f5149f8`, after the
-router moved its validation to registration and cut the inline parameter array
-from eight to four.
+These results were recorded on 2026-09-01 from commit `846504b` plus the
+request-path fast path, after the router moved its validation to registration,
+cut the inline parameter array from eight to four, and stopped re-escaping the
+request path on every request.
 
 | Environment | Value |
 |---|---|
@@ -35,28 +36,33 @@ cache-permission differences and do not affect the benchmarked code.
 
 | Case | Router | Median ns/op | Range ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|---:|
-| Static | go-router | 86.6 | 86.1–87.2 | 320 | 1 |
-| Static | go-router pooled | 57.0 | 56.8–57.5 | 0 | 0 |
-| Static | chi 5.3.2 | 121.1 | 120.1–121.5 | 368 | 2 |
-| Static | echo 5.3.1 | 35.4 | 35.3–35.5 | 0 | 0 |
-| Static | `http.ServeMux` | 98.0 | 97.7–99.1 | 0 | 0 |
-| Parameter | go-router | 93.0 | 92.5–94.0 | 320 | 1 |
-| Parameter | go-router pooled | 62.3 | 62.1–64.2 | 0 | 0 |
-| Parameter | chi 5.3.2 | 214.8 | 212.2–217.4 | 704 | 4 |
-| Parameter | echo 5.3.1 | 43.9 | 43.8–44.2 | 0 | 0 |
-| Parameter | `http.ServeMux` | 100.4 | 99.9–101.9 | 16 | 1 |
-| Deep | go-router | 135.6 | 134.9–137.4 | 320 | 1 |
-| Deep | go-router pooled | 101.1 | 100.7–102.1 | 0 | 0 |
-| Deep | chi 5.3.2 | 312.6 | 308.2–314.4 | 704 | 4 |
-| Deep | echo 5.3.1 | 71.4 | 71.0–72.9 | 0 | 0 |
-| Deep | `http.ServeMux` | 262.7 | 260.9–265.9 | 112 | 3 |
+| Static | go-router | 80.8 | 80.0–81.5 | 320 | 1 |
+| Static | go-router pooled | 50.2 | 50.0–51.0 | 0 | 0 |
+| Static | chi 5.3.2 | 120.7 | 120.3–123.3 | 368 | 2 |
+| Static | echo 5.3.1 | 35.9 | 35.3–36.7 | 0 | 0 |
+| Static | `http.ServeMux` | 98.2 | 97.7–100.3 | 0 | 0 |
+| Parameter | go-router | 85.3 | 84.8–86.7 | 320 | 1 |
+| Parameter | go-router pooled | 55.4 | 55.3–55.8 | 0 | 0 |
+| Parameter | chi 5.3.2 | 210.2 | 207.0–225.3 | 704 | 4 |
+| Parameter | echo 5.3.1 | 43.6 | 43.3–45.1 | 0 | 0 |
+| Parameter | `http.ServeMux` | 100.1 | 99.3–102.6 | 16 | 1 |
+| Deep | go-router | 115.4 | 114.8–117.1 | 320 | 1 |
+| Deep | go-router pooled | 84.1 | 83.6–85.2 | 0 | 0 |
+| Deep | chi 5.3.2 | 300.5 | 298.3–305.1 | 704 | 4 |
+| Deep | echo 5.3.1 | 70.5 | 69.8–71.2 | 0 | 0 |
+| Deep | `http.ServeMux` | 256.4 | 254.8–259.0 | 112 | 3 |
 
 This run was quiet: every range is within 2% of its median. Do not read the
 table against the previous recording, which ran under transient scheduler load
 and reported ranges as wide as 97.1–592.5 ns. Numbers from two sessions are not
 comparable. Measured within one session against the pre-refactor commit, the
 unpooled cases moved -3.3%, -4.4% and -2.4%, and the pooled cases +1.5%, +1.5%
-and +1.3%, which is the run-to-run band for this suite.
+and +1.3%, which is the run-to-run band for this suite. The request-path fast
+path then took another -12.25% geomean off every go-router row.
+
+Echo stays 1.4x to 1.6x ahead of the pooled router. A profile of the remaining
+gap is half trie walk and a sixth `sync.Pool`, with no single item left to
+remove.
 
 Echo 5.3.1 lands where echo 4.15.4 did on the same machine. The major upgrade
 changed the API, not the speed.
@@ -65,10 +71,10 @@ changed the API, not the speed.
 
 | Case | Median ns/op | Range ns/op | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Exact | 103.5 | 102.5–105.1 | 320 | 1 |
-| Parameter | 108.2 | 107.2–111.7 | 320 | 1 |
-| Wildcard | 99.4 | 99.0–102.6 | 320 | 1 |
-| Host-free fallback | 99.9 | 98.8–100.4 | 320 | 1 |
+| Exact | 93.9 | 92.8–95.6 | 320 | 1 |
+| Parameter | 99.0 | 98.7–99.7 | 320 | 1 |
+| Wildcard | 91.0 | 90.7–91.5 | 320 | 1 |
+| Host-free fallback | 92.2 | 91.9–96.7 | 320 | 1 |
 
 The host measurements include complete authority validation. The pooled
 measurements include clearing request and response references, alternate

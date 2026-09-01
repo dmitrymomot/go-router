@@ -1244,6 +1244,15 @@ func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
 // as %2F. Every other request has the decoded path in Path already, and
 // decoding twice would turn "%252F" into a separator the client never sent.
 func requestPath(u *url.URL) (path string, escaped bool) {
+	// EscapedPath rebuilds the escaped form byte by byte, which is a quarter of
+	// a pooled request. It is only needed when the answer can differ from Path.
+	// An empty RawPath means net/url reproduces the request target from Path,
+	// and the canonical form decodes every escape it would add except the ones
+	// standing for a backslash or a percent, so a Path holding neither is
+	// already the answer.
+	if u.RawPath == "" && strings.IndexByte(u.Path, '%') < 0 && strings.IndexByte(u.Path, '\\') < 0 {
+		return u.Path, false
+	}
 	path = canonicalEscapedPath(u.EscapedPath())
 	if path == u.Path {
 		return u.Path, false
