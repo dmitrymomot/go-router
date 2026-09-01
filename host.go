@@ -11,26 +11,18 @@ import (
 type hostLabel struct {
 	lit   string
 	parts []segPart
-
 	whole *segPart
-
-	off int
-	n   int
-
-	rest bool
+	off   int
+	n     int
+	rest  bool
 }
 
 type hostSpec struct {
 	pattern string
-
-	suffix string
-
-	labels []hostLabel
-
-	names []string
-
-	head *segPart
-
+	suffix  string
+	labels  []hostLabel
+	names   []string
+	head    *segPart
 	statics int
 	any     bool
 	hasRest bool
@@ -40,31 +32,23 @@ func (s *hostSpec) exact() bool { return !s.any && len(s.names) == 0 && s.static
 
 type hostEntry[C Context] struct {
 	hostSpec
-
-	tree *node[C]
-
-	mws     []Middleware[C]
-	haveMWs bool
-
-	idx int32
-
+	tree            *node[C]
+	mws             []Middleware[C]
+	haveMWs         bool
+	idx             int32
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
 	errHandler      ErrorHandlerFunc[C]
-
-	rawNotFound   HandlerFunc[C]
-	rawNotAllowed HandlerFunc[C]
+	rawNotFound     HandlerFunc[C]
+	rawNotAllowed   HandlerFunc[C]
 }
 
 type hostSet[C Context] struct {
 	exact map[string]*hostEntry[C]
-
-	pats []*hostEntry[C]
-
-	any *hostEntry[C]
-
-	all []*hostEntry[C]
+	pats  []*hostEntry[C]
+	any   *hostEntry[C]
+	all   []*hostEntry[C]
 }
 
 func (hs *hostSet[C]) match(host string, dst []string) (*hostEntry[C], []string) {

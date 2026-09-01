@@ -31,8 +31,7 @@ var cookieEnc = base64.RawURLEncoding
 
 type CookieCodec struct {
 	MaxAge time.Duration
-
-	key []byte
+	key    []byte
 }
 
 func NewCookieCodec(key []byte) *CookieCodec {

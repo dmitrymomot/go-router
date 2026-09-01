@@ -13,7 +13,6 @@ import (
 // betteralign:check
 type Response struct {
 	http.ResponseWriter
-
 	before    []func()
 	Status    int
 	Size      int64

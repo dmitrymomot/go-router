@@ -21,9 +21,8 @@ type Event struct {
 
 type sseConfig struct {
 	closeEvent *Event
-
-	heartbeat time.Duration
-	retry     time.Duration
+	heartbeat  time.Duration
+	retry      time.Duration
 }
 
 type SSEOption func(*sseConfig)
@@ -50,9 +49,8 @@ type SSEWriter struct {
 	err   error
 	buf   bytes.Buffer
 	lines sseLines
-
-	cfg  sseConfig
-	head bool
+	cfg   sseConfig
+	head  bool
 }
 
 func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {

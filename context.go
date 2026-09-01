@@ -41,21 +41,18 @@ const maxInlineParams = 4
 
 // betteralign:check
 type Base struct {
-	req *http.Request
-	res *Response
-
-	store      map[string]any
-	paramArr   [maxInlineParams]string
-	queryCache url.Values
-
+	req         *http.Request
+	res         *Response
+	store       map[string]any
+	paramArr    [maxInlineParams]string
+	queryCache  url.Values
 	pattern     string
 	host        string
 	hostPattern string
 	rawTail     string
-
-	paramNames []string
-	paramVals  []string
-	ropts      *routerOpts
+	paramNames  []string
+	paramVals   []string
+	ropts       *routerOpts
 
 	// One word rather than two error fields, which would push Base from 360 to
 	// 384 bytes and its embedder into the next size class.

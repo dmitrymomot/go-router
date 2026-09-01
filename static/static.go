@@ -40,15 +40,13 @@ type Assets struct {
 	notFound     http.Handler
 	etags        map[string]string
 	isNavigation func(r *http.Request) bool
-
-	prefix  string
-	build   string
-	index   string
-	urlBase string
-	cache   string
-
-	spa         bool
-	redirectDir bool
+	prefix       string
+	build        string
+	index        string
+	urlBase      string
+	cache        string
+	spa          bool
+	redirectDir  bool
 }
 
 func New(cfg Config) (*Assets, error) {
