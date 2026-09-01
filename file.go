@@ -94,16 +94,26 @@ func fileNotFound(err error) error {
 func (b *Base) sendFile(name string, f fs.File, info fs.FileInfo) error {
 	req := b.req
 	rs, ok := f.(io.ReadSeeker)
+	var fake *nonseek.Reader
 	if !ok {
 		req = nonseek.Request(req, info.Size())
 		var err error
-		rs, err = nonseek.ReadSeeker("", b.res.Header(), req, name, f, info.Size())
+		fake, err = nonseek.ReadSeeker("", b.res.Header(), req, name, f, info.Size())
 		if err != nil {
 			return ErrInternalServerError.WithError(fmt.Errorf("router: read the file: %w", err))
 		}
+		rs = fake
 	}
 
 	http.ServeContent(b.res, req, path.Base(name), info.ModTime(), rs)
+	// ServeContent reports a read failure as a seek failure and answers it
+	// itself, in text/plain, telling the caller nothing. Putting it back on the
+	// error path is what lets the error handler, the logger and Observe see it.
+	if fake != nil {
+		if err := fake.Err(); err != nil {
+			return ErrInternalServerError.WithError(fmt.Errorf("router: read the file: %w", err))
+		}
+	}
 	return nil
 }
 

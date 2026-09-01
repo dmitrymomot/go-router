@@ -200,16 +200,23 @@ func (a *Assets) send(w http.ResponseWriter, r *http.Request, name string, f fs.
 
 	req := r
 	rs, ok := f.(io.ReadSeeker)
+	var fake *nonseek.Reader
 	if !ok {
 		req = nonseek.Request(req, info.Size())
 		var err error
-		rs, err = nonseek.ReadSeeker("static: ", w.Header(), req, name, f, info.Size())
+		fake, err = nonseek.ReadSeeker("static: ", w.Header(), req, name, f, info.Size())
 		if err != nil {
 			return err
 		}
+		rs = fake
 	}
 
 	http.ServeContent(w, req, path.Base(name), info.ModTime(), rs)
+	// ServeContent answers a read failure with its own 500 and returns nothing,
+	// so the error has to be picked back up here to reach the caller.
+	if fake != nil {
+		return fake.Err()
+	}
 	return nil
 }
 

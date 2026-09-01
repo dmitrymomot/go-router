@@ -94,7 +94,17 @@ func singleRangeStart(value string, size int64) (int64, bool) {
 
 // ReadSeeker wraps src so ServeContent can serve it. Every error it reports
 // carries prefix, because ServeContent puts the text in the response.
-func ReadSeeker(prefix string, h http.Header, r *http.Request, name string, src io.Reader, size int64) (io.ReadSeeker, error) {
+// Reader is the fake seeker. Err reports a read failure that ServeContent
+// turned into its own response, so the caller can put it back on the error path.
+type Reader struct{ reader }
+
+// Err is the read error the source returned, if any. ServeContent answers a
+// failed Seek with its own 500 in text/plain and tells the caller nothing, so
+// without this the router's error handler, logger and Observe never learned
+// that the file could not be read.
+func (r *Reader) Err() error { return r.readErr }
+
+func ReadSeeker(prefix string, h http.Header, r *http.Request, name string, src io.Reader, size int64) (*Reader, error) {
 	if size < 0 {
 		return nil, errors.New(prefix + "negative file size")
 	}
@@ -103,7 +113,7 @@ func ReadSeeker(prefix string, h http.Header, r *http.Request, name string, src 
 	if _, ok := h["Content-Type"]; !ok && r.Method == http.MethodHead && mime.TypeByExtension(path.Ext(name)) == "" {
 		h["Content-Type"] = nil
 	}
-	return &reader{r: src, ctx: r.Context(), size: size, probe: r.Method != http.MethodHead, errPrefix: prefix}, nil
+	return &Reader{reader{r: src, ctx: r.Context(), size: size, probe: r.Method != http.MethodHead, errPrefix: prefix}}, nil
 }
 
 type reader struct {
