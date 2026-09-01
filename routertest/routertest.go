@@ -39,6 +39,8 @@ func HTMX() RequestOption {
 	return Header(router.HeaderHXRequest, "true")
 }
 
+// A nil cookie is refused here: http.Request.AddCookie takes it and adds
+// nothing, so the request would go out short of a cookie and say nothing.
 func Cookie(c *http.Cookie) RequestOption {
 	if c == nil {
 		panic("routertest: Cookie needs a cookie")
@@ -46,6 +48,8 @@ func Cookie(c *http.Cookie) RequestOption {
 	return func(r *http.Request) { r.AddCookie(c) }
 }
 
+// A nil reader is refused here: it would reach the handler as a body that
+// panics on the first read, a long way from the call that built it.
 func Body(contentType string, r io.Reader) RequestOption {
 	if r == nil {
 		panic("routertest: Body needs a reader")
@@ -138,10 +142,7 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 
 func Request(method, target string, opts ...RequestOption) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
-	for i, opt := range opts {
-		if opt == nil {
-			panic(fmt.Sprintf("routertest: request option %d is nil", i))
-		}
+	for _, opt := range opts {
 		opt(req)
 	}
 	return req
@@ -173,19 +174,9 @@ func NewContext[C router.Context](
 	opts ...ContextOption,
 ) (C, *httptest.ResponseRecorder) {
 	tb.Helper()
-	if newCtx == nil {
-		var zero C
-		tb.Fatalf("routertest: NewContext needs a context factory")
-		return zero, nil
-	}
 
 	var spec contextSpec
-	for i, opt := range opts {
-		if opt == nil {
-			var zero C
-			tb.Fatalf("routertest: context option %d is nil", i)
-			return zero, nil
-		}
+	for _, opt := range opts {
 		opt(&spec)
 	}
 	req := spec.req
@@ -230,9 +221,8 @@ type Response struct {
 }
 
 func Serve(h http.Handler, req *http.Request) *Response {
-	if h == nil {
-		panic("routertest: Serve needs a handler")
-	}
+	// A nil request is refused here: a handler that never reads one answers it
+	// without complaint, and the test passes against a request nobody made.
 	if req == nil {
 		panic("routertest: Serve needs a request")
 	}
@@ -284,6 +274,8 @@ func (r *Response) AssertHeader(tb testing.TB, key, want string) {
 
 func NewServer(tb testing.TB, h http.Handler) *httptest.Server {
 	tb.Helper()
+	// A nil handler is refused here: httptest.NewServer would serve
+	// http.DefaultServeMux instead, and every request would come back 404.
 	if h == nil {
 		tb.Fatalf("routertest: NewServer needs a handler")
 		return nil

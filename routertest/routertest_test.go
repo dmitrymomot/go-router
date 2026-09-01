@@ -306,12 +306,6 @@ func TestContextHelpersRejectNilInputs(t *testing.T) {
 		name string
 		call func(*recordingTB)
 	}{
-		{name: "context factory", call: func(tb *recordingTB) {
-			routertest.NewContext[*appContext](tb, nil)
-		}},
-		{name: "context option", call: func(tb *recordingTB) {
-			routertest.NewContext(tb, newContext, nil)
-		}},
 		{name: "server handler", call: func(tb *recordingTB) {
 			routertest.NewServer(tb, nil)
 		}},
