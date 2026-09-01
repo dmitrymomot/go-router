@@ -1251,9 +1251,15 @@ func (r *Router[C]) release(c C) {
 		return
 	}
 	if r.pool != nil {
-		r.reset(c)
 		b := c.base()
-		b.req, b.res = nil, nil
+		if b.retained {
+			// A goroutine outlived the handler and still points at this
+			// context. Recycling it would hand the two the same memory.
+			b.req, b.res = releasedRequest, nil
+			return
+		}
+		r.reset(c)
+		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()
@@ -1266,9 +1272,15 @@ func (r *Router[C]) release(c C) {
 
 func (r *Router[C]) recycle(c C) {
 	if r.pool != nil {
-		r.reset(c)
 		b := c.base()
-		b.req, b.res = nil, nil
+		if b.retained {
+			// A goroutine outlived the handler and still points at this
+			// context. Recycling it would hand the two the same memory.
+			b.req, b.res = releasedRequest, nil
+			return
+		}
+		r.reset(c)
+		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()

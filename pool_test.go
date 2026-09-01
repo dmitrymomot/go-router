@@ -1,6 +1,8 @@
 package router
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,7 +205,10 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 			t.Fatal("handler did not run")
 		}
 		b := &seen.Base
-		if b.req != nil || b.res != nil || b.queryCache != nil || b.deferred != nil {
+		// req points at the released-request sentinel rather than nil, so that a
+		// Base held past its handler answers as a finished context instead of
+		// dereferencing nil. It must not point at the request that just ended.
+		if b.req != releasedRequest || b.res != nil || b.queryCache != nil || b.deferred != nil {
 			t.Fatal("pooled context retained completed request state")
 		}
 		if len(b.store) != 0 || b.resStorage.ResponseWriter != nil || b.resStorage.before != nil {
@@ -354,5 +359,90 @@ func TestPoolDoesNotCarryParametersFromATrailingSlashRedirect(t *testing.T) {
 				t.Fatalf("round %d: paramArr[%d] = %q after the pool took the context back", round, i, value)
 			}
 		}
+	}
+}
+
+// A wrapper that abandons next on another goroutine -- http.TimeoutHandler is
+// the one in the standard library -- leaves that goroutine writing through the
+// context after the handler returned. Recycling it would hand the next request
+// the same memory.
+func TestPooledContextIsNotRecycledWhileNextStillRuns(t *testing.T) {
+	var (
+		running = make(chan struct{})
+		release = make(chan struct{})
+		done    = make(chan *pctx, 1)
+	)
+
+	r := newPooledRouter()
+	r.Use(WrapMiddleware[*pctx](func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			go h.ServeHTTP(w, req)
+			// Return once the handler is definitely inside, still running, as
+			// a timeout does when its deadline passes mid-handler.
+			<-running
+		})
+	}))
+	r.GET("/slow", func(c *pctx) error {
+		close(running)
+		<-release
+		done <- c
+		return nil
+	})
+
+	do(r, http.MethodGet, "/slow")
+	close(release)
+
+	c := <-done
+	if !c.Base.retained {
+		t.Error("a context whose next was still running was not marked retained")
+	}
+}
+
+// The ordinary case must still recycle: a wrapper that rejects and never calls
+// next has not leaked anything.
+func TestPooledContextIsRecycledWhenNextIsSkipped(t *testing.T) {
+	r := newPooledRouter()
+	r.Use(WrapMiddleware[*pctx](func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		})
+	}))
+	var seen *pctx
+	r.GET("/never", func(c *pctx) error { seen = c; return nil })
+
+	if got := do(r, http.MethodGet, "/never").Code; got != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", got)
+	}
+	if seen != nil {
+		t.Fatal("the handler ran although the wrapper rejected")
+	}
+}
+
+// A Base kept past its handler used to dereference a nil request, which takes
+// the process down from a goroutine nobody is recovering. It answers as a
+// finished context instead.
+func TestBaseHeldPastItsRequestReadsAsCancelled(t *testing.T) {
+	r := newPooledRouter()
+	held := make(chan *pctx, 1)
+	r.GET("/a", func(c *pctx) error {
+		held <- c
+		return c.NoContent(http.StatusNoContent)
+	})
+	do(r, http.MethodGet, "/a")
+
+	c := <-held
+	select {
+	case <-c.Done():
+	default:
+		t.Error("Done() on a released context did not report the request as over")
+	}
+	if !errors.Is(c.Err(), context.Canceled) {
+		t.Errorf("Err() = %v, want context.Canceled", c.Err())
+	}
+	if _, ok := c.Deadline(); ok {
+		t.Error("Deadline() on a released context reported one")
+	}
+	if v := c.Value("anything"); v != nil {
+		t.Errorf("Value() = %v, want nil", v)
 	}
 }

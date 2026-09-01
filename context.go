@@ -69,6 +69,11 @@ type Base struct {
 	// handler has to be told the slash was there. Without it every directory
 	// URL reaches the handler one form short of what the client sent.
 	tailSlash bool
+
+	// retained keeps this context out of the pool. Something still holds it
+	// that the router cannot wait for, so handing it to the next request would
+	// let the two write over each other.
+	retained bool
 }
 
 type routerOpts struct {
@@ -212,6 +217,18 @@ func (b *Base) Logger() *slog.Logger {
 func (b *Base) Response() *Response { return b.res }
 
 func (b *Base) ResponseWriter() http.ResponseWriter { return b.res }
+
+// releasedRequest stands in for the request once the handler has returned, so
+// that a Base kept past its request answers as a finished context instead of
+// dereferencing nil. Holding one past the handler is a mistake either way -- on
+// a pooled router the values belong to whoever has it next -- but a cancelled
+// context is a truthful answer and does not take the process down from inside
+// a goroutine nobody is recovering.
+var releasedRequest = func() *http.Request {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return (&http.Request{}).WithContext(ctx)
+}()
 
 func (b *Base) Deadline() (time.Time, bool) { return b.req.Context().Deadline() }
 
