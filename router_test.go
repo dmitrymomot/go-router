@@ -2570,3 +2570,45 @@ func TestMountedHandlerKeepsTheTrailingSlash(t *testing.T) {
 		t.Errorf("path without a trailing slash = %q, want %q", seen, "/sub/index.html")
 	}
 }
+
+// The 405 branch calls setRoute from the matched route, so a scope handler saw
+// its prefix parameters there. The 404 branch had no route to read them from
+// and left them empty, which made the two disagree about the same request.
+func TestScopeFallbackSeesItsPrefixParams(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/t/{tid}", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error {
+			return c.String(http.StatusNotFound, "404 tid="+c.Param("tid")+" pattern="+c.RoutePattern())
+		})
+		g.MethodNotAllowed(func(c *tctx) error {
+			return c.String(http.StatusMethodNotAllowed, "405 tid="+c.Param("tid"))
+		})
+		g.GET("/x", echoRoute)
+	})
+
+	if got := do(r, http.MethodGet, "/t/acme/missing").Body.String(); got != "404 tid=acme pattern=/t/{tid}" {
+		t.Errorf("scope 404 = %q, want %q", got, "404 tid=acme pattern=/t/{tid}")
+	}
+	if got := do(r, http.MethodPost, "/t/acme/x").Body.String(); got != "405 tid=acme" {
+		t.Errorf("scope 405 = %q, want %q", got, "405 tid=acme")
+	}
+}
+
+// A host scope contributes parameters too, and the scope prefix appends to them
+// rather than replacing them.
+func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
+	r := newTestRouter()
+	r.Host("{sub}.example.com", func(h *Router[*tctx]) {
+		h.Route("/t/{tid}", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error {
+				return c.String(http.StatusNotFound, "sub="+c.Param("sub")+" tid="+c.Param("tid"))
+			})
+			g.GET("/x", echoRoute)
+		})
+	})
+
+	got := doHost(r, http.MethodGet, "acme.example.com", "/t/42/missing").Body.String()
+	if got != "sub=acme tid=42" {
+		t.Errorf("scope 404 under a host = %q, want %q", got, "sub=acme tid=42")
+	}
+}

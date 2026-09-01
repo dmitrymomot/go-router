@@ -839,8 +839,8 @@ func (r *Router[C]) refresh() {
 		})
 	}
 	for _, ps := range pending {
-		segs, _, _ := parsePattern(ps.prefix) //nolint:errcheck // newChild rejected a bad prefix already.
-		s := &scopeFallback[C]{prefix: ps.prefix, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
+		segs, names, _ := parsePattern(ps.prefix) //nolint:errcheck // newChild rejected a bad prefix already.
+		s := &scopeFallback[C]{prefix: ps.prefix, names: names, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
@@ -948,6 +948,7 @@ func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
 
 type scopeFallback[C Context] struct {
 	prefix          string
+	names           []string
 	pattern         []segment
 	depth           int
 	hostIdx         int32
@@ -959,12 +960,28 @@ type scopeFallback[C Context] struct {
 }
 
 func (s *scopeFallback[C]) covers(path string, escaped bool) bool {
+	_, ok := s.walk(path, escaped, nil)
+	return ok
+}
+
+// coversInto is covers, keeping the parameter values it decodes on the way.
+func (s *scopeFallback[C]) coversInto(path string, escaped bool, vals []string) ([]string, bool) {
+	return s.walk(path, escaped, vals)
+}
+
+// walk matches the scope prefix against the path. vals collects the value of
+// every non-static segment when it is non-nil, and stays untouched otherwise:
+// covers runs on the hot path and must not allocate.
+func (s *scopeFallback[C]) walk(path string, escaped bool, vals []string) ([]string, bool) {
 	for _, want := range s.pattern {
 		if want.kind == segWildcard {
-			return true
+			if vals != nil {
+				vals = append(vals, strings.TrimPrefix(path, "/"))
+			}
+			return vals, true
 		}
 		if path == "" {
-			return false
+			return vals, false
 		}
 		raw, rest := cutSegment(path)
 		got := raw
@@ -972,15 +989,18 @@ func (s *scopeFallback[C]) covers(path string, escaped bool) bool {
 			var ok bool
 			got, ok = decodePathSegment(raw, escaped)
 			if !ok {
-				return false
+				return vals, false
 			}
 		}
 		if !segmentMatches(want, got) {
-			return false
+			return vals, false
+		}
+		if vals != nil && want.kind != segStatic {
+			vals = append(vals, got)
 		}
 		path = rest
 	}
-	return true
+	return vals, true
 }
 
 func cutSegment(p string) (seg, rest string) {
@@ -1007,14 +1027,41 @@ func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path st
 	return nil
 }
 
-func (r *Router[C]) fallbackChains(host *hostEntry[C], path string, escaped bool) (notFound, notAllowed, options HandlerFunc[C]) {
+func (r *Router[C]) fallbackChains(
+	host *hostEntry[C], path string, escaped bool,
+) (scope *scopeFallback[C], notFound, notAllowed, options HandlerFunc[C]) {
 	if s := scopeFor(r.scopes, host, path, escaped); s != nil {
-		return s.notFoundChain, s.notAllowedChain, s.optionsChain
+		return s, s.notFoundChain, s.notAllowedChain, s.optionsChain
 	}
 	if host != nil {
-		return host.notFoundChain, host.notAllowedChain, host.optionsChain
+		return nil, host.notFoundChain, host.notAllowedChain, host.optionsChain
 	}
-	return r.notFoundChain, r.notAllowedChain, r.optionsChain
+	return nil, r.notFoundChain, r.notAllowedChain, r.optionsChain
+}
+
+// bindPrefixParams gives a scope fallback the parameters of its own prefix, so
+// that a 404 under /t/{tid} can read the tenant. The matched route supplies
+// them on every other path; here there is no route, only the scope.
+func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) {
+	if len(s.names) == 0 {
+		return
+	}
+	// walk collects only into a non-nil slice, and a request that matched no
+	// host has nil values; the inline array gives it somewhere to write.
+	seed := b.paramVals
+	if seed == nil {
+		seed = b.paramArr[:0]
+	}
+	vals, ok := s.coversInto(path, escaped, seed)
+	if !ok {
+		return
+	}
+	names := s.names
+	if len(b.paramNames) > 0 {
+		names = append(slices.Clip(b.paramNames), s.names...)
+	}
+	b.needsCleanup = true
+	b.setRoute(s.prefix, names, vals)
 }
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
@@ -1305,7 +1352,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		req.Pattern = match.pattern
 		b.res.Header().Set(HeaderAllow, r.allowHeader(&hostSt, &anySt))
 
-		_, notAllowed, options := r.fallbackChains(host, trimmed, escaped)
+		_, _, notAllowed, options := r.fallbackChains(host, trimmed, escaped)
 		if req.Method == http.MethodOptions && r.autoOptions {
 			if handleErrors {
 				return r.dispatch(c, options)
@@ -1321,7 +1368,10 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		if len(r.errScopes) > 0 || host != nil && host.errHandler != nil {
 			r.selectErrorTarget(b, host, trimmed, escaped)
 		}
-		notFound, _, _ := r.fallbackChains(host, trimmed, escaped)
+		scope, notFound, _, _ := r.fallbackChains(host, trimmed, escaped)
+		if scope != nil {
+			scope.bindPrefixParams(b, trimmed, escaped)
+		}
 		if handleErrors {
 			return r.dispatch(c, notFound)
 		}
