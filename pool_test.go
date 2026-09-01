@@ -254,3 +254,105 @@ func BenchmarkPooledStatic(b *testing.B) {
 	r.GET("/users/settings", func(c *pctx) error { return c.NoContent(http.StatusOK) })
 	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/users/settings")
 }
+
+// A pooled context must not carry a parameter from the request before it: not
+// into the next response, and not into the pool, where the string would stay
+// reachable for as long as the context sits there. The wide route in each case
+// is deeper than the narrow one, so the values the trie writes on the way down
+// sit above the slots the narrow route owns.
+func TestPoolDoesNotCarryParametersBetweenRequests(t *testing.T) {
+	cases := []struct {
+		name, wide, narrow     string
+		wideTarget, narrowPath string
+		narrowBody             string
+	}{
+		{
+			name:       "inline",
+			wide:       "/p/{one}/deep/{two}/{three}",
+			narrow:     "/p/{one}/other",
+			wideTarget: "/p/wide1/deep/wide2/wide3",
+			narrowPath: "/p/narrow1/other",
+			narrowBody: "one=narrow1",
+		},
+		{
+			// Six parameters against an InlineParamBudget of four: paramVals
+			// spills to the heap, and what stays in paramArr is whatever the
+			// trie wrote before the spill.
+			name:       "spilled",
+			wide:       "/q/{a}/{b}/{c}/{d}/{e}/{f}",
+			narrow:     "/q/{a}/end",
+			wideTarget: "/q/wide1/wide2/wide3/wide4/wide5/wide6",
+			narrowPath: "/q/narrowA/end",
+			narrowBody: "a=narrowA",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen *pctx
+			r := newPooledRouter()
+			r.GET(tc.wide, func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
+			r.GET(tc.narrow, func(c *pctx) error {
+				seen = c
+				names := c.ParamNames()
+				parts := make([]string, len(names))
+				for i, n := range names {
+					parts[i] = n + "=" + c.Param(n)
+				}
+				return c.String(http.StatusOK, strings.Join(parts, ","))
+			})
+
+			// Three rounds: the first fills the pool, the rest run on a context
+			// the wide request already used.
+			for round := range 3 {
+				do(r, http.MethodGet, tc.wideTarget)
+				seen = nil
+				got := do(r, http.MethodGet, tc.narrowPath).Body.String()
+				if got != tc.narrowBody {
+					t.Fatalf("round %d: body = %q, want %q", round, got, tc.narrowBody)
+				}
+				if seen == nil {
+					t.Fatal("the narrow handler did not run")
+				}
+				for i, value := range seen.paramArr {
+					if value != "" {
+						t.Fatalf("round %d: paramArr[%d] = %q after the pool took the context back", round, i, value)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The trailing-slash redirect answers from inside route, before any handler
+// runs, and it gets there by running the trie once to see whether the trimmed
+// path matches. That probe matched, so the trie never unwound its scratch: the
+// values are still in paramArr when the context goes back to the pool.
+func TestPoolDoesNotCarryParametersFromATrailingSlashRedirect(t *testing.T) {
+	var seen *pctx
+	r := newPooledRouter()
+	r.RedirectTrailingSlash(true)
+	r.Pre(func(next HandlerFunc[*pctx]) HandlerFunc[*pctx] {
+		return func(c *pctx) error {
+			seen = c
+			return next(c)
+		}
+	})
+	r.GET("/p/{one}/deep/{two}/{three}", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
+
+	for round := range 3 {
+		seen = nil
+		rec := do(r, http.MethodGet, "/p/wide1/deep/wide2/wide3/")
+		if rec.Code != http.StatusMovedPermanently {
+			t.Fatalf("round %d: status = %d, want %d", round, rec.Code, http.StatusMovedPermanently)
+		}
+		if seen == nil {
+			t.Fatal("the pre-routing middleware did not run")
+		}
+		for i, value := range seen.paramArr {
+			if value != "" {
+				t.Fatalf("round %d: paramArr[%d] = %q after the pool took the context back", round, i, value)
+			}
+		}
+	}
+}
