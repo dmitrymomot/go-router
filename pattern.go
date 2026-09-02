@@ -5,8 +5,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-
-	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type segKind uint8
@@ -164,7 +162,7 @@ func checkStaticLiteral(raw, pattern string) error {
 		if raw[i] != '%' || i+2 >= len(raw) {
 			continue
 		}
-		v, ok := urlesc.Unhex(raw[i+1], raw[i+2])
+		v, ok := unhex(raw[i+1], raw[i+2])
 		if !ok {
 			// requestPath leaves this alone, so the literal reaches the trie
 			// exactly as written and matches.
@@ -183,6 +181,32 @@ func checkStaticLiteral(raw, pattern string) error {
 		}
 	}
 	return nil
+}
+
+// unhex decodes one percent-escape body, reporting whether both digits were hex.
+func unhex(a, b byte) (byte, bool) {
+	hi, ok := hexDigit(a)
+	if !ok {
+		return 0, false
+	}
+	lo, ok := hexDigit(b)
+	if !ok {
+		return 0, false
+	}
+	return hi<<4 | lo, true
+}
+
+func hexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }
 
 func isWholeBrace(raw string) bool {

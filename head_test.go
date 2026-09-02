@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -171,14 +170,6 @@ func headCases() []headCase {
 			},
 			header: map[string]string{HeaderAccept: MIMETextHTML},
 			check:  wantResponseHeader(HeaderContentType, MIMETextHTMLCharsetUTF8),
-		},
-		{
-			name: "a problem document",
-			setup: func(_ *testing.T, r *Router[*tctx]) {
-				r.ErrorHandler(ProblemErrorHandler[*tctx](true))
-				r.GET("/x", func(*tctx) error { return ErrBadRequest.WithError(errors.New("why")) })
-			},
-			check: wantResponseHeader(HeaderContentType, MIMEApplicationProblemJSON),
 		},
 		{
 			name: "an SSE stream",

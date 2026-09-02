@@ -39,7 +39,6 @@ const (
 	HeaderXForwardedFor                   = "X-Forwarded-For"
 	HeaderXForwardedProto                 = "X-Forwarded-Proto"
 	HeaderXFrameOptions                   = "X-Frame-Options"
-	HeaderXHTTPMethodOverride             = "X-HTTP-Method-Override"
 	HeaderXRealIP                         = "X-Real-IP"
 	HeaderXRequestID                      = "X-Request-Id"
 
@@ -57,7 +56,6 @@ const (
 const (
 	MIMEApplicationJSON            = "application/json"
 	MIMEApplicationJSONCharsetUTF8 = "application/json; charset=utf-8"
-	MIMEApplicationProblemJSON     = "application/problem+json"
 	MIMEApplicationForm            = "application/x-www-form-urlencoded"
 	MIMEMultipartForm              = "multipart/form-data"
 	MIMEOctetStream                = "application/octet-stream"

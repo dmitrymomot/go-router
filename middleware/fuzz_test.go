@@ -1,8 +1,6 @@
 package middleware
 
 import (
-	"net/url"
-	"strings"
 	"testing"
 )
 
@@ -37,34 +35,5 @@ func FuzzForwardedEntry(f *testing.F) {
 		}
 		parseHop(h.addr)
 		parseEntry(entry, false)
-	})
-}
-
-func FuzzRewriteEscapedCapture(f *testing.F) {
-	for _, seed := range []string{
-		"a/b",
-		`a\b`,
-		"a%252Fb",
-		"résumé",
-	} {
-		f.Add(seed)
-	}
-	f.Fuzz(func(t *testing.T, capture string) {
-		escaped := url.PathEscape(capture)
-		rule := rewriteRule{parts: []string{"/old/", ""}, to: "/new/$1"}
-		got, ok := rule.apply("/old/" + escaped)
-		if !ok {
-			t.Fatal("the trailing capture did not match")
-		}
-		decoded, err := url.PathUnescape(got)
-		if err != nil {
-			t.Fatalf("rewritten path is not a valid escape: %v", err)
-		}
-		if want := "/new/" + capture; decoded != want {
-			t.Fatalf("decoded rewrite = %q, want %q", decoded, want)
-		}
-		if strings.Contains(capture, "/") && !strings.Contains(got, "%2F") {
-			t.Fatalf("escaped slash was lost: %q", got)
-		}
 	})
 }

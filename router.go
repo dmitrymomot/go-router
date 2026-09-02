@@ -11,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type Route struct {
@@ -1453,7 +1451,7 @@ func canonicalEscapedPath(path string) string {
 		if path[i] != '%' {
 			continue
 		}
-		v, ok := urlesc.Unhex(path[i+1], path[i+2])
+		v, ok := unhex(path[i+1], path[i+2])
 		if !ok {
 			continue
 		}
@@ -1465,7 +1463,7 @@ func canonicalEscapedPath(path string) string {
 		out = append(out, path[:i]...)
 		for i < len(path) {
 			if i+2 < len(path) && path[i] == '%' {
-				if v, ok := urlesc.Unhex(path[i+1], path[i+2]); ok {
+				if v, ok := unhex(path[i+1], path[i+2]); ok {
 					if v == '/' || v == '\\' || v == '%' {
 						out = append(out, '%', hex[v>>4], hex[v&15])
 					} else {
