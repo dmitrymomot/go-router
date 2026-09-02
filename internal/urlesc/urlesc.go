@@ -1,5 +1,5 @@
 // Package urlesc holds the percent-decoding the router and the rewrite
-// middleware both need. Two copies of it drifted apart once already.
+// middleware both need.
 package urlesc
 
 // Unhex decodes one percent-escape body, reporting whether both digits were hex.

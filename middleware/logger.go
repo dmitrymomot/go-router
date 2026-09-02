@@ -58,8 +58,8 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
 				level = cfg.ClientErrorLevel
 			}
 
-			// Nine to thirteen attrs, several of them formatted, are wasted on a
-			// logger that is not going to record them.
+			// Nine to thirteen attrs, several formatted, for a record that may
+			// be discarded.
 			if !cfg.Logger.Enabled(req.Context(), level.Level()) {
 				return err
 			}

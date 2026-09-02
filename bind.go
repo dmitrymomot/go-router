@@ -37,9 +37,8 @@ func (b *Base) Bind[T any]() (T, error) {
 	case ct == MIMEApplicationForm, ct == MIMEMultipartForm:
 		return b.BindForm[T]()
 	case ct == "":
-		// GET, HEAD, DELETE and QUERY already returned above, so this is a
-		// method that carries a body and does not say what it is. Binding the
-		// query string instead left the body unread and reported nothing.
+		// The bodiless methods returned above, so this one carries a body and
+		// does not say what it is.
 		return v, ErrUnsupportedMediaType.WithMessage("a %s body needs a Content-Type", b.req.Method)
 	default:
 		return v, ErrUnsupportedMediaType.WithMessage("cannot decode a %s body", ct)
@@ -111,9 +110,9 @@ type Validator interface {
 	Validate() error
 }
 
-// validate is handed &v so that a Validator with a pointer receiver is found.
-// When T is itself a pointer that makes **T, whose method set is empty, so the
-// value has to be tried as well or Validate never runs for Bind[*User].
+// validate takes &v so a Validator with a pointer receiver is found. For a
+// pointer T that makes **T, whose method set is empty, so the value is tried
+// too.
 func validate[T any](v *T) error {
 	sv, ok := any(v).(Validator)
 	if !ok {
@@ -263,10 +262,9 @@ func (b *Base) limitedBody() io.ReadCloser {
 	if limit <= 0 {
 		return b.req.Body
 	}
-	// MaxBytesReader tells the server to close the connection through an
-	// unexported method on the writer it is handed. *Response cannot have that
-	// method and net/http does not unwrap, so the writer net/http gave us goes
-	// in: with the wrapper a 413 left the connection open and drained the rest.
+	// MaxBytesReader marks the connection for closing through an unexported
+	// method on the writer it is handed, and does not unwrap, so it needs the
+	// one net/http gave us rather than the wrapper.
 	return http.MaxBytesReader(b.res.ResponseWriter, b.req.Body, limit)
 }
 
@@ -274,14 +272,12 @@ func (b *Base) parseForm() error {
 	if err := b.formError(); err != nil {
 		return err
 	}
-	// A media type is "type/subtype" up to the first ";", and the parameters
-	// after it decide nothing here. net/http parses the whole thing again for
-	// the body anyway, and would reject a malformed one there.
+	// Only the type matters here, and net/http parses the whole header again
+	// for the body, rejecting a malformed one there.
 	ct, _, _ := strings.Cut(b.req.Header.Get(HeaderContentType), ";")
 	multipart := strings.EqualFold(strings.TrimSpace(ct), MIMEMultipartForm)
-	// ParseForm on a multipart request fills PostForm with an empty map and
-	// leaves MultipartForm nil, so PostForm alone cannot say whether this body
-	// has been read.
+	// ParseForm leaves MultipartForm nil but fills PostForm, so which field
+	// says "already read" depends on the content type.
 	if multipart && b.req.MultipartForm != nil || !multipart && b.req.PostForm != nil {
 		return nil
 	}

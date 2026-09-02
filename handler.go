@@ -41,19 +41,16 @@ func WrapHandlerFunc[C Context](h http.HandlerFunc) HandlerFunc[C] {
 	return WrapHandler[C](h)
 }
 
-// WrapMiddleware adapts net/http middleware. The wrapped middleware must call
-// next on the goroutine it was given and must not return before next returns:
-// the request-scoped state lives in the context, and on a pooled router that
-// context belongs to the next request as soon as this one ends.
+// WrapMiddleware adapts net/http middleware. The wrapper must call next on the
+// goroutine it was given and must not return before next does: the
+// request-scoped state lives in the context, which on a pooled router belongs
+// to the next request as soon as this one ends.
 //
-// http.TimeoutHandler is the middleware that breaks the rule -- it runs the
-// handler on a new goroutine and returns at the deadline. Wrapping it here
-// leaves that goroutine writing into a live request. Use it outside the router,
-// around the whole handler, or use middleware.Timeout, which cancels the
-// context instead of abandoning the goroutine.
-//
-// A context whose next has not returned is not recycled, so the damage stops at
-// one leaked context rather than reaching the request that follows.
+// http.TimeoutHandler breaks that rule, running the handler on a new goroutine
+// and returning at the deadline. Put it outside the router, or use
+// middleware.Timeout, which cancels the context instead. A context whose next
+// has not returned is kept out of the pool, which limits the damage but does
+// not make the pattern safe.
 func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] {
 	if m == nil {
 		panic("router: WrapMiddleware needs middleware")
@@ -68,20 +65,16 @@ func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] 
 			outer := b.res
 			var (
 				err error
-				// Written by whichever goroutine runs next and read here, so
-				// they have to be atomic: a wrapper that breaks the rule below
-				// is exactly the case this is trying to detect. Two flags,
-				// because a wrapper that never calls next at all -- an auth
-				// check that rejects, say -- is ordinary and must not be
-				// mistaken for one that is still running it.
+				// Written by whichever goroutine runs next, so they have to be
+				// atomic. Two flags: a wrapper that never calls next is
+				// ordinary, one still running it is not.
 				entered, returned, finished atomic.Bool
 			)
 
 			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				entered.Store(true)
 				if finished.Load() {
-					// The wrapper has already returned, so this request is over
-					// and the context may belong to the next one by now.
+					// The request is over; the context may belong to another.
 					return
 				}
 				b.SetRequest(r)
@@ -98,14 +91,11 @@ func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] 
 			}
 			wrapped.ServeHTTP(outer, b.req)
 
-			// Store before the load, as the inner closure does in the opposite
-			// order: whichever of the two runs second sees the other's write, so
-			// a late next either finds finished set and does nothing, or is seen
-			// here and keeps the context out of the pool.
+			// Stored before the load that follows, while the inner closure
+			// loads before it stores, so whichever runs second sees the other.
 			finished.Store(true)
 			if entered.Load() && !returned.Load() {
-				// The wrapper handed control back while next was still running,
-				// so another goroutine is still writing through this context.
+				// next is still running on another goroutine.
 				b.retained = true
 			}
 			if b.res != outer {
@@ -114,11 +104,8 @@ func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] 
 					outer.Size = b.res.Size
 					outer.Committed = b.res.Committed
 				}
-				// Hooks registered while the inner Response was in place belong
-				// to the response as a whole. Without this a middleware that
-				// registers one and then fails -- KeyAuth setting
-				// WWW-Authenticate before it answers 401 -- lost the header,
-				// because the failure is written after this restore.
+				// Hooks registered against the inner Response belong to the
+				// response as a whole, and a failure is written after this.
 				outer.before = b.res.before
 				b.res = outer
 			}

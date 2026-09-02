@@ -34,9 +34,8 @@ var cookieEnc = base64.RawURLEncoding
 type CookieCodec struct {
 	MaxAge time.Duration
 	key    []byte
-	// hmac.New builds and keys a fresh pair of hashes on every call, and a
-	// flash message is signed or verified at least twice per request. Reset
-	// puts a used one back in the state New would have given it.
+	// hmac.New builds and keys two hashes per call, and a flash is signed or
+	// verified at least twice per request.
 	macs sync.Pool
 }
 

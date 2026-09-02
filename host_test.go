@@ -888,9 +888,8 @@ func TestPerHostErrorHandlersIgnoreSetterOrder(t *testing.T) {
 	}
 }
 
-// Every colon outside braces was read as a port, so both spellings of an IPv6
-// literal were turned away. A request carrying one arrives with the brackets
-// already stripped, so it could only ever reach an any-host route.
+// A request from an IPv6 client arrives with its brackets stripped, so a host
+// scope has to be reachable by both spellings.
 func TestIPv6HostPatterns(t *testing.T) {
 	for _, pattern := range []string{"::1", "[::1]"} {
 		t.Run(pattern, func(t *testing.T) {
@@ -912,9 +911,8 @@ func TestIPv6HostPatterns(t *testing.T) {
 	}
 }
 
-// parseHostPattern lower-cases and drops a trailing dot, so two spellings of
-// one host resolved to one entry. The second copy of every route then hit a
-// trie that already held it, and the panic blamed the route.
+// parseHostPattern lower-cases and drops a trailing dot, so two spellings
+// resolve to one entry and the duplicate insert blames the route.
 func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {
 	r := newTestRouter()
 	mustPanicContaining(t, "which name the same host a.com", func() {

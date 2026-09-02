@@ -1290,9 +1290,8 @@ type pointerValidated struct {
 
 func (p *pointerValidated) Validate() error { return errors.New("validate ran") }
 
-// validate is handed &v, which is **T when T is a pointer, and a pointer to a
-// pointer has an empty method set. Bind[*User] therefore skipped Validate
-// entirely while Bind[User] ran it.
+// validate is handed &v, which is **T for a pointer T, and a pointer to a
+// pointer has an empty method set.
 func TestValidateRunsForAPointerTypeArgument(t *testing.T) {
 	r := newTestRouter()
 	r.POST("/ptr", func(c *tctx) error {
@@ -1322,9 +1321,8 @@ type optionOnlyTags struct {
 	Age   int    `json:",string"`
 }
 
-// encoding/json reads an empty tag name with options as "this field, under its
-// Go name". StrictBind read it as untagged and zeroed the field after decoding
-// it, so an annotated field came back empty and nothing said why.
+// An empty tag name with options still names the field, so StrictBind must not
+// treat it as untagged and zero it.
 func TestStrictBindKeepsFieldsTaggedWithOptionsOnly(t *testing.T) {
 	for _, strict := range []bool{true, false} {
 		r := newTestRouter()
@@ -1365,9 +1363,8 @@ func TestStrictBindStillStripsUntaggedFields(t *testing.T) {
 	}
 }
 
-// http.Request.ParseForm on a multipart body sets PostForm to an empty map and
-// leaves MultipartForm nil, so PostForm alone could not say whether the body
-// had been read. A middleware calling ParseForm cost the handler its uploads.
+// ParseForm on a multipart body fills PostForm and leaves MultipartForm nil, so
+// PostForm alone cannot say whether the body has been read.
 func TestFormFileSurvivesAnEarlierParseForm(t *testing.T) {
 	r := newTestRouter()
 	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
@@ -1391,8 +1388,7 @@ func TestFormFileSurvivesAnEarlierParseForm(t *testing.T) {
 	}
 }
 
-// A method that carries a body and does not say what it is used to bind the
-// query string, so the body went unread with no error.
+// A body method with no Content-Type must not fall through to the query.
 func TestBindRefusesABodyWithNoContentType(t *testing.T) {
 	r := newTestRouter()
 	r.POST("/x", func(c *tctx) error {
@@ -1410,9 +1406,8 @@ func TestBindRefusesABodyWithNoContentType(t *testing.T) {
 	}
 }
 
-// HTTPError has exported fields, so one can be built without a status.
-// WriteHeader panicked on 0 and the recovery wrote a bare 500, losing the
-// message the caller had written.
+// HTTPError has exported fields, so one can be built without a status, and
+// WriteHeader panics on 0.
 func TestHTTPErrorWithoutAStatusIsAnInternalError(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/z", func(*tctx) error { return &HTTPError{Message: "custom"} })
@@ -1425,10 +1420,8 @@ func TestHTTPErrorWithoutAStatusIsAnInternalError(t *testing.T) {
 	}
 }
 
-// MaxBytesReader signals "close this connection" through an unexported method
-// on the writer it is handed. *Response cannot have that method and net/http
-// does not unwrap, so a 413 used to leave the connection open and drain the
-// rest of the body.
+// MaxBytesReader marks the connection for closing through an unexported method
+// on the writer it is handed, and does not unwrap.
 func TestOversizedBodyClosesTheConnection(t *testing.T) {
 	r := newTestRouter()
 	r.MaxBodyBytes(16)

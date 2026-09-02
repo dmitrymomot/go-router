@@ -113,10 +113,9 @@ func (w *gzipWriter) WriteHeader(code int) {
 	}
 	if n, err := strconv.ParseInt(h.Get(router.HeaderContentLength), 10, 64); err == nil {
 		if n >= int64(w.min) && h.Get(router.HeaderContentType) == "" {
-			// Committing here would set Content-Encoding with an empty buffer,
-			// so the sniff below never runs and net/http stops sniffing once
-			// the encoding is set: the response goes out with no Content-Type
-			// at all. Wait for the first Write, which brings bytes to sniff.
+			// Committing now would set Content-Encoding with nothing buffered
+			// to sniff, and net/http stops sniffing once it is set. Wait for
+			// the first Write.
 			return
 		}
 		//nolint:errcheck // Same as above: the body follows, and reports it.

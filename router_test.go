@@ -2395,8 +2395,7 @@ func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
 	}
 }
 
-// A scope keyed by nothing covers everything, so a fallback set on one used to
-// displace the root's for the whole tree, depending on declaration order.
+// A scope keyed by nothing covers everything, so it cannot own a fallback.
 func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -2454,9 +2453,8 @@ func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
 	}
 }
 
-// install does not run through handle, so the owners of a mounted subtree used
-// to keep hasRoutes false. Use then passed its guard and baked itself into
-// nothing: the mounted routes had already been chained without it.
+// install does not run through handle, so Mount has to mark the owners itself
+// or Use will pass a guard that exists to catch exactly this.
 func TestUseAfterMountIsRefused(t *testing.T) {
 	sub := newTestRouter()
 	sub.GET("/ping", echoRoute)
@@ -2546,10 +2544,8 @@ func TestMountRefusesAScopeOfAnotherRouter(t *testing.T) {
 	}
 }
 
-// Routing trims the trailing slash before it matches, so the tail handed to a
-// mounted handler used to be one form short of what the client sent. A
-// FileServer answered a directory request with a relative redirect, which the
-// client resolved against the un-trimmed URL and bounced back here.
+// Routing trims the trailing slash before matching, but a mounted handler needs
+// the path the client sent: a FileServer redirects relative to it.
 func TestMountedHandlerKeepsTheTrailingSlash(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
@@ -2584,9 +2580,8 @@ func TestMountedHandlerKeepsTheTrailingSlash(t *testing.T) {
 	}
 }
 
-// The 405 branch calls setRoute from the matched route, so a scope handler saw
-// its prefix parameters there. The 404 branch had no route to read them from
-// and left them empty, which made the two disagree about the same request.
+// The 405 branch reads the parameters off the matched route; the 404 branch has
+// no route and must take them from the scope prefix.
 func TestScopeFallbackSeesItsPrefixParams(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/t/{tid}", func(g *Router[*tctx]) {
@@ -2626,10 +2621,8 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 	}
 }
 
-// A registrar that installs more than one tree entry is still one route to the
-// caller. The name guard counted entries, so naming a mount or a multi-method
-// Match panicked on the second one, advising a second Name scope that the
-// caller has no way to open.
+// A registrar that installs several tree entries is still one route to the
+// caller, so one Name scope has to cover all of them.
 func TestOneRegistrarCallHoldsOneName(t *testing.T) {
 	t.Run("MountHandler", func(t *testing.T) {
 		r := newTestRouter()
@@ -2669,10 +2662,8 @@ func TestOneRegistrarCallHoldsOneName(t *testing.T) {
 	})
 }
 
-// A path arrives canonicalised: %, \ and / stay percent-encoded in upper case
-// and every other escape is decoded. A literal spelled any other way is
-// compared against text no request can produce, and used to register happily
-// and answer 404 for ever with nothing to say why.
+// A path arrives canonicalised, so a literal spelled any other way is compared
+// against text no request can produce.
 func TestUnmatchableStaticLiteralsAreRejected(t *testing.T) {
 	for _, tc := range []struct{ pattern, want string }{
 		{`/backslash/a\b`, "write %5C"},
@@ -2694,9 +2685,8 @@ func TestUnmatchableStaticLiteralsAreRejected(t *testing.T) {
 	}
 }
 
-// {*} spells the same name through the brace branch, which rejects duplicates.
-// The bare form did not, so a pattern could carry two parameters called "*":
-// Param returned only the first and URL expansion failed on the second.
+// {*} goes through the brace branch, which rejects duplicates; the bare form
+// has to do the same.
 func TestBareStarChecksForADuplicateName(t *testing.T) {
 	if err := ValidatePattern("/{*}/*"); err == nil ||
 		!strings.Contains(err.Error(), "duplicate parameter") {

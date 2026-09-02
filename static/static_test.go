@@ -1201,10 +1201,8 @@ func TestDirModeRedirectsADirectory(t *testing.T) {
 	}
 }
 
-// A path that walks through a regular file is a request for a file that cannot
-// exist. The Dir backend reports it as ENOTDIR, which used to reach the default
-// branch: a 500, an ERROR log, and no SPA fallback -- while the embedded
-// backend answered 404 for the very same URL.
+// A path through a regular file names a file that cannot exist. The Dir backend
+// reports ENOTDIR where the embedded one reports ErrNotExist.
 func TestAPathThroughAFileIsNotFoundOnEveryBackend(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "css"), 0o755); err != nil {
@@ -1237,8 +1235,7 @@ func TestAPathThroughAFileIsNotFoundOnEveryBackend(t *testing.T) {
 	}
 }
 
-// Config.NotFound was read only by Assets.ServeHTTP, so a mounted asset set
-// answered with the router's own 404 and the configured handler never ran.
+// Config.NotFound was read only by Assets.ServeHTTP, so Mount ignored it.
 func TestConfigNotFoundRunsThroughMount(t *testing.T) {
 	custom := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -1280,9 +1277,8 @@ func TestMountWithoutNotFoundLeavesTheRouterInCharge(t *testing.T) {
 	}
 }
 
-// "." and ".." survive Trim and then read as path segments, so URL handed out
-// /./app.js: a browser normalises it away, cutSegment never matched the tag
-// back, and the asset was served no-cache instead of immutable.
+// "." and ".." survive Trim and read as path segments, so URL would hand out
+// /./app.js and the tag would never match back.
 func TestBuildTagRejectsDotSegments(t *testing.T) {
 	for _, tag := range []string{".", ".."} {
 		_, err := static.New(static.Config{

@@ -99,10 +99,8 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	if newContext == nil {
 		panic("router: New needs a context factory")
 	}
-	// The three fallback fields stay nil until a setter fills one, so that
-	// "did the caller choose this?" has an answer everywhere. refresh
-	// substitutes the defaults; Mount needs the distinction to know which
-	// handlers to carry over.
+	// The fallback fields stay nil until a setter fills one, so "did the caller
+	// choose this?" has an answer. refresh substitutes the defaults.
 	r := &Router[C]{
 		newCtx:      newContext,
 		autoOptions: true,
@@ -144,9 +142,8 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 	r.handleNamed(method, pattern, h, mws, r.name)
 }
 
-// inOneRoute groups the registrations that a single registrar call makes, so a
-// Name scope can hold all of them. MountHandler installs two patterns and Match
-// one per method; the caller wrote one route and named it once.
+// inOneRoute groups the registrations one registrar call makes, so a Name scope
+// holds all of them: MountHandler installs two patterns, Match one per method.
 func (r *Router[C]) inOneRoute(fn func()) {
 	r.routeBatch++
 	fn()
@@ -172,8 +169,7 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 		if r.nameUsed {
 			panic("router: the scope named " + r.name + " already registered a route; open another Name scope for " + method + " " + pattern)
 		}
-		// Inside a batch the flag waits for the last registration, so that one
-		// registrar call does not trip over its own earlier entries.
+		// In a batch the flag waits, so a call cannot trip over its own entries.
 		if r.routeBatch == 0 {
 			r.nameUsed = true
 		}
@@ -354,10 +350,9 @@ func (r *Router[C]) settingChanged() {
 }
 
 // inOneScope holds the graph rebuild until the outermost scope callback
-// returns. refresh walks the whole graph, and every nested Route, Group and
-// Hosts triggered one, so building a table cost time quadratic in its size:
-// 4000 Route scopes took 1.5s. The router is still ready to serve the moment
-// the outermost call returns, which is the rule this keeps.
+// returns. refresh walks the whole graph, so one per nested Route, Group or
+// Hosts made building a table quadratic in its size. The router is still ready
+// to serve the moment that outermost call returns.
 func (r *Router[C]) inOneScope(fn func()) {
 	root := r.top()
 	root.refreshDepth++
@@ -536,8 +531,8 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	// already holds and close it: a later route would have nowhere to go.
 	sub.owner = shim
 	if sub.hasRoutes {
-		// install does not mark the owners, so a Use above the mount would pass
-		// its guard and then skip every route the subtree brought with it.
+		// install does not mark the owners, so Use above the mount would pass
+		// its guard and apply to none of these routes.
 		for s := shim; s != nil; s = s.owner {
 			s.hasRoutes = true
 		}
@@ -547,10 +542,9 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	r.settingChanged()
 }
 
-// closeSubtree shuts a mounted subtree to further registration. Its routes are
-// already replayed into the parent, so one added afterwards would land in a
-// trie nobody serves. This is per-scope on purpose: the sub keeps its own root
-// pointer, so that one router can be mounted into two parents.
+// closeSubtree shuts a mounted subtree to further registration: its routes are
+// replayed into the parent, so a later one would land in a trie nobody serves.
+// Per-scope on purpose, so a router can still be mounted into two parents.
 func closeSubtree[C Context](r *Router[C]) {
 	r.closed = true
 	for _, ch := range r.children {
@@ -558,9 +552,8 @@ func closeSubtree[C Context](r *Router[C]) {
 	}
 }
 
-// mustNotCarryRootOnlySettings refuses a mount that would silently lose
-// something. Fallbacks move onto the shim, but these live on the root the
-// request path actually reads, and there is one of those per served router.
+// mustNotCarryRootOnlySettings refuses a mount that would lose a setting.
+// These live on the root the request path reads, one per served router.
 func (r *Router[C]) mustNotCarryRootOnlySettings() {
 	lost := ""
 	switch {
@@ -619,9 +612,8 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 	}
 	r.inOneRoute(func() {
 		r.handle(anyMethod, prefix, handler, nil)
-		// The two patterns are one mount. The name belongs to the prefix, which
-		// is what URL should resolve; naming the catch-all as well would read
-		// as one name standing for two different routes.
+		// The name belongs to the prefix, which is what URL resolves; naming
+		// the catch-all too would give one name two patterns.
 		r.handleNamed(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil, "")
 	})
 }
@@ -670,10 +662,8 @@ func (r *Router[C]) mustBeOpen(what string) {
 
 // mustOwnFallbacks rejects a fallback setter on a scope that cannot express
 // one. Scopes are keyed by path prefix, so a prefix-less child covers the whole
-// tree: its handler would answer for routes outside it and would displace the
-// root's own, silently and depending on declaration order. The root, a host
-// scope and any scope with a prefix all name a region the router can match, so
-// they keep their handlers.
+// tree and would displace the root's. The root, a host scope and any prefixed
+// scope each name a region the router can match.
 func (r *Router[C]) mustOwnFallbacks(what string) {
 	if r == r.root || len(r.hosts) > 0 || normalizePattern(r.scopePrefix()) != "/" {
 		return
@@ -793,9 +783,8 @@ func (r *Router[C]) refresh() {
 			e.errHandler, e.rawNotFound, e.rawNotAllowed = nil, nil, nil
 		}
 	}
-	// A router that never calls a setter still has to answer, so a nil field
-	// reads as the package default here rather than at construction: elsewhere
-	// nil is what tells Mount and refresh that nobody chose a handler.
+	// A nil field reads as the package default here, because elsewhere nil is
+	// what says nobody chose a handler.
 	rootNotFound := HandlerFunc[C](defaultNotFound[C])
 	if r.notFound != nil {
 		rootNotFound = r.notFound
@@ -841,10 +830,8 @@ func (r *Router[C]) refresh() {
 
 			own := inherited
 			switch {
-			// Only the router itself and a host scope own the root fallbacks.
-			// A prefix-less child cannot: it covers everything, so its handler
-			// would displace the root's for the whole tree. mustOwnFallbacks
-			// rejects that at the setter, and this keeps refresh honest.
+			// Only the router itself and a host scope own the root fallbacks;
+			// mustOwnFallbacks rejects the rest at the setter.
 			case rt == r || len(rt.hosts) > 0:
 				if e == nil {
 					if rt.notFound != nil {
@@ -1035,9 +1022,9 @@ func (s *scopeFallback[C]) coversInto(path string, escaped bool, vals []string) 
 	return s.walk(path, escaped, vals)
 }
 
-// walk matches the scope prefix against the path. vals collects the value of
-// every non-static segment when it is non-nil, and stays untouched otherwise:
-// covers runs on the hot path and must not allocate.
+// walk matches the scope prefix against the path, collecting the value of every
+// non-static segment when vals is non-nil. covers passes nil: it must not
+// allocate.
 func (s *scopeFallback[C]) walk(path string, escaped bool, vals []string) ([]string, bool) {
 	for _, want := range s.pattern {
 		if want.kind == segWildcard {
@@ -1106,14 +1093,13 @@ func (r *Router[C]) fallbackChains(
 }
 
 // bindPrefixParams gives a scope fallback the parameters of its own prefix, so
-// that a 404 under /t/{tid} can read the tenant. The matched route supplies
-// them on every other path; here there is no route, only the scope.
+// a 404 under /t/{tid} can read the tenant. There is no matched route here.
 func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) {
 	if len(s.names) == 0 {
 		return
 	}
-	// walk collects only into a non-nil slice, and a request that matched no
-	// host has nil values; the inline array gives it somewhere to write.
+	// walk collects only into a non-nil slice; a request that matched no host
+	// has none, so the inline array gives it somewhere to write.
 	seed := b.paramVals
 	if seed == nil {
 		seed = b.paramArr[:0]

@@ -65,14 +65,12 @@ type Base struct {
 	errorRouted  bool
 	needsCleanup bool
 
-	// Routing matches the path with its trailing slash trimmed, so a mounted
-	// handler has to be told the slash was there. Without it every directory
-	// URL reaches the handler one form short of what the client sent.
+	// Routing matches the path trimmed of its trailing slash, so a mounted
+	// handler has to be told the slash was there.
 	tailSlash bool
 
-	// retained keeps this context out of the pool. Something still holds it
-	// that the router cannot wait for, so handing it to the next request would
-	// let the two write over each other.
+	// retained keeps this context out of the pool: something the router cannot
+	// wait for still holds it.
 	retained bool
 }
 
@@ -218,12 +216,10 @@ func (b *Base) Response() *Response { return b.res }
 
 func (b *Base) ResponseWriter() http.ResponseWriter { return b.res }
 
-// releasedRequest stands in for the request once the handler has returned, so
-// that a Base kept past its request answers as a finished context instead of
-// dereferencing nil. Holding one past the handler is a mistake either way -- on
-// a pooled router the values belong to whoever has it next -- but a cancelled
-// context is a truthful answer and does not take the process down from inside
-// a goroutine nobody is recovering.
+// releasedRequest stands in for the request once the handler has returned, so a
+// Base held past its request reads as a finished context rather than
+// dereferencing nil. Holding one is still a mistake: on a pooled router its
+// values belong to whoever has it next.
 var releasedRequest = func() *http.Request {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -299,9 +295,8 @@ func (b *Base) UserAgent() string { return b.req.UserAgent() }
 
 func (b *Base) Referer() string { return b.req.Referer() }
 
-// Accepts picks the best of offers for this request, or "" when none of them
-// is acceptable. Every Accept line counts: a client is free to send the header
-// more than once, and Get would have read only the first.
+// Accepts picks the best of offers for this request, or "" when none is
+// acceptable. A client may send Accept more than once; every line counts.
 func (b *Base) Accepts(offers ...string) string {
 	return negotiate(joinAccept(b.req), offers)
 }

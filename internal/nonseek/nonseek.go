@@ -33,16 +33,13 @@ import (
 	"sync"
 )
 
-// ReadSeeker trusts size. It caps every read at size - pos and reports size for
-// a seek to the end, because a reader that cannot seek has no other way to know
-// where the file ends. Content-Length is therefore whatever Stat said: a size
-// too small truncates the body without an error, and one too large leaves the
-// client waiting for bytes that never come. A regular file always reports its
-// own length, but a synthetic fs.FS that computes one has to make it match the
-// bytes it will hand over.
+// ReadSeeker trusts the size it is given: reads are capped at it and a seek to
+// the end reports it, so Content-Length is whatever Stat said. A size that does
+// not match the bytes available truncates the body or leaves the client
+// waiting, so a synthetic fs.FS has to report the length it will really hand
+// over.
 
-// The skip buffer escapes through the io.Reader interface call below it, so it
-// is heap-allocated on every ranged request without this.
+// The skip buffer escapes through the io.Reader call that fills it.
 var skipBuffers = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
 
 // MaxRangeSkip is the furthest into a non-seekable file a Range may start.
@@ -106,14 +103,12 @@ func singleRangeStart(value string, size int64) (int64, bool) {
 
 // ReadSeeker wraps src so ServeContent can serve it. Every error it reports
 // carries prefix, because ServeContent puts the text in the response.
-// Reader is the fake seeker. Err reports a read failure that ServeContent
-// turned into its own response, so the caller can put it back on the error path.
+// Reader is the fake seeker.
 type Reader struct{ reader }
 
 // Err is the read error the source returned, if any. ServeContent answers a
-// failed Seek with its own 500 in text/plain and tells the caller nothing, so
-// without this the router's error handler, logger and Observe never learned
-// that the file could not be read.
+// failed Seek with its own 500 and tells the caller nothing, so the caller has
+// to ask.
 func (r *Reader) Err() error { return r.readErr }
 
 func ReadSeeker(prefix string, h http.Header, r *http.Request, name string, src io.Reader, size int64) (*Reader, error) {

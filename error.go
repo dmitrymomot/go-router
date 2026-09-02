@@ -136,9 +136,7 @@ func StatusOf(err error) int {
 		return http.StatusOK
 	}
 	if he, ok := errors.AsType[*HTTPError](err); ok {
-		// HTTPError is a plain struct with exported fields, so a caller can
-		// build one without a status. Passing 0 to WriteHeader panics, and the
-		// recovery loses the message the caller wrote.
+		// The fields are exported, so a caller can build one with no status.
 		if he.Status != 0 {
 			return he.Status
 		}
@@ -186,10 +184,9 @@ func writeError(b *Base, err error, exposeCause bool) {
 		he = NewHTTPError(StatusOf(err)).WithError(err)
 	}
 
-	// HTTPError has exported fields, so a caller can build one and never set a
-	// status. WriteHeader panics on 0, handleError recovers and writes a bare
-	// 500, and the Message and Details the caller wrote are lost. Read it once
-	// here rather than mutating the error the caller still holds.
+	// The fields are exported, so a caller can build one with no status, and
+	// WriteHeader panics on 0. Read it here rather than mutating the caller's
+	// error.
 	status := he.Status
 	if status == 0 {
 		status = http.StatusInternalServerError
@@ -230,8 +227,7 @@ func writeError(b *Base, err error, exposeCause bool) {
 		//nolint:errcheck // Same as above.
 		b.res.WriteString(html.EscapeString(he.Message))
 		if cause != "" {
-			// The JSON and text representations both carry it; the caller has
-			// already decided whether a cause may be shown at all.
+			// The other representations carry it; exposeCause already decided.
 			//nolint:errcheck // Same as above.
 			b.res.WriteString("\n<pre>" + html.EscapeString(cause) + "</pre>")
 		}

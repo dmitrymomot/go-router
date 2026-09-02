@@ -529,9 +529,8 @@ func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 	}
 }
 
-// RFC 6839: a +json subtype is JSON with a name on it. matchRank compared
-// subtypes exactly, so a JSON:API or problem+json client was answered in
-// text/plain -- a type it had asked for even less than the JSON it wanted.
+// RFC 6839: a +json subtype is JSON with a name on it, and text/plain is not
+// what a JSON:API client asked for.
 func TestErrorNegotiationAcceptsAStructuredJSONSuffix(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/e", func(*tctx) error { return ErrBadRequest })
@@ -560,9 +559,7 @@ func TestErrorNegotiationAcceptsAStructuredJSONSuffix(t *testing.T) {
 	}
 }
 
-// A client may send Accept more than once. Accepts read only the first line
-// while the error path read all of them, so the two disagreed about the same
-// request.
+// A client may send Accept more than once, and the error path reads them all.
 func TestAcceptsReadsEveryAcceptLine(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/a", func(c *tctx) error {
@@ -579,8 +576,8 @@ func TestAcceptsReadsEveryAcceptLine(t *testing.T) {
 	}
 }
 
-// Blob with no content type wrote a blank Content-Type header, and net/http
-// sniffs only when the key is absent, so the client got nothing to go on.
+// net/http sniffs only when the Content-Type key is absent, not when it is
+// present and empty.
 func TestBlobWithNoContentTypeLetsTheServerSniff(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/b", func(c *tctx) error { return c.Blob(http.StatusOK, "", []byte("<html>hi</html>")) })

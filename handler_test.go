@@ -63,10 +63,8 @@ func TestWrappedMiddlewareRejectsNilResult(t *testing.T) {
 	}
 }
 
-// The inner Response that WrapMiddleware builds when the wrapper substitutes a
-// writer carried its own hook list. Only Status, Size and Committed were copied
-// back, so a hook registered inside -- KeyAuth's WWW-Authenticate -- was gone by
-// the time the 401 was written.
+// WrapMiddleware builds an inner Response when the wrapper substitutes a
+// writer, and a hook registered against it has to survive the restore.
 func TestWrapMiddlewareKeepsBeforeHooks(t *testing.T) {
 	substituting := func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

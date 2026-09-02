@@ -147,10 +147,8 @@ func parseHostPattern(pattern string) (hostSpec, error) {
 	if pattern == "*" {
 		return hostSpec{pattern: "*", any: true}, nil
 	}
-	// An IPv6 literal is all colons, and a request carrying one arrives with the
-	// brackets already stripped, so it can only ever be matched exactly. Both
-	// spellings used to be turned away as if they carried a port, which left
-	// IPv6 clients reachable only through any-host routes.
+	// An IPv6 literal is all colons, and arrives with its brackets stripped, so
+	// it can only be matched exactly.
 	if host, ok := ipv6HostPattern(pattern); ok {
 		return hostSpec{pattern: host, labels: []hostLabel{{lit: host}}, statics: 1}, nil
 	}
@@ -215,9 +213,8 @@ func parseHostPattern(pattern string) (hostSpec, error) {
 	return s, nil
 }
 
-// ipv6HostPattern reports the address in an IPv6 host pattern, written either
-// bare or in brackets. The text is kept as given, because normalizeHostOK hands
-// over what was between the brackets without canonicalising it either.
+// ipv6HostPattern reports the address in an IPv6 host pattern, bare or
+// bracketed. The text is kept as written, as normalizeHostOK keeps it too.
 func ipv6HostPattern(pattern string) (string, bool) {
 	host := pattern
 	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {

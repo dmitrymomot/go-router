@@ -742,10 +742,8 @@ func TestSafeFileNameRejectsAmbiguousRootsAndTraversal(t *testing.T) {
 	}
 }
 
-// ServeContent reports a read failure as a seek failure and answers it with its
-// own 500 in text/plain, returning nothing. The handler then returned nil, so
-// the error handler, the logger and Observe were all told the request had
-// succeeded with a 500 and no error.
+// ServeContent answers a read failure with its own 500 and returns nothing, so
+// the error has to reach the pipeline another way.
 func TestNonSeekableReadFailureReachesTheErrorPipeline(t *testing.T) {
 	var (
 		handled  error

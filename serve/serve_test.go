@@ -1013,9 +1013,8 @@ func Example() {
 	// <nil>
 }
 
-// Run closes a caller-supplied listener on the serving path, so it owns it from
-// the moment it is handed one. The early returns used to leave it accepting,
-// and the caller could not tell whether ownership had passed.
+// Run closes a caller-supplied listener when it serves, so it owns one from the
+// moment it is handed it.
 func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()

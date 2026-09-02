@@ -29,9 +29,7 @@ func FromHeader(name, cutPrefix string) TokenSource {
 		for _, v := range values {
 			if len(v) > n && strings.EqualFold(v[:n], cutPrefix) {
 				// RFC 6750 allows more than one space after the scheme, and
-				// RFC 9110 allows optional whitespace besides. Cutting exactly
-				// len("Bearer ") turned "Bearer  tok" into " tok", which no
-				// key ever equals.
+				// RFC 9110 allows whitespace besides.
 				out = append(out, strings.TrimLeft(v[n:], " \t"))
 			}
 		}

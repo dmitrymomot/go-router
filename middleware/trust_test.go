@@ -133,9 +133,8 @@ func TestNewTrustSetRejectsANilOption(t *testing.T) {
 	})
 }
 
-// netip.ParsePrefix returns a zero Prefix beside its error. Stored, it matches
-// nothing, so the proxy is never trusted and RealIP strips every forwarding
-// header -- a misconfiguration that looks like working code.
+// A zero Prefix matches nothing, so the proxy is never trusted and the
+// misconfiguration looks like working code.
 func TestTrustPrefixRejectsAnInvalidPrefix(t *testing.T) {
 	bad, err := netip.ParsePrefix("not-a-prefix")
 	if err == nil {

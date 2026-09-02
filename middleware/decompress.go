@@ -41,9 +41,8 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 				return next(c)
 			}
 
-			// gzip.Reader.Reset wraps anything without ReadByte in a fresh 4 KiB
-			// bufio.Reader, and *http.body has none. Lending it one that does
-			// keeps that allocation out of every compressed request.
+			// gzip.Reader.Reset wraps a source without ReadByte in a fresh 4 KiB
+			// bufio.Reader, and *http.body has none.
 			src := byteReaders.Get().(*bufio.Reader)
 			src.Reset(req.Body)
 

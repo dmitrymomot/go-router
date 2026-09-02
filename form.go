@@ -182,9 +182,7 @@ func fieldName(ft reflect.StructField, tag string) (name, layout string, tagged,
 			return name, layout, true, false
 		}
 		// encoding/json reads `json:",omitempty"` as "this field, under its Go
-		// name, with options". The field is tagged; only the name is defaulted.
-		// StrictBind drops untagged fields, so reading it as untagged silently
-		// zeroed a field the author had annotated on purpose.
+		// name": it is tagged, only the name is defaulted.
 		if hasOpts && opts != "" {
 			return ft.Name, layout, true, false
 		}

@@ -646,11 +646,8 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 	}
 }
 
-// A handler that sets Content-Length and no Content-Type used to be committed
-// from WriteHeader with an empty buffer: the sniff fallback never ran, and
-// net/http stops sniffing once Content-Encoding is set, so the response went
-// out with no Content-Type at all. With Secure's nosniff the browser then
-// showed the page as plain text.
+// Committing from WriteHeader leaves nothing buffered to sniff, and net/http
+// stops sniffing once Content-Encoding is set.
 func TestGzipSniffsWhenContentLengthIsSetWithoutAType(t *testing.T) {
 	body := strings.Repeat("<p>hello</p>", 400)
 

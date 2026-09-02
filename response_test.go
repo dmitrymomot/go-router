@@ -388,10 +388,8 @@ func TestResponseBeforeRejectsNil(t *testing.T) {
 	new(Response).Before(nil)
 }
 
-// After a hijack the caller owns the wire. The response stayed uncommitted with
-// Status 0, so a later error went down the normal write path and net/http
-// logged "response.WriteHeader on hijacked connection", while Observe reported
-// a 500 for a connection that had carried a 101.
+// After a hijack the caller owns the wire, so the router must not write on it
+// again or report a status the connection never carried.
 func TestHijackCommitsTheResponse(t *testing.T) {
 	var (
 		status   int

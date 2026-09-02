@@ -255,9 +255,8 @@ func TestFromFormReadsTheMethodsThatNetHTTPParses(t *testing.T) {
 	}
 }
 
-// RFC 6750 allows more than one space after the scheme. The cut was exactly
-// len("Bearer "), so "Bearer  tok" produced the key " tok", which matches no
-// key: BasicAuth in the same package already trimmed.
+// RFC 6750 allows more than one space after the scheme, as BasicAuth already
+// accepts.
 func TestFromHeaderTrimsExtraSpaceAfterTheScheme(t *testing.T) {
 	src := middleware.FromHeader("Authorization", "Bearer ")
 	for _, header := range []string{"Bearer tok", "Bearer  tok", "Bearer \ttok"} {

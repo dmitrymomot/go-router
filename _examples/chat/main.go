@@ -40,8 +40,7 @@ func main() {
 		MaxHeaderBytes:    16 << 10,
 	}
 
-	// SIGTERM is what a container runtime sends, so leaving it out meant
-	// docker stop killed the process outright: no room close, no drain.
+	// SIGTERM is what a container runtime sends.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -60,8 +59,7 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
-	// ListenAndServe returns as soon as Shutdown begins, so returning here
-	// would end the process while requests were still being drained.
+	// ListenAndServe returns as soon as Shutdown begins, not when it finishes.
 	<-drained
 }
 

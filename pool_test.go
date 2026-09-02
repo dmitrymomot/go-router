@@ -362,10 +362,8 @@ func TestPoolDoesNotCarryParametersFromATrailingSlashRedirect(t *testing.T) {
 	}
 }
 
-// A wrapper that abandons next on another goroutine -- http.TimeoutHandler is
-// the one in the standard library -- leaves that goroutine writing through the
-// context after the handler returned. Recycling it would hand the next request
-// the same memory.
+// A wrapper that abandons next on another goroutine leaves it writing through
+// the context after the handler returned.
 func TestPooledContextIsNotRecycledWhileNextStillRuns(t *testing.T) {
 	var (
 		running = make(chan struct{})
@@ -418,9 +416,8 @@ func TestPooledContextIsRecycledWhenNextIsSkipped(t *testing.T) {
 	}
 }
 
-// A Base kept past its handler used to dereference a nil request, which takes
-// the process down from a goroutine nobody is recovering. It answers as a
-// finished context instead.
+// A Base kept past its handler must read as a finished context, not dereference
+// a nil request.
 func TestBaseHeldPastItsRequestReadsAsCancelled(t *testing.T) {
 	r := newPooledRouter()
 	held := make(chan *pctx, 1)
