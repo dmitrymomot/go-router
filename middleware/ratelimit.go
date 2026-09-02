@@ -29,9 +29,19 @@ type RateLimitConfig[C router.Context] struct {
 }
 
 type MemoryStoreConfig struct {
-	Rate       float64
-	Burst      int
-	ExpiresIn  time.Duration
+	Rate      float64
+	Burst     int
+	ExpiresIn time.Duration
+
+	// MaxEntries caps how many keys the store tracks, so that a flood of
+	// one-off keys cannot exhaust memory. Zero means
+	// DefaultMemoryStoreMaxEntries; negative means no cap at all.
+	//
+	// A full store fails closed: an id it has never seen is denied for
+	// ExpiresIn instead of admitted. With the default ClientIP key that means
+	// every first-time visitor is turned away with 429 while the table stays
+	// full, so raise the cap or lift it if that trade is the wrong way round
+	// for the service.
 	MaxEntries int
 }
 
@@ -103,10 +113,14 @@ func NewMemoryStoreWithConfig[C router.Context](cfg MemoryStoreConfig) RateLimit
 	if cfg.ExpiresIn <= 0 {
 		cfg.ExpiresIn = DefaultRateLimitExpiry
 	}
+	// The store is bounded so that a flood of one-off keys cannot exhaust
+	// memory, and it fails closed when it is full: an unseen id is denied for
+	// ExpiresIn rather than admitted. That protects the process, but with the
+	// default ClientIP key it also locks out every first-time visitor once the
+	// table fills, so a caller who would rather spend the memory can say so.
 	if cfg.MaxEntries < 0 {
-		panic("middleware: NewMemoryStore needs max entries above zero")
-	}
-	if cfg.MaxEntries == 0 {
+		cfg.MaxEntries = 0 // unbounded
+	} else if cfg.MaxEntries == 0 {
 		cfg.MaxEntries = DefaultMemoryStoreMaxEntries
 	}
 	return &memoryStore[C]{
@@ -115,6 +129,7 @@ func NewMemoryStoreWithConfig[C router.Context](cfg MemoryStoreConfig) RateLimit
 		burst:      float64(cfg.Burst),
 		expiresIn:  cfg.ExpiresIn,
 		maxEntries: int64(cfg.MaxEntries),
+		unbounded:  cfg.MaxEntries == 0,
 	}
 }
 
@@ -146,6 +161,7 @@ type memoryStore[C router.Context] struct {
 	burst         float64
 	expiresIn     time.Duration
 	maxEntries    int64
+	unbounded     bool
 }
 
 func (s *memoryStore[C]) Allow(_ C, id string) (bool, time.Duration, error) {
@@ -198,6 +214,10 @@ func (s *memoryStore[C]) Allow(_ C, id string) (bool, time.Duration, error) {
 }
 
 func (s *memoryStore[C]) reserve() bool {
+	if s.unbounded {
+		s.entries.Add(1)
+		return true
+	}
 	for {
 		entries := s.entries.Load()
 		if entries >= s.maxEntries {
