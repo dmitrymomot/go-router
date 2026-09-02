@@ -263,32 +263,27 @@ type sseLines struct {
 }
 
 func (w *sseLines) Write(p []byte) (int, error) {
-	for i := 0; i < len(p); {
-		j := nextBreak(p, i)
-		if j > i {
-			w.start()
-			w.buf.Write(p[i:j])
-			w.cr = false
-		}
-		if j < len(p) {
-			w.br(p[j])
-			j++
-		}
-		i = j
-	}
+	writeLines(w, p, (*bytes.Buffer).Write)
 	return len(p), nil
 }
 
 func (w *sseLines) WriteString(p string) {
-	for i := 0; i < len(p); {
-		j := nextBreak(p, i)
+	writeLines(w, p, (*bytes.Buffer).WriteString)
+}
+
+// writeLines splits v on CR and LF and hands each run to the buffer, opening a
+// field for the first and a fresh one after every break.
+func writeLines[T string | []byte](w *sseLines, v T, write func(*bytes.Buffer, T) (int, error)) {
+	for i := 0; i < len(v); {
+		j := nextBreak(v, i)
 		if j > i {
 			w.start()
-			w.buf.WriteString(p[i:j])
+			//nolint:errcheck // bytes.Buffer never fails.
+			write(w.buf, v[i:j])
 			w.cr = false
 		}
-		if j < len(p) {
-			w.br(p[j])
+		if j < len(v) {
+			w.br(v[j])
 			j++
 		}
 		i = j
