@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/fs"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"testing/fstest"
 )
 
 // HEAD is decided in its own place on every response path: Blob, String,
@@ -57,20 +55,6 @@ func writeTempFile(t *testing.T, body string) (dir, name string) {
 	}
 	return dir, name
 }
-
-// forwardOnlyFS hands back files that cannot seek, which is the path through
-// internal/nonseek rather than straight to http.ServeContent.
-type forwardOnlyFS struct{ fs.FS }
-
-func (f forwardOnlyFS) Open(name string) (fs.File, error) {
-	file, err := f.FS.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	return forwardOnlyFile{file}, nil
-}
-
-type forwardOnlyFile struct{ fs.File }
 
 func headCases() []headCase {
 	const body = "the body of the response"
@@ -161,14 +145,6 @@ func headCases() []headCase {
 			setup: func(t *testing.T, r *Router[*tctx]) {
 				dir, name := writeTempFile(t, body)
 				r.GET("/x", func(c *tctx) error { return c.FileFS(name, os.DirFS(dir)) })
-			},
-			check: wantResponseHeader("Accept-Ranges", "bytes"),
-		},
-		{
-			name: "File from a reader that cannot seek",
-			setup: func(_ *testing.T, r *Router[*tctx]) {
-				fsys := forwardOnlyFS{fstest.MapFS{"asset.txt": {Data: []byte(body)}}}
-				r.GET("/x", func(c *tctx) error { return c.FileFS("asset.txt", fsys) })
 			},
 			check: wantResponseHeader("Accept-Ranges", "bytes"),
 		},

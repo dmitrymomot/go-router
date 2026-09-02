@@ -10,8 +10,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-
-	"github.com/dmitrymomot/go-router/internal/nonseek"
 )
 
 const (
@@ -92,27 +90,15 @@ func fileNotFound(err error) error {
 }
 
 func (b *Base) sendFile(name string, f fs.File, info fs.FileInfo) error {
-	req := b.req
+	// ServeContent needs to seek to size the body and to answer a Range.
+	// os.DirFS and embed.FS both return seekable files; a filesystem that does
+	// not has to say so rather than be faked around.
 	rs, ok := f.(io.ReadSeeker)
-	var fake *nonseek.Reader
 	if !ok {
-		req = nonseek.Request(req, info.Size())
-		var err error
-		fake, err = nonseek.ReadSeeker("", b.res.Header(), req, name, f, info.Size())
-		if err != nil {
-			return ErrInternalServerError.WithError(fmt.Errorf("router: read the file: %w", err))
-		}
-		rs = fake
+		return ErrInternalServerError.WithError(
+			fmt.Errorf("router: %s comes from a filesystem whose files cannot seek", name))
 	}
-
-	http.ServeContent(b.res, req, path.Base(name), info.ModTime(), rs)
-	// ServeContent answers a read failure with its own 500 and returns nothing,
-	// so the error has to be picked back up to reach the error pipeline.
-	if fake != nil {
-		if err := fake.Err(); err != nil {
-			return ErrInternalServerError.WithError(fmt.Errorf("router: read the file: %w", err))
-		}
-	}
+	http.ServeContent(b.res, b.req, path.Base(name), info.ModTime(), rs)
 	return nil
 }
 
