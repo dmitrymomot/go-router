@@ -1,0 +1,79 @@
+{{define "landing" -}}
+{{template "head" "Workspaces"}}
+<h1>One app, one subdomain for each customer</h1>
+<p class="lede">Create a workspace and the app sends you to its own address.</p>
+
+<p><a class="button" href="/signup">Create a workspace</a></p>
+
+{{- with .Workspaces}}
+<h2>Yours</h2>
+<ul class="spaces">
+	{{- range .}}
+	<li><a href="{{.URL}}">{{.Name}}</a><br><code>{{.URL}}</code></li>
+	{{- end}}
+</ul>
+{{- end}}
+
+{{- with .Email}}
+<form action="/signout" method="post"><button type="submit">Sign out {{.}}</button></form>
+{{- end}}
+{{template "foot"}}
+{{- end}}
+
+{{define "signup" -}}
+{{template "head" "Create a workspace"}}
+<h1>Create a workspace</h1>
+<p class="lede">The name becomes the subdomain.</p>
+
+<form class="stack" action="/signup" method="post" autocomplete="off">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+	<label>Workspace name
+		<input name="name" value="{{.Name}}" maxlength="40" placeholder="Acme, Inc." required autofocus>
+	</label>
+	<label>Your email
+		<input name="email" type="email" value="{{.Email}}" maxlength="120" placeholder="you@example.com" required>
+	</label>
+	{{- with .Error}}
+	<p class="error" role="alert">{{.}}</p>
+	{{- end}}
+	<button type="submit">Create it</button>
+</form>
+<p class="hint">"Acme, Inc." becomes <code>acme-inc.lvh.me</code>.</p>
+{{template "foot"}}
+{{- end}}
+
+{{define "dashboard" -}}
+{{template "head" .Workspace.Name}}
+<h1>{{.Workspace.Name}}</h1>
+<p class="lede">This page answers on <code>{{.Workspace.Slug}}.lvh.me</code> and on no other host.</p>
+
+<ul class="spaces">
+	<li>Subdomain: <code>{{.Workspace.Slug}}</code>, read from the host as a route parameter</li>
+	<li>Owner: {{.Workspace.Owner}}</li>
+	<li>Created: {{.Workspace.Created.Format "2 Jan 2006, 15:04"}}</li>
+</ul>
+
+{{if .IsOwner}}
+<p class="hint">The session cookie is signed and scoped to the base domain, so it followed you here from the landing page.</p>
+<form action="/signout" method="post"><button type="submit">Sign out</button></form>
+{{else}}
+<p class="hint">You are reading this workspace as a guest.</p>
+{{end}}
+<p><a href="{{.ApexURL}}">Back to the landing page</a></p>
+{{template "foot"}}
+{{- end}}
+
+{{define "unknown" -}}
+{{template "head" "Unknown host"}}
+<h1>Nothing answers on {{.Host}}</h1>
+<p class="lede">This app routes on the host. Ask for <code>{{.Base}}</code>, or for the subdomain of a workspace.</p>
+{{template "foot"}}
+{{- end}}
+
+{{define "error" -}}
+{{template "head" "Sorry"}}
+<h1>{{.Status}}</h1>
+<p class="lede">{{.Message}}</p>
+<p><a href="{{.ApexURL}}">Back to the landing page</a></p>
+{{template "foot"}}
+{{- end}}

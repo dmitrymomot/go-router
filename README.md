@@ -85,6 +85,7 @@ Each line links to the example that proves it.
 | --- | --- |
 | [`_examples/restapi`](_examples/restapi) | a JSON API: a mounted sub-router, binding, validation, domain errors, a JSON error handler |
 | [`_examples/chat`](_examples/chat) | a chat room: `html/template`, htmx and server-sent events |
+| [`_examples/tenants`](_examples/tenants) | a multi-tenant app: a workspace per subdomain, and a session that crosses them |
 
 ## License
 
