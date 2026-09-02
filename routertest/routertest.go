@@ -24,16 +24,20 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// RequestOption changes the request that [Request] builds.
 type RequestOption func(*http.Request)
 
+// Header sets a request header.
 func Header(key, value string) RequestOption {
 	return func(r *http.Request) { r.Header.Set(key, value) }
 }
 
+// Host sets the host of the request, for a route scoped to one.
 func Host(host string) RequestOption {
 	return func(r *http.Request) { r.Host = host }
 }
 
+// HTMX marks the request as one htmx made.
 func HTMX() RequestOption {
 	return Header(router.HeaderHXRequest, "true")
 }
@@ -58,6 +62,7 @@ func Body(contentType string, r io.Reader) RequestOption {
 	}
 }
 
+// JSONBody sends v as a JSON body. It panics if v does not encode.
 func JSONBody(v any, opts ...json.Options) RequestOption {
 	return func(req *http.Request) {
 		data, err := json.Marshal(v, opts...)
@@ -68,12 +73,15 @@ func JSONBody(v any, opts ...json.Options) RequestOption {
 	}
 }
 
+// FormBody sends values as a URL-encoded form body.
 func FormBody(values url.Values) RequestOption {
 	return func(req *http.Request) {
 		setBody(req, router.MIMEApplicationForm, strings.NewReader(values.Encode()))
 	}
 }
 
+// FilePart is one uploaded file of a multipart body. An empty Filename takes
+// the field name, and an empty ContentType takes application/octet-stream.
 type FilePart struct {
 	Field       string
 	Filename    string
@@ -81,6 +89,8 @@ type FilePart struct {
 	Content     []byte
 }
 
+// MultipartBody sends fields and files as a multipart form. The fields go out
+// in the order of their names, so the body is the same on every run.
 func MultipartBody(fields url.Values, files ...FilePart) RequestOption {
 	return func(req *http.Request) {
 		var buf bytes.Buffer
@@ -138,6 +148,8 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 	}
 }
 
+// Request builds a request for a handler under test. target is a path, and it
+// may carry a query.
 func Request(method, target string, opts ...RequestOption) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	for _, opt := range opts {
@@ -152,20 +164,33 @@ type contextSpec struct {
 	pattern string
 }
 
+// ContextOption configures the context that [NewContext] builds.
 type ContextOption func(*contextSpec)
 
+// WithParams gives the context the route parameters that a router would have
+// filled in.
 func WithParams(params map[string]string) ContextOption {
 	return func(s *contextSpec) { s.params = params }
 }
 
+// WithPattern gives the context the route pattern that [router.Base.RoutePattern]
+// reports.
 func WithPattern(pattern string) ContextOption {
 	return func(s *contextSpec) { s.pattern = pattern }
 }
 
+// WithRequest gives the context a request of your own, from [Request] or from
+// httptest. Without it the context answers a GET of "/".
 func WithRequest(req *http.Request) ContextOption {
 	return func(s *contextSpec) { s.req = req }
 }
 
+// NewContext builds one application context and the recorder it writes to, so
+// a handler can be called on its own without a router.
+//
+// newCtx is the factory of the application, the same one [router.New] takes.
+// It has to return a context whose [router.Base] is usable: embed Base by
+// value, or fill an embedded pointer with [router.NewBase].
 func NewContext[C router.Context](
 	tb testing.TB,
 	newCtx func(http.ResponseWriter, *http.Request) C,
@@ -212,12 +237,17 @@ func paramSlices(params map[string]string) (names, vals []string) {
 	return names, vals
 }
 
+// Response is what a handler answered. Body holds the whole body, already
+// read, and the embedded [http.Response] can be read again from the start.
 type Response struct {
 	*http.Response
 	Body     []byte
 	Recorder *httptest.ResponseRecorder
 }
 
+// Serve sends req to h and reports the answer.
+//
+// Serve panics if req is nil.
 func Serve(h http.Handler, req *http.Request) *Response {
 	// A nil request is refused here: a handler that never reads one answers it
 	// without complaint, and the test passes against a request nobody made.
@@ -233,22 +263,28 @@ func Serve(h http.Handler, req *http.Request) *Response {
 	return &Response{Response: res, Body: body, Recorder: rec}
 }
 
+// Do builds a request and sends it to h. See [Request] and [Serve].
 func Do(h http.Handler, method, target string, opts ...RequestOption) *Response {
 	return Serve(h, Request(method, target, opts...))
 }
 
+// Get is [Do] for a GET.
 func Get(h http.Handler, target string, opts ...RequestOption) *Response {
 	return Do(h, http.MethodGet, target, opts...)
 }
 
+// String reports the body as text.
 func (r *Response) String() string { return string(r.Body) }
 
+// JSON decodes the body as a T.
 func (r *Response) JSON[T any](opts ...json.Options) (T, error) {
 	var v T
 	err := json.Unmarshal(r.Body, &v, opts...)
 	return v, err
 }
 
+// AssertStatus fails the test unless the status is want. The message carries
+// the body, which usually says why.
 func (r *Response) AssertStatus(tb testing.TB, want int) {
 	tb.Helper()
 	if r.StatusCode != want {
@@ -256,6 +292,7 @@ func (r *Response) AssertStatus(tb testing.TB, want int) {
 	}
 }
 
+// AssertBody fails the test unless the body is exactly want.
 func (r *Response) AssertBody(tb testing.TB, want string) {
 	tb.Helper()
 	if got := r.String(); got != want {
@@ -263,6 +300,7 @@ func (r *Response) AssertBody(tb testing.TB, want string) {
 	}
 }
 
+// AssertHeader fails the test unless the response header key is want.
 func (r *Response) AssertHeader(tb testing.TB, key, want string) {
 	tb.Helper()
 	if got := r.Header.Get(key); got != want {
@@ -270,6 +308,11 @@ func (r *Response) AssertHeader(tb testing.TB, key, want string) {
 	}
 }
 
+// NewServer starts a real server for h and stops it when the test ends. Use it
+// where the recorder is not enough, such as a stream the test reads as it
+// arrives.
+//
+// It fails the test if h is nil.
 func NewServer(tb testing.TB, h http.Handler) *httptest.Server {
 	tb.Helper()
 	// A nil handler is refused here: httptest.NewServer would serve
@@ -281,12 +324,16 @@ func NewServer(tb testing.TB, h http.Handler) *httptest.Server {
 	return httptest.NewTestServer(tb, h)
 }
 
+// Event is one event parsed out of a server-sent event body.
 type Event struct {
 	ID   string
 	Name string
 	Data string
 }
 
+// Events parses the body as a server-sent event stream. Comments are dropped,
+// the data fields of one event are joined with a line break, and an id carries
+// over to the events that follow, as the format says.
 func Events(r *Response) []Event {
 	var (
 		events  []Event
@@ -332,6 +379,8 @@ func Events(r *Response) []Event {
 	return events
 }
 
+// AssertEvents fails the test unless the body holds exactly the events want,
+// in order.
 func AssertEvents(tb testing.TB, r *Response, want ...Event) {
 	tb.Helper()
 	got := Events(r)
@@ -367,6 +416,11 @@ func closeGoldenRoot(tb testing.TB, root *os.Root) {
 	}
 }
 
+// AssertGolden compares got with the file testdata/name, and fails the test on
+// any difference. Run the test with -routertest.update, or with an -update
+// flag of your own, to write the file instead.
+//
+// name is a slash path inside testdata, and it cannot leave that directory.
 func AssertGolden(tb testing.TB, name string, got []byte) {
 	tb.Helper()
 
