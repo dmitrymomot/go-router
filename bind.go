@@ -274,10 +274,11 @@ func (b *Base) parseForm() error {
 	if err := b.formError(); err != nil {
 		return err
 	}
-	multipart := false
-	if ct, _, _ := mime.ParseMediaType(b.req.Header.Get(HeaderContentType)); ct == MIMEMultipartForm {
-		multipart = true
-	}
+	// A media type is "type/subtype" up to the first ";", and the parameters
+	// after it decide nothing here. net/http parses the whole thing again for
+	// the body anyway, and would reject a malformed one there.
+	ct, _, _ := strings.Cut(b.req.Header.Get(HeaderContentType), ";")
+	multipart := strings.EqualFold(strings.TrimSpace(ct), MIMEMultipartForm)
 	// ParseForm on a multipart request fills PostForm with an empty map and
 	// leaves MultipartForm nil, so PostForm alone cannot say whether this body
 	// has been read.

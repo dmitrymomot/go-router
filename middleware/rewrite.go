@@ -28,8 +28,10 @@ func Rewrite[C router.Context](rules ...RewriteRule) router.Middleware[C] {
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
 			req := c.Request()
+			// The path does not change between rules, so decode it once.
+			path := decodeUnreservedEscapes(req.URL.EscapedPath())
 			for _, rule := range compiled {
-				to, ok := rule.apply(decodeUnreservedEscapes(req.URL.EscapedPath()))
+				to, ok := rule.apply(path)
 				if !ok {
 					continue
 				}

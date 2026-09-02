@@ -131,6 +131,9 @@ func safeFileName(name string) bool {
 }
 
 func cleanFileName(name string) string {
+	if len(name) > 0 && name[0] == '/' {
+		return strings.TrimPrefix(path.Clean(name), "/")
+	}
 	return strings.TrimPrefix(path.Clean("/"+name), "/")
 }
 

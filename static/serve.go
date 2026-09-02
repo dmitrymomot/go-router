@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -90,12 +89,11 @@ func (a *Assets) fallback(w http.ResponseWriter, r *http.Request, name string) b
 func htmlPreference(accept string) (int, float64) {
 	bestSpecificity, bestQuality := -1, 0.0
 	for v := range strings.SplitSeq(accept, ",") {
-		media, params, err := mime.ParseMediaType(strings.TrimSpace(v))
-		if err != nil {
-			continue
-		}
+		// ParseMediaType allocates a parameter map for every member; the only
+		// parameter that counts here is q, and quality reads it without one.
+		media, params, _ := strings.Cut(v, ";")
 		var specificity int
-		switch strings.ToLower(media) {
+		switch strings.ToLower(strings.TrimSpace(media)) {
 		case "text/html":
 			specificity = 2
 		case "text/*":
@@ -105,18 +103,32 @@ func htmlPreference(accept string) (int, float64) {
 		default:
 			continue
 		}
-		quality := 1.0
-		if raw, ok := params["q"]; ok {
-			quality, err = strconv.ParseFloat(raw, 64)
-			if err != nil || quality < 0 || quality > 1 {
-				continue
-			}
+		quality := acceptQualityOf(params)
+		if quality < 0 {
+			continue
 		}
 		if specificity > bestSpecificity || specificity == bestSpecificity && quality > bestQuality {
 			bestSpecificity, bestQuality = specificity, quality
 		}
 	}
 	return bestSpecificity, bestQuality
+}
+
+// acceptQualityOf reads the q parameter of one Accept member, or -1 when it is
+// present and malformed. Absent means 1, as RFC 9110 has it.
+func acceptQualityOf(params string) float64 {
+	for p := range strings.SplitSeq(params, ";") {
+		k, v, ok := strings.Cut(p, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+			continue
+		}
+		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || q < 0 || q > 1 {
+			return -1
+		}
+		return q
+	}
+	return 1
 }
 
 func addVary(h http.Header, name string) {

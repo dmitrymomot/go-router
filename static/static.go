@@ -215,6 +215,9 @@ func normalizePrefix(p string) string {
 }
 
 func cleanName(p string) string {
+	if len(p) > 0 && p[0] == '/' {
+		return strings.TrimPrefix(path.Clean(p), "/")
+	}
 	return strings.TrimPrefix(path.Clean("/"+p), "/")
 }
 
