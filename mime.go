@@ -113,26 +113,9 @@ func matchRank(typ, sub, rt, rs string) int {
 		return 1
 	case strings.EqualFold(rt, typ) && strings.EqualFold(rs, sub):
 		return 2
-	case strings.EqualFold(rt, typ) && structuredSuffix(rs) == sub:
-		// RFC 6839: application/vnd.api+json is JSON with a name on it. A
-		// client that asks for one will read the plain offer, and the
-		// alternative here is text/plain, which it asked for even less. Bind
-		// already reads a +json request body as JSON; this is the same rule on
-		// the way out. It ranks below an exact match, so an offer that names
-		// the type itself still wins.
-		return 1
 	default:
 		return -1
 	}
-}
-
-// structuredSuffix is the base syntax of a subtype like "vnd.api+json", or ""
-// when it carries no suffix.
-func structuredSuffix(sub string) string {
-	if i := strings.LastIndexByte(sub, '+'); i >= 0 {
-		return sub[i+1:]
-	}
-	return ""
 }
 
 func quality(params string) float64 {

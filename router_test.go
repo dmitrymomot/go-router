@@ -410,7 +410,7 @@ func TestErrorHandling(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
 	}
-	if got, want := rec.Body.String(), `{"status":403,"error":"no entry"}`; got != want {
+	if got, want := rec.Body.String(), "no entry"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 

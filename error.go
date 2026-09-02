@@ -2,10 +2,8 @@ package router
 
 import (
 	"context"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/http"
 	"runtime"
@@ -159,13 +157,6 @@ func ResolveStatus(res *Response, err error) int {
 
 type ErrorHandlerFunc[C Context] func(c C, err error)
 
-type errorBody struct {
-	Status  int    `json:"status"`
-	Error   string `json:"error"`
-	Details any    `json:"details,omitempty"`
-	Cause   string `json:"cause,omitempty"`
-}
-
 func DefaultErrorHandler[C Context](c C, err error) {
 	writeError(c.base(), err, false)
 }
@@ -204,43 +195,23 @@ func writeError(b *Base, err error, exposeCause bool) {
 		cause = he.Err.Error()
 	}
 
-	b.Vary(HeaderAccept, HeaderHXRequest)
-
-	switch errorRepresentationFor(b.req) {
-	case errorRepresentationJSON:
-		b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
-		b.res.WriteHeader(status)
-		if b.req.Method == http.MethodHead {
-			return
-		}
-		//nolint:errcheck // The connection is already failing; nothing to report.
-		json.MarshalWrite(b.res, errorBody{
-			Status: status, Error: he.Message, Details: he.Details, Cause: cause,
-		})
-		return
-	case errorRepresentationHTML:
-		b.res.Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
-		b.res.WriteHeader(status)
-		if b.req.Method == http.MethodHead {
-			return
-		}
-		//nolint:errcheck // Same as above.
-		b.res.WriteString(html.EscapeString(he.Message))
-		if cause != "" {
-			// The other representations carry it; exposeCause already decided.
-			//nolint:errcheck // Same as above.
-			b.res.WriteString("\n<pre>" + html.EscapeString(cause) + "</pre>")
-		}
-		return
-	}
-
+	// Plain text, always. A handler that wants JSON or HTML for its errors
+	// says so in its own ErrorHandler, which knows what its clients read.
 	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
 	b.res.WriteHeader(status)
 	if b.req.Method == http.MethodHead {
 		return
 	}
-	//nolint:errcheck // Same as above.
+	//nolint:errcheck // The connection is already failing; nothing to report.
 	b.res.WriteString(he.Message)
+	// Field errors say which field failed, which is the useful half of a
+	// binding failure, so they get a line each rather than being dropped.
+	if fields, ok := he.Details.([]FieldError); ok {
+		for _, f := range fields {
+			//nolint:errcheck // Same as above.
+			b.res.WriteString("\n" + f.Error())
+		}
+	}
 	if cause != "" {
 		//nolint:errcheck // Same as above.
 		b.res.WriteString("\n\n" + cause)
@@ -269,36 +240,4 @@ func writableFailure(b *Base, err error) bool {
 		return false
 	}
 	return true
-}
-
-type errorRepresentation uint8
-
-const (
-	errorRepresentationText errorRepresentation = iota
-	errorRepresentationJSON
-	errorRepresentationHTML
-)
-
-// htmx sends "Accept: */*" and swaps what it receives into a page, so it gets
-// HTML unless it names JSON itself.
-func errorRepresentationFor(r *http.Request) errorRepresentation {
-	htmx := hxTrue(r.Header.Get(HeaderHXRequest))
-	offers := [...]string{MIMEApplicationJSON, MIMETextPlain, MIMETextHTML}
-	if htmx {
-		offers = [...]string{MIMETextHTML, MIMEApplicationJSON, MIMETextPlain}
-	}
-
-	switch negotiate(joinAccept(r), offers[:]) {
-	case MIMEApplicationJSON:
-		return errorRepresentationJSON
-	case MIMETextHTML:
-		return errorRepresentationHTML
-	case MIMETextPlain:
-		return errorRepresentationText
-	default:
-		if htmx {
-			return errorRepresentationHTML
-		}
-		return errorRepresentationText
-	}
 }

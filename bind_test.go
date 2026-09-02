@@ -194,7 +194,7 @@ func TestBindQueryReportsAParseError(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), `"field":"page"`) {
+	if !strings.Contains(rec.Body.String(), "page: ") {
 		t.Errorf("body does not name the field: %q", rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "cannot parse") {
@@ -367,17 +367,20 @@ func multipartBody(t *testing.T, values url.Values, files ...upload) (body, cont
 	return buf.String(), w.FormDataContentType()
 }
 
+// details reads the field errors back out of a plain-text error body, which
+// carries them one per line after the message as "field: message".
 func details(t *testing.T, rec *httptest.ResponseRecorder) []FieldError {
 	t.Helper()
-	var body struct {
-		Status  int          `json:"status"`
-		Error   string       `json:"error"`
-		Details []FieldError `json:"details"`
+	lines := strings.Split(strings.TrimRight(rec.Body.String(), "\n"), "\n")
+	var out []FieldError
+	for _, line := range lines[1:] {
+		field, msg, ok := strings.Cut(line, ": ")
+		if !ok {
+			continue
+		}
+		out = append(out, FieldError{Field: field, Message: msg})
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
-	}
-	return body.Details
+	return out
 }
 
 func TestBindFormAppliesTheBodyLimit(t *testing.T) {

@@ -156,22 +156,6 @@ func headCases() []headCase {
 			check:  wantResponseHeader(HeaderContentType, MIMETextPlainCharsetUTF8),
 		},
 		{
-			name: "an error as JSON",
-			setup: func(_ *testing.T, r *Router[*tctx]) {
-				r.GET("/x", func(*tctx) error { return ErrBadRequest })
-			},
-			header: map[string]string{HeaderAccept: MIMEApplicationJSON},
-			check:  wantResponseHeader(HeaderContentType, MIMEApplicationJSONCharsetUTF8),
-		},
-		{
-			name: "an error as HTML",
-			setup: func(_ *testing.T, r *Router[*tctx]) {
-				r.GET("/x", func(*tctx) error { return ErrBadRequest })
-			},
-			header: map[string]string{HeaderAccept: MIMETextHTML},
-			check:  wantResponseHeader(HeaderContentType, MIMETextHTMLCharsetUTF8),
-		},
-		{
 			name: "an SSE stream",
 			setup: func(_ *testing.T, r *Router[*tctx]) {
 				r.GET("/x", func(c *tctx) error {
