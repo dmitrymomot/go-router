@@ -90,6 +90,9 @@ type Router[C Context] struct {
 // reads, and nothing registration keeps. The split is what lets the table be
 // rebuilt and swapped whole rather than mutated under a live request.
 type engine[C Context] struct {
+	// owner dispatches errors and owns the context pool. The table is swapped;
+	// the router it belongs to is not.
+	owner   *Router[C]
 	tree    *node[C]
 	hostSet *hostSet[C]
 
@@ -130,6 +133,7 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 		eng:    newEngine[C](),
 	}
 	r.root = r
+	r.eng.owner = r
 	return r
 }
 
@@ -984,7 +988,7 @@ func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern strin
 	return nil
 }
 
-func (r *Router[C]) preTerminal(c C) error { return r.route(c, c.base().req, false) }
+func (r *Router[C]) preTerminal(c C) error { return r.eng.route(c, c.base().req, false) }
 
 type pendingScope[C Context] struct {
 	prefix string
@@ -1095,16 +1099,16 @@ func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path st
 	return nil
 }
 
-func (r *Router[C]) fallbackChains(
+func (e *engine[C]) fallbackChains(
 	host *hostEntry[C], path string, escaped bool,
 ) (scope *scopeFallback[C], notFound, notAllowed, options HandlerFunc[C]) {
-	if s := scopeFor(r.eng.scopes, host, path, escaped); s != nil {
+	if s := scopeFor(e.scopes, host, path, escaped); s != nil {
 		return s, s.notFoundChain, s.notAllowedChain, s.optionsChain
 	}
 	if host != nil {
 		return nil, host.notFoundChain, host.notAllowedChain, host.optionsChain
 	}
-	return nil, r.eng.notFoundChain, r.eng.notAllowedChain, r.eng.optionsChain
+	return nil, e.notFoundChain, e.notAllowedChain, e.optionsChain
 }
 
 // bindPrefixParams gives a scope fallback the parameters of its own prefix, so
@@ -1237,7 +1241,7 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	//nolint:errcheck // Same as above.
-	root.route(c, req, true)
+	root.eng.route(c, req, true)
 }
 
 func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
@@ -1263,7 +1267,7 @@ func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
 		err = r.dispatch(c, r.preChain)
 		return
 	}
-	err = r.route(c, req, true)
+	err = r.eng.route(c, req, true)
 }
 
 func (r *Router[C]) acquire(w http.ResponseWriter, req *http.Request) C {
@@ -1330,7 +1334,7 @@ func (r *Router[C]) recycle(c C) {
 	}
 }
 
-func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
+func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 	b := c.base()
 
 	path, escaped := requestPath(req.URL)
@@ -1350,15 +1354,15 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		host     *hostEntry[C]
 		hostVals = b.paramArr[:0]
 	)
-	if r.eng.hostSet != nil {
+	if e.hostSet != nil {
 		var hostOK bool
 		b.host, hostOK = normalizeHostOK(req.Host)
 		b.hostKnown = true
-		if r.pool != nil && b.host != "" {
+		if e.owner.pool != nil && b.host != "" {
 			b.needsCleanup = true
 		}
 		if hostOK {
-			host, hostVals = r.eng.hostSet.match(b.host, hostVals)
+			host, hostVals = e.hostSet.match(b.host, hostVals)
 		}
 		if host != nil {
 			b.hostIdx, b.hostPattern = host.idx, host.pattern
@@ -1366,7 +1370,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		}
 	}
 
-	if r.eng.redirectSlash && trimmed != path && r.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
+	if e.redirectSlash && trimmed != path && e.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
 		redirectTo(b.res, req, trimmed, escaped)
 		return nil
 	}
@@ -1379,8 +1383,8 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 	if host != nil {
 		n, vals = search(host.tree, trimmed, req.Method, hostVals, &hostSt, escaped)
 	}
-	if n == nil && r.eng.anyHostRoutes {
-		if m, v := search(r.eng.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
+	if n == nil && e.anyHostRoutes {
+		if m, v := search(e.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
 			n, vals = m, v
 			b.hostIdx, b.hostPattern = -1, ""
 		}
@@ -1392,8 +1396,8 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		if b.hostIdx < 0 {
 			selectedHost = nil
 		}
-		if len(r.eng.errScopes) > 0 || selectedHost != nil && selectedHost.errHandler != nil {
-			r.selectErrorTarget(b, selectedHost, trimmed, escaped)
+		if len(e.errScopes) > 0 || selectedHost != nil && selectedHost.errHandler != nil {
+			e.selectErrorTarget(b, selectedHost, trimmed, escaped)
 		}
 		if n.kind == edgeWildcard && len(vals) > 0 {
 			b.rawTail = vals[len(vals)-1]
@@ -1406,7 +1410,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		req.Pattern = n.pattern
 		h := n.handler(req.Method)
 		if handleErrors {
-			return r.dispatch(c, h)
+			return e.owner.dispatch(c, h)
 		}
 		return h(c)
 
@@ -1423,42 +1427,42 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 				matched[len(matched)-1] = decoded
 			}
 		}
-		if len(r.eng.errScopes) > 0 || host != nil && host.errHandler != nil {
-			r.selectErrorTarget(b, host, trimmed, escaped)
+		if len(e.errScopes) > 0 || host != nil && host.errHandler != nil {
+			e.selectErrorTarget(b, host, trimmed, escaped)
 		}
 		b.needsCleanup = true
 		b.setRoute(match.pattern, match.names, matched)
 		req.Pattern = match.pattern
-		b.res.Header().Set(HeaderAllow, r.allowHeader(&hostSt, &anySt))
+		b.res.Header().Set(HeaderAllow, e.allowHeader(&hostSt, &anySt))
 
-		_, _, notAllowed, options := r.fallbackChains(host, trimmed, escaped)
-		if req.Method == http.MethodOptions && r.eng.autoOptions {
+		_, _, notAllowed, options := e.fallbackChains(host, trimmed, escaped)
+		if req.Method == http.MethodOptions && e.autoOptions {
 			if handleErrors {
-				return r.dispatch(c, options)
+				return e.owner.dispatch(c, options)
 			}
 			return options(c)
 		}
 		if handleErrors {
-			return r.dispatch(c, notAllowed)
+			return e.owner.dispatch(c, notAllowed)
 		}
 		return notAllowed(c)
 
 	default:
-		if len(r.eng.errScopes) > 0 || host != nil && host.errHandler != nil {
-			r.selectErrorTarget(b, host, trimmed, escaped)
+		if len(e.errScopes) > 0 || host != nil && host.errHandler != nil {
+			e.selectErrorTarget(b, host, trimmed, escaped)
 		}
-		scope, notFound, _, _ := r.fallbackChains(host, trimmed, escaped)
+		scope, notFound, _, _ := e.fallbackChains(host, trimmed, escaped)
 		if scope != nil {
 			scope.bindPrefixParams(b, trimmed, escaped)
 		}
 		if handleErrors {
-			return r.dispatch(c, notFound)
+			return e.owner.dispatch(c, notFound)
 		}
 		return notFound(c)
 	}
 }
 
-func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
+func (e *engine[C]) allowHeader(host, anyHost *matchState[C]) string {
 	if host.rest == nil && anyHost.rest == nil {
 		var only *node[C]
 		switch {
@@ -1468,13 +1472,13 @@ func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
 			only = anyHost.pathMatch
 		}
 		if only != nil {
-			if s, ok := r.eng.allowCache[only]; ok {
+			if s, ok := e.allowCache[only]; ok {
 				return s
 			}
 		}
 	}
-	out := host.allowedMethods(nil, r.eng.autoOptions)
-	out = anyHost.allowedMethods(out, r.eng.autoOptions)
+	out := host.allowedMethods(nil, e.autoOptions)
+	out = anyHost.allowedMethods(out, e.autoOptions)
 	slices.Sort(out)
 	return strings.Join(out, ", ")
 }
@@ -1563,33 +1567,33 @@ func (r *Router[C]) handleError(c C, err error) {
 			b.res.WriteHeader(http.StatusInternalServerError)
 		}
 	}()
-	r.errorHandlerFor(c.base())(c, err)
+	r.eng.errorHandlerFor(c.base())(c, err)
 }
 
-func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
+func (e *engine[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 	if !b.errorRouted {
-		return r.eng.rootErrorHandler
+		return e.rootErrorHandler
 	}
-	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(r.eng.errScopes) {
-		return r.eng.errScopes[b.errorScopeIdx].errHandler
+	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(e.errScopes) {
+		return e.errScopes[b.errorScopeIdx].errHandler
 	}
 	var host *hostEntry[C]
-	if b.hostIdx >= 0 && r.eng.hostSet != nil && int(b.hostIdx) < len(r.eng.hostSet.all) {
-		host = r.eng.hostSet.all[b.hostIdx]
+	if b.hostIdx >= 0 && e.hostSet != nil && int(b.hostIdx) < len(e.hostSet.all) {
+		host = e.hostSet.all[b.hostIdx]
 	}
 	if host != nil && host.errHandler != nil {
 		return host.errHandler
 	}
-	return r.eng.rootErrorHandler
+	return e.rootErrorHandler
 }
 
 // selectErrorTarget picks the scope whose error handler owns this request. It
 // runs while the routed path is still known: a handler is free to rewrite the
 // request, and that must not change who handles its failure.
-func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
+func (e *engine[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
 	b.errorRouted = true
 	b.errorScopeIdx = -1
-	if s := scopeFor(r.eng.errScopes, host, path, escaped); s != nil {
+	if s := scopeFor(e.errScopes, host, path, escaped); s != nil {
 		b.errorScopeIdx = s.errorIdx
 	}
 	if host != nil {
@@ -1599,18 +1603,18 @@ func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, 
 	}
 }
 
-func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []string, escaped bool) bool {
+func (e *engine[C]) canMatch(host *hostEntry[C], path, method string, scratch []string, escaped bool) bool {
 	if host != nil {
 		var st matchState[C]
 		if n, _ := search(host.tree, path, method, scratch, &st, escaped); n != nil || st.pathMatch != nil {
 			return true
 		}
 	}
-	if !r.eng.anyHostRoutes {
+	if !e.anyHostRoutes {
 		return false
 	}
 	var st matchState[C]
-	n, _ := search(r.eng.tree, path, method, scratch, &st, escaped)
+	n, _ := search(e.tree, path, method, scratch, &st, escaped)
 	return n != nil || st.pathMatch != nil
 }
 
