@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/internal/nonseek"
 )
 
@@ -74,7 +75,7 @@ func (a *Assets) fallback(w http.ResponseWriter, r *http.Request, name string) b
 		w.Header().Set("Vary", "*")
 		return a.isNavigation(r)
 	}
-	addVary(w.Header(), "Accept")
+	router.AddVary(w.Header(), "Accept")
 	accept := strings.Join(r.Header.Values("Accept"), ",")
 	if strings.TrimSpace(accept) == "" {
 		return path.Ext(name) == ""
@@ -129,18 +130,6 @@ func acceptQualityOf(params string) float64 {
 		return q
 	}
 	return 1
-}
-
-func addVary(h http.Header, name string) {
-	if h.Get("Vary") == "*" {
-		return
-	}
-	for value := range strings.SplitSeq(h.Get("Vary"), ",") {
-		if strings.EqualFold(strings.TrimSpace(value), name) {
-			return
-		}
-	}
-	h.Add("Vary", name)
 }
 
 func (a *Assets) write(w http.ResponseWriter, r *http.Request, name string, versioned bool) error {
