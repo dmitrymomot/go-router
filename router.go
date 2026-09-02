@@ -78,6 +78,7 @@ type Router[C Context] struct {
 	hasRoutes        bool
 	closed           bool
 	routeBatch       int
+	refreshDepth     int
 	name             string
 	meta             any
 	tagged           bool
@@ -344,7 +345,28 @@ func (r *Router[C]) Use(mws ...Middleware[C]) {
 
 // settingChanged rebuilds the derived state so the router is ready to serve the
 // moment the setter returns.
-func (r *Router[C]) settingChanged() { r.top().refresh() }
+func (r *Router[C]) settingChanged() {
+	if root := r.top(); root.refreshDepth == 0 {
+		root.refresh()
+	}
+}
+
+// inOneScope holds the graph rebuild until the outermost scope callback
+// returns. refresh walks the whole graph, and every nested Route, Group and
+// Hosts triggered one, so building a table cost time quadratic in its size:
+// 4000 Route scopes took 1.5s. The router is still ready to serve the moment
+// the outermost call returns, which is the rule this keeps.
+func (r *Router[C]) inOneScope(fn func()) {
+	root := r.top()
+	root.refreshDepth++
+	defer func() {
+		root.refreshDepth--
+		if root.refreshDepth == 0 {
+			root.refresh()
+		}
+	}()
+	fn()
+}
 
 func validateMiddleware[C Context](mws []Middleware[C]) {
 	for _, mw := range mws {
@@ -372,18 +394,24 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 }
 
 func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
-	c := r.newChild("", nil)
-	if fn != nil {
-		fn(c)
-	}
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild("", nil)
+		if fn != nil {
+			fn(c)
+		}
+	})
 	return c
 }
 
 func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
-	c := r.newChild(prefix, nil)
-	if fn != nil {
-		fn(c)
-	}
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild(prefix, nil)
+		if fn != nil {
+			fn(c)
+		}
+	})
 	return c
 }
 
@@ -456,17 +484,20 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	if r.inHost || len(r.hosts) > 0 {
 		panic("router: a host scope cannot sit inside another host scope")
 	}
-	c := r.newChild("", nil)
-	c.hosts = specs
-	for _, spec := range specs {
-		if _, err := r.root.hostEntry(spec); err != nil {
-			panic(err.Error())
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild("", nil)
+		c.hosts = specs
+		for _, spec := range specs {
+			if _, err := r.root.hostEntry(spec); err != nil {
+				panic(err.Error())
+			}
 		}
-	}
-	if fn != nil {
-		fn(c)
-	}
-	c.settingChanged()
+		if fn != nil {
+			fn(c)
+		}
+		c.settingChanged()
+	})
 	return c
 }
 
