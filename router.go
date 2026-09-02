@@ -442,6 +442,12 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 		if err != nil {
 			panic(err.Error())
 		}
+		// Two spellings of one host resolve to one entry, so the second copy of
+		// every route landed in a trie that already held it and the insert
+		// blamed the route rather than the duplicate host.
+		if i := slices.IndexFunc(specs, func(o hostSpec) bool { return o.pattern == spec.pattern }); i >= 0 {
+			panic("router: Hosts got " + patterns[i] + " and " + p + ", which name the same host " + spec.pattern)
+		}
 		specs = append(specs, spec)
 	}
 	if r.root.started.Load() {

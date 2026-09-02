@@ -887,3 +887,39 @@ func TestPerHostErrorHandlersIgnoreSetterOrder(t *testing.T) {
 		})
 	}
 }
+
+// Every colon outside braces was read as a port, so both spellings of an IPv6
+// literal were turned away. A request carrying one arrives with the brackets
+// already stripped, so it could only ever reach an any-host route.
+func TestIPv6HostPatterns(t *testing.T) {
+	for _, pattern := range []string{"::1", "[::1]"} {
+		t.Run(pattern, func(t *testing.T) {
+			r := newTestRouter()
+			r.Host(pattern, func(h *Router[*tctx]) {
+				h.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "v6 "+c.RouteHost()) })
+			})
+			r.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "any host") })
+
+			for _, authority := range []string{"[::1]", "[::1]:8080"} {
+				if got := doHost(r, http.MethodGet, authority, "/x").Body.String(); got != "v6 ::1" {
+					t.Errorf("Host %s = %q, want %q", authority, got, "v6 ::1")
+				}
+			}
+			if got := doHost(r, http.MethodGet, "example.com", "/x").Body.String(); got != "any host" {
+				t.Errorf("another host = %q, want %q", got, "any host")
+			}
+		})
+	}
+}
+
+// parseHostPattern lower-cases and drops a trailing dot, so two spellings of
+// one host resolved to one entry. The second copy of every route then hit a
+// trie that already held it, and the panic blamed the route.
+func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {
+	r := newTestRouter()
+	mustPanicContaining(t, "which name the same host a.com", func() {
+		r.Hosts([]string{"a.com", "A.com."}, func(h *Router[*tctx]) {
+			h.GET("/x", echoRoute)
+		})
+	})
+}
