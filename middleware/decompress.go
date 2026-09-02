@@ -12,8 +12,12 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// DefaultMaxDecompressedSize is how many bytes [Decompress] expands a body to
+// before it stops. It bounds a small body that expands to a huge one.
 const DefaultMaxDecompressedSize int64 = 100 << 20
 
+// DecompressConfig configures [DecompressWithConfig]. A MaxDecompressedSize of
+// zero takes [DefaultMaxDecompressedSize].
 type DecompressConfig struct {
 	Skip                func(c router.Context) bool
 	MaxDecompressedSize int64
@@ -23,10 +27,19 @@ var gzipReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
 
 const emptyGzipStream = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 
+// Decompress expands a request body that Content-Encoding marks as gzip, so
+// the handler and the binders read plain bytes. A body in any other encoding,
+// and one in none, passes through.
+//
+// The expansion stops at [DefaultMaxDecompressedSize], which is what keeps a
+// small body that expands to a huge one from filling the memory. A body that
+// is not gzip reports [router.ErrBadRequest], and one over the limit reports
+// [router.ErrPayloadTooLarge].
 func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return DecompressWithConfig[C](DecompressConfig{})(next)
 }
 
+// DecompressWithConfig is [Decompress] with a configuration.
 func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middleware[C] {
 	limit := cfg.MaxDecompressedSize
 	if limit == 0 {
