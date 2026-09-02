@@ -21,16 +21,14 @@ test path='./...':
     set -eu; \
     go test -count=1 {{ path }}; \
     go test -race -cover -count=1 {{ path }}; \
-    ( \
-        cd benchmarks; \
-        go test -count=1 ./...; \
-        go test -race -cover -count=1 ./... \
-    ); \
-    ( \
-        cd _examples/chat; \
-        go test -count=1 ./...; \
-        go test -race -cover -count=1 ./... \
-    )
+    for dir in benchmarks _examples/*/; do \
+        [ -d "$dir" ] || continue; \
+        ( \
+            cd "$dir"; \
+            go test -count=1 ./...; \
+            go test -race -cover -count=1 ./... \
+        ); \
+    done
 
 # Report total coverage
 cover:
@@ -148,7 +146,9 @@ analyze:
     set -euo pipefail
     # nilaway is deliberately absent: all four of its findings here were false
     # positives, and suppressing them would leave nothing behind.
-    for dir in . benchmarks _examples/chat; do
+    for dir in . benchmarks _examples/*/; do
+        # An unmatched glob stays literal, and cd would fail the recipe.
+        [ -d "$dir" ] || continue
         (
             cd "$dir"
             go run {{ modernize }} ./...
@@ -161,14 +161,16 @@ golangci:
     # CI runs this recipe and not the action: the prebuilt binary of the action
     # is built with an older Go, which refuses a module targeting 1.27.
     set -eu; \
-    for dir in . benchmarks _examples/chat; do \
+    for dir in . benchmarks _examples/*/; do \
+        [ -d "$dir" ] || continue; \
         (cd "$dir" && go run {{ golangci }} run ./...); \
     done
 
 # Report known vulnerabilities in the module and the toolchain
 vuln:
     set -eu; \
-    for dir in . benchmarks _examples/chat; do \
+    for dir in . benchmarks _examples/*/; do \
+        [ -d "$dir" ] || continue; \
         (cd "$dir" && go run {{ govulncheck }} ./...); \
     done
 
@@ -177,13 +179,15 @@ actionlint:
 
 fuzz-smoke:
     set -eu; \
-    for dir in . benchmarks _examples/chat; do \
+    for dir in . benchmarks _examples/*/; do \
+        [ -d "$dir" ] || continue; \
         (cd "$dir" && go test -count=1 -run '^Fuzz' ./...); \
     done
 
 cross:
     set -eu; \
-    for dir in . benchmarks _examples/chat; do \
+    for dir in . benchmarks _examples/*/; do \
+        [ -d "$dir" ] || continue; \
         (cd "$dir" && env GOOS=linux GOARCH=386 CGO_ENABLED=0 go test -exec=true -count=1 ./...); \
     done
 

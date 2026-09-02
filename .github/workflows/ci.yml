@@ -22,6 +22,7 @@ jobs:
             go.mod
             benchmarks/go.sum
             _examples/chat/go.mod
+            _examples/restapi/go.mod
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
       # vet, build, gofmt, go fix, and the benchmarks module, which ./... misses.
       - run: just lint
@@ -38,6 +39,7 @@ jobs:
             go.mod
             benchmarks/go.sum
             _examples/chat/go.mod
+            _examples/restapi/go.mod
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
       # modernize and betteralign compile from source, so they run beside lint.
       - run: just analyze
@@ -53,6 +55,7 @@ jobs:
             go.mod
             benchmarks/go.sum
             _examples/chat/go.mod
+            _examples/restapi/go.mod
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
       # The recipe compiles the pinned linter with the Go of this job. The action
       # ships a binary built with an older Go, which refuses this module.
@@ -70,6 +73,7 @@ jobs:
             go.mod
             benchmarks/go.sum
             _examples/chat/go.mod
+            _examples/restapi/go.mod
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
       - run: just test
       - run: just cover
@@ -87,6 +91,7 @@ jobs:
             go.mod
             benchmarks/go.sum
             _examples/chat/go.mod
+            _examples/restapi/go.mod
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
       - run: just vuln
 
@@ -102,6 +107,7 @@ jobs:
             go.mod
             benchmarks/go.sum
             _examples/chat/go.mod
+            _examples/restapi/go.mod
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
       # The numbers from a shared runner mean nothing; this proves they still run.
       - run: just bench-ci
