@@ -114,6 +114,12 @@ func WrapMiddleware[C Context](m func(http.Handler) http.Handler) Middleware[C] 
 					outer.Size = b.res.Size
 					outer.Committed = b.res.Committed
 				}
+				// Hooks registered while the inner Response was in place belong
+				// to the response as a whole. Without this a middleware that
+				// registers one and then fails -- KeyAuth setting
+				// WWW-Authenticate before it answers 401 -- lost the header,
+				// because the failure is written after this restore.
+				outer.before = b.res.before
 				b.res = outer
 			}
 			return err

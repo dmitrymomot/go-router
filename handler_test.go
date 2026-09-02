@@ -62,3 +62,41 @@ func TestWrappedMiddlewareRejectsNilResult(t *testing.T) {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
 }
+
+// The inner Response that WrapMiddleware builds when the wrapper substitutes a
+// writer carried its own hook list. Only Status, Size and Committed were copied
+// back, so a hook registered inside -- KeyAuth's WWW-Authenticate -- was gone by
+// the time the 401 was written.
+func TestWrapMiddlewareKeepsBeforeHooks(t *testing.T) {
+	substituting := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(passThroughWriter{w}, r)
+		})
+	}
+
+	for name, wrap := range map[string]func(http.Handler) http.Handler{
+		"identity":     func(h http.Handler) http.Handler { return h },
+		"substituting": substituting,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newTestRouter()
+			r.Use(WrapMiddleware[*tctx](wrap), func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+				return func(c *tctx) error {
+					c.Response().Before(func() { c.Response().Header().Set("X-Hook", "ran") })
+					return ErrUnauthorized
+				}
+			})
+			r.GET("/a", echoRoute)
+
+			rec := do(r, http.MethodGet, "/a")
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			if got := rec.Header().Get("X-Hook"); got != "ran" {
+				t.Errorf("hook header = %q, want %q", got, "ran")
+			}
+		})
+	}
+}
+
+type passThroughWriter struct{ http.ResponseWriter }
