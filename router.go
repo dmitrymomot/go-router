@@ -210,25 +210,33 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 
 // install puts the route in its trie now, so a malformed pattern or a conflict
 // panics at the line that wrote it rather than at the first request.
-func (r *Router[C]) install(reg registration[C]) {
+func (r *Router[C]) install(reg registration[C]) { r.installInto(reg, r.top().eng, true) }
+
+// installInto puts a route in the given table. describe is false when replaying
+// into a rebuilt table: the names and metadata are already recorded, and the
+// duplicate-name guard would be answering about routes it has already seen.
+func (r *Router[C]) installInto(reg registration[C], eng *engine[C], describe bool) {
 	full := joinPattern(r.scopePrefix(), reg.pattern)
 	handler := chain(reg.handler, concatMiddleware(r.scopeMiddleware(), reg.mws))
 
-	root := r.top()
-	entries := r.hostEntries()
+	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
-		root.eng.anyHostRoutes = true
-		if err := root.eng.tree.insert(reg.method, full, nil, handler, root.eng.autoOptions, root.eng.allowCache); err != nil {
+		eng.anyHostRoutes = true
+		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
-		r.record(reg, nil, full)
+		if describe {
+			r.record(reg, nil, full)
+		}
 		return
 	}
 	for _, e := range entries {
-		if err := e.tree.insert(reg.method, full, e.names, handler, root.eng.autoOptions, root.eng.allowCache); err != nil {
+		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
-		r.record(reg, e, full)
+		if describe {
+			r.record(reg, e, full)
+		}
 	}
 }
 
@@ -276,14 +284,14 @@ func (r *Router[C]) top() *Router[C] {
 
 // hostEntries returns the entries of the nearest host scope, or none when the
 // route answers on every host.
-func (r *Router[C]) hostEntries() []*hostEntry[C] {
+func (r *Router[C]) hostEntriesIn(eng *engine[C]) []*hostEntry[C] {
 	for s := r; s != nil; s = s.owner {
 		if len(s.hosts) == 0 {
 			continue
 		}
 		out := make([]*hostEntry[C], 0, len(s.hosts))
 		for _, spec := range s.hosts {
-			e, err := r.top().hostEntry(spec)
+			e, err := eng.hostEntry(spec)
 			if err != nil {
 				panic(err.Error())
 			}
@@ -367,6 +375,11 @@ func (r *Router[C]) settingChanged() {
 		root.refresh()
 	}
 }
+
+// refresh recompiles the live table in place. Every setter that can change a
+// fallback calls it, so the router is ready to serve the moment the setter
+// returns.
+func (r *Router[C]) refresh() { r.compile(r.eng) }
 
 // inOneScope holds the graph rebuild until the outermost scope callback
 // returns. refresh walks the whole graph, so one per nested Route, Group or
@@ -505,7 +518,7 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 		c = r.newChild("", nil)
 		c.hosts = specs
 		for _, spec := range specs {
-			if _, err := r.root.hostEntry(spec); err != nil {
+			if _, err := r.root.eng.hostEntry(spec); err != nil {
 				panic(err.Error())
 			}
 		}
@@ -789,14 +802,13 @@ func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
 	}
 }
 
-// refresh rebuilds everything the request path reads that is not a route: the
-// fallback chains, the scope table and the host order. Every setter that can
-// change one of them calls it, so the router is ready to serve the moment the
-// setter returns. Routes never reach here; install puts those in the trie.
-func (r *Router[C]) refresh() {
-	r.eng.scopes, r.eng.errScopes = nil, nil
-	if r.eng.hostSet != nil {
-		for _, e := range r.eng.hostSet.all {
+// compile turns the scope tree into the non-route half of a table: the fallback
+// chains, the scope list and the host order. Routes never come through here;
+// installInto puts those in the trie.
+func (r *Router[C]) compile(eng *engine[C]) {
+	eng.scopes, eng.errScopes = nil, nil
+	if eng.hostSet != nil {
+		for _, e := range eng.hostSet.all {
 			e.mws, e.haveMWs = nil, false
 			e.notFoundChain, e.notAllowedChain, e.optionsChain = nil, nil, nil
 			e.errHandler, e.rawNotFound, e.rawNotAllowed = nil, nil, nil
@@ -816,9 +828,9 @@ func (r *Router[C]) refresh() {
 	if r.errHandler != nil {
 		rootErrHandler = r.errHandler
 	}
-	r.eng.notFoundChain = chain(rootNotFound, r.mws)
-	r.eng.notAllowedChain = chain(rootNotAllowed, r.mws)
-	r.eng.optionsChain = chain(autoOptions[C], r.mws)
+	eng.notFoundChain = chain(rootNotFound, r.mws)
+	eng.notAllowedChain = chain(rootNotAllowed, r.mws)
+	eng.optionsChain = chain(autoOptions[C], r.mws)
 	open := make(map[*Router[C]]bool)
 
 	var pending []pendingScope[C]
@@ -841,7 +853,7 @@ func (r *Router[C]) refresh() {
 				if host != nil {
 					panic("router: a host scope cannot sit inside another host scope")
 				}
-				e = r.mustHostEntry(rt.hosts[i])
+				e = eng.mustHostEntry(rt.hosts[i])
 				if !e.haveMWs {
 					e.mws, e.haveMWs = m, true
 				}
@@ -855,11 +867,11 @@ func (r *Router[C]) refresh() {
 				if e == nil {
 					if rt.notFound != nil {
 						rootNotFound = rt.notFound
-						r.eng.notFoundChain = chain(rt.notFound, m)
+						eng.notFoundChain = chain(rt.notFound, m)
 					}
 					if rt.methodNotAllowed != nil {
 						rootNotAllowed = rt.methodNotAllowed
-						r.eng.notAllowedChain = chain(rt.methodNotAllowed, m)
+						eng.notAllowedChain = chain(rt.methodNotAllowed, m)
 					}
 					if rt.errHandler != nil {
 						rootErrHandler = rt.errHandler
@@ -894,8 +906,8 @@ func (r *Router[C]) refresh() {
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
 	}
-	if r.eng.hostSet != nil {
-		for _, e := range r.eng.hostSet.all {
+	if eng.hostSet != nil {
+		for _, e := range eng.hostSet.all {
 			if e.optionsChain == nil {
 				e.optionsChain = chain(autoOptions[C], e.mws)
 			}
@@ -906,7 +918,7 @@ func (r *Router[C]) refresh() {
 				e.notAllowedChain = chain(rootNotAllowed, e.mws)
 			}
 		}
-		slices.SortStableFunc(r.eng.hostSet.pats, func(a, b *hostEntry[C]) int {
+		slices.SortStableFunc(eng.hostSet.pats, func(a, b *hostEntry[C]) int {
 			return lessSpecific(&a.hostSpec, &b.hostSpec)
 		})
 	}
@@ -933,9 +945,9 @@ func (r *Router[C]) refresh() {
 		s.notAllowedChain = chain(notAllowed, ps.mws)
 		s.optionsChain = chain(autoOptions[C], ps.mws)
 		s.errHandler = ps.fb.errHandler
-		r.eng.scopes = append(r.eng.scopes, s)
+		eng.scopes = append(eng.scopes, s)
 	}
-	slices.SortStableFunc(r.eng.scopes, func(a, b *scopeFallback[C]) int {
+	slices.SortStableFunc(eng.scopes, func(a, b *scopeFallback[C]) int {
 		for i := range min(len(a.pattern), len(b.pattern)) {
 			as := segmentSpecificity(a.pattern[i].kind)
 			bs := segmentSpecificity(b.pattern[i].kind)
@@ -951,13 +963,13 @@ func (r *Router[C]) refresh() {
 		}
 		return strings.Compare(a.prefix, b.prefix)
 	})
-	for _, s := range r.eng.scopes {
+	for _, s := range eng.scopes {
 		if s.errHandler != nil {
-			s.errorIdx = int32(len(r.eng.errScopes))
-			r.eng.errScopes = append(r.eng.errScopes, s)
+			s.errorIdx = int32(len(eng.errScopes))
+			eng.errScopes = append(eng.errScopes, s)
 		}
 	}
-	r.eng.rootErrorHandler = rootErrHandler
+	eng.rootErrorHandler = rootErrHandler
 }
 
 func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) error {
@@ -1137,19 +1149,19 @@ func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) 
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
 
-func (r *Router[C]) mustHostEntry(spec hostSpec) *hostEntry[C] {
-	e, err := r.hostEntry(spec)
+func (e *engine[C]) mustHostEntry(spec hostSpec) *hostEntry[C] {
+	he, err := e.hostEntry(spec)
 	if err != nil {
 		panic(err.Error())
 	}
-	return e
+	return he
 }
 
-func (r *Router[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
-	if r.eng.hostSet == nil {
-		r.eng.hostSet = new(hostSet[C])
+func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
+	if eng.hostSet == nil {
+		eng.hostSet = new(hostSet[C])
 	}
-	hs := r.eng.hostSet
+	hs := eng.hostSet
 	for _, e := range hs.all {
 		if e.pattern == spec.pattern {
 			return e, nil
