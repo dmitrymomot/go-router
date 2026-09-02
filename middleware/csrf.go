@@ -11,13 +11,18 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// CSRFTokenKey is where [CSRF] stores the token on the context.
 const CSRFTokenKey = "csrf_token"
 
+// The cookie and the form field that [CSRF] uses when the configuration names
+// none.
 const (
 	DefaultCSRFCookieName = "_csrf"
 	DefaultCSRFFormField  = "_csrf"
 )
 
+// DefaultCSRFCookieMaxAge is how long the CSRF cookie lives when
+// CSRFConfig.CookieMaxAge is zero or less.
 const DefaultCSRFCookieMaxAge = 24 * time.Hour
 
 const csrfTokenBytes = 32
@@ -32,6 +37,17 @@ var defaultCSRFSources = []TokenSource{
 	FromForm(DefaultCSRFFormField),
 }
 
+// CSRFConfig configures [CSRFWithConfig].
+//
+// TokenSources say where the token of an unsafe request may come from, and an
+// empty list reads the X-CSRF-Token header and the "_csrf" form field. The
+// Cookie fields shape the cookie that carries the token; CookieHTTPOnly has to
+// stay false for a script to read it, and a template that renders the token
+// into the form does not need it.
+//
+// TrustedOrigins names the origins that may post cross-site, each with a
+// scheme and a host. AllowSecFetchSite replaces the Sec-Fetch-Site check
+// entirely.
 type CSRFConfig struct {
 	Skip              func(c router.Context) bool
 	TokenSources      []TokenSource
@@ -46,10 +62,24 @@ type CSRFConfig struct {
 	AllowSecFetchSite func(c router.Context) (bool, error)
 }
 
+// CSRF issues a token, puts it in a cookie and on the context, and refuses an
+// unsafe request that does not send it back. GET, HEAD, OPTIONS and TRACE pass
+// through and still get a token.
+//
+// A request that Sec-Fetch-Site marks as same-origin passes without a token,
+// which is what lets a browser that sends the header carry an ordinary form.
+// One that marks it cross-site is refused outright unless its origin is
+// trusted. A request with no such header needs the token.
+//
+// [CSRFTokenFrom] reads the token for a template.
 func CSRF[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return CSRFWithConfig[C](CSRFConfig{})(next)
 }
 
+// CSRFWithConfig is [CSRF] with a configuration.
+//
+// CSRFWithConfig panics on a nil token source, on more than
+// [MaxTokenSources] of them, and on a trusted origin it cannot parse.
 func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 	if len(cfg.TokenSources) == 0 {
 		cfg.TokenSources = defaultCSRFSources
@@ -115,6 +145,8 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 	}
 }
 
+// CSRFTokenFrom reports the token that [CSRF] stored, for a template to render
+// into a hidden form field. It reports "" when the middleware did not run.
 func CSRFTokenFrom[C router.Context](c C) string {
 	s, _ := c.Value(CSRFTokenKey).(string)
 	return s

@@ -9,8 +9,19 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// PathParam is the route parameter that carries the asset path. [Mount]
+// registers it, and [Handler] reads it.
 const PathParam = "assetpath"
 
+// Handler serves a from a route of your own, which suits a set behind
+// middleware. Register it on a pattern ending in "{assetpath...}", or see
+// [Mount] for the ordinary case.
+//
+// It reports [router.ErrMethodNotAllowed] for a method other than GET and
+// HEAD, and [router.ErrNotFound] for a path the set does not hold, unless
+// Config.NotFound named a handler.
+//
+// Handler panics if a is nil.
 func Handler[C router.Context](a *Assets) router.HandlerFunc[C] {
 	if a == nil {
 		panic("static: Handler needs an asset set")
@@ -53,6 +64,9 @@ func assetPath(a *Assets, c router.Context) string {
 	return p
 }
 
+// Mount registers a on r under its own prefix, for GET and HEAD.
+//
+// Mount panics if r or a is nil.
 func Mount[C router.Context](r *router.Router[C], a *Assets) {
 	if r == nil {
 		panic("static: Mount needs a router")

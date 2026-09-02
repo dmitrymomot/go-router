@@ -12,6 +12,15 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// RealIPConfig configures [RealIPWithConfig].
+//
+// Trust names the peers whose forwarding headers count, and a nil one takes
+// [NewTrustSet]. Headers names the headers to read, in order of preference;
+// an empty list reads none, so a server behind a proxy has to name them.
+//
+// Leftmost takes the first address of the chain in place of the nearest
+// untrusted hop. The first address is whatever the client wrote, so use it
+// only where the chain itself is trusted.
 type RealIPConfig struct {
 	Skip     func(c router.Context) bool
 	Trust    *TrustSet
@@ -32,10 +41,23 @@ func canonicalHeaders(names ...string) []string {
 	return out
 }
 
+// RealIP reads no header and deletes every forwarding header of an untrusted
+// peer, which is the safe default: a server with no proxy in front cannot be
+// told a false client address.
+//
+// Name the headers your proxy actually sets, through [RealIPWithConfig], to
+// have the address of the client replace RemoteAddr.
 func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return RealIPWithConfig[C](RealIPConfig{})(next)
 }
 
+// RealIPWithConfig is [RealIP] with a configuration. It rewrites RemoteAddr
+// with the address the named headers give, when the peer is trusted, and
+// X-Forwarded-Proto then also decides [router.Base.Scheme].
+//
+// A header the configuration does not name is deleted, so a later handler
+// cannot read one this middleware did not check. Every forwarding header of an
+// untrusted peer is deleted.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 	if cfg.Trust == nil {
 		cfg.Trust = NewTrustSet()
@@ -88,6 +110,8 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 	}
 }
 
+// ClientIP reports the address of the peer, without its port. Put [RealIP] in
+// front for this to be the address of the client rather than of the proxy.
 func ClientIP[C router.Context](c C) string {
 	host, _, err := net.SplitHostPort(c.Request().RemoteAddr)
 	if err != nil {

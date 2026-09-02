@@ -11,18 +11,32 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// DefaultGzipMinLength is the body below which [Gzip] compresses nothing,
+// because the header of the format costs more than the saving.
 const DefaultGzipMinLength = 1024
 
+// GzipConfig configures [GzipWithConfig]. Level is a level of [compress/gzip],
+// and zero or one out of range takes the default. MinLength is the shortest
+// body worth compressing, and zero takes [DefaultGzipMinLength].
 type GzipConfig struct {
 	Skip      func(c router.Context) bool
 	Level     int
 	MinLength int
 }
 
+// Gzip compresses the response for a client that says it takes gzip, and adds
+// Accept-Encoding to Vary. A body under [DefaultGzipMinLength], a status with
+// no body, and a body that is already encoded all go out untouched.
+//
+// A stream passes through: an event stream is never compressed, and a handler
+// that flushes keeps its data moving to the client.
+//
+// A HEAD gets the headers its GET would carry and no body.
 func Gzip[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return GzipWithConfig[C](GzipConfig{})(next)
 }
 
+// GzipWithConfig is [Gzip] with a configuration.
 func GzipWithConfig[C router.Context](cfg GzipConfig) router.Middleware[C] {
 	level := gzipLevel(cfg.Level)
 	minLength := cfg.MinLength

@@ -10,6 +10,12 @@ import (
 	"strings"
 )
 
+// Response wraps the [http.ResponseWriter] of the request and records what went
+// out. It is what [Base.Response] reports.
+//
+// Status and Size hold what the handler wrote, and Committed says whether the
+// header is already out. A middleware reads them after the chain returns.
+//
 //betteralign:check
 type Response struct {
 	http.ResponseWriter
@@ -19,8 +25,16 @@ type Response struct {
 	Committed bool
 }
 
+// Unwrap reports the writer underneath, which lets
+// [http.NewResponseController] reach the features of net/http through this
+// wrapper.
 func (r *Response) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
+// Before registers fn to run just before the header goes out, which is the
+// last moment a header can still be set. Callbacks run in the order they were
+// added.
+//
+// Before panics if fn is nil.
 func (r *Response) Before(fn func()) {
 	if fn == nil {
 		panic("router: Response.Before needs a callback")
@@ -28,6 +42,10 @@ func (r *Response) Before(fn func()) {
 	r.before = append(r.before, fn)
 }
 
+// WriteHeader writes the status and commits the response, after it runs the
+// callbacks of [Response.Before]. A 1xx other than 101 passes through as an
+// informational response and commits nothing. A second call is dropped and
+// logged at debug level.
 func (r *Response) WriteHeader(code int) {
 	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		r.ResponseWriter.WriteHeader(code)
@@ -48,6 +66,8 @@ func (r *Response) WriteHeader(code int) {
 	r.Committed = true
 }
 
+// Write writes b, committing the response with a 200 when no status went out
+// yet, and adds to Size.
 func (r *Response) Write(b []byte) (int, error) {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -57,6 +77,8 @@ func (r *Response) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// WriteString writes s, committing the response with a 200 when no status went
+// out yet, and adds to Size.
 func (r *Response) WriteString(s string) (int, error) {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -66,6 +88,8 @@ func (r *Response) WriteString(s string) (int, error) {
 	return n, err
 }
 
+// Flush sends what is buffered to the client, committing the response with a
+// 200 when no status went out yet. A writer that cannot flush is left alone.
 func (r *Response) Flush() {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -74,6 +98,10 @@ func (r *Response) Flush() {
 	http.NewResponseController(r.ResponseWriter).Flush()
 }
 
+// ReadFrom copies src to the client, committing the response with a 200 when
+// no status went out yet, and adds to Size. It hands the copy to the writer
+// underneath when that writer can take it, so a file can go out through
+// sendfile.
 func (r *Response) ReadFrom(src io.Reader) (int64, error) {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
@@ -107,6 +135,9 @@ func (r *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 const unwrapLimit = 16
 
+// UnwrapResponse digs a [Response] out of w, through any number of wrappers
+// that implement Unwrap. A middleware of net/http uses it to reach the status
+// and the size. ok is false when no Response is in the chain.
 func UnwrapResponse(w http.ResponseWriter) (*Response, bool) {
 	for range unwrapLimit {
 		switch v := w.(type) {

@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// Route is one entry of the table that [Router.Routes] reports.
 type Route struct {
 	Method  string
 	Pattern string
@@ -28,6 +29,8 @@ type Route struct {
 // need a second allocation. See Route.Params.
 const InlineParamBudget = maxInlineParams
 
+// MethodQuery is the QUERY method of RFC 9110. The standard library has no
+// constant for it.
 const MethodQuery = "QUERY"
 
 // No request can spell it: net/http rejects a method that is not a token.
@@ -41,6 +44,13 @@ type registration[C Context] struct {
 	meta    any
 }
 
+// Router matches a request to a handler. C is the context type of the
+// application, and every handler and middleware of this router takes it.
+//
+// Build one with [New] or [NewPooled], register routes, then serve it: Router
+// is an [http.Handler]. A setter panics once the first request arrives, and
+// every setter leaves the router ready to serve, so there is no build step to
+// forget.
 type Router[C Context] struct {
 	// The request path reads this block on every request, so it stays together
 	// and in front: ServeHTTP walks started, observer, pool and preChain before
@@ -114,6 +124,10 @@ func newEngine[C Context]() *engine[C] {
 	}
 }
 
+// New builds a router that calls newContext once per request. The returned
+// context must embed [Base]; the router fills it before the handler runs.
+//
+// New panics if newContext is nil.
 func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Router[C] {
 	if newContext == nil {
 		panic("router: New needs a context factory")
@@ -130,6 +144,12 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	return r
 }
 
+// NewPooled builds a router that reuses its contexts. newContext builds one,
+// and reset clears the fields of the application before the context goes back
+// to the pool. A pooled context belongs to one request, so a handler must not
+// keep it past the point where it returns.
+//
+// NewPooled panics if newContext or reset is nil.
 func NewPooled[C Context](newContext func() C, reset func(c C)) *Router[C] {
 	if newContext == nil {
 		panic("router: NewPooled needs a context factory")
@@ -146,6 +166,16 @@ func NewPooled[C Context](newContext func() C, reset func(c C)) *Router[C] {
 func defaultNotFound[C Context](C) error         { return ErrNotFound }
 func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 
+// Handle registers h for one method and pattern. mws wrap this route alone,
+// inside whatever [Router.Use] already added.
+//
+// A pattern names a parameter in braces, "/users/{id}", and a trailing
+// "{name...}" takes the rest of the path. A parameter may sit inside a
+// segment, as in "/reports/rep-{date}.csv".
+//
+// Handle panics on an empty method, a nil handler, a nil middleware, a pattern
+// that conflicts with one already registered, or a call that arrives after the
+// router started serving.
 func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.handle(method, pattern, h, mws)
 }
@@ -264,38 +294,52 @@ func (r *Router[C]) hostEntriesIn(eng *engine[C]) []*hostEntry[C] {
 	return nil
 }
 
+// GET registers h for GET. See [Router.Handle].
 func (r *Router[C]) GET(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(http.MethodGet, pattern, h, mws...)
 }
 
+// HEAD registers h for HEAD. A GET route answers HEAD on its own, so this is
+// only for a HEAD that differs. See [Router.Handle].
 func (r *Router[C]) HEAD(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(http.MethodHead, pattern, h, mws...)
 }
 
+// POST registers h for POST. See [Router.Handle].
 func (r *Router[C]) POST(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(http.MethodPost, pattern, h, mws...)
 }
 
+// PUT registers h for PUT. See [Router.Handle].
 func (r *Router[C]) PUT(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(http.MethodPut, pattern, h, mws...)
 }
 
+// PATCH registers h for PATCH. See [Router.Handle].
 func (r *Router[C]) PATCH(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(http.MethodPatch, pattern, h, mws...)
 }
 
+// DELETE registers h for DELETE. See [Router.Handle].
 func (r *Router[C]) DELETE(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(http.MethodDelete, pattern, h, mws...)
 }
 
+// OPTIONS registers h for OPTIONS, in place of the answer that
+// [Router.HandleOPTIONS] builds. See [Router.Handle].
 func (r *Router[C]) OPTIONS(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(http.MethodOptions, pattern, h, mws...)
 }
 
+// Any registers h for every method. A route registered for one method wins
+// over this one on that method. See [Router.Handle].
 func (r *Router[C]) Any(pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.Handle(anyMethod, pattern, h, mws...)
 }
 
+// Match registers h for each of methods. See [Router.Handle].
+//
+// Match panics on a nil handler, an empty methods, or an empty method in it.
 func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	if h == nil {
 		panic("router: Match needs a handler for " + pattern)
@@ -316,6 +360,12 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 	}
 }
 
+// Use adds middleware to this scope. It runs for every route the scope
+// registers after the call, outermost first, and it does not reach a route
+// registered before it.
+//
+// Use panics on a nil middleware, on a scope that already holds routes, or
+// after the router started serving.
 func (r *Router[C]) Use(mws ...Middleware[C]) {
 	validateMiddleware(mws)
 	if r.hasRoutes {
@@ -382,6 +432,8 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 	return c
 }
 
+// Group opens a scope with no prefix, for middleware that covers some routes
+// and not others. fn registers into the scope, which Group also returns.
 func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
@@ -393,6 +445,8 @@ func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 	return c
 }
 
+// Route opens a scope under prefix. The patterns that fn registers are
+// relative to it, and the scope carries the middleware of its parent.
 func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
@@ -404,10 +458,19 @@ func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 	return c
 }
 
+// With opens a scope that carries mws on top of the middleware of its parent.
+// Unlike [Router.Use] it registers nothing itself, so it suits a single route:
+// r.With(auth).GET("/me", me).
 func (r *Router[C]) With(mws ...Middleware[C]) *Router[C] {
 	return r.newChild("", slices.Clone(mws))
 }
 
+// Pre adds middleware that runs before matching, so it also covers the
+// requests that end in a 404 or a 405. A pre-routing middleware sees no route
+// pattern and no route parameter.
+//
+// Pre panics on a scope, on a nil middleware, or after the router started
+// serving.
 func (r *Router[C]) Pre(mws ...Middleware[C]) {
 	if r.root != r {
 		panic("router: Pre belongs to the root router, because it runs before matching picks a scope")
@@ -418,6 +481,9 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 	r.settingChanged()
 }
 
+// Meta attaches v to the routes that the returned scope registers.
+// [Router.Routes] reports it, which lets a route table drive a permission
+// list or an OpenAPI document.
 func (r *Router[C]) Meta(v any) *Router[C] {
 	c := r.tag()
 	c.meta = v
@@ -436,10 +502,17 @@ func (r *Router[C]) tag() *Router[C] {
 	return c
 }
 
+// Host opens a scope that answers only for pattern. See [Router.Hosts].
 func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 	return r.Hosts([]string{pattern}, fn)
 }
 
+// Hosts opens a scope that answers for any of patterns. A pattern is an exact
+// host, a leading wildcard such as "*.example.com", or a host parameter such
+// as "{tenant}.example.com", which [Base.Param] then reads. A route outside
+// any host scope answers for every host.
+//
+// Hosts panics on an empty patterns or on a pattern it cannot parse.
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	if len(patterns) == 0 {
 		panic("router: Hosts needs at least one pattern")
@@ -481,6 +554,11 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	return c
 }
 
+// HostRouter gives pattern to a router with a context type of its own. sub
+// answers every request for that host, and it keeps its own middleware, error
+// handler and context.
+//
+// HostRouter panics if sub is nil.
 func (r *Router[C]) HostRouter[D Context](pattern string, sub *Router[D]) {
 	if sub == nil {
 		panic("router: HostRouter needs a router")
@@ -488,6 +566,9 @@ func (r *Router[C]) HostRouter[D Context](pattern string, sub *Router[D]) {
 	r.HostHandler(pattern, sub)
 }
 
+// HostHandler gives pattern to a standard library handler.
+//
+// HostHandler panics if h is nil.
 func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
 	if h == nil {
 		panic("router: HostHandler needs a handler")
@@ -495,6 +576,15 @@ func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
 	r.Host(pattern, func(g *Router[C]) { g.MountHandler("/", h) })
 }
 
+// Mount grafts a router of the same context type under prefix. The routes of
+// sub join the table of this router and take its middleware, so they route as
+// cheaply as a route registered here.
+//
+// sub is closed to further registration afterwards, and it must be a top-level
+// router that carries no setting belonging to the router that serves.
+//
+// Mount panics if sub is nil, is a scope of another router, is mounted inside
+// itself, or carries such a setting.
 func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")
@@ -572,6 +662,11 @@ func (r *Router[C]) installSubtree() {
 	}
 }
 
+// MountRouter grafts a router with a context type of its own under prefix. Use
+// it where [Router.Mount] cannot go: sub keeps its own context, middleware and
+// error handler, and it sees the path with prefix removed.
+//
+// MountRouter panics if sub is nil.
 func (r *Router[C]) MountRouter[D Context](prefix string, sub *Router[D]) {
 	if sub == nil {
 		panic("router: MountRouter needs a router")
@@ -579,6 +674,11 @@ func (r *Router[C]) MountRouter[D Context](prefix string, sub *Router[D]) {
 	r.MountHandler(prefix, sub)
 }
 
+// MountHandler gives prefix and everything under it to a standard library
+// handler. h sees the path with prefix removed, so an [http.FileServer] or a
+// third-party mux mounts as it stands.
+//
+// MountHandler panics if h is nil.
 func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 	if h == nil {
 		panic("router: MountHandler needs a handler")
@@ -649,6 +749,13 @@ func (r *Router[C]) mustOwnFallbacks(what string) {
 		"; set it on the router itself, or open a Route with a prefix")
 }
 
+// ErrorHandler installs the handler that answers a request whose handler
+// returned an error. A scope with a prefix or a host may hold one of its own,
+// which covers the routes of that scope alone. Without a call the router uses
+// [DefaultErrorHandler].
+//
+// ErrorHandler panics if h is nil, if the scope has neither a prefix nor a
+// host, or after the router started serving.
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 	if h == nil {
 		panic("router: ErrorHandler needs a handler")
@@ -659,6 +766,11 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 	r.settingChanged()
 }
 
+// HandleOPTIONS decides whether the router answers OPTIONS itself with the
+// methods of the matched path. It is on by default. An OPTIONS route of your
+// own wins either way.
+//
+// HandleOPTIONS panics after the router started serving.
 func (r *Router[C]) HandleOPTIONS(on bool) {
 	r.mustNotBeServing("the OPTIONS setting")
 	root := r.root
@@ -671,31 +783,60 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 	}
 }
 
+// MaxBodyBytes caps the request body that the Bind methods read. It defaults
+// to [DefaultMaxBodyBytes], and a body over the cap fails with
+// [ErrPayloadTooLarge]. A value of zero or less lifts the cap.
+//
+// MaxBodyBytes panics after the router started serving.
 func (r *Router[C]) MaxBodyBytes(n int64) {
 	r.mustNotBeServing("the body limit")
 	r.root.ropts.maxBody = n
 }
 
+// MaxMultipartMemory caps the memory that a multipart form takes before its
+// parts spill to a temporary file. Zero takes the default of net/http.
+//
+// MaxMultipartMemory panics after the router started serving.
 func (r *Router[C]) MaxMultipartMemory(n int64) {
 	r.mustNotBeServing("the multipart memory limit")
 	r.root.ropts.maxMultipart = n
 }
 
+// Logger installs the logger that [Base.Logger] and the error handler use. A
+// nil logger takes [slog.Default].
+//
+// Logger panics after the router started serving.
 func (r *Router[C]) Logger(l *slog.Logger) {
 	r.mustNotBeServing("the logger")
 	r.root.ropts.logger = l
 }
 
+// JSONOptions sets the options that [Base.JSON] and [Base.BindJSON] apply. The
+// options of a single call win over these.
+//
+// JSONOptions panics after the router started serving.
 func (r *Router[C]) JSONOptions(opts ...json.Options) {
 	r.mustNotBeServing("the JSON options")
 	r.root.ropts.jsonOpts = slices.Clone(opts)
 }
 
+// RedirectTrailingSlash decides whether a request whose path differs from a
+// route by a trailing slash gets a redirect to the route: 301 for GET and
+// HEAD, 308 for anything else. It is off by default, and such a request
+// otherwise ends in a 404.
+//
+// RedirectTrailingSlash panics after the router started serving.
 func (r *Router[C]) RedirectTrailingSlash(on bool) {
 	r.mustNotBeServing("the trailing slash setting")
 	r.root.eng.redirectSlash = on
 }
 
+// Observe installs a function that runs once per request, after the response
+// is written, with the status, the size of the body, how long the request
+// took, and the error the handler returned. It suits a metric; a log line
+// belongs in a middleware, which can also read the request.
+//
+// Observe panics after the router started serving.
 func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Duration, err error)) {
 	r.mustNotBeServing("the observer")
 	r.root.observer = fn
@@ -1101,6 +1242,8 @@ func concatMiddleware[C Context](a, b []Middleware[C]) []Middleware[C] {
 	}
 }
 
+// ServeHTTP answers one request, which makes Router an [http.Handler]. The
+// first call closes the router to further registration.
 func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	root := r.root
 	if !root.started.Load() {

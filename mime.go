@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+// The header names that this package and its middleware read or write. They
+// are in the canonical form of net/http, so they suit a direct map read.
 const (
 	HeaderAccept                          = "Accept"
 	HeaderAcceptEncoding                  = "Accept-Encoding"
@@ -53,6 +55,7 @@ const (
 	HeaderOrigin                        = "Origin"
 )
 
+// The media types that this package writes or recognizes.
 const (
 	MIMEApplicationJSON            = "application/json"
 	MIMEApplicationJSONCharsetUTF8 = "application/json; charset=utf-8"

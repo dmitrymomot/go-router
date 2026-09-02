@@ -7,15 +7,25 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// HTMXRedirectConfig configures [HTMXRedirectWithConfig]. Location sends
+// HX-Location, which swaps the new page in, in place of HX-Redirect, which
+// loads it whole.
 type HTMXRedirectConfig struct {
 	Skip     func(c router.Context) bool
 	Location bool
 }
 
+// HTMXRedirect turns the redirect of a later handler into an htmx one: a 3xx
+// with a Location becomes a 200 with HX-Redirect, so the browser navigates
+// rather than swapping the redirect target into the page.
+//
+// It only touches a request that wants a fragment, and it adds the htmx
+// headers to Vary. An ordinary form post keeps its redirect.
 func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return HTMXRedirectWithConfig[C](HTMXRedirectConfig{})(next)
 }
 
+// HTMXRedirectWithConfig is [HTMXRedirect] with a configuration.
 func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Middleware[C] {
 	header := router.HeaderHXRedirect
 	if cfg.Location {

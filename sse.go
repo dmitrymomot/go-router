@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// Event is one server-sent event. Data may hold line breaks, which the writer
+// splits into the several data fields the format needs. Retry tells the client
+// how long to wait before it reconnects.
 type Event struct {
 	ID    string
 	Name  string
@@ -25,24 +28,39 @@ type sseConfig struct {
 	retry      time.Duration
 }
 
+// SSEOption configures a stream. See [SSEHeartbeat], [SSERetry] and
+// [SSEClose].
 type SSEOption func(*sseConfig)
 
 const nilSSEOptionError = "router: an SSE option cannot be nil"
 
+// SSEHeartbeat sends a comment every d, which holds a connection open through
+// a proxy that drops an idle one. [ServeSSE] does the sending; a stream driven
+// by hand calls [SSEWriter.Comment] itself.
 func SSEHeartbeat(d time.Duration) SSEOption {
 	return func(c *sseConfig) { c.heartbeat = d }
 }
 
+// SSERetry tells the client how long to wait before it reconnects. It goes out
+// once, as the stream opens.
 func SSERetry(d time.Duration) SSEOption {
 	return func(c *sseConfig) { c.retry = d }
 }
 
+// SSEClose sends e as the last event, once the channel of [ServeSSE] closes.
+// It suits a "done" the client watches for, because the browser reconnects on
+// its own when a stream simply ends.
 func SSEClose(e Event) SSEOption {
 	return func(c *sseConfig) { c.closeEvent = &e }
 }
 
 const sseHeartbeatText = "ping"
 
+// SSEWriter writes a server-sent event stream. [Base.SSE] opens one.
+//
+// The first failure closes the writer and every later call reports it, so a
+// loop needs one error check per send and no more. [SSEWriter.Closed] reports
+// whether the stream still takes events.
 type SSEWriter struct {
 	b     *Base
 	rc    *http.ResponseController
@@ -53,6 +71,15 @@ type SSEWriter struct {
 	head  bool
 }
 
+// SSE opens a server-sent event stream and writes status with the headers of
+// the format. It clears the write deadline, so the stream outlives the
+// ordinary timeout of the server.
+//
+// It reports an [ErrInternalServerError] when an option is nil or the response
+// writer cannot flush. A HEAD request gets the headers and a writer that is
+// already closed.
+//
+// See [ServeSSE] to drive a stream from a channel.
 func (b *Base) SSE(status int, opts ...SSEOption) (*SSEWriter, error) {
 	if err := validateSSEOptions(opts); err != nil {
 		return nil, ErrInternalServerError.WithError(err)
@@ -104,14 +131,22 @@ func validateSSEOptions(opts []SSEOption) error {
 	return nil
 }
 
+// LastEventID reports the Last-Event-ID header, which a client sends when it
+// reconnects, so a handler can resume where the stream stopped.
 func (b *Base) LastEventID() string { return b.req.Header.Get(HeaderLastEventID) }
 
+// Request reports the request that opened the stream.
 func (s *SSEWriter) Request() *http.Request { return s.b.req }
 
+// LastEventID reports the Last-Event-ID header of the request. See
+// [Base.LastEventID].
 func (s *SSEWriter) LastEventID() string { return s.b.LastEventID() }
 
+// Closed reports whether the stream stopped taking events, because a send
+// failed or because the request is a HEAD.
 func (s *SSEWriter) Closed() bool { return s.head || s.err != nil }
 
+// Send writes e and flushes it to the client.
 func (s *SSEWriter) Send(e Event) error {
 	ok, err := s.begin(e)
 	if !ok {
@@ -121,8 +156,11 @@ func (s *SSEWriter) Send(e Event) error {
 	return s.end()
 }
 
+// SendData writes an unnamed event carrying data.
 func (s *SSEWriter) SendData(data string) error { return s.Send(Event{Data: data}) }
 
+// SendJSON writes an event called name whose data is v as JSON. opts win over
+// the options of [Router.JSONOptions].
 func (s *SSEWriter) SendJSON(name string, v any, opts ...json.Options) error {
 	ok, err := s.begin(Event{Name: name})
 	if !ok {
@@ -134,6 +172,8 @@ func (s *SSEWriter) SendJSON(name string, v any, opts ...json.Options) error {
 	return s.end()
 }
 
+// SendComponent writes an event called name whose data is c rendered as HTML,
+// which is what htmx reads from a stream.
 func (s *SSEWriter) SendComponent(name string, c Component) error {
 	ok, err := s.begin(Event{Name: name})
 	if !ok {
@@ -145,6 +185,8 @@ func (s *SSEWriter) SendComponent(name string, c Component) error {
 	return s.end()
 }
 
+// Comment writes a comment, which the client ignores. It keeps a connection
+// alive through a proxy that drops an idle one.
 func (s *SSEWriter) Comment(text string) error {
 	if s.Closed() {
 		return s.err
@@ -325,18 +367,26 @@ func (w *sseLines) end() {
 	}
 }
 
+// SSESender turns one value of the channel into one event. See [SSEJSON],
+// [SSEText], [SSEComponent] and [SSEEvents].
 type SSESender[T any] func(s *SSEWriter, v T) error
 
+// SSEJSON sends each value as JSON, in an event called name.
 func SSEJSON[T any](name string) SSESender[T] {
 	return func(s *SSEWriter, v T) error { return s.SendJSON(name, v) }
 }
 
+// SSEText sends each value in its printed form, in an event called name.
 func SSEText[T any](name string) SSESender[T] {
 	return func(s *SSEWriter, v T) error {
 		return s.Send(Event{Name: name, Data: fmt.Sprint(v)})
 	}
 }
 
+// SSEComponent renders each value through view and sends the HTML, in an event
+// called name.
+//
+// SSEComponent panics if view is nil.
 func SSEComponent[T any, C Component](name string, view func(T) C) SSESender[T] {
 	if view == nil {
 		panic("router: SSEComponent needs a view")
@@ -344,10 +394,18 @@ func SSEComponent[T any, C Component](name string, view func(T) C) SSESender[T] 
 	return func(s *SSEWriter, v T) error { return s.SendComponent(name, view(v)) }
 }
 
+// SSEEvents sends each [Event] of the channel as it stands, for a handler that
+// sets the name, the id or the retry per event.
 func SSEEvents() SSESender[Event] {
 	return func(s *SSEWriter, e Event) error { return s.Send(e) }
 }
 
+// ServeSSE opens a stream and sends every value of ch through send, until ch
+// closes or the client goes away. A closed ch sends the [SSEClose] event, when
+// one is configured, and ends the handler.
+//
+// The heartbeat of [SSEHeartbeat] runs here, so a stream driven this way keeps
+// itself alive.
 func ServeSSE[T any](c Context, ch <-chan T, send SSESender[T], opts ...SSEOption) error {
 	if send == nil {
 		return ErrInternalServerError.WithError(errors.New("router: ServeSSE needs a sender"))
@@ -388,11 +446,16 @@ func ServeSSE[T any](c Context, ch <-chan T, send SSESender[T], opts ...SSEOptio
 	}
 }
 
+// SSEStream holds a sender and its options, so several handlers can share one
+// configuration. It is safe for concurrent use.
 type SSEStream[T any] struct {
 	send SSESender[T]
 	opts []SSEOption
 }
 
+// NewSSEStream builds a stream from send and opts, which it copies.
+//
+// NewSSEStream panics if send is nil or an option is nil.
 func NewSSEStream[T any](send SSESender[T], opts ...SSEOption) *SSEStream[T] {
 	if send == nil {
 		panic("router: NewSSEStream needs a sender")
@@ -403,6 +466,7 @@ func NewSSEStream[T any](send SSESender[T], opts ...SSEOption) *SSEStream[T] {
 	return &SSEStream[T]{send: send, opts: slices.Clone(opts)}
 }
 
+// Serve is [ServeSSE] with the sender and the options of st.
 func (st *SSEStream[T]) Serve(c Context, ch <-chan T) error {
 	return ServeSSE(c, ch, st.send, st.opts...)
 }
