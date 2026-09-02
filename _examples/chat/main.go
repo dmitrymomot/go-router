@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
