@@ -116,6 +116,11 @@ type Validator interface {
 func validate[T any](v *T) error {
 	sv, ok := any(v).(Validator)
 	if !ok {
+		// A nil T -- a JSON body of "null" bound into a pointer -- satisfies
+		// Validator but has no value to check, and calling through it panics.
+		if rv := reflect.ValueOf(*v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			return nil
+		}
 		sv, ok = any(*v).(Validator)
 	}
 	if !ok {
