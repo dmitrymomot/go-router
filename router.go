@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type Route struct {
@@ -720,7 +722,6 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 			e.tree.recacheAllow(on, root.allowCache)
 		}
 	}
-	root.refresh()
 }
 
 func (r *Router[C]) MaxBodyBytes(n int64) {
@@ -1507,7 +1508,7 @@ func canonicalEscapedPath(path string) string {
 		if path[i] != '%' {
 			continue
 		}
-		v, ok := unhex(path[i+1], path[i+2])
+		v, ok := urlesc.Unhex(path[i+1], path[i+2])
 		if !ok {
 			continue
 		}
@@ -1519,7 +1520,7 @@ func canonicalEscapedPath(path string) string {
 		out = append(out, path[:i]...)
 		for i < len(path) {
 			if i+2 < len(path) && path[i] == '%' {
-				if v, ok := unhex(path[i+1], path[i+2]); ok {
+				if v, ok := urlesc.Unhex(path[i+1], path[i+2]); ok {
 					if v == '/' || v == '\\' || v == '%' {
 						out = append(out, '%', hex[v>>4], hex[v&15])
 					} else {
@@ -1535,27 +1536,6 @@ func canonicalEscapedPath(path string) string {
 		return string(out)
 	}
 	return path
-}
-
-func unhex(a, b byte) (byte, bool) {
-	hex := func(c byte) (byte, bool) {
-		switch {
-		case c >= '0' && c <= '9':
-			return c - '0', true
-		case c >= 'a' && c <= 'f':
-			return c - 'a' + 10, true
-		case c >= 'A' && c <= 'F':
-			return c - 'A' + 10, true
-		default:
-			return 0, false
-		}
-	}
-	hi, ok := hex(a)
-	if !ok {
-		return 0, false
-	}
-	lo, ok := hex(b)
-	return hi<<4 | lo, ok
 }
 
 func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {

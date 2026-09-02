@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type segKind uint8
@@ -162,7 +164,7 @@ func checkStaticLiteral(raw, pattern string) error {
 		if raw[i] != '%' || i+2 >= len(raw) {
 			continue
 		}
-		v, ok := unhex(raw[i+1], raw[i+2])
+		v, ok := urlesc.Unhex(raw[i+1], raw[i+2])
 		if !ok {
 			// requestPath leaves this alone, so the literal reaches the trie
 			// exactly as written and matches.
