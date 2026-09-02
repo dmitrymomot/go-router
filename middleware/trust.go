@@ -20,7 +20,13 @@ func TrustLinkLocal(v bool) TrustOption { return func(s *TrustSet) { s.linkLocal
 
 func TrustPrivateNet(v bool) TrustOption { return func(s *TrustSet) { s.private = v } }
 
+// TrustPrefix trusts every address in p. A zero Prefix -- what netip.ParsePrefix
+// returns beside its error -- panics: stored, it matches nothing, so the proxy
+// is never trusted and RealIP quietly strips every forwarding header.
 func TrustPrefix(p netip.Prefix) TrustOption {
+	if !p.IsValid() {
+		panic("middleware: TrustPrefix needs a valid prefix")
+	}
 	return func(s *TrustSet) { s.prefixes = append(s.prefixes, p.Masked()) }
 }
 
