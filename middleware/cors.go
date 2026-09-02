@@ -11,6 +11,18 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// CORSConfig configures [CORSWithConfig].
+//
+// AllowOrigins names the origins that may read the answers, each with a scheme
+// and a host; "*" allows every origin. AllowOriginFunc decides per request,
+// for a list that lives in a database, and it wins over AllowOrigins.
+//
+// AllowMethods and AllowHeaders answer a preflight; empty ones take the
+// methods of the route and the headers the client asked for. ExposeHeaders
+// names the response headers the browser hands to the script.
+// AllowCredentials lets the browser send cookies, and it cannot go with "*".
+// MaxAge is how long the browser caches the preflight, and a negative one
+// caches nothing.
 type CORSConfig struct {
 	Skip             func(c router.Context) bool
 	AllowOrigins     []string
@@ -22,6 +34,9 @@ type CORSConfig struct {
 	MaxAge           time.Duration
 }
 
+// CORS allows every origin, without credentials. It suits a public read-only
+// API; anything that carries a session needs [CORSWithConfig] with the origins
+// named.
 func CORS[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return CORSWithConfig[C](CORSConfig{AllowOrigins: []string{"*"}})(next)
 }
@@ -31,6 +46,12 @@ var defaultCORSMethods = strings.Join([]string{
 	http.MethodPut, http.MethodPatch, http.MethodDelete,
 }, ", ")
 
+// CORSWithConfig is [CORS] with a configuration. It answers a preflight itself
+// with a 204 and never calls the handler.
+//
+// CORSWithConfig panics on an entry of AllowOrigins that is not an origin, and
+// on "*" together with AllowCredentials, which would let every site read the
+// answers of a signed-in user.
 func CORSWithConfig[C router.Context](cfg CORSConfig) router.Middleware[C] {
 	cfg.AllowOrigins = slices.Clone(cfg.AllowOrigins)
 	wildcard := checkCORSOrigins(cfg.AllowOrigins, cfg.AllowCredentials)

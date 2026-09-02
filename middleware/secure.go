@@ -9,8 +9,19 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// SecureOmit is the value that tells [SecureWithConfig] to send no header at
+// all, where an empty string takes the default instead.
 const SecureOmit = "-"
 
+// SecureConfig configures [SecureWithConfig]. An empty string field takes its
+// default, and [SecureOmit] drops the header: ContentTypeNosniff defaults to
+// "nosniff", FrameOptions to "SAMEORIGIN", and ReferrerPolicy to
+// "strict-origin-when-cross-origin".
+//
+// ContentSecurityPolicy is sent only when it is set, and CSPReportOnly sends
+// it as a report rather than a rule. The HSTS fields build
+// Strict-Transport-Security, which goes out over HTTPS alone; HSTSMaxAge is a
+// [time.Duration], so write 365*24*time.Hour.
 type SecureConfig struct {
 	Skip                  func(c router.Context) bool
 	ContentTypeNosniff    string
@@ -23,10 +34,17 @@ type SecureConfig struct {
 	HSTSPreload           bool
 }
 
+// Secure adds the security headers that suit any site: nosniff, SAMEORIGIN and
+// a strict referrer policy. It sends no HSTS and no content security policy,
+// because both need a decision that belongs to the site.
 func Secure[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return SecureWithConfig[C](SecureConfig{})(next)
 }
 
+// SecureWithConfig is [Secure] with a configuration.
+//
+// SecureWithConfig panics on an HSTSMaxAge under one second, which is the
+// shape of a caller who wrote a number of seconds in place of a duration.
 func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
 	nosniff := setting(cfg.ContentTypeNosniff, "nosniff")
 	frame := setting(cfg.FrameOptions, "SAMEORIGIN")
