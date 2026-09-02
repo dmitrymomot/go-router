@@ -229,6 +229,12 @@ func writeError(b *Base, err error, exposeCause bool) {
 		}
 		//nolint:errcheck // Same as above.
 		b.res.WriteString(html.EscapeString(he.Message))
+		if cause != "" {
+			// The JSON and text representations both carry it; the caller has
+			// already decided whether a cause may be shown at all.
+			//nolint:errcheck // Same as above.
+			b.res.WriteString("\n<pre>" + html.EscapeString(cause) + "</pre>")
+		}
 		return
 	}
 
