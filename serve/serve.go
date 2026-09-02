@@ -14,10 +14,27 @@ import (
 	"time"
 )
 
+// DefaultShutdownTimeout is how long [Run] waits for the requests in flight
+// when Config.ShutdownTimeout is zero.
 const DefaultShutdownTimeout = 10 * time.Second
 
+// DefaultReadHeaderTimeout is the header deadline that [Run] applies when
+// Config.ReadHeaderTimeout is zero. It keeps a slow client from holding a
+// connection open forever.
 const DefaultReadHeaderTimeout = 10 * time.Second
 
+// Config is what [Run] builds the server from. Set Addr, or hand over a
+// Listener of your own; a Listener wins, and Run closes it either way.
+//
+// Every timeout of zero takes the default of net/http, except
+// ReadHeaderTimeout, which takes [DefaultReadHeaderTimeout], and
+// ShutdownTimeout, which takes [DefaultShutdownTimeout]. A negative
+// ReadHeaderTimeout means no deadline, and a negative ShutdownTimeout closes
+// the connections at once rather than draining them.
+//
+// OnListen runs with the address the server actually listens on, which names
+// the port that ":0" chose. OnServer sees the [http.Server] before it serves,
+// for a setting this Config does not carry; an error from it stops Run.
 type Config struct {
 	Addr              string
 	Network           string
@@ -33,12 +50,15 @@ type Config struct {
 	OnServer          func(*http.Server) error
 }
 
+// Option adds a TLS certificate to the server. See [CertFiles], [CertPEM] and
+// [CertFS].
 type Option func(*options) error
 
 type options struct {
 	certs []tls.Certificate
 }
 
+// CertFiles loads a certificate and its key from disk.
 func CertFiles(certPath, keyPath string) Option {
 	return func(o *options) error {
 		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
@@ -50,6 +70,8 @@ func CertFiles(certPath, keyPath string) Option {
 	}
 }
 
+// CertPEM takes a certificate and its key as PEM bytes, which suits a secret
+// that arrives through the environment.
 func CertPEM(cert, key []byte) Option {
 	return func(o *options) error {
 		c, err := tls.X509KeyPair(cert, key)
@@ -61,6 +83,7 @@ func CertPEM(cert, key []byte) Option {
 	}
 }
 
+// CertFS loads a certificate and its key from fsys, such as an [embed.FS].
 func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 	return func(o *options) error {
 		if fsys == nil {
@@ -83,6 +106,17 @@ func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 	}
 }
 
+// Run serves h until ctx ends, then drains the requests in flight and reports
+// once the server has stopped. A cancelled ctx is the ordinary way to stop, so
+// Run reports nil for it.
+//
+// Any certificate among opts turns the server into an HTTPS one, over TLS 1.3
+// and h2. A Config.TLSConfig of your own wins, and the certificates join the
+// ones it already carries.
+//
+// Run reports an error for a nil context, a nil handler, a Config that names
+// neither an address nor a listener, a nil or failing option, a listener it
+// cannot open, and a drain that runs out of time.
 func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error {
 	// Run closes a caller-supplied listener on the serving path, so it owns it
 	// from here on and has to close it on every path. It used to return early
