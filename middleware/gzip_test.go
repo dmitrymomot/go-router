@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -642,5 +643,39 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 				t.Errorf("the request failed: %v", failed)
 			}
 		})
+	}
+}
+
+// A handler that sets Content-Length and no Content-Type used to be committed
+// from WriteHeader with an empty buffer: the sniff fallback never ran, and
+// net/http stops sniffing once Content-Encoding is set, so the response went
+// out with no Content-Type at all. With Secure's nosniff the browser then
+// showed the page as plain text.
+func TestGzipSniffsWhenContentLengthIsSetWithoutAType(t *testing.T) {
+	body := strings.Repeat("<p>hello</p>", 400)
+
+	for _, withLength := range []bool{true, false} {
+		r := newRouter()
+		r.Use(middleware.Gzip[*appContext])
+		r.GET("/h", func(c *appContext) error {
+			if withLength {
+				c.Response().Header().Set("Content-Length", strconv.Itoa(len(body)))
+			}
+			c.Response().WriteHeader(http.StatusOK)
+			_, err := c.Response().WriteString(body)
+			return err
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/h", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+			t.Fatalf("Content-Length set=%v: encoding = %q, want gzip", withLength, got)
+		}
+		if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+			t.Errorf("Content-Length set=%v: type = %q, want a sniffed text/html", withLength, got)
+		}
 	}
 }
