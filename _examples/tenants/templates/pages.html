@@ -3,20 +3,36 @@
 <h1>One app, one subdomain for each customer</h1>
 <p class="lede">Create a workspace and the app sends you to its own address.</p>
 
-<p><a class="button" href="/signup">Create a workspace</a></p>
-
+{{if .Email}}
+<h2>Your workspaces</h2>
 {{- with .Workspaces}}
-<h2>Yours</h2>
 <ul class="spaces">
 	{{- range .}}
 	<li><a href="{{.URL}}">{{.Name}}</a><br><code>{{.URL}}</code></li>
 	{{- end}}
 </ul>
+{{- else}}
+<p class="hint">You own none yet.</p>
 {{- end}}
 
-{{- with .Email}}
-<form action="/signout" method="post"><button type="submit">Sign out {{.}}</button></form>
-{{- end}}
+<form class="stack" action="/workspaces" method="post" autocomplete="off">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+	<label>Add another workspace
+		<input name="name" maxlength="40" placeholder="Beta, Ltd." required>
+	</label>
+	{{- with .Error}}
+	<p class="error" role="alert">{{.}}</p>
+	{{- end}}
+	<button type="submit">Create it</button>
+</form>
+
+<form action="/signout" method="post"><button type="submit">Sign out {{.Email}}</button></form>
+{{else}}
+<p>
+	<a class="button" href="/signup">Create a workspace</a>
+	<a class="button" href="/login">Sign in</a>
+</p>
+{{end}}
 {{template "foot"}}
 {{- end}}
 
@@ -33,12 +49,37 @@
 	<label>Your email
 		<input name="email" type="email" value="{{.Email}}" maxlength="120" placeholder="you@example.com" required>
 	</label>
+	<label>Password
+		<input name="password" type="password" minlength="8" maxlength="200" autocomplete="new-password" required>
+	</label>
 	{{- with .Error}}
 	<p class="error" role="alert">{{.}}</p>
 	{{- end}}
 	<button type="submit">Create it</button>
 </form>
-<p class="hint">"Acme, Inc." becomes <code>acme-inc.lvh.me</code>.</p>
+<p class="hint">"Acme, Inc." becomes <code>acme-inc.lvh.me</code>. Already have an account? <a href="/login">Sign in</a>.</p>
+{{template "foot"}}
+{{- end}}
+
+{{define "login" -}}
+{{template "head" "Sign in"}}
+<h1>Sign in</h1>
+<p class="lede">This takes you to your first workspace.</p>
+
+<form class="stack" action="/login" method="post" autocomplete="off">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+	<label>Your email
+		<input name="email" type="email" value="{{.Email}}" maxlength="120" placeholder="you@example.com" required autofocus>
+	</label>
+	<label>Password
+		<input name="password" type="password" maxlength="200" autocomplete="current-password" required>
+	</label>
+	{{- with .Error}}
+	<p class="error" role="alert">{{.}}</p>
+	{{- end}}
+	<button type="submit">Sign in</button>
+</form>
+<p class="hint">No account yet? <a href="/signup">Create a workspace</a>.</p>
 {{template "foot"}}
 {{- end}}
 

@@ -3,23 +3,29 @@ package main
 import (
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// apexRoutes answers on the base domain itself: the landing page and the form
-// that creates a workspace.
+// apexRoutes answers on the base domain itself: the landing page, the two
+// forms that let somebody in, and the one that adds another workspace.
 func apexRoutes(h *router.Router[Ctx]) {
 	h.GET("/", landing)
 	h.GET("/signup", signupForm)
 	h.POST("/signup", signup)
+	h.GET("/login", loginForm)
+	h.POST("/login", login)
 	h.POST("/signout", signout)
+
+	// One more middleware, and the same tree. Only this route needs a session.
+	h.With(requireSession).POST("/workspaces", newWorkspace)
 }
 
 type landingPage struct {
+	CSRFToken  string
 	Email      string
+	Error      string
 	Workspaces []workspaceLink
 }
 
@@ -29,80 +35,65 @@ type workspaceLink struct {
 }
 
 func landing(c Ctx) error {
-	page := landingPage{Email: c.Email}
+	return c.Render(http.StatusOK, landingFor(c, ""))
+}
+
+func landingFor(c Ctx, reason string) router.Component {
+	page := landingPage{
+		CSRFToken: middleware.CSRFTokenFrom(c),
+		Email:     c.Email,
+		Error:     reason,
+	}
 	for _, w := range c.Store.OwnedBy(c.Email) {
 		page.Workspaces = append(page.Workspaces, workspaceLink{
 			Name: w.Name,
 			URL:  workspaceURL(c, w.Slug),
 		})
 	}
-	return c.Render(http.StatusOK, tmpl("landing", page))
+	return tmpl("landing", page)
 }
 
-type signupPage struct {
-	CSRFToken string
-	Name      string
-	Email     string
-	Error     string
-	Preview   string
+type workspaceInput struct {
+	Name string `form:"name"`
 }
 
-func signupForm(c Ctx) error {
-	return c.Render(http.StatusOK, tmpl("signup", signupPage{
-		CSRFToken: middleware.CSRFTokenFrom(c),
-		Email:     c.Email,
-	}))
-}
-
-type signupInput struct {
-	Name  string `form:"name"`
-	Email string `form:"email"`
-}
-
-func signup(c Ctx) error {
-	in, err := c.Bind[signupInput]()
+// newWorkspace adds a workspace to the account that is already signed in, so
+// it asks for a name and nothing else.
+func newWorkspace(c Ctx) error {
+	in, err := c.Bind[workspaceInput]()
 	if err != nil {
 		return err
 	}
 
-	name, email := cleanName(in.Name), cleanEmail(in.Email)
-	page := signupPage{
-		CSRFToken: middleware.CSRFTokenFrom(c),
-		Name:      name,
-		Email:     email,
-		Preview:   slugify(name),
-	}
-
-	if reason := checkSignup(name, email); reason != "" {
-		page.Error = reason
-		return c.Render(http.StatusUnprocessableEntity, tmpl("signup", page))
-	}
-
-	w, err := c.Store.Create(name, email)
+	w, err := c.Store.Create(cleanName(in.Name), c.Email)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrSlugEmpty), errors.Is(err, ErrSlugReserved), errors.Is(err, ErrSlugTaken):
-			page.Error = "Pick another name: " + err.Error() + "."
-			return c.Render(http.StatusUnprocessableEntity, tmpl("signup", page))
-		default:
-			return err
+		if reason, ok := nameRefused(err); ok {
+			return c.Render(http.StatusUnprocessableEntity, landingFor(c, reason))
 		}
+		return err
 	}
-
-	writeSession(c, email)
-
-	// The new workspace lives on its own host, so this leaves the apex.
 	return c.Redirect(http.StatusSeeOther, workspaceURL(c, w.Slug))
 }
 
-func checkSignup(name, email string) string {
+// nameRefused turns a slug rule into a sentence for the reader, and says
+// whether the error was one of those rules at all.
+func nameRefused(err error) (string, bool) {
 	switch {
-	case name == "":
-		return "Type a name for the workspace."
-	case !strings.Contains(email, "@"):
-		return "Type the email address that owns it."
+	case errors.Is(err, ErrSlugEmpty), errors.Is(err, ErrSlugReserved), errors.Is(err, ErrSlugTaken):
+		return "Pick another name: " + err.Error() + ".", true
+	default:
+		return "", false
 	}
-	return ""
+}
+
+// requireSession sends an anonymous reader to the login form.
+func requireSession(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
+	return func(c Ctx) error {
+		if c.Email == "" {
+			return c.Redirect(http.StatusSeeOther, "/login")
+		}
+		return next(c)
+	}
 }
 
 func signout(c Ctx) error {

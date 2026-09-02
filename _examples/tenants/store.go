@@ -22,18 +22,68 @@ var (
 	ErrSlugEmpty    = errors.New("the name has no letters or digits to build a subdomain from")
 	ErrSlugReserved = errors.New("that subdomain is reserved")
 	ErrSlugTaken    = errors.New("that subdomain is taken")
+
+	ErrEmailTaken = errors.New("that email already has an account")
+	// ErrBadCredentials never says which half was wrong, so the form cannot be
+	// used to learn which addresses have an account.
+	ErrBadCredentials = errors.New("that email and password do not match")
 )
+
+// An account owns the workspaces it creates. The password is kept as a salt
+// and a derived key, never as itself.
+type Account struct {
+	Email string
+	Salt  []byte
+	Key   []byte
+}
 
 // reserved names never become a workspace, because the apex router already
 // answers on them.
 var reserved = []string{"www", "api", "admin", "static", "mail"}
 
 type Store struct {
-	bySlug map[string]Workspace
-	mu     sync.RWMutex
+	bySlug   map[string]Workspace
+	accounts map[string]Account
+	mu       sync.RWMutex
 }
 
-func NewStore() *Store { return &Store{bySlug: make(map[string]Workspace)} }
+func NewStore() *Store {
+	return &Store{
+		bySlug:   make(map[string]Workspace),
+		accounts: make(map[string]Account),
+	}
+}
+
+func (s *Store) Register(email, password string) error {
+	salt := newSalt()
+	key := derive(password, salt)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, taken := s.accounts[email]; taken {
+		return ErrEmailTaken
+	}
+	s.accounts[email] = Account{Email: email, Salt: salt, Key: key}
+	return nil
+}
+
+func (s *Store) Authenticate(email, password string) error {
+	s.mu.RLock()
+	a, ok := s.accounts[email]
+	s.mu.RUnlock()
+
+	if !ok {
+		// Derive anyway. An address with no account must not answer faster
+		// than one with a wrong password.
+		derive(password, make([]byte, saltLen))
+		return ErrBadCredentials
+	}
+	if !passwordMatches(password, a.Salt, a.Key) {
+		return ErrBadCredentials
+	}
+	return nil
+}
 
 func (s *Store) Create(name, owner string) (Workspace, error) {
 	slug := slugify(name)
