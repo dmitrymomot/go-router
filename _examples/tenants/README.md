@@ -1,12 +1,12 @@
 # tenants
 
-A multi-tenant web app in about 700 lines: a landing page and a signup form on the base domain, and one route table that serves every workspace on a subdomain of its own, its login page and its accounts included.
+A multi-tenant web app in about 700 lines: a landing page and a signup form on the base domain, and one route table that serves every workspace on a subdomain of its own.
 
 ```bash
 go run .
 ```
 
-Then open <http://lvh.me:8080> and create a workspace. The app sends you to its address, such as <http://acme.lvh.me:8080>, and that address is the only door to it from then on.
+Then open <http://lvh.me:8080> and create a workspace. The app sends you to its address, such as <http://acme.lvh.me:8080>.
 
 `lvh.me` and every name under it resolve to 127.0.0.1, so the subdomains work with no entry in `/etc/hosts` and no DNS of your own.
 
@@ -52,9 +52,9 @@ if !ok {
 }
 ```
 
-**A session that belongs to one host.** `SetSignedCookie` signs the email with an HMAC, and the cookie names no `Domain`, so it belongs to the host that set it and to no other. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out, which is the point: the account is the workspace's, not the site's.
+**A session that belongs to one host.** `SetSignedCookie` signs the email with an HMAC, and the cookie names no `Domain`, so it belongs to the host that set it and to no other. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out.
 
-**A ticket to cross the hosts.** That scoping has a consequence. Signup runs on the apex, and no server may set a cookie for a host below its own, so the apex cannot start the session it just earned. It hands over a ticket instead — one random id, good for one minute and one visit:
+**A ticket to cross the hosts.** Signup runs on the apex, and no server may set a cookie for a host below its own, so the apex cannot start the session it just earned. It hands over a ticket instead: one random id, good for one minute and one visit.
 
 ```go
 return c.Redirect(http.StatusSeeOther, enterURL(c, w.Slug, c.Store.NewTicket(w.Slug, email)))
