@@ -391,7 +391,7 @@ func TestPooledContextIsNotRecycledWhileNextStillRuns(t *testing.T) {
 	close(release)
 
 	c := <-done
-	if !c.Base.retained {
+	if !c.retained {
 		t.Error("a context whose next was still running was not marked retained")
 	}
 }
