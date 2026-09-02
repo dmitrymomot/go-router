@@ -234,7 +234,7 @@ func (a *Assets) URL(name string) string {
 	return u.EscapedPath()
 }
 
-// FuncMap reports an "asset" function for [template.FuncMap], so a template
+// FuncMap reports an "asset" function for a template.FuncMap, so a template
 // writes {{ asset "app.css" }} and gets the fingerprinted URL.
 func (a *Assets) FuncMap() map[string]any {
 	return map[string]any{"asset": a.URL}

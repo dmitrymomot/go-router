@@ -280,8 +280,8 @@ func removeSpilledParts(req *http.Request) {
 }
 
 // ParamAs reads route parameter name as a T. T may be any string, bool,
-// integer, float, [time.Duration] or [time.Time], or a type that implements
-// [encoding.TextUnmarshaler].
+// integer, float, time.Duration or time.Time, or a type that implements
+// encoding.TextUnmarshaler.
 //
 // A missing parameter and one that does not parse each report an
 // [ErrBadRequest].
@@ -340,8 +340,8 @@ func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 }
 
 // ParseValue parses s as a T. T may be any string, bool, integer, float,
-// [time.Duration] or [time.Time], or a type that implements
-// [encoding.TextUnmarshaler]. The error is the parse failure itself, without a
+// time.Duration or time.Time, or a type that implements
+// encoding.TextUnmarshaler. The error is the parse failure itself, without a
 // status.
 func ParseValue[T any](s string) (T, error) {
 	var v T

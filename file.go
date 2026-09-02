@@ -27,7 +27,7 @@ func (b *Base) File(name string) error {
 	return b.serveFile(name, nil, "", "")
 }
 
-// FileFS is [Base.File] from fsys, such as an [embed.FS] or an [os.DirFS].
+// FileFS is [Base.File] from fsys, such as an embed.FS or an [os.DirFS].
 // The files of fsys have to seek, which the two above do.
 func (b *Base) FileFS(name string, fsys fs.FS) error {
 	if fsys == nil {

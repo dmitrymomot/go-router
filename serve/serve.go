@@ -83,7 +83,7 @@ func CertPEM(cert, key []byte) Option {
 	}
 }
 
-// CertFS loads a certificate and its key from fsys, such as an [embed.FS].
+// CertFS loads a certificate and its key from fsys, such as an embed.FS.
 func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 	return func(o *options) error {
 		if fsys == nil {

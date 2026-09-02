@@ -7,7 +7,7 @@ import (
 )
 
 // The header names that this package and its middleware read or write. They
-// are in the canonical form of [http.Header], so they suit a direct map read.
+// are in the canonical form of net/http, so they suit a direct map read.
 const (
 	HeaderAccept                          = "Accept"
 	HeaderAcceptEncoding                  = "Accept-Encoding"
