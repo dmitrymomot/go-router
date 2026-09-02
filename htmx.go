@@ -361,32 +361,28 @@ func (h HXResponse) NoContent(status int) error {
 
 func (h HXResponse) NoSwap() error { return h.NoContent(http.StatusNoContent) }
 
-func (h HXResponse) Redirect(url string) error {
+// clientNavigate sets one of the htmx navigation headers and answers 200, or
+// falls back to an ordinary redirect for a request htmx did not make.
+func (h HXResponse) clientNavigate(header, target string) error {
 	if err := h.b.hxError(); err != nil {
 		return err
 	}
 	if !h.b.IsHTMX() {
-		return h.b.Redirect(http.StatusSeeOther, url)
+		return h.b.Redirect(http.StatusSeeOther, target)
 	}
-	h = h.set(HeaderHXRedirect, url)
+	h = h.set(header, target)
 	if err := h.b.hxError(); err != nil {
 		return err
 	}
 	return h.b.NoContent(http.StatusOK)
 }
 
+func (h HXResponse) Redirect(url string) error {
+	return h.clientNavigate(HeaderHXRedirect, url)
+}
+
 func (h HXResponse) Location(path string) error {
-	if err := h.b.hxError(); err != nil {
-		return err
-	}
-	if !h.b.IsHTMX() {
-		return h.b.Redirect(http.StatusSeeOther, path)
-	}
-	h = h.set(HeaderHXLocation, path)
-	if err := h.b.hxError(); err != nil {
-		return err
-	}
-	return h.b.NoContent(http.StatusOK)
+	return h.clientNavigate(HeaderHXLocation, path)
 }
 
 func (h HXResponse) LocationWith(loc HXLocation) error {
