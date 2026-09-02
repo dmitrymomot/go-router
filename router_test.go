@@ -354,24 +354,19 @@ func TestEscapedParameter(t *testing.T) {
 func TestPercentEscapeCanonicalization(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/alpha", func(c *tctx) error { return c.String(http.StatusOK, "alpha") })
-	r.GET("/café", func(c *tctx) error { return c.String(http.StatusOK, "café") })
-	r.GET("/slash/a%2Fb", func(c *tctx) error { return c.String(http.StatusOK, "escaped slash") })
 	r.GET("/slash/a/b", func(c *tctx) error { return c.String(http.StatusOK, "split slash") })
-	r.GET("/backslash/a%5Cb", func(c *tctx) error { return c.String(http.StatusOK, "escaped backslash") })
 	r.GET("/value/{value}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
 
+	// A literal is compared undecoded, so only a path that decodes to it
+	// matches. A parameter value is decoded, escaped separators included.
 	tests := []struct{ path, want string }{
 		{"/%61lpha", "alpha"},
-		{"/caf%C3%A9", "café"},
-		{"/caf%c3%a9", "café"},
-		{"/slash/a%2Fb", "escaped slash"},
-		{"/slash/a%2fb", "escaped slash"},
-		{"/backslash/a%5Cb", "escaped backslash"},
-		{"/backslash/a%5cb", "escaped backslash"},
+		{"/slash/a/b", "split slash"},
 		{"/value/a%2Fb", "a/b"},
 		{"/value/a%5Cb", `a\b`},
 		{"/value/%252F", "%2F"},
 		{"/value/%255C", "%5C"},
+		{"/value/caf%C3%A9", "café"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {
@@ -1761,43 +1756,6 @@ func registerScopedHandlers(r *Router[*tctx], prefix, name string) {
 	})
 }
 
-func TestEscapedStaticScopeKeepsItsFallbacksAndErrorHandler(t *testing.T) {
-	for _, reverse := range []bool{false, true} {
-		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
-			r := newTestRouter()
-			static := func() { registerScopedHandlers(r, "/x/a%2Fb", "static") }
-			dynamic := func() { registerScopedHandlers(r, "/x/{value}", "dynamic") }
-			if reverse {
-				dynamic()
-				static()
-			} else {
-				static()
-				dynamic()
-			}
-
-			tests := []struct {
-				method string
-				path   string
-				code   int
-				body   string
-			}{
-				{http.MethodGet, "/x/a%2Fb/missing", http.StatusNotFound, "static 404"},
-				{http.MethodGet, "/x/a%2fb/missing", http.StatusNotFound, "static 404"},
-				{http.MethodPost, "/x/a%2Fb/method", http.StatusMethodNotAllowed, "static 405"},
-				{http.MethodPost, "/x/a%2fb/method", http.StatusMethodNotAllowed, "static 405"},
-				{http.MethodGet, "/x/a%2Fb/error", http.StatusInternalServerError, "static 500"},
-				{http.MethodGet, "/x/a%2fb/error", http.StatusInternalServerError, "static 500"},
-			}
-			for _, tc := range tests {
-				rec := do(r, tc.method, tc.path)
-				if rec.Code != tc.code || rec.Body.String() != tc.body {
-					t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.path, rec.Code, rec.Body.String(), tc.code, tc.body)
-				}
-			}
-		})
-	}
-}
-
 func TestScopedHandlersMatchCanonicalAndDynamicEscapes(t *testing.T) {
 	t.Run("unreserved static", func(t *testing.T) {
 		r := newTestRouter()
@@ -1847,7 +1805,7 @@ func TestScopeCoverageRejectsInvalidDynamicEscapes(t *testing.T) {
 		path    string
 		want    bool
 	}{
-		{"/x/%zz", "/x/%zz/missing", true},
+		{"/x/plain", "/x/plain/missing", true},
 		{"/x/{value}", "/x/%zz/missing", false},
 		{"/x/pre-{value}", "/x/pre-%zz/missing", false},
 		{"/x/{value:.+}", "/x/%zz/missing", false},
@@ -2432,29 +2390,6 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 	}
 }
 
-// A path arrives canonicalised, so a literal spelled any other way is compared
-// against text no request can produce.
-func TestUnmatchableStaticLiteralsAreRejected(t *testing.T) {
-	for _, tc := range []struct{ pattern, want string }{
-		{`/backslash/a\b`, "write %5C"},
-		{"/lower/a%2fb", "upper-case escapes"},
-		{"/decoded/%41", `decoded, so write "A"`},
-	} {
-		t.Run(tc.pattern, func(t *testing.T) {
-			err := ValidatePattern(tc.pattern)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("ValidatePattern(%q) = %v, want one that reads %q", tc.pattern, err, tc.want)
-			}
-			mustPanicContaining(t, tc.want, func() { newTestRouter().GET(tc.pattern, echoRoute) })
-		})
-	}
-
-	// A % that starts no escape reaches the trie as written, so it still works.
-	if err := ValidatePattern("/discount/50%"); err != nil {
-		t.Errorf("ValidatePattern(/discount/50%%) = %v, want nil", err)
-	}
-}
-
 // {*} goes through the brace branch, which rejects duplicates; the bare form
 // has to do the same.
 func TestBareStarChecksForADuplicateName(t *testing.T) {
@@ -2490,6 +2425,38 @@ func TestLateRegistrationIsRefusedNotRaced(t *testing.T) {
 		// refused. It is never installed into a trie being read.
 		if !panicked.Load() && do(r, http.MethodGet, "/b").Code != http.StatusOK {
 			t.Fatal("a route was neither refused nor served")
+		}
+	}
+}
+
+// A path arrives percent-decoded except for %, \ and /, so a literal outside
+// the unreserved set either cannot appear or would have to be spelled as an
+// escape to match. Refusing it at registration means a literal never needs
+// decoding to be compared.
+func TestLiteralCharsetIsEnforced(t *testing.T) {
+	for _, pattern := range []string{
+		"/café",
+		`/files/a\b`,
+		"/slash/a%2Fb",
+		"/discount/50%",
+		"/files/{name}.tx t",
+		"/a:b",
+	} {
+		t.Run(pattern, func(t *testing.T) {
+			if err := ValidatePattern(pattern); err == nil ||
+				!strings.Contains(err.Error(), "a literal may hold only") {
+				t.Errorf("ValidatePattern(%q) = %v, want a charset error", pattern, err)
+			}
+			mustPanicContaining(t, "a literal may hold only", func() {
+				newTestRouter().GET(pattern, echoRoute)
+			})
+		})
+	}
+
+	// The unreserved set, in a plain segment and inside a template.
+	for _, pattern := range []string{"/health.json", "/files/{name}.txt", "/a_b~c-d/{id}"} {
+		if err := ValidatePattern(pattern); err != nil {
+			t.Errorf("ValidatePattern(%q) = %v, want nil", pattern, err)
 		}
 	}
 }
