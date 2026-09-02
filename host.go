@@ -5,6 +5,7 @@ import (
 	"net"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -529,20 +530,8 @@ func normalizeIPAuthority(authority string) (string, bool) {
 }
 
 func validPort(port string) bool {
-	if port == "" {
-		return false
-	}
-	n := 0
-	for i := range len(port) {
-		if port[i] < '0' || port[i] > '9' {
-			return false
-		}
-		n = n*10 + int(port[i]-'0')
-		if n > 65535 {
-			return false
-		}
-	}
-	return true
+	_, err := strconv.ParseUint(port, 10, 16)
+	return err == nil
 }
 
 func asciiLower(s string) string {

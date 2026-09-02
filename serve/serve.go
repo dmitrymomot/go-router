@@ -181,6 +181,9 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	return joinErrors(err, closeErr, drainErr)
 }
 
+// joinErrors is errors.Join, except that one error is returned as itself.
+// errors.Join always wraps, which would break the identity comparisons callers
+// make against the error Run gives back.
 func joinErrors(errs ...error) error {
 	nonNil := errs[:0]
 	for _, err := range errs {
@@ -188,14 +191,10 @@ func joinErrors(errs ...error) error {
 			nonNil = append(nonNil, err)
 		}
 	}
-	switch len(nonNil) {
-	case 0:
-		return nil
-	case 1:
+	if len(nonNil) == 1 {
 		return nonNil[0]
-	default:
-		return errors.Join(nonNil...)
 	}
+	return errors.Join(nonNil...)
 }
 
 func listen(ctx context.Context, cfg Config) (net.Listener, error) {

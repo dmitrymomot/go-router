@@ -64,7 +64,6 @@ func Request(r *http.Request, size int64) *http.Request {
 		return r
 	}
 	clone := r.Clone(r.Context())
-	clone.Header = r.Header.Clone()
 	clone.Header.Del("Range")
 	return clone
 }
