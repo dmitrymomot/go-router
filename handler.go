@@ -5,8 +5,13 @@ import (
 	"slices"
 )
 
+// HandlerFunc answers one request. The router builds C, fills its embedded
+// [Base], and calls the handler. A non-nil error goes to the error handler of
+// the router, which writes the response.
 type HandlerFunc[C Context] func(c C) error
 
+// Middleware wraps a handler in another handler. It runs in the order that
+// [Router.Use] received it, and it must return a non-nil handler.
 type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 
 func chain[C Context](h HandlerFunc[C], mws []Middleware[C]) HandlerFunc[C] {
@@ -21,6 +26,11 @@ func chain[C Context](h HandlerFunc[C], mws []Middleware[C]) HandlerFunc[C] {
 	return h
 }
 
+// WrapHandler turns a standard library handler into a [HandlerFunc]. The
+// wrapped handler reads the route parameters through [http.Request.PathValue],
+// and the returned handler never reports an error.
+//
+// WrapHandler panics if h is nil.
 func WrapHandler[C Context](h http.Handler) HandlerFunc[C] {
 	if h == nil {
 		panic("router: WrapHandler needs a handler")
@@ -33,6 +43,9 @@ func WrapHandler[C Context](h http.Handler) HandlerFunc[C] {
 	}
 }
 
+// WrapHandlerFunc is [WrapHandler] for a plain function.
+//
+// WrapHandlerFunc panics if h is nil.
 func WrapHandlerFunc[C Context](h http.HandlerFunc) HandlerFunc[C] {
 	if h == nil {
 		panic("router: WrapHandlerFunc needs a handler")
