@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"encoding"
 	"encoding/json/v2"
 	"errors"
 	"io"
@@ -59,9 +58,6 @@ func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 		}
 		return v, ErrBadRequest.WithMessage("malformed JSON body: %s", err).WithError(err)
 	}
-	if b.opts().strictBind {
-		stripUntagged(reflect.ValueOf(&v).Elem())
-	}
 	return v, validate(&v)
 }
 
@@ -114,13 +110,14 @@ type Validator interface {
 // pointer T that makes **T, whose method set is empty, so the value is tried
 // too.
 func validate[T any](v *T) error {
+	// A body of "null" bound into a pointer leaves nothing to hand the handler,
+	// and the client chose that, not the caller. Refusing it here keeps a nil
+	// out of every handler that binds a pointer.
+	if rv := reflect.ValueOf(*v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+		return ErrBadRequest.WithMessage("the request body is null")
+	}
 	sv, ok := any(v).(Validator)
 	if !ok {
-		// A nil T -- a JSON body of "null" bound into a pointer -- satisfies
-		// Validator but has no value to check, and calling through it panics.
-		if rv := reflect.ValueOf(*v); rv.Kind() == reflect.Pointer && rv.IsNil() {
-			return nil
-		}
 		sv, ok = any(*v).(Validator)
 	}
 	if !ok {
@@ -160,79 +157,8 @@ func fieldErrors(err error) []FieldError {
 	return nil
 }
 
-var selfDecoders = [...]reflect.Type{
-	reflect.TypeFor[json.UnmarshalerFrom](),
-	reflect.TypeFor[json.Unmarshaler](),
-	reflect.TypeFor[encoding.TextUnmarshaler](),
-}
-
-func stripUntagged(rv reflect.Value) {
-	rt := rv.Type()
-	for _, it := range selfDecoders {
-		if rt.Implements(it) || reflect.PointerTo(rt).Implements(it) {
-			return
-		}
-	}
-
-	switch rv.Kind() {
-	case reflect.Pointer:
-		if !rv.IsNil() {
-			stripUntagged(rv.Elem())
-		}
-	case reflect.Slice, reflect.Array:
-		if !holdsFields(rt.Elem()) {
-			return
-		}
-		for i := range rv.Len() {
-			stripUntagged(rv.Index(i))
-		}
-	case reflect.Map:
-		if !holdsFields(rt.Elem()) {
-			return
-		}
-		for _, k := range rv.MapKeys() {
-			ev := reflect.New(rt.Elem()).Elem()
-			ev.Set(rv.MapIndex(k))
-			stripUntagged(ev)
-			rv.SetMapIndex(k, ev)
-		}
-	case reflect.Struct:
-		for _, f := range structFields(rt, "json") {
-			fv := rv.Field(f.index)
-			if f.embedded {
-				stripUntagged(fv)
-				continue
-			}
-			if !fv.CanSet() {
-				continue
-			}
-			if f.tagged {
-				stripUntagged(fv)
-				continue
-			}
-			fv.SetZero()
-		}
-	}
-}
-
-const typeWalkLimit = 8
-
-func holdsFields(t reflect.Type) bool {
-	for range typeWalkLimit {
-		switch t.Kind() {
-		case reflect.Struct:
-			return true
-		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
-			t = t.Elem()
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {
-	fields, err := decodeValues(vals, dst, tag, b.opts().strictBind)
+	fields, err := decodeValues(vals, dst, tag)
 	if err != nil {
 		return ErrBadRequest.WithError(err)
 	}

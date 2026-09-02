@@ -252,13 +252,10 @@ func TestHostMiddleware(t *testing.T) {
 
 func TestHostFallbacks(t *testing.T) {
 	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
 	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
 
 	r.Host("example.com", func(h *Router[*tctx]) {
-		h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "site 404") })
-		h.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "site 405") })
-		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "site err") })
+		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "site err") })
 		h.GET("/", echoHost)
 		h.GET("/boom", func(c *tctx) error { return fmt.Errorf("boom") })
 	})
@@ -271,14 +268,14 @@ func TestHostFallbacks(t *testing.T) {
 		code                     int
 		body                     string
 	}{
-		{"host 404", "example.com", http.MethodGet, "/nope", http.StatusNotFound, "site 404"},
-		{"host 405", "example.com", http.MethodPost, "/", http.StatusMethodNotAllowed, "site 405"},
-		{"host error", "example.com", http.MethodGet, "/boom", http.StatusTeapot, "site err"},
+		{"host 404", "example.com", http.MethodGet, "/nope", http.StatusNotFound, "site err"},
+		{"host 405", "example.com", http.MethodPost, "/", http.StatusMethodNotAllowed, "site err"},
+		{"host error", "example.com", http.MethodGet, "/boom", http.StatusInternalServerError, "site err"},
 
-		{"root 404 on a host", "api.example.com", http.MethodGet, "/nope", http.StatusNotFound, "root 404"},
+		{"root 404 on a host", "api.example.com", http.MethodGet, "/nope", http.StatusTeapot, "root err"},
 		{"root error on a host", "api.example.com", http.MethodGet, "/boom", http.StatusTeapot, "root err"},
 
-		{"root 404", "other.com", http.MethodGet, "/nope", http.StatusNotFound, "root 404"},
+		{"root 404", "other.com", http.MethodGet, "/nope", http.StatusTeapot, "root err"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -673,7 +670,7 @@ func TestHostRestLabel(t *testing.T) {
 func TestHostFallbackAppliesToEveryPatternOfAScope(t *testing.T) {
 	r := newTestRouter()
 	r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *Router[*tctx]) {
-		h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "tenant 404") })
+		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "tenant 404") })
 		h.GET("/", echoHost)
 	})
 
@@ -750,8 +747,8 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 	build := func() *Router[*tctx] {
 		r := newTestRouter()
 		r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
-			h.NotFound(func(c *tctx) error {
-				return c.String(http.StatusNotFound, "404 tenant="+c.Param("tenant"))
+			h.ErrorHandler(func(c *tctx, err error) {
+				_ = c.String(StatusOf(err), "404 tenant="+c.Param("tenant"))
 			})
 			h.GET("/", echoHost)
 		})
@@ -771,29 +768,31 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 	}
 }
 
-func TestHostInheritsTheFallbackOfTheRoot(t *testing.T) {
+func TestHostInheritsTheErrorHandlerOfTheRoot(t *testing.T) {
 	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "custom 404") })
-	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "custom 405") })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "custom "+err.Error()) })
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 
-	if got := doHost(r, http.MethodGet, "other.invalid", "/nope").Body.String(); got != "custom 404" {
-		t.Errorf("404 with no host = %q, want %q", got, "custom 404")
-	}
-	if got := doHost(r, http.MethodGet, "example.com", "/nope").Body.String(); got != "custom 404" {
-		t.Errorf("404 on a host = %q, want %q", got, "custom 404")
-	}
-	if got := doHost(r, http.MethodPost, "example.com", "/").Body.String(); got != "custom 405" {
-		t.Errorf("405 on a host = %q, want %q", got, "custom 405")
+	for _, tc := range []struct {
+		method, host, path string
+		code               int
+	}{
+		{http.MethodGet, "other.invalid", "/nope", http.StatusNotFound},
+		{http.MethodGet, "example.com", "/nope", http.StatusNotFound},
+		{http.MethodPost, "example.com", "/", http.StatusMethodNotAllowed},
+	} {
+		rec := doHost(r, tc.method, tc.host, tc.path)
+		if rec.Code != tc.code || !strings.HasPrefix(rec.Body.String(), "custom ") {
+			t.Errorf("%s %s%s = %d %q, want %d from the root error handler",
+				tc.method, tc.host, tc.path, rec.Code, rec.Body.String(), tc.code)
+		}
 	}
 }
 
 func TestHostFreeRouteUsesTheRootFallbacks(t *testing.T) {
 	r := newTestRouter()
-	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "root 405") })
 	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
 	r.Host("example.com", func(h *Router[*tctx]) {
-		h.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "host 405") })
 		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "host err") })
 		h.GET("/site", echoHost)
 	})
@@ -803,9 +802,9 @@ func TestHostFreeRouteUsesTheRootFallbacks(t *testing.T) {
 	tests := []struct {
 		name, method, path, want string
 	}{
-		{"405 on a host-free route", http.MethodPost, "/healthz", "root 405"},
+		{"405 on a host-free route", http.MethodPost, "/healthz", "root err"},
 		{"error on a host-free route", http.MethodGet, "/boom", "root err"},
-		{"405 on a route of the host", http.MethodPost, "/site", "host 405"},
+		{"405 on a route of the host", http.MethodPost, "/site", "host err"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -883,29 +882,6 @@ func TestPerHostErrorHandlersIgnoreSetterOrder(t *testing.T) {
 				if got := doHost(r, http.MethodGet, tc.host, tc.path).Body.String(); got != tc.want {
 					t.Errorf("%s%s = %q, want %q", tc.host, tc.path, got, tc.want)
 				}
-			}
-		})
-	}
-}
-
-// A request from an IPv6 client arrives with its brackets stripped, so a host
-// scope has to be reachable by both spellings.
-func TestIPv6HostPatterns(t *testing.T) {
-	for _, pattern := range []string{"::1", "[::1]"} {
-		t.Run(pattern, func(t *testing.T) {
-			r := newTestRouter()
-			r.Host(pattern, func(h *Router[*tctx]) {
-				h.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "v6 "+c.RouteHost()) })
-			})
-			r.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "any host") })
-
-			for _, authority := range []string{"[::1]", "[::1]:8080"} {
-				if got := doHost(r, http.MethodGet, authority, "/x").Body.String(); got != "v6 ::1" {
-					t.Errorf("Host %s = %q, want %q", authority, got, "v6 ::1")
-				}
-			}
-			if got := doHost(r, http.MethodGet, "example.com", "/x").Body.String(); got != "any host" {
-				t.Errorf("another host = %q, want %q", got, "any host")
 			}
 		})
 	}

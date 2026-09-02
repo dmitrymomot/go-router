@@ -2,6 +2,7 @@ package static
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"syscall"
 
 	"github.com/dmitrymomot/go-router"
-	"github.com/dmitrymomot/go-router/internal/nonseek"
 )
 
 var errNoFile = errors.New("static: the asset set holds no such file")
@@ -193,31 +193,21 @@ func redirectDir(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Assets) send(w http.ResponseWriter, r *http.Request, name string, f fs.File, info fs.FileInfo, versioned bool) error {
+	// ServeContent needs to seek to size the body and to answer a Range.
+	// os.DirFS and embed.FS both return seekable files; a filesystem that does
+	// not has to say so rather than be faked around. Checked before any header
+	// is set, so a failure does not go out carrying caching headers.
+	rs, ok := f.(io.ReadSeeker)
+	if !ok {
+		return fmt.Errorf("static: %s comes from a filesystem whose files cannot seek", name)
+	}
+
 	h := w.Header()
 	if tag := a.etag(name, info); tag != "" {
 		h.Set("Etag", tag)
 	}
 	h.Set("Cache-Control", a.cacheControl(name, versioned))
-
-	req := r
-	rs, ok := f.(io.ReadSeeker)
-	var fake *nonseek.Reader
-	if !ok {
-		req = nonseek.Request(req, info.Size())
-		var err error
-		fake, err = nonseek.ReadSeeker("static: ", w.Header(), req, name, f, info.Size())
-		if err != nil {
-			return err
-		}
-		rs = fake
-	}
-
-	http.ServeContent(w, req, path.Base(name), info.ModTime(), rs)
-	// ServeContent answers a read failure with its own 500 and returns nothing,
-	// so the error has to be picked back up here to reach the caller.
-	if fake != nil {
-		return fake.Err()
-	}
+	http.ServeContent(w, r, path.Base(name), info.ModTime(), rs)
 	return nil
 }
 

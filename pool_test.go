@@ -177,13 +177,9 @@ func TestPoolUnderConcurrentRequests(t *testing.T) {
 func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 	var seen *pctx
 	r := newPooledRouter()
-	r.NotFound(func(c *pctx) error {
+	r.ErrorHandler(func(c *pctx, err error) {
 		seen = c
-		return c.NoContent(http.StatusNotFound)
-	})
-	r.MethodNotAllowed(func(c *pctx) error {
-		seen = c
-		return c.NoContent(http.StatusMethodNotAllowed)
+		_ = c.NoContent(StatusOf(err))
 	})
 	r.GET("/backtrack/{value}/wanted", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
 	r.GET("/method/{value}", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
@@ -359,60 +355,6 @@ func TestPoolDoesNotCarryParametersFromATrailingSlashRedirect(t *testing.T) {
 				t.Fatalf("round %d: paramArr[%d] = %q after the pool took the context back", round, i, value)
 			}
 		}
-	}
-}
-
-// A wrapper that abandons next on another goroutine leaves it writing through
-// the context after the handler returned.
-func TestPooledContextIsNotRecycledWhileNextStillRuns(t *testing.T) {
-	var (
-		running = make(chan struct{})
-		release = make(chan struct{})
-		done    = make(chan *pctx, 1)
-	)
-
-	r := newPooledRouter()
-	r.Use(WrapMiddleware[*pctx](func(h http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			go h.ServeHTTP(w, req)
-			// Return once the handler is definitely inside, still running, as
-			// a timeout does when its deadline passes mid-handler.
-			<-running
-		})
-	}))
-	r.GET("/slow", func(c *pctx) error {
-		close(running)
-		<-release
-		done <- c
-		return nil
-	})
-
-	do(r, http.MethodGet, "/slow")
-	close(release)
-
-	c := <-done
-	if !c.retained {
-		t.Error("a context whose next was still running was not marked retained")
-	}
-}
-
-// The ordinary case must still recycle: a wrapper that rejects and never calls
-// next has not leaked anything.
-func TestPooledContextIsRecycledWhenNextIsSkipped(t *testing.T) {
-	r := newPooledRouter()
-	r.Use(WrapMiddleware[*pctx](func(http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
-		})
-	}))
-	var seen *pctx
-	r.GET("/never", func(c *pctx) error { seen = c; return nil })
-
-	if got := do(r, http.MethodGet, "/never").Code; got != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", got)
-	}
-	if seen != nil {
-		t.Fatal("the handler ran although the wrapper rejected")
 	}
 }
 

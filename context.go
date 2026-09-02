@@ -68,10 +68,6 @@ type Base struct {
 	// Routing matches the path trimmed of its trailing slash, so a mounted
 	// handler has to be told the slash was there.
 	tailSlash bool
-
-	// retained keeps this context out of the pool: something the router cannot
-	// wait for still holds it.
-	retained bool
 }
 
 type routerOpts struct {
@@ -79,7 +75,6 @@ type routerOpts struct {
 	logger       *slog.Logger
 	maxBody      int64
 	maxMultipart int64
-	strictBind   bool
 }
 
 var defaultRouterOpts = &routerOpts{maxBody: DefaultMaxBodyBytes}

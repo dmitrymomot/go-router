@@ -11,15 +11,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type Route struct {
 	Method  string
 	Pattern string
 	Host    string
-	Name    string
 	Meta    any
 
 	// Params counts the host and path parameters together. A route over
@@ -41,7 +38,6 @@ type registration[C Context] struct {
 	pattern string
 	handler HandlerFunc[C]
 	mws     []Middleware[C]
-	name    string
 	meta    any
 }
 
@@ -57,8 +53,41 @@ type Router[C Context] struct {
 	newCtx   func(http.ResponseWriter, *http.Request) C
 	reset    func(C)
 	ropts    *routerOpts
-	tree     *node[C]
-	hostSet  *hostSet[C]
+
+	// eng is the compiled route table. Only the root holds one; every scope
+	// reaches it through root.
+	eng *engine[C]
+
+	// regMu orders registration against the one-time freeze, so the check that
+	// refuses a late route cannot be overtaken by the request that makes it
+	// late. No request ever takes it.
+	regMu sync.Mutex
+
+	// Registration only, from here down.
+	prefix       string
+	mws          []Middleware[C]
+	regs         []registration[C]
+	children     []*Router[C]
+	owner        *Router[C]
+	hasRoutes    bool
+	closed       bool
+	refreshDepth int
+	meta         any
+	tagged       bool
+	hosts        []hostSpec
+	inHost       bool
+	errHandler   ErrorHandlerFunc[C]
+	preMws       []Middleware[C]
+	info         map[routeKey]routeInfo
+}
+
+// engine is the route table as the request path sees it: everything routing
+// reads, and nothing registration keeps.
+type engine[C Context] struct {
+	// owner dispatches errors and owns the context pool.
+	owner   *Router[C]
+	tree    *node[C]
+	hostSet *hostSet[C]
 
 	allowCache       map[*node[C]]string
 	scopes           []*scopeFallback[C]
@@ -70,29 +99,19 @@ type Router[C Context] struct {
 	autoOptions      bool
 	redirectSlash    bool
 	anyHostRoutes    bool
+}
 
-	// Registration only, from here down.
-	prefix           string
-	mws              []Middleware[C]
-	regs             []registration[C]
-	children         []*Router[C]
-	owner            *Router[C]
-	hasRoutes        bool
-	closed           bool
-	routeBatch       int
-	refreshDepth     int
-	name             string
-	meta             any
-	tagged           bool
-	nameUsed         bool
-	hosts            []hostSpec
-	inHost           bool
-	notFound         HandlerFunc[C]
-	methodNotAllowed HandlerFunc[C]
-	errHandler       ErrorHandlerFunc[C]
-	preMws           []Middleware[C]
-	named            map[string]namedRoute
-	info             map[routeKey]routeInfo
+func newEngine[C Context]() *engine[C] {
+	return &engine[C]{
+		tree:        new(node[C]),
+		allowCache:  map[*node[C]]string{},
+		autoOptions: true,
+		// A router that never calls a setter still has to answer.
+		notFoundChain:    defaultNotFound[C],
+		notAllowedChain:  defaultMethodNotAllowed[C],
+		optionsChain:     autoOptions[C],
+		rootErrorHandler: DefaultErrorHandler[C],
+	}
 }
 
 func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Router[C] {
@@ -102,19 +121,12 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	// The fallback fields stay nil until a setter fills one, so "did the caller
 	// choose this?" has an answer. refresh substitutes the defaults.
 	r := &Router[C]{
-		newCtx:      newContext,
-		autoOptions: true,
-		tree:        new(node[C]),
-		allowCache:  map[*node[C]]string{},
-		ropts:       &routerOpts{maxBody: DefaultMaxBodyBytes},
+		newCtx: newContext,
+		ropts:  &routerOpts{maxBody: DefaultMaxBodyBytes},
+		eng:    newEngine[C](),
 	}
 	r.root = r
-	// A router that never calls a setter still has to answer, so the fallbacks
-	// start out as the defaults and refresh only replaces them.
-	r.notFoundChain = defaultNotFound[C]
-	r.notAllowedChain = defaultMethodNotAllowed[C]
-	r.optionsChain = autoOptions[C]
-	r.rootErrorHandler = DefaultErrorHandler[C]
+	r.eng.owner = r
 	return r
 }
 
@@ -139,21 +151,10 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 }
 
 func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
-	r.handleNamed(method, pattern, h, mws, r.name)
-}
-
-// inOneRoute groups the registrations one registrar call makes, so a Name scope
-// holds all of them: MountHandler installs two patterns, Match one per method.
-func (r *Router[C]) inOneRoute(fn func()) {
-	r.routeBatch++
-	fn()
-	r.routeBatch--
-	if r.routeBatch == 0 && r.name != "" {
-		r.nameUsed = true
-	}
-}
-
-func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []Middleware[C], name string) {
+	// Ordered against the freeze: without it the check below is a guess, and a
+	// route could go into a trie a request had already started reading.
+	r.root.regMu.Lock()
+	defer r.root.regMu.Unlock()
 	if r.root.started.Load() {
 		panic("router: cannot register " + method + " " + pattern + " after the router started serving")
 	}
@@ -165,15 +166,6 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 		panic("router: Handle needs a handler for " + method + " " + pattern)
 	}
 	validateMiddleware(mws)
-	if r.name != "" {
-		if r.nameUsed {
-			panic("router: the scope named " + r.name + " already registered a route; open another Name scope for " + method + " " + pattern)
-		}
-		// In a batch the flag waits, so a call cannot trip over its own entries.
-		if r.routeBatch == 0 {
-			r.nameUsed = true
-		}
-	}
 	for s := r; s != nil; s = s.owner {
 		s.hasRoutes = true
 	}
@@ -182,7 +174,6 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 		pattern: pattern,
 		handler: h,
 		mws:     slices.Clone(mws),
-		name:    name,
 		meta:    r.meta,
 	}
 	r.regs = append(r.regs, reg)
@@ -192,21 +183,21 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 // install puts the route in its trie now, so a malformed pattern or a conflict
 // panics at the line that wrote it rather than at the first request.
 func (r *Router[C]) install(reg registration[C]) {
+	eng := r.top().eng
 	full := joinPattern(r.scopePrefix(), reg.pattern)
 	handler := chain(reg.handler, concatMiddleware(r.scopeMiddleware(), reg.mws))
 
-	root := r.top()
-	entries := r.hostEntries()
+	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
-		root.anyHostRoutes = true
-		if err := root.tree.insert(reg.method, full, nil, handler, root.autoOptions, root.allowCache); err != nil {
+		eng.anyHostRoutes = true
+		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, nil, full)
 		return
 	}
 	for _, e := range entries {
-		if err := e.tree.insert(reg.method, full, e.names, handler, root.autoOptions, root.allowCache); err != nil {
+		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, e, full)
@@ -214,9 +205,7 @@ func (r *Router[C]) install(reg registration[C]) {
 }
 
 func (r *Router[C]) record(reg registration[C], e *hostEntry[C], full string) {
-	if err := r.top().describe(reg, e, normalizePattern(full)); err != nil {
-		panic(err.Error())
-	}
+	r.top().describe(reg, e, normalizePattern(full))
 }
 
 // scopePrefix joins the prefixes of every scope between the root and this one.
@@ -257,14 +246,14 @@ func (r *Router[C]) top() *Router[C] {
 
 // hostEntries returns the entries of the nearest host scope, or none when the
 // route answers on every host.
-func (r *Router[C]) hostEntries() []*hostEntry[C] {
+func (r *Router[C]) hostEntriesIn(eng *engine[C]) []*hostEntry[C] {
 	for s := r; s != nil; s = s.owner {
 		if len(s.hosts) == 0 {
 			continue
 		}
 		out := make([]*hostEntry[C], 0, len(s.hosts))
 		for _, spec := range s.hosts {
-			e, err := r.top().hostEntry(spec)
+			e, err := eng.hostEntry(spec)
 			if err != nil {
 				panic(err.Error())
 			}
@@ -322,11 +311,9 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 			panic("router: Match needs non-empty methods")
 		}
 	}
-	r.inOneRoute(func() {
-		for _, m := range methods {
-			r.handle(m, pattern, h, mws)
-		}
-	})
+	for _, m := range methods {
+		r.handle(m, pattern, h, mws)
+	}
 }
 
 func (r *Router[C]) Use(mws ...Middleware[C]) {
@@ -348,6 +335,11 @@ func (r *Router[C]) settingChanged() {
 		root.refresh()
 	}
 }
+
+// refresh recompiles the live table in place. Every setter that can change a
+// fallback calls it, so the router is ready to serve the moment the setter
+// returns.
+func (r *Router[C]) refresh() { r.compile(r.eng) }
 
 // inOneScope holds the graph rebuild until the outermost scope callback
 // returns. refresh walks the whole graph, so one per nested Route, Group or
@@ -426,15 +418,6 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 	r.settingChanged()
 }
 
-func (r *Router[C]) Name(name string) *Router[C] {
-	if name == "" {
-		panic("router: Name needs a name")
-	}
-	c := r.tag()
-	c.name = name
-	return c
-}
-
 func (r *Router[C]) Meta(v any) *Router[C] {
 	c := r.tag()
 	c.meta = v
@@ -486,7 +469,7 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 		c = r.newChild("", nil)
 		c.hosts = specs
 		for _, spec := range specs {
-			if _, err := r.root.hostEntry(spec); err != nil {
+			if _, err := r.root.eng.hostEntry(spec); err != nil {
 				panic(err.Error())
 			}
 		}
@@ -561,16 +544,14 @@ func (r *Router[C]) mustNotCarryRootOnlySettings() {
 		lost = "Pre middleware"
 	case r.observer != nil:
 		lost = "an observer"
-	case !r.autoOptions:
+	case !r.eng.autoOptions:
 		lost = "HandleOPTIONS(false)"
-	case r.redirectSlash:
+	case r.eng.redirectSlash:
 		lost = "RedirectTrailingSlash(true)"
 	case r.ropts.maxBody != DefaultMaxBodyBytes:
 		lost = "MaxBodyBytes"
 	case r.ropts.maxMultipart != 0:
 		lost = "MaxMultipartMemory"
-	case r.ropts.strictBind:
-		lost = "StrictBind"
 	case r.ropts.logger != nil:
 		lost = "a logger"
 	case len(r.ropts.jsonOpts) > 0:
@@ -610,12 +591,8 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 		h.ServeHTTP(b.res, req)
 		return nil
 	}
-	r.inOneRoute(func() {
-		r.handle(anyMethod, prefix, handler, nil)
-		// The name belongs to the prefix, which is what URL resolves; naming
-		// the catch-all too would give one name two patterns.
-		r.handleNamed(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil, "")
-	})
+	r.handle(anyMethod, prefix, handler, nil)
+	r.handle(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil)
 }
 
 func stripMountPrefix(r *http.Request, tail string, escaped, tailSlash bool) *http.Request {
@@ -660,36 +637,16 @@ func (r *Router[C]) mustBeOpen(what string) {
 	}
 }
 
-// mustOwnFallbacks rejects a fallback setter on a scope that cannot express
-// one. Scopes are keyed by path prefix, so a prefix-less child covers the whole
-// tree and would displace the root's. The root, a host scope and any prefixed
-// scope each name a region the router can match.
+// mustOwnFallbacks rejects an error handler on a scope that cannot express one.
+// Scopes are keyed by path prefix, so a prefix-less child covers the whole tree
+// and would displace the root's. The root, a host scope and any prefixed scope
+// each name a region the router can match.
 func (r *Router[C]) mustOwnFallbacks(what string) {
 	if r == r.root || len(r.hosts) > 0 || normalizePattern(r.scopePrefix()) != "/" {
 		return
 	}
 	panic("router: a scope without a prefix cannot own " + what +
 		"; set it on the router itself, or open a Route with a prefix")
-}
-
-func (r *Router[C]) NotFound(h HandlerFunc[C]) {
-	if h == nil {
-		panic("router: NotFound needs a handler")
-	}
-	r.mustNotBeServing("the not-found handler")
-	r.mustOwnFallbacks("the not-found handler")
-	r.notFound = h
-	r.settingChanged()
-}
-
-func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
-	if h == nil {
-		panic("router: MethodNotAllowed needs a handler")
-	}
-	r.mustNotBeServing("the method-not-allowed handler")
-	r.mustOwnFallbacks("the method-not-allowed handler")
-	r.methodNotAllowed = h
-	r.settingChanged()
 }
 
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
@@ -705,11 +662,11 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 func (r *Router[C]) HandleOPTIONS(on bool) {
 	r.mustNotBeServing("the OPTIONS setting")
 	root := r.root
-	root.autoOptions = on
-	root.tree.recacheAllow(on, root.allowCache)
-	if root.hostSet != nil {
-		for _, e := range root.hostSet.all {
-			e.tree.recacheAllow(on, root.allowCache)
+	root.eng.autoOptions = on
+	root.eng.tree.recacheAllow(on, root.eng.allowCache)
+	if root.eng.hostSet != nil {
+		for _, e := range root.eng.hostSet.all {
+			e.tree.recacheAllow(on, root.eng.allowCache)
 		}
 	}
 }
@@ -724,11 +681,6 @@ func (r *Router[C]) MaxMultipartMemory(n int64) {
 	r.root.ropts.maxMultipart = n
 }
 
-func (r *Router[C]) StrictBind(on bool) {
-	r.mustNotBeServing("the strict binding setting")
-	r.root.ropts.strictBind = on
-}
-
 func (r *Router[C]) Logger(l *slog.Logger) {
 	r.mustNotBeServing("the logger")
 	r.root.ropts.logger = l
@@ -741,7 +693,7 @@ func (r *Router[C]) JSONOptions(opts ...json.Options) {
 
 func (r *Router[C]) RedirectTrailingSlash(on bool) {
 	r.mustNotBeServing("the trailing slash setting")
-	r.root.redirectSlash = on
+	r.root.eng.redirectSlash = on
 }
 
 func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Duration, err error)) {
@@ -756,6 +708,11 @@ func (r *Router[C]) Routes() []Route { return r.top().collectRoutes() }
 // Idempotent: it reads the graph and stores a flag, so two first requests can
 // run it at once without a Once to serialize them.
 func (r *Router[C]) freeze() {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	if r.started.Load() {
+		return
+	}
 	freezeRouterGraph(r, make(map[*Router[C]]bool))
 }
 
@@ -770,36 +727,30 @@ func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
 	}
 }
 
-// refresh rebuilds everything the request path reads that is not a route: the
-// fallback chains, the scope table and the host order. Every setter that can
-// change one of them calls it, so the router is ready to serve the moment the
-// setter returns. Routes never reach here; install puts those in the trie.
-func (r *Router[C]) refresh() {
-	r.scopes, r.errScopes = nil, nil
-	if r.hostSet != nil {
-		for _, e := range r.hostSet.all {
+// compile turns the scope tree into the non-route half of a table: the fallback
+// chains, the scope list and the host order. Routes never come through here;
+// installInto puts those in the trie.
+func (r *Router[C]) compile(eng *engine[C]) {
+	eng.scopes, eng.errScopes = nil, nil
+	if eng.hostSet != nil {
+		for _, e := range eng.hostSet.all {
 			e.mws, e.haveMWs = nil, false
 			e.notFoundChain, e.notAllowedChain, e.optionsChain = nil, nil, nil
-			e.errHandler, e.rawNotFound, e.rawNotAllowed = nil, nil, nil
+			e.errHandler = nil
 		}
 	}
-	// A nil field reads as the package default here, because elsewhere nil is
-	// what says nobody chose a handler.
+	// A miss and a wrong method are errors like any other; only the error
+	// handler is replaceable. The chains exist so a scope's middleware still
+	// runs on the way to them.
 	rootNotFound := HandlerFunc[C](defaultNotFound[C])
-	if r.notFound != nil {
-		rootNotFound = r.notFound
-	}
 	rootNotAllowed := HandlerFunc[C](defaultMethodNotAllowed[C])
-	if r.methodNotAllowed != nil {
-		rootNotAllowed = r.methodNotAllowed
-	}
 	rootErrHandler := ErrorHandlerFunc[C](DefaultErrorHandler[C])
 	if r.errHandler != nil {
 		rootErrHandler = r.errHandler
 	}
-	r.notFoundChain = chain(rootNotFound, r.mws)
-	r.notAllowedChain = chain(rootNotAllowed, r.mws)
-	r.optionsChain = chain(autoOptions[C], r.mws)
+	eng.notFoundChain = chain(rootNotFound, r.mws)
+	eng.notAllowedChain = chain(rootNotAllowed, r.mws)
+	eng.optionsChain = chain(autoOptions[C], r.mws)
 	open := make(map[*Router[C]]bool)
 
 	var pending []pendingScope[C]
@@ -822,7 +773,7 @@ func (r *Router[C]) refresh() {
 				if host != nil {
 					panic("router: a host scope cannot sit inside another host scope")
 				}
-				e = r.mustHostEntry(rt.hosts[i])
+				e = eng.mustHostEntry(rt.hosts[i])
 				if !e.haveMWs {
 					e.mws, e.haveMWs = m, true
 				}
@@ -834,29 +785,11 @@ func (r *Router[C]) refresh() {
 			// mustOwnFallbacks rejects the rest at the setter.
 			case rt == r || len(rt.hosts) > 0:
 				if e == nil {
-					if rt.notFound != nil {
-						rootNotFound = rt.notFound
-						r.notFoundChain = chain(rt.notFound, m)
-					}
-					if rt.methodNotAllowed != nil {
-						rootNotAllowed = rt.methodNotAllowed
-						r.notAllowedChain = chain(rt.methodNotAllowed, m)
-					}
 					if rt.errHandler != nil {
 						rootErrHandler = rt.errHandler
 					}
-				} else {
-					if rt.notFound != nil {
-						e.notFoundChain = chain(rt.notFound, m)
-						e.rawNotFound = rt.notFound
-					}
-					if rt.methodNotAllowed != nil {
-						e.notAllowedChain = chain(rt.methodNotAllowed, m)
-						e.rawNotAllowed = rt.methodNotAllowed
-					}
-					if rt.errHandler != nil {
-						e.errHandler = rt.errHandler
-					}
+				} else if rt.errHandler != nil {
+					e.errHandler = rt.errHandler
 				}
 			default:
 				sets := own.take(rt)
@@ -875,8 +808,8 @@ func (r *Router[C]) refresh() {
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
 	}
-	if r.hostSet != nil {
-		for _, e := range r.hostSet.all {
+	if eng.hostSet != nil {
+		for _, e := range eng.hostSet.all {
 			if e.optionsChain == nil {
 				e.optionsChain = chain(autoOptions[C], e.mws)
 			}
@@ -887,7 +820,7 @@ func (r *Router[C]) refresh() {
 				e.notAllowedChain = chain(rootNotAllowed, e.mws)
 			}
 		}
-		slices.SortStableFunc(r.hostSet.pats, func(a, b *hostEntry[C]) int {
+		slices.SortStableFunc(eng.hostSet.pats, func(a, b *hostEntry[C]) int {
 			return lessSpecific(&a.hostSpec, &b.hostSpec)
 		})
 	}
@@ -897,26 +830,13 @@ func (r *Router[C]) refresh() {
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
-		notFound, notAllowed := ps.fb.notFound, ps.fb.notAllowed
-		if notFound == nil {
-			notFound = rootNotFound
-			if ps.host != nil && ps.host.rawNotFound != nil {
-				notFound = ps.host.rawNotFound
-			}
-		}
-		if notAllowed == nil {
-			notAllowed = rootNotAllowed
-			if ps.host != nil && ps.host.rawNotAllowed != nil {
-				notAllowed = ps.host.rawNotAllowed
-			}
-		}
-		s.notFoundChain = chain(notFound, ps.mws)
-		s.notAllowedChain = chain(notAllowed, ps.mws)
+		s.notFoundChain = chain(rootNotFound, ps.mws)
+		s.notAllowedChain = chain(rootNotAllowed, ps.mws)
 		s.optionsChain = chain(autoOptions[C], ps.mws)
 		s.errHandler = ps.fb.errHandler
-		r.scopes = append(r.scopes, s)
+		eng.scopes = append(eng.scopes, s)
 	}
-	slices.SortStableFunc(r.scopes, func(a, b *scopeFallback[C]) int {
+	slices.SortStableFunc(eng.scopes, func(a, b *scopeFallback[C]) int {
 		for i := range min(len(a.pattern), len(b.pattern)) {
 			as := segmentSpecificity(a.pattern[i].kind)
 			bs := segmentSpecificity(b.pattern[i].kind)
@@ -932,44 +852,31 @@ func (r *Router[C]) refresh() {
 		}
 		return strings.Compare(a.prefix, b.prefix)
 	})
-	for _, s := range r.scopes {
+	for _, s := range eng.scopes {
 		if s.errHandler != nil {
-			s.errorIdx = int32(len(r.errScopes))
-			r.errScopes = append(r.errScopes, s)
+			s.errorIdx = int32(len(eng.errScopes))
+			eng.errScopes = append(eng.errScopes, s)
 		}
 	}
-	r.rootErrorHandler = rootErrHandler
+	eng.rootErrorHandler = rootErrHandler
 }
 
-func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) error {
-	if reg.name == "" && reg.meta == nil {
-		return nil
+// describe records the metadata a route was tagged with, for Routes.
+func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) {
+	if reg.meta == nil {
+		return
 	}
 	host := ""
 	if e != nil {
 		host = e.pattern
 	}
-	if reg.name != "" {
-		if prev, ok := r.named[reg.name]; ok && prev.pattern != pattern {
-			return fmt.Errorf("router: the route name %q names both %q and %q", reg.name, prev.pattern, pattern)
-		}
-		if r.named == nil {
-			r.named = make(map[string]namedRoute)
-		}
-		nr := namedRoute{pattern: pattern, parts: parseURLTemplate(pattern)}
-		if segs, _, err := parsePattern(pattern); err == nil {
-			nr.segs, nr.recheck = segs, needsRoundTrip(segs)
-		}
-		r.named[reg.name] = nr
-	}
 	if r.info == nil {
 		r.info = make(map[routeKey]routeInfo)
 	}
-	r.info[routeKey{host: host, method: reg.method, pattern: pattern}] = routeInfo{name: reg.name, meta: reg.meta}
-	return nil
+	r.info[routeKey{host: host, method: reg.method, pattern: pattern}] = routeInfo{meta: reg.meta}
 }
 
-func (r *Router[C]) preTerminal(c C) error { return r.route(c, c.base().req, false) }
+func (r *Router[C]) preTerminal(c C) error { return r.eng.route(c, c.base().req, false) }
 
 type pendingScope[C Context] struct {
 	prefix string
@@ -980,23 +887,15 @@ type pendingScope[C Context] struct {
 }
 
 type scopeFallbacks[C Context] struct {
-	notFound   HandlerFunc[C]
-	notAllowed HandlerFunc[C]
 	errHandler ErrorHandlerFunc[C]
 }
 
 func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
-	set := false
-	if rt.notFound != nil {
-		f.notFound, set = rt.notFound, true
+	if rt.errHandler == nil {
+		return false
 	}
-	if rt.methodNotAllowed != nil {
-		f.notAllowed, set = rt.methodNotAllowed, true
-	}
-	if rt.errHandler != nil {
-		f.errHandler, set = rt.errHandler, true
-	}
-	return set
+	f.errHandler = rt.errHandler
+	return true
 }
 
 type scopeFallback[C Context] struct {
@@ -1080,16 +979,16 @@ func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path st
 	return nil
 }
 
-func (r *Router[C]) fallbackChains(
+func (e *engine[C]) fallbackChains(
 	host *hostEntry[C], path string, escaped bool,
 ) (scope *scopeFallback[C], notFound, notAllowed, options HandlerFunc[C]) {
-	if s := scopeFor(r.scopes, host, path, escaped); s != nil {
+	if s := scopeFor(e.scopes, host, path, escaped); s != nil {
 		return s, s.notFoundChain, s.notAllowedChain, s.optionsChain
 	}
 	if host != nil {
 		return nil, host.notFoundChain, host.notAllowedChain, host.optionsChain
 	}
-	return nil, r.notFoundChain, r.notAllowedChain, r.optionsChain
+	return nil, e.notFoundChain, e.notAllowedChain, e.optionsChain
 }
 
 // bindPrefixParams gives a scope fallback the parameters of its own prefix, so
@@ -1118,19 +1017,19 @@ func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) 
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
 
-func (r *Router[C]) mustHostEntry(spec hostSpec) *hostEntry[C] {
-	e, err := r.hostEntry(spec)
+func (e *engine[C]) mustHostEntry(spec hostSpec) *hostEntry[C] {
+	he, err := e.hostEntry(spec)
 	if err != nil {
 		panic(err.Error())
 	}
-	return e
+	return he
 }
 
-func (r *Router[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
-	if r.hostSet == nil {
-		r.hostSet = new(hostSet[C])
+func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
+	if eng.hostSet == nil {
+		eng.hostSet = new(hostSet[C])
 	}
-	hs := r.hostSet
+	hs := eng.hostSet
 	for _, e := range hs.all {
 		if e.pattern == spec.pattern {
 			return e, nil
@@ -1158,10 +1057,7 @@ func (r *Router[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
 
 type routeKey struct{ host, method, pattern string }
 
-type routeInfo struct {
-	name string
-	meta any
-}
+type routeInfo struct{ meta any }
 
 func (r *Router[C]) collectRoutes() []Route {
 	var out []Route
@@ -1169,14 +1065,14 @@ func (r *Router[C]) collectRoutes() []Route {
 		return func(pattern, method string, params int) {
 			rt := Route{Host: host, Method: method, Pattern: pattern, Params: params}
 			if info, ok := r.info[routeKey{host: host, method: method, pattern: pattern}]; ok {
-				rt.Name, rt.Meta = info.name, info.meta
+				rt.Meta = info.meta
 			}
 			out = append(out, rt)
 		}
 	}
-	r.tree.walk(add(""))
-	if r.hostSet != nil {
-		for _, e := range r.hostSet.all {
+	r.eng.tree.walk(add(""))
+	if r.eng.hostSet != nil {
+		for _, e := range r.eng.hostSet.all {
 			e.tree.walk(add(e.pattern))
 		}
 	}
@@ -1222,7 +1118,7 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	//nolint:errcheck // Same as above.
-	root.route(c, req, true)
+	root.eng.route(c, req, true)
 }
 
 func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
@@ -1248,7 +1144,7 @@ func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
 		err = r.dispatch(c, r.preChain)
 		return
 	}
-	err = r.route(c, req, true)
+	err = r.eng.route(c, req, true)
 }
 
 func (r *Router[C]) acquire(w http.ResponseWriter, req *http.Request) C {
@@ -1276,12 +1172,6 @@ func (r *Router[C]) release(c C) {
 	}
 	if r.pool != nil {
 		b := c.base()
-		if b.retained {
-			// A goroutine outlived the handler and still points at this
-			// context. Recycling it would hand the two the same memory.
-			b.req, b.res = releasedRequest, nil
-			return
-		}
 		r.reset(c)
 		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil
@@ -1297,12 +1187,6 @@ func (r *Router[C]) release(c C) {
 func (r *Router[C]) recycle(c C) {
 	if r.pool != nil {
 		b := c.base()
-		if b.retained {
-			// A goroutine outlived the handler and still points at this
-			// context. Recycling it would hand the two the same memory.
-			b.req, b.res = releasedRequest, nil
-			return
-		}
 		r.reset(c)
 		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil
@@ -1315,7 +1199,7 @@ func (r *Router[C]) recycle(c C) {
 	}
 }
 
-func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
+func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 	b := c.base()
 
 	path, escaped := requestPath(req.URL)
@@ -1335,15 +1219,15 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		host     *hostEntry[C]
 		hostVals = b.paramArr[:0]
 	)
-	if r.hostSet != nil {
+	if e.hostSet != nil {
 		var hostOK bool
 		b.host, hostOK = normalizeHostOK(req.Host)
 		b.hostKnown = true
-		if r.pool != nil && b.host != "" {
+		if e.owner.pool != nil && b.host != "" {
 			b.needsCleanup = true
 		}
 		if hostOK {
-			host, hostVals = r.hostSet.match(b.host, hostVals)
+			host, hostVals = e.hostSet.match(b.host, hostVals)
 		}
 		if host != nil {
 			b.hostIdx, b.hostPattern = host.idx, host.pattern
@@ -1351,7 +1235,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		}
 	}
 
-	if r.redirectSlash && trimmed != path && r.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
+	if e.redirectSlash && trimmed != path && e.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
 		redirectTo(b.res, req, trimmed, escaped)
 		return nil
 	}
@@ -1364,8 +1248,8 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 	if host != nil {
 		n, vals = search(host.tree, trimmed, req.Method, hostVals, &hostSt, escaped)
 	}
-	if n == nil && r.anyHostRoutes {
-		if m, v := search(r.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
+	if n == nil && e.anyHostRoutes {
+		if m, v := search(e.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
 			n, vals = m, v
 			b.hostIdx, b.hostPattern = -1, ""
 		}
@@ -1377,8 +1261,8 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		if b.hostIdx < 0 {
 			selectedHost = nil
 		}
-		if len(r.errScopes) > 0 || selectedHost != nil && selectedHost.errHandler != nil {
-			r.selectErrorTarget(b, selectedHost, trimmed, escaped)
+		if len(e.errScopes) > 0 || selectedHost != nil && selectedHost.errHandler != nil {
+			e.selectErrorTarget(b, selectedHost, trimmed, escaped)
 		}
 		if n.kind == edgeWildcard && len(vals) > 0 {
 			b.rawTail = vals[len(vals)-1]
@@ -1391,7 +1275,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		req.Pattern = n.pattern
 		h := n.handler(req.Method)
 		if handleErrors {
-			return r.dispatch(c, h)
+			return e.owner.dispatch(c, h)
 		}
 		return h(c)
 
@@ -1408,42 +1292,42 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 				matched[len(matched)-1] = decoded
 			}
 		}
-		if len(r.errScopes) > 0 || host != nil && host.errHandler != nil {
-			r.selectErrorTarget(b, host, trimmed, escaped)
+		if len(e.errScopes) > 0 || host != nil && host.errHandler != nil {
+			e.selectErrorTarget(b, host, trimmed, escaped)
 		}
 		b.needsCleanup = true
 		b.setRoute(match.pattern, match.names, matched)
 		req.Pattern = match.pattern
-		b.res.Header().Set(HeaderAllow, r.allowHeader(&hostSt, &anySt))
+		b.res.Header().Set(HeaderAllow, e.allowHeader(&hostSt, &anySt))
 
-		_, _, notAllowed, options := r.fallbackChains(host, trimmed, escaped)
-		if req.Method == http.MethodOptions && r.autoOptions {
+		_, _, notAllowed, options := e.fallbackChains(host, trimmed, escaped)
+		if req.Method == http.MethodOptions && e.autoOptions {
 			if handleErrors {
-				return r.dispatch(c, options)
+				return e.owner.dispatch(c, options)
 			}
 			return options(c)
 		}
 		if handleErrors {
-			return r.dispatch(c, notAllowed)
+			return e.owner.dispatch(c, notAllowed)
 		}
 		return notAllowed(c)
 
 	default:
-		if len(r.errScopes) > 0 || host != nil && host.errHandler != nil {
-			r.selectErrorTarget(b, host, trimmed, escaped)
+		if len(e.errScopes) > 0 || host != nil && host.errHandler != nil {
+			e.selectErrorTarget(b, host, trimmed, escaped)
 		}
-		scope, notFound, _, _ := r.fallbackChains(host, trimmed, escaped)
+		scope, notFound, _, _ := e.fallbackChains(host, trimmed, escaped)
 		if scope != nil {
 			scope.bindPrefixParams(b, trimmed, escaped)
 		}
 		if handleErrors {
-			return r.dispatch(c, notFound)
+			return e.owner.dispatch(c, notFound)
 		}
 		return notFound(c)
 	}
 }
 
-func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
+func (e *engine[C]) allowHeader(host, anyHost *matchState[C]) string {
 	if host.rest == nil && anyHost.rest == nil {
 		var only *node[C]
 		switch {
@@ -1453,13 +1337,13 @@ func (r *Router[C]) allowHeader(host, anyHost *matchState[C]) string {
 			only = anyHost.pathMatch
 		}
 		if only != nil {
-			if s, ok := r.allowCache[only]; ok {
+			if s, ok := e.allowCache[only]; ok {
 				return s
 			}
 		}
 	}
-	out := host.allowedMethods(nil, r.autoOptions)
-	out = anyHost.allowedMethods(out, r.autoOptions)
+	out := host.allowedMethods(nil, e.autoOptions)
+	out = anyHost.allowedMethods(out, e.autoOptions)
 	slices.Sort(out)
 	return strings.Join(out, ", ")
 }
@@ -1494,7 +1378,7 @@ func canonicalEscapedPath(path string) string {
 		if path[i] != '%' {
 			continue
 		}
-		v, ok := urlesc.Unhex(path[i+1], path[i+2])
+		v, ok := unhex(path[i+1], path[i+2])
 		if !ok {
 			continue
 		}
@@ -1506,7 +1390,7 @@ func canonicalEscapedPath(path string) string {
 		out = append(out, path[:i]...)
 		for i < len(path) {
 			if i+2 < len(path) && path[i] == '%' {
-				if v, ok := urlesc.Unhex(path[i+1], path[i+2]); ok {
+				if v, ok := unhex(path[i+1], path[i+2]); ok {
 					if v == '/' || v == '\\' || v == '%' {
 						out = append(out, '%', hex[v>>4], hex[v&15])
 					} else {
@@ -1548,33 +1432,33 @@ func (r *Router[C]) handleError(c C, err error) {
 			b.res.WriteHeader(http.StatusInternalServerError)
 		}
 	}()
-	r.errorHandlerFor(c.base())(c, err)
+	r.eng.errorHandlerFor(c.base())(c, err)
 }
 
-func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
+func (e *engine[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 	if !b.errorRouted {
-		return r.rootErrorHandler
+		return e.rootErrorHandler
 	}
-	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(r.errScopes) {
-		return r.errScopes[b.errorScopeIdx].errHandler
+	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(e.errScopes) {
+		return e.errScopes[b.errorScopeIdx].errHandler
 	}
 	var host *hostEntry[C]
-	if b.hostIdx >= 0 && r.hostSet != nil && int(b.hostIdx) < len(r.hostSet.all) {
-		host = r.hostSet.all[b.hostIdx]
+	if b.hostIdx >= 0 && e.hostSet != nil && int(b.hostIdx) < len(e.hostSet.all) {
+		host = e.hostSet.all[b.hostIdx]
 	}
 	if host != nil && host.errHandler != nil {
 		return host.errHandler
 	}
-	return r.rootErrorHandler
+	return e.rootErrorHandler
 }
 
 // selectErrorTarget picks the scope whose error handler owns this request. It
 // runs while the routed path is still known: a handler is free to rewrite the
 // request, and that must not change who handles its failure.
-func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
+func (e *engine[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
 	b.errorRouted = true
 	b.errorScopeIdx = -1
-	if s := scopeFor(r.errScopes, host, path, escaped); s != nil {
+	if s := scopeFor(e.errScopes, host, path, escaped); s != nil {
 		b.errorScopeIdx = s.errorIdx
 	}
 	if host != nil {
@@ -1584,18 +1468,18 @@ func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, 
 	}
 }
 
-func (r *Router[C]) canMatch(host *hostEntry[C], path, method string, scratch []string, escaped bool) bool {
+func (e *engine[C]) canMatch(host *hostEntry[C], path, method string, scratch []string, escaped bool) bool {
 	if host != nil {
 		var st matchState[C]
 		if n, _ := search(host.tree, path, method, scratch, &st, escaped); n != nil || st.pathMatch != nil {
 			return true
 		}
 	}
-	if !r.anyHostRoutes {
+	if !e.anyHostRoutes {
 		return false
 	}
 	var st matchState[C]
-	n, _ := search(r.tree, path, method, scratch, &st, escaped)
+	n, _ := search(e.tree, path, method, scratch, &st, escaped)
 	return n != nil || st.pathMatch != nil
 }
 

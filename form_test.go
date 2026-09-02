@@ -121,7 +121,7 @@ func TestDecodeValuesFillsAByteSlice(t *testing.T) {
 	var got struct {
 		Data []byte `query:"data"`
 	}
-	fields, err := decodeValues(url.Values{"data": {"abc"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"data": {"abc"}}, &got, "query")
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestDecodeValuesReadsAFormatTag(t *testing.T) {
 			}})
 			dst := reflect.New(rt)
 
-			fields, err := decodeValues(url.Values{"since": {tt.in}}, dst.Interface(), "query", false)
+			fields, err := decodeValues(url.Values{"since": {tt.in}}, dst.Interface(), "query")
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -207,7 +207,7 @@ func TestDecodeValuesKeepsRFC3339WithoutAFormatTag(t *testing.T) {
 	var got struct {
 		Since time.Time `query:"since"`
 	}
-	fields, err := decodeValues(url.Values{"since": {"2026-01-02T03:04:05Z"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"since": {"2026-01-02T03:04:05Z"}}, &got, "query")
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("decode: %v, %+v", err, fields)
 	}
@@ -215,7 +215,7 @@ func TestDecodeValuesKeepsRFC3339WithoutAFormatTag(t *testing.T) {
 		t.Errorf("Since = %v, want %v", got.Since, want)
 	}
 
-	fields, err = decodeValues(url.Values{"since": {"2026-01-02"}}, &got, "query", false)
+	fields, err = decodeValues(url.Values{"since": {"2026-01-02"}}, &got, "query")
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestDecodeValuesReadsAFormatTagForASliceAndAPointer(t *testing.T) {
 	fields, err := decodeValues(url.Values{
 		"day": {"2026-01-02", "2026-01-03"},
 		"cut": {"2026-02-01"},
-	}, &got, "query", false)
+	}, &got, "query")
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("decode: %v, %+v", err, fields)
 	}
@@ -256,7 +256,7 @@ func TestDecodeValuesCollectsEveryFieldError(t *testing.T) {
 		"limit": {"b"},
 		"ttl":   {"c"},
 		"q":     {"go"},
-	}, &got, "query", false)
+	}, &got, "query")
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -277,38 +277,12 @@ func TestDecodeValuesNamesTheFieldAsTheRequestSpellsIt(t *testing.T) {
 	var got struct {
 		Page int
 	}
-	fields, err := decodeValues(url.Values{"page": {"a"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"page": {"a"}}, &got, "query")
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(fields) != 1 || fields[0].Field != "page" {
 		t.Fatalf("fields = %+v, want the lower-case key that matched", fields)
-	}
-}
-
-func TestDecodeValuesFillsOnlyTaggedFieldsWhenStrict(t *testing.T) {
-	type user struct {
-		Name    string `form:"name"`
-		IsAdmin bool
-	}
-
-	var loose user
-	if _, err := decodeValues(url.Values{"name": {"bo"}, "isadmin": {"true"}}, &loose, "form", false); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !loose.IsAdmin {
-		t.Error("the default mode no longer fills an untagged field, which the strict mode exists to stop")
-	}
-
-	var strict user
-	if _, err := decodeValues(url.Values{"name": {"bo"}, "isadmin": {"true"}}, &strict, "form", true); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if strict.Name != "bo" {
-		t.Errorf("Name = %q, want the tagged field to be filled", strict.Name)
-	}
-	if strict.IsAdmin {
-		t.Error("IsAdmin = true, want the untagged field to be left alone")
 	}
 }
 
@@ -323,7 +297,7 @@ func TestDecodeValuesRejectsABadTarget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := decodeValues(nil, tt.dst, "query", false); err == nil {
+			if _, err := decodeValues(nil, tt.dst, "query"); err == nil {
 				t.Errorf("decodeValues(%T) = nil, want an error", tt.dst)
 			}
 		})
@@ -335,7 +309,7 @@ func TestDecodeValuesSkipsADashTag(t *testing.T) {
 		Ignored string `query:"-"`
 		Kept    string `query:"kept"`
 	}
-	if _, err := decodeValues(url.Values{"Ignored": {"x"}, "kept": {"y"}}, &got, "query", false); err != nil {
+	if _, err := decodeValues(url.Values{"Ignored": {"x"}, "kept": {"y"}}, &got, "query"); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if got.Ignored != "" || got.Kept != "y" {
@@ -349,7 +323,7 @@ func TestStructFieldsKeepsAPlanPerTag(t *testing.T) {
 	}
 
 	var fromQuery in
-	if _, err := decodeValues(url.Values{"url": {"q"}, "body": {"f"}}, &fromQuery, "query", false); err != nil {
+	if _, err := decodeValues(url.Values{"url": {"q"}, "body": {"f"}}, &fromQuery, "query"); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if fromQuery.Value != "q" {
@@ -357,7 +331,7 @@ func TestStructFieldsKeepsAPlanPerTag(t *testing.T) {
 	}
 
 	var fromForm in
-	if _, err := decodeValues(url.Values{"url": {"q"}, "body": {"f"}}, &fromForm, "form", false); err != nil {
+	if _, err := decodeValues(url.Values{"url": {"q"}, "body": {"f"}}, &fromForm, "form"); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if fromForm.Value != "f" {
@@ -514,7 +488,7 @@ func TestDecodeValuesFillsAnEmbeddedPointer(t *testing.T) {
 	}
 
 	var got filter
-	fields, err := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query")
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("decode: %v, %+v", err, fields)
 	}
@@ -536,7 +510,7 @@ func TestDecodeValuesLeavesAnUnusedEmbeddedPointerNil(t *testing.T) {
 	}
 
 	var got filter
-	fields, err := decodeValues(url.Values{"q": {"go"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"q": {"go"}}, &got, "query")
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("decode: %v, %+v", err, fields)
 	}
@@ -555,7 +529,7 @@ func TestDecodeValuesStopsAtARecursiveEmbeddedPointer(t *testing.T) {
 	}
 
 	var got Node
-	fields, err := decodeValues(url.Values{"value": {"root"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"value": {"root"}}, &got, "query")
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("decode: %v, %+v", err, fields)
 	}
@@ -569,7 +543,7 @@ func TestDecodeValuesStopsAtARecursiveEmbeddedPointer(t *testing.T) {
 
 func TestDecodeValuesStopsAtAMutualEmbeddingCycle(t *testing.T) {
 	var got MutuallyEmbeddedA
-	fields, err := decodeValues(url.Values{"name": {"leaf"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"name": {"leaf"}}, &got, "query")
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("decode: %v, %+v", err, fields)
 	}
@@ -597,7 +571,7 @@ func TestDecodeValuesLeavesAnUnexportedEmbeddedPointerAlone(t *testing.T) {
 	}
 
 	var got filter
-	fields, err := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query")
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("decode: %v, %+v", err, fields)
 	}

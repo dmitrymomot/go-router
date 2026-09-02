@@ -316,7 +316,6 @@ func TestRouterSettingsReachTheContext(t *testing.T) {
 	r := newTestRouter()
 	r.MaxBodyBytes(1 << 20)
 	r.MaxMultipartMemory(64 << 10)
-	r.StrictBind(true)
 	r.Logger(own)
 
 	var got *Base
@@ -336,9 +335,6 @@ func TestRouterSettingsReachTheContext(t *testing.T) {
 	if opts.maxMultipart != 64<<10 {
 		t.Errorf("maxMultipart = %d, want %d", opts.maxMultipart, 64<<10)
 	}
-	if !opts.strictBind {
-		t.Error("strictBind = false, want true")
-	}
 	if got.Logger() != own {
 		t.Error("Logger() did not answer with the logger of the router")
 	}
@@ -350,7 +346,6 @@ func TestNewSettingsAfterServingPanic(t *testing.T) {
 		set  func(r *Router[*tctx])
 	}{
 		{"the multipart memory limit", func(r *Router[*tctx]) { r.MaxMultipartMemory(1) }},
-		{"the strict binding setting", func(r *Router[*tctx]) { r.StrictBind(true) }},
 		{"the logger", func(r *Router[*tctx]) { r.Logger(slog.New(slog.DiscardHandler)) }},
 	}
 	for _, tc := range tests {

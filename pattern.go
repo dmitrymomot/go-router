@@ -5,8 +5,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-
-	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type segKind uint8
@@ -137,7 +135,7 @@ func parsePattern(pattern string) ([]segment, []string, error) {
 			if strings.Contains(raw, "*") {
 				return nil, nil, fmt.Errorf("router: a catch-all must span a whole segment, but %q does not in %q", raw, pattern)
 			}
-			if err := checkStaticLiteral(raw, pattern); err != nil {
+			if err := checkLiteral(raw, pattern); err != nil {
 				return nil, nil, err
 			}
 			segs = append(segs, segment{kind: segStatic, value: raw})
@@ -146,43 +144,52 @@ func parsePattern(pattern string) ([]segment, []string, error) {
 	return segs, names, nil
 }
 
-// checkStaticLiteral rejects a literal segment that no request can reach.
-//
-// A path arrives at the trie in the canonical form requestPath produces: %, \
-// and / stay percent-encoded with upper-case hex, every other escape is
-// decoded, and a % that starts no escape is left alone. A literal is compared
-// against that form byte for byte, so it has to be spelled the same way. The
-// three spellings that can never match used to register happily and answer 404
-// for ever with nothing to say why.
-func checkStaticLiteral(raw, pattern string) error {
+// literalCharset is what a literal part of a pattern may hold: the unreserved
+// characters of RFC 3986. A path arrives percent-decoded except for %, \ and /,
+// so anything outside this either cannot appear in a literal or would have to
+// be spelled as an escape to match. Refusing it at registration means a literal
+// never needs decoding to be compared.
+const literalCharset = "a-z A-Z 0-9 and . _ ~ -"
+
+func literalByteOK(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '.' || c == '_' || c == '~' || c == '-'
+}
+
+func checkLiteral(raw, pattern string) error {
 	for i := range len(raw) {
-		if raw[i] == '\\' {
-			return fmt.Errorf(
-				"router: %q in %q can never match: the path arrives with a backslash escaped, so write %%5C",
-				raw, pattern)
-		}
-		if raw[i] != '%' || i+2 >= len(raw) {
-			continue
-		}
-		v, ok := urlesc.Unhex(raw[i+1], raw[i+2])
-		if !ok {
-			// requestPath leaves this alone, so the literal reaches the trie
-			// exactly as written and matches.
-			continue
-		}
-		if v != '/' && v != '\\' && v != '%' {
-			return fmt.Errorf(
-				"router: %q in %q can never match: the path arrives with %%%s decoded, so write %q",
-				raw, pattern, raw[i+1:i+3], string(rune(v)))
-		}
-		const hex = "0123456789ABCDEF"
-		if raw[i+1] != hex[v>>4] || raw[i+2] != hex[v&15] {
-			return fmt.Errorf(
-				"router: %q in %q can never match: the path arrives with upper-case escapes, so write %%%c%c",
-				raw, pattern, hex[v>>4], hex[v&15])
+		if !literalByteOK(raw[i]) {
+			return fmt.Errorf("router: %q in %q holds %q; a literal may hold only %s",
+				raw, pattern, string(raw[i]), literalCharset)
 		}
 	}
 	return nil
+}
+
+// unhex decodes one percent-escape body, reporting whether both digits were hex.
+func unhex(a, b byte) (byte, bool) {
+	hi, ok := hexDigit(a)
+	if !ok {
+		return 0, false
+	}
+	lo, ok := hexDigit(b)
+	if !ok {
+		return 0, false
+	}
+	return hi<<4 | lo, true
+}
+
+func hexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }
 
 func isWholeBrace(raw string) bool {
@@ -215,9 +222,14 @@ func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
 		names []string
 		lit   strings.Builder
 	)
+	var literalErr error
 	flush := func() {
 		if lit.Len() > 0 {
-			parts = append(parts, segPart{lit: lit.String()})
+			text := lit.String()
+			if literalErr == nil {
+				literalErr = checkLiteral(text, pattern)
+			}
+			parts = append(parts, segPart{lit: text})
 			lit.Reset()
 		}
 	}
@@ -265,6 +277,9 @@ func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
 	}
 	flush()
 
+	if literalErr != nil {
+		return nil, nil, literalErr
+	}
 	if len(names) == 0 {
 		return nil, nil, fmt.Errorf("router: %q holds no parameter in %q", raw, pattern)
 	}

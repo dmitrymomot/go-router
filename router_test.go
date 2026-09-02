@@ -1,7 +1,6 @@
 package router
 
 import (
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -10,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -352,24 +354,19 @@ func TestEscapedParameter(t *testing.T) {
 func TestPercentEscapeCanonicalization(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/alpha", func(c *tctx) error { return c.String(http.StatusOK, "alpha") })
-	r.GET("/café", func(c *tctx) error { return c.String(http.StatusOK, "café") })
-	r.GET("/slash/a%2Fb", func(c *tctx) error { return c.String(http.StatusOK, "escaped slash") })
 	r.GET("/slash/a/b", func(c *tctx) error { return c.String(http.StatusOK, "split slash") })
-	r.GET("/backslash/a%5Cb", func(c *tctx) error { return c.String(http.StatusOK, "escaped backslash") })
 	r.GET("/value/{value}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
 
+	// A literal is compared undecoded, so only a path that decodes to it
+	// matches. A parameter value is decoded, escaped separators included.
 	tests := []struct{ path, want string }{
 		{"/%61lpha", "alpha"},
-		{"/caf%C3%A9", "café"},
-		{"/caf%c3%a9", "café"},
-		{"/slash/a%2Fb", "escaped slash"},
-		{"/slash/a%2fb", "escaped slash"},
-		{"/backslash/a%5Cb", "escaped backslash"},
-		{"/backslash/a%5cb", "escaped backslash"},
+		{"/slash/a/b", "split slash"},
 		{"/value/a%2Fb", "a/b"},
 		{"/value/a%5Cb", `a\b`},
 		{"/value/%252F", "%2F"},
 		{"/value/%255C", "%5C"},
+		{"/value/caf%C3%A9", "café"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {
@@ -408,7 +405,7 @@ func TestErrorHandling(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
 	}
-	if got, want := rec.Body.String(), `{"status":403,"error":"no entry"}`; got != want {
+	if got, want := rec.Body.String(), "no entry"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 
@@ -426,20 +423,6 @@ func TestErrorHandling(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "database") {
 		t.Errorf("body leaks the internal cause: %q", rec.Body.String())
-	}
-}
-
-func TestCustomFallbacks(t *testing.T) {
-	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "nothing here") })
-	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "wrong method") })
-	r.GET("/only", echoRoute)
-
-	if got := do(r, http.MethodGet, "/other").Body.String(); got != "nothing here" {
-		t.Errorf("not found body = %q", got)
-	}
-	if got := do(r, http.MethodPost, "/only").Body.String(); got != "wrong method" {
-		t.Errorf("method not allowed body = %q", got)
 	}
 }
 
@@ -537,45 +520,20 @@ func TestPanics(t *testing.T) {
 	}
 }
 
-func TestWrapHandlerAndWrapMiddleware(t *testing.T) {
-	tagging := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			next.ServeHTTP(&prefixWriter{ResponseWriter: w, prefix: "["},
-				req.WithContext(context.WithValue(req.Context(), ctxKey("who"), "std")))
-		})
-	}
-
+func TestWrapHandler(t *testing.T) {
 	r := newTestRouter()
-	r.Use(WrapMiddleware[*tctx](tagging))
 	r.GET("/plain", WrapHandler[*tctx](http.HandlerFunc(
 		func(w http.ResponseWriter, req *http.Request) {
-			_, _ = fmt.Fprint(w, req.Context().Value(ctxKey("who")))
+			_, _ = fmt.Fprint(w, "std")
 		})))
 
 	rec := do(r, http.MethodGet, "/plain")
-	if got, want := rec.Body.String(), "[std"; got != want {
+	if got, want := rec.Body.String(), "std"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
-}
-
-type ctxKey string
-
-type prefixWriter struct {
-	http.ResponseWriter
-	prefix string
-	done   bool
-}
-
-func (w *prefixWriter) Write(b []byte) (int, error) {
-	if !w.done {
-		w.done = true
-		//nolint:errcheck // test helper
-		w.ResponseWriter.Write([]byte(w.prefix))
-	}
-	return w.ResponseWriter.Write(b)
 }
 
 func TestRedirectTrailingSlashKeepsTheMethod(t *testing.T) {
@@ -655,31 +613,6 @@ func TestErrorHandlerCatchesEverything(t *testing.T) {
 	}
 }
 
-func TestFallbackHandlersBeatTheErrorHandler(t *testing.T) {
-	errorHandlerRan := false
-
-	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) {
-		errorHandlerRan = true
-		_ = c.String(StatusOf(err), "error handler")
-	})
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "not found") })
-	r.MethodNotAllowed(func(c *tctx) error {
-		return c.String(http.StatusMethodNotAllowed, "method not allowed")
-	})
-	r.GET("/only", echoRoute)
-
-	if got := do(r, http.MethodGet, "/missing").Body.String(); got != "not found" {
-		t.Errorf("body = %q, want %q", got, "not found")
-	}
-	if got := do(r, http.MethodPost, "/only").Body.String(); got != "method not allowed" {
-		t.Errorf("body = %q, want %q", got, "method not allowed")
-	}
-	if errorHandlerRan {
-		t.Error("the error handler ran; the fallback handlers must win")
-	}
-}
-
 func TestPanicInTheErrorHandlerAnswers500(t *testing.T) {
 	r := newTestRouter()
 	r.ErrorHandler(func(*tctx, error) { panic("the renderer is broken") })
@@ -737,16 +670,7 @@ func setHeader(name, value string) Middleware[*tctx] {
 }
 
 func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
-	var seen []string
-	std := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			seen = append(seen, "mw "+req.Pattern+" id="+req.PathValue("id"))
-			next.ServeHTTP(w, req)
-		})
-	}
-
 	r := newTestRouter()
-	r.Use(WrapMiddleware[*tctx](std))
 	r.GET("/users/{id}/posts/{postID}", WrapHandler[*tctx](http.HandlerFunc(
 		func(w http.ResponseWriter, req *http.Request) {
 			_, _ = fmt.Fprintf(w, "handler %s id=%s postID=%s",
@@ -757,9 +681,6 @@ func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if want := []string{"mw /users/{id}/posts/{postID} id=7"}; !slices.Equal(seen, want) {
-		t.Errorf("middleware saw %q, want %q", seen, want)
-	}
 	want := "handler /users/{id}/posts/{postID} id=7 postID=12"
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want %q", got, want)
@@ -769,12 +690,12 @@ func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
 func TestRequestPatternIsSetForAFallbackToo(t *testing.T) {
 	var pattern string
 	r := newTestRouter()
-	r.Use(WrapMiddleware[*tctx](func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			pattern = req.Pattern
-			next.ServeHTTP(w, req)
-		})
-	}))
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			pattern = c.RoutePattern()
+			return next(c)
+		}
+	})
 	r.GET("/users/{id}", echoRoute)
 
 	if do(r, http.MethodPost, "/users/7"); pattern != "/users/{id}" {
@@ -1027,34 +948,6 @@ func TestPrefixScopeFallbackCoversAParameterPrefix(t *testing.T) {
 	}
 }
 
-func TestPrefixScopeFallbackUsesTheHandlerOfItsHost(t *testing.T) {
-	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
-	r.Host("api.example.com", func(h *Router[*tctx]) {
-		h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
-		h.Route("/v1", func(g *Router[*tctx]) {
-			g.Use(setHeader("X-Scope", "v1"))
-			g.GET("/users", echoRoute)
-		})
-	})
-
-	rec := doHost(r, http.MethodGet, "api.example.com", "/v1/typo")
-	if got := rec.Body.String(); got != "api 404" {
-		t.Errorf("body = %q, want %q", got, "api 404")
-	}
-	if got := rec.Header().Get("X-Scope"); got != "v1" {
-		t.Errorf("X-Scope = %q, want %q", got, "v1")
-	}
-
-	rec = doHost(r, http.MethodGet, "other.example.com", "/v1/typo")
-	if got := rec.Body.String(); got != "root 404" {
-		t.Errorf("body = %q, want %q", got, "root 404")
-	}
-	if got := rec.Header().Get("X-Scope"); got != "" {
-		t.Errorf("X-Scope = %q, want none", got)
-	}
-}
-
 func TestMountedRoutesKeepTheFallbackOfTheirPrefix(t *testing.T) {
 	sub := newTestRouter()
 	sub.GET("/users", echoRoute)
@@ -1070,11 +963,11 @@ func TestMountedRoutesKeepTheFallbackOfTheirPrefix(t *testing.T) {
 	}
 }
 
-func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
+func TestRoutesReportsTheMetadata(t *testing.T) {
 	type op struct{ Summary string }
 
 	r := newTestRouter()
-	r.Name("user").Meta(op{Summary: "read a user"}).GET("/users/{id}", echoRoute)
+	r.Meta(op{Summary: "read a user"}).GET("/users/{id}", echoRoute)
 	r.Meta(op{Summary: "create a user"}).POST("/users", echoRoute)
 	r.GET("/health", echoRoute)
 
@@ -1082,7 +975,7 @@ func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	want := []Route{
 		{Method: http.MethodGet, Pattern: "/health"},
 		{Method: http.MethodPost, Pattern: "/users", Meta: op{Summary: "create a user"}},
-		{Method: http.MethodGet, Pattern: "/users/{id}", Name: "user", Meta: op{Summary: "read a user"}, Params: 1},
+		{Method: http.MethodGet, Pattern: "/users/{id}", Meta: op{Summary: "read a user"}, Params: 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
@@ -1090,25 +983,6 @@ func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("route %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}
-
-func TestNameAndMetaComposeInEitherOrder(t *testing.T) {
-	r := newTestRouter()
-	r.Meta("first").Name("a").GET("/a", echoRoute)
-	r.Name("b").Meta("second").GET("/b", echoRoute)
-
-	for _, rt := range r.Routes() {
-		switch rt.Pattern {
-		case "/a":
-			if rt.Name != "a" || rt.Meta != "first" {
-				t.Errorf("/a = %+v, want the name a and the meta first", rt)
-			}
-		case "/b":
-			if rt.Name != "b" || rt.Meta != "second" {
-				t.Errorf("/b = %+v, want the name b and the meta second", rt)
-			}
 		}
 	}
 }
@@ -1276,10 +1150,6 @@ func TestRegistrationPanicsOnABadTable(t *testing.T) {
 		{"a router mounted inside itself", func(r *Router[*tctx]) {
 			r.Mount("/self", r)
 		}, "mounted inside itself"},
-		{"a duplicate route name", func(r *Router[*tctx]) {
-			r.Name("dup").GET("/a", echoRoute)
-			r.Name("dup").GET("/b", echoRoute)
-		}, `the route name "dup" names both`},
 		{"a route on a mounted subrouter", func(r *Router[*tctx]) {
 			sub := newTestRouter()
 			sub.GET("/a", echoRoute)
@@ -1467,25 +1337,12 @@ func TestRegistrationPanics(t *testing.T) {
 			do(r, http.MethodGet, "/")
 			r.Pre(setHeader("X", "1"))
 		}, "after the router started serving"},
-		{"a second route on a named scope", func() {
-			r := newTestRouter()
-			named := r.Name("both")
-			named.GET("/a", echoRoute)
-			named.POST("/b", echoRoute)
-		}, "already registered a route"},
-		{"an empty name", func() { newTestRouter().Name("") }, "Name needs a name"},
 		{"Match with no methods", func() {
 			newTestRouter().Match(nil, "/x", echoRoute)
 		}, "Match needs at least one method"},
 		{"Match with an empty method", func() {
 			newTestRouter().Match([]string{""}, "/x", echoRoute)
 		}, "Match needs non-empty methods"},
-		{"a duplicate name", func() {
-			r := newTestRouter()
-			r.Name("dup").GET("/a", echoRoute)
-			r.Name("dup").GET("/b", echoRoute)
-			r.Routes()
-		}, "names both"},
 		{"Observe after serving", func() {
 			r := newTestRouter()
 			r.GET("/", echoRoute)
@@ -1536,51 +1393,10 @@ func TestObserveReportsARequestThatThePreStageAnswered(t *testing.T) {
 	}
 }
 
-func TestScopeFallbacksAnswerTheirScopeAlone(t *testing.T) {
-	text := func(status int, body string) HandlerFunc[*tctx] {
-		return func(c *tctx) error { return c.String(status, body) }
-	}
-
-	r := newTestRouter()
-	r.NotFound(text(http.StatusNotFound, "root 404"))
-	r.MethodNotAllowed(text(http.StatusMethodNotAllowed, "root 405"))
-	r.Route("/api", func(g *Router[*tctx]) {
-		g.NotFound(text(http.StatusNotFound, "api 404"))
-		g.MethodNotAllowed(text(http.StatusMethodNotAllowed, "api 405"))
-		g.GET("/users", echoRoute)
-	})
-	r.Route("/admin", func(g *Router[*tctx]) {
-		g.NotFound(text(http.StatusNotFound, "admin 404"))
-		g.MethodNotAllowed(text(http.StatusMethodNotAllowed, "admin 405"))
-		g.GET("/panel", echoRoute)
-	})
-	r.GET("/health", echoRoute)
-
-	tests := []struct {
-		method string
-		path   string
-		want   string
-	}{
-		{http.MethodGet, "/api/typo", "api 404"},
-		{http.MethodGet, "/admin/typo", "admin 404"},
-		{http.MethodGet, "/typo", "root 404"},
-		{http.MethodPost, "/api/users", "api 405"},
-		{http.MethodPost, "/admin/panel", "admin 405"},
-		{http.MethodPost, "/health", "root 405"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			if got := do(r, tc.method, tc.path).Body.String(); got != tc.want {
-				t.Errorf("body = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api 404") })
 		g.GET("/users", echoRoute)
 	})
 	r.GET("/health", echoRoute)
@@ -1596,7 +1412,7 @@ func TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone(t *testing.T) {
 func TestAScopeFallbackReachesTheScopesBelowIt(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api 404") })
 		g.Route("/v1", func(v *Router[*tctx]) { v.GET("/users", echoRoute) })
 	})
 
@@ -1694,19 +1510,18 @@ func TestAMountedRouterKeepsTheFallbacksOfTheRoot(t *testing.T) {
 	sub.GET("/users", echoRoute)
 
 	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root: "+err.Error()) })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root: "+err.Error()) })
 	r.Mount("/api", sub)
 	r.GET("/boom", func(*tctx) error { return errors.New("kettle") })
 
-	if got := do(r, http.MethodGet, "/api/typo").Body.String(); got != "root 404" {
-		t.Errorf("GET /api/typo = %q, want %q", got, "root 404")
-	}
-	if got := do(r, http.MethodGet, "/typo").Body.String(); got != "root 404" {
-		t.Errorf("GET /typo = %q, want %q", got, "root 404")
+	for _, path := range []string{"/api/typo", "/typo"} {
+		rec := do(r, http.MethodGet, path)
+		if rec.Code != http.StatusNotFound || !strings.HasPrefix(rec.Body.String(), "root: ") {
+			t.Errorf("GET %s = %d %q, want a 404 from the root error handler", path, rec.Code, rec.Body.String())
+		}
 	}
 	rec := do(r, http.MethodGet, "/boom")
-	if rec.Code != http.StatusTeapot {
+	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("GET /boom: status = %d, want %d", rec.Code, http.StatusTeapot)
 	}
 }
@@ -1715,7 +1530,7 @@ func TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
 		g.Group(func(h *Router[*tctx]) {
-			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api 404") })
 			h.GET("/users", echoRoute)
 		})
 	})
@@ -1767,7 +1582,6 @@ func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
 
 func TestUseAfterATaggedRoutePanics(t *testing.T) {
 	register := map[string]func(*Router[*tctx]){
-		"Name":  func(r *Router[*tctx]) { r.Name("u").GET("/u", echoRoute) },
 		"Meta":  func(r *Router[*tctx]) { r.Meta("op").GET("/u", echoRoute) },
 		"With":  func(r *Router[*tctx]) { r.With().GET("/u", echoRoute) },
 		"plain": func(r *Router[*tctx]) { r.GET("/u", echoRoute) },
@@ -1852,12 +1666,12 @@ func TestScopedFallbackUsesParsedPrefix(t *testing.T) {
 			r := newTestRouter()
 			addPlain := func() {
 				r.Route("/t/{value}", func(g *Router[*tctx]) {
-					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "plain") })
+					g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "plain") })
 				})
 			}
 			addNumeric := func() {
 				r.Route("/t/{value:[0-9]+}", func(g *Router[*tctx]) {
-					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "numeric") })
+					g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "numeric") })
 				})
 			}
 			if reverse {
@@ -1879,7 +1693,7 @@ func TestScopedFallbackUsesParsedPrefix(t *testing.T) {
 
 	r := newTestRouter()
 	r.Route("/reports/report-{id:[0-9]+}.csv", func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "report") })
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "report") })
 	})
 	if got := do(r, http.MethodGet, "/reports/report-7.csv/missing").Body.String(); got != "report" {
 		t.Errorf("template scope chose %q", got)
@@ -1901,12 +1715,8 @@ func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
 							return next(c)
 						}
 					})
-					g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, name+" 404") })
-					g.MethodNotAllowed(func(c *tctx) error {
-						return c.String(http.StatusMethodNotAllowed, name+" 405")
-					})
 					g.ErrorHandler(func(c *tctx, err error) {
-						_ = c.String(http.StatusTeapot, name+" error")
+						_ = c.String(StatusOf(err), name+" "+strconv.Itoa(StatusOf(err)))
 					})
 				})
 			}
@@ -1929,7 +1739,7 @@ func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
 			if rec := do(r, http.MethodOptions, "/a/b/method"); rec.Code != http.StatusNoContent || rec.Header().Get("X-Scope") != "static-first" {
 				t.Errorf("OPTIONS = %d scope %q", rec.Code, rec.Header().Get("X-Scope"))
 			}
-			if rec := do(r, http.MethodGet, "/a/b/error"); rec.Code != http.StatusTeapot || rec.Body.String() != "static-first error" {
+			if rec := do(r, http.MethodGet, "/a/b/error"); rec.Code != http.StatusInternalServerError || rec.Body.String() != "static-first 500" {
 				t.Errorf("error = %d %q", rec.Code, rec.Body.String())
 			}
 		})
@@ -1938,51 +1748,12 @@ func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
 
 func registerScopedHandlers(r *Router[*tctx], prefix, name string) {
 	r.Route(prefix, func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, name+" 404") })
-		g.MethodNotAllowed(func(c *tctx) error {
-			return c.String(http.StatusMethodNotAllowed, name+" 405")
+		g.ErrorHandler(func(c *tctx, err error) {
+			_ = c.String(StatusOf(err), name+" "+strconv.Itoa(StatusOf(err)))
 		})
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, name+" error") })
 		g.GET("/method", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
 		g.GET("/error", func(*tctx) error { return errors.New("boom") })
 	})
-}
-
-func TestEscapedStaticScopeKeepsItsFallbacksAndErrorHandler(t *testing.T) {
-	for _, reverse := range []bool{false, true} {
-		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
-			r := newTestRouter()
-			static := func() { registerScopedHandlers(r, "/x/a%2Fb", "static") }
-			dynamic := func() { registerScopedHandlers(r, "/x/{value}", "dynamic") }
-			if reverse {
-				dynamic()
-				static()
-			} else {
-				static()
-				dynamic()
-			}
-
-			tests := []struct {
-				method string
-				path   string
-				code   int
-				body   string
-			}{
-				{http.MethodGet, "/x/a%2Fb/missing", http.StatusNotFound, "static 404"},
-				{http.MethodGet, "/x/a%2fb/missing", http.StatusNotFound, "static 404"},
-				{http.MethodPost, "/x/a%2Fb/method", http.StatusMethodNotAllowed, "static 405"},
-				{http.MethodPost, "/x/a%2fb/method", http.StatusMethodNotAllowed, "static 405"},
-				{http.MethodGet, "/x/a%2Fb/error", http.StatusTeapot, "static error"},
-				{http.MethodGet, "/x/a%2fb/error", http.StatusTeapot, "static error"},
-			}
-			for _, tc := range tests {
-				rec := do(r, tc.method, tc.path)
-				if rec.Code != tc.code || rec.Body.String() != tc.body {
-					t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.path, rec.Code, rec.Body.String(), tc.code, tc.body)
-				}
-			}
-		})
-	}
 }
 
 func TestScopedHandlersMatchCanonicalAndDynamicEscapes(t *testing.T) {
@@ -1992,8 +1763,8 @@ func TestScopedHandlersMatchCanonicalAndDynamicEscapes(t *testing.T) {
 		if got := do(r, http.MethodGet, "/x/%61lpha/missing").Body.String(); got != "static 404" {
 			t.Errorf("fallback = %q, want %q", got, "static 404")
 		}
-		if got := do(r, http.MethodGet, "/x/%61lpha/error").Body.String(); got != "static error" {
-			t.Errorf("error = %q, want %q", got, "static error")
+		if got := do(r, http.MethodGet, "/x/%61lpha/error").Body.String(); got != "static 500" {
+			t.Errorf("error = %q, want %q", got, "static 500")
 		}
 	})
 
@@ -2012,8 +1783,8 @@ func TestScopedHandlersMatchCanonicalAndDynamicEscapes(t *testing.T) {
 			if got := do(r, http.MethodGet, "/x/pre-a%2Fb-post/missing").Body.String(); got != "template 404" {
 				t.Errorf("fallback = %q, want %q", got, "template 404")
 			}
-			if got := do(r, http.MethodGet, "/x/pre-a%2Fb-post/error").Body.String(); got != "template error" {
-				t.Errorf("error = %q, want %q", got, "template error")
+			if got := do(r, http.MethodGet, "/x/pre-a%2Fb-post/error").Body.String(); got != "template 500" {
+				t.Errorf("error = %q, want %q", got, "template 500")
 			}
 		})
 	}
@@ -2023,8 +1794,8 @@ func TestScopedHandlersMatchCanonicalAndDynamicEscapes(t *testing.T) {
 	if got := do(r, http.MethodGet, "/x/a%2Fb/missing").Body.String(); got != "regex 404" {
 		t.Errorf("regex fallback = %q, want %q", got, "regex 404")
 	}
-	if got := do(r, http.MethodGet, "/x/a%2Fb/error").Body.String(); got != "regex error" {
-		t.Errorf("regex error = %q, want %q", got, "regex error")
+	if got := do(r, http.MethodGet, "/x/a%2Fb/error").Body.String(); got != "regex 500" {
+		t.Errorf("regex error = %q, want %q", got, "regex 500")
 	}
 }
 
@@ -2034,7 +1805,7 @@ func TestScopeCoverageRejectsInvalidDynamicEscapes(t *testing.T) {
 		path    string
 		want    bool
 	}{
-		{"/x/%zz", "/x/%zz/missing", true},
+		{"/x/plain", "/x/plain/missing", true},
 		{"/x/{value}", "/x/%zz/missing", false},
 		{"/x/pre-{value}", "/x/pre-%zz/missing", false},
 		{"/x/{value:.+}", "/x/%zz/missing", false},
@@ -2055,8 +1826,9 @@ func TestScopeCoverageRejectsInvalidDynamicEscapes(t *testing.T) {
 
 func TestScopedHandlersIgnoreInvalidRawPath(t *testing.T) {
 	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusInternalServerError, "root error") })
+	r.ErrorHandler(func(c *tctx, err error) {
+		_ = c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
+	})
 	registerScopedHandlers(r, "/x/safe", "scope")
 	r.GET("/outside/error", func(*tctx) error { return errors.New("boom") })
 
@@ -2065,7 +1837,7 @@ func TestScopedHandlersIgnoreInvalidRawPath(t *testing.T) {
 		body string
 	}{
 		{"/outside/missing", "root 404"},
-		{"/outside/error", "root error"},
+		{"/outside/error", "root 500"},
 	}
 	for _, tc := range tests {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -2082,7 +1854,7 @@ func TestAScopeValidatesItsPrefix(t *testing.T) {
 	r := newTestRouter()
 	mustPanicContaining(t, "unbalanced", func() {
 		r.Route("/bad/{", func(g *Router[*tctx]) {
-			g.NotFound(func(c *tctx) error { return c.NoContent(http.StatusNotFound) })
+			g.ErrorHandler(func(c *tctx, err error) { _ = c.NoContent(StatusOf(err)) })
 		})
 	})
 }
@@ -2257,8 +2029,7 @@ func TestRouteParamsCountsHostAndPathTogether(t *testing.T) {
 // maxInlineParams that the sample tables cannot afford fails here.
 func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
 	for name, build := range map[string]func() *Router[*tctx]{
-		"siteRouter":  siteRouter,
-		"namedRouter": namedRouter,
+		"siteRouter": siteRouter,
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, rt := range build().Routes() {
@@ -2275,7 +2046,7 @@ func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
 // own prefix, so a 404 names the scope that answered it.
 func scopeAnswering(r *Router[*tctx], prefix string) {
 	r.Route(prefix, func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, prefix) })
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), prefix) })
 	})
 }
 
@@ -2361,11 +2132,11 @@ func TestScopeFallbackPrecedenceIsLeftmostMostSpecificSegment(t *testing.T) {
 func TestScopeFallbackPrefersTheDeeperScopeOnAnEqualPrefix(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/a/b", func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "flat") })
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "flat") })
 	})
 	r.Route("/a", func(g *Router[*tctx]) {
 		g.Route("/b", func(h *Router[*tctx]) {
-			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "nested") })
+			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "nested") })
 		})
 	})
 
@@ -2383,7 +2154,7 @@ func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
 	scopeAnswering(r, "/a")
 	r.Host("api.example.com", func(h *Router[*tctx]) {
 		h.Route("/{p}", func(g *Router[*tctx]) {
-			g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "host /{p}") })
+			g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "host /{p}") })
 		})
 	})
 
@@ -2402,12 +2173,6 @@ func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
 		want string
 		set  func(*Router[*tctx])
 	}{
-		{"NotFound", "the not-found handler", func(g *Router[*tctx]) {
-			g.NotFound(func(c *tctx) error { return nil })
-		}},
-		{"MethodNotAllowed", "the method-not-allowed handler", func(g *Router[*tctx]) {
-			g.MethodNotAllowed(func(c *tctx) error { return nil })
-		}},
 		{"ErrorHandler", "the error handler", func(g *Router[*tctx]) {
 			g.ErrorHandler(func(c *tctx, err error) {})
 		}},
@@ -2425,24 +2190,28 @@ func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
 // can match, so each keeps its own fallbacks.
 func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
 	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
+	r.ErrorHandler(func(c *tctx, err error) {
+		_ = c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
+	})
 	r.GET("/outside", func(c *tctx) error { return ErrInternalServerError })
 	r.Route("/api", func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "api err") })
+		g.ErrorHandler(func(c *tctx, err error) {
+			_ = c.String(StatusOf(err), "api "+strconv.Itoa(StatusOf(err)))
+		})
 		g.GET("/inside", func(c *tctx) error { return ErrInternalServerError })
 	})
 	// A nested Group inherits the prefix of its owner, so it may own them too.
 	r.Route("/deep", func(g *Router[*tctx]) {
 		g.Group(func(h *Router[*tctx]) {
-			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "deep 404") })
+			h.ErrorHandler(func(c *tctx, err error) {
+				_ = c.String(StatusOf(err), "deep "+strconv.Itoa(StatusOf(err)))
+			})
 		})
 	})
 
 	for _, tc := range []struct{ path, want string }{
-		{"/outside", "root err"},
-		{"/api/inside", "api err"},
+		{"/outside", "root 500"},
+		{"/api/inside", "api 500"},
 		{"/nowhere", "root 404"},
 		{"/api/nowhere", "api 404"},
 		{"/deep/nowhere", "deep 404"},
@@ -2469,18 +2238,21 @@ func TestUseAfterMountIsRefused(t *testing.T) {
 // answer there and leave the rest of the tree to the parent.
 func TestMountKeepsTheFallbacksOfTheMountedRouter(t *testing.T) {
 	api := newTestRouter()
-	api.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
-	api.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "api err") })
+	api.ErrorHandler(func(c *tctx, err error) {
+		_ = c.String(StatusOf(err), "api "+strconv.Itoa(StatusOf(err)))
+	})
 	api.GET("/boom", func(*tctx) error { return ErrInternalServerError })
 
 	r := newTestRouter()
-	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.ErrorHandler(func(c *tctx, err error) {
+		_ = c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
+	})
 	r.Mount("/api", api)
 	r.GET("/outside", func(*tctx) error { return ErrInternalServerError })
 
 	for _, tc := range []struct{ path, want string }{
 		{"/api/nope", "api 404"},
-		{"/api/boom", "api err"},
+		{"/api/boom", "api 500"},
 		{"/nope", "root 404"},
 	} {
 		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
@@ -2510,7 +2282,6 @@ func TestMountRefusesARouterCarryingRootOnlySettings(t *testing.T) {
 		{"RedirectTrailingSlash", "RedirectTrailingSlash(true)", func(s *Router[*tctx]) { s.RedirectTrailingSlash(true) }},
 		{"MaxBodyBytes", "MaxBodyBytes", func(s *Router[*tctx]) { s.MaxBodyBytes(1 << 10) }},
 		{"MaxMultipartMemory", "MaxMultipartMemory", func(s *Router[*tctx]) { s.MaxMultipartMemory(1 << 10) }},
-		{"StrictBind", "StrictBind", func(s *Router[*tctx]) { s.StrictBind(true) }},
 		{"JSONOptions", "JSONOptions", func(s *Router[*tctx]) { s.JSONOptions(json.Deterministic(true)) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2585,11 +2356,9 @@ func TestMountedHandlerKeepsTheTrailingSlash(t *testing.T) {
 func TestScopeFallbackSeesItsPrefixParams(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/t/{tid}", func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error {
-			return c.String(http.StatusNotFound, "404 tid="+c.Param("tid")+" pattern="+c.RoutePattern())
-		})
-		g.MethodNotAllowed(func(c *tctx) error {
-			return c.String(http.StatusMethodNotAllowed, "405 tid="+c.Param("tid"))
+		g.ErrorHandler(func(c *tctx, err error) {
+			_ = c.String(StatusOf(err), strconv.Itoa(StatusOf(err))+
+				" tid="+c.Param("tid")+" pattern="+c.RoutePattern())
 		})
 		g.GET("/x", echoRoute)
 	})
@@ -2597,8 +2366,8 @@ func TestScopeFallbackSeesItsPrefixParams(t *testing.T) {
 	if got := do(r, http.MethodGet, "/t/acme/missing").Body.String(); got != "404 tid=acme pattern=/t/{tid}" {
 		t.Errorf("scope 404 = %q, want %q", got, "404 tid=acme pattern=/t/{tid}")
 	}
-	if got := do(r, http.MethodPost, "/t/acme/x").Body.String(); got != "405 tid=acme" {
-		t.Errorf("scope 405 = %q, want %q", got, "405 tid=acme")
+	if got := do(r, http.MethodPost, "/t/acme/x").Body.String(); got != "405 tid=acme pattern=/t/{tid}/x" {
+		t.Errorf("scope 405 = %q, want the route pattern and tid", got)
 	}
 }
 
@@ -2608,8 +2377,8 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 	r := newTestRouter()
 	r.Host("{sub}.example.com", func(h *Router[*tctx]) {
 		h.Route("/t/{tid}", func(g *Router[*tctx]) {
-			g.NotFound(func(c *tctx) error {
-				return c.String(http.StatusNotFound, "sub="+c.Param("sub")+" tid="+c.Param("tid"))
+			g.ErrorHandler(func(c *tctx, err error) {
+				_ = c.String(StatusOf(err), "sub="+c.Param("sub")+" tid="+c.Param("tid"))
 			})
 			g.GET("/x", echoRoute)
 		})
@@ -2621,75 +2390,73 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 	}
 }
 
-// A registrar that installs several tree entries is still one route to the
-// caller, so one Name scope has to cover all of them.
-func TestOneRegistrarCallHoldsOneName(t *testing.T) {
-	t.Run("MountHandler", func(t *testing.T) {
-		r := newTestRouter()
-		r.Name("assets").MountHandler("/static", http.NotFoundHandler())
-		got, err := r.URL("assets", nil)
-		if err != nil {
-			t.Fatalf("URL(assets) = %v", err)
-		}
-		if got != "/static" {
-			t.Errorf("URL(assets) = %q, want %q", got, "/static")
-		}
-	})
-
-	t.Run("Match", func(t *testing.T) {
-		r := newTestRouter()
-		r.Name("save").Match([]string{http.MethodPost, http.MethodPut}, "/items", echoRoute)
-		got, err := r.URL("save", nil)
-		if err != nil {
-			t.Fatalf("URL(save) = %v", err)
-		}
-		if got != "/items" {
-			t.Errorf("URL(save) = %q, want %q", got, "/items")
-		}
-		for _, m := range []string{http.MethodPost, http.MethodPut} {
-			if code := do(r, m, "/items").Code; code != http.StatusOK {
-				t.Errorf("%s /items = %d, want 200", m, code)
-			}
-		}
-	})
-
-	// A named scope still holds one route, not two.
-	t.Run("two routes still panic", func(t *testing.T) {
-		r := newTestRouter()
-		named := r.Name("twice")
-		named.GET("/a", echoRoute)
-		mustPanicContaining(t, "already registered a route", func() { named.GET("/b", echoRoute) })
-	})
-}
-
-// A path arrives canonicalised, so a literal spelled any other way is compared
-// against text no request can produce.
-func TestUnmatchableStaticLiteralsAreRejected(t *testing.T) {
-	for _, tc := range []struct{ pattern, want string }{
-		{`/backslash/a\b`, "write %5C"},
-		{"/lower/a%2fb", "upper-case escapes"},
-		{"/decoded/%41", `decoded, so write "A"`},
-	} {
-		t.Run(tc.pattern, func(t *testing.T) {
-			err := ValidatePattern(tc.pattern)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("ValidatePattern(%q) = %v, want one that reads %q", tc.pattern, err, tc.want)
-			}
-			mustPanicContaining(t, tc.want, func() { newTestRouter().GET(tc.pattern, echoRoute) })
-		})
-	}
-
-	// A % that starts no escape reaches the trie as written, so it still works.
-	if err := ValidatePattern("/discount/50%"); err != nil {
-		t.Errorf("ValidatePattern(/discount/50%%) = %v, want nil", err)
-	}
-}
-
 // {*} goes through the brace branch, which rejects duplicates; the bare form
 // has to do the same.
 func TestBareStarChecksForADuplicateName(t *testing.T) {
 	if err := ValidatePattern("/{*}/*"); err == nil ||
 		!strings.Contains(err.Error(), "duplicate parameter") {
 		t.Errorf("ValidatePattern(/{*}/*) = %v, want a duplicate-parameter error", err)
+	}
+}
+
+// Registration and the first request order against each other, so the check
+// that refuses a late route cannot be overtaken by the request that makes it
+// late. Without that ordering a route could go into a trie a request had
+// already started reading.
+func TestLateRegistrationIsRefusedNotRaced(t *testing.T) {
+	for range 200 {
+		r := newTestRouter()
+		r.GET("/a", echoRoute)
+
+		var wg sync.WaitGroup
+		var panicked atomic.Bool
+		wg.Go(func() { do(r, http.MethodGet, "/a") })
+		wg.Go(func() {
+			defer func() {
+				if recover() != nil {
+					panicked.Store(true)
+				}
+			}()
+			r.GET("/b", echoRoute)
+		})
+		wg.Wait()
+
+		// Either the route was registered before the request, or it was
+		// refused. It is never installed into a trie being read.
+		if !panicked.Load() && do(r, http.MethodGet, "/b").Code != http.StatusOK {
+			t.Fatal("a route was neither refused nor served")
+		}
+	}
+}
+
+// A path arrives percent-decoded except for %, \ and /, so a literal outside
+// the unreserved set either cannot appear or would have to be spelled as an
+// escape to match. Refusing it at registration means a literal never needs
+// decoding to be compared.
+func TestLiteralCharsetIsEnforced(t *testing.T) {
+	for _, pattern := range []string{
+		"/café",
+		`/files/a\b`,
+		"/slash/a%2Fb",
+		"/discount/50%",
+		"/files/{name}.tx t",
+		"/a:b",
+	} {
+		t.Run(pattern, func(t *testing.T) {
+			if err := ValidatePattern(pattern); err == nil ||
+				!strings.Contains(err.Error(), "a literal may hold only") {
+				t.Errorf("ValidatePattern(%q) = %v, want a charset error", pattern, err)
+			}
+			mustPanicContaining(t, "a literal may hold only", func() {
+				newTestRouter().GET(pattern, echoRoute)
+			})
+		})
+	}
+
+	// The unreserved set, in a plain segment and inside a template.
+	for _, pattern := range []string{"/health.json", "/files/{name}.txt", "/a_b~c-d/{id}"} {
+		if err := ValidatePattern(pattern); err != nil {
+			t.Errorf("ValidatePattern(%q) = %v, want nil", pattern, err)
+		}
 	}
 }

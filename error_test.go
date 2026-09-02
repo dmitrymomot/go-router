@@ -99,7 +99,7 @@ func TestErrorHandlerHidesTheMessageOfAStatusCoder(t *testing.T) {
 	if rec.Code != http.StatusPaymentRequired {
 		t.Errorf("status = %d, want 402", rec.Code)
 	}
-	if got, want := rec.Body.String(), `{"status":402,"error":"Payment Required"}`; got != want {
+	if got, want := rec.Body.String(), "Payment Required"; got != want {
 		t.Errorf("body = %q, want %q; the status is the client's, the message is not", got, want)
 	}
 }
@@ -157,7 +157,7 @@ func TestFieldErrorsReachTheBody(t *testing.T) {
 	})
 
 	rec := do(r, http.MethodPost, "/users")
-	want := `{"status":422,"error":"Unprocessable Entity","details":[{"field":"email","message":"is not an address"}]}`
+	want := "Unprocessable Entity\nemail: is not an address"
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
@@ -259,30 +259,12 @@ func TestErrorHandlerExposesTheCause(t *testing.T) {
 		return ErrBadRequest.WithMessage("check the payload").WithError(errors.New("sql: no rows"))
 	})
 
-	tests := []struct {
-		name   string
-		accept string
-		want   string
-	}{
-		{"JSON", "", `{"status":400,"error":"check the payload","cause":"sql: no rows"}`},
-		{"text", MIMETextPlain, "check the payload\n\nsql: no rows"},
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			if tc.accept != "" {
-				req.Header.Set(HeaderAccept, tc.accept)
-			}
-			rec := httptest.NewRecorder()
-			r.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400", rec.Code)
-			}
-			if got := rec.Body.String(); got != tc.want {
-				t.Errorf("body = %q, want %q", got, tc.want)
-			}
-		})
+	if got, want := rec.Body.String(), "check the payload\n\nsql: no rows"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
@@ -337,166 +319,6 @@ func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
 	}
 }
 
-func TestDefaultErrorHandlerAnswersHTMXWithHTML(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/boom", func(*tctx) error {
-		return ErrForbidden.WithMessage("no <b>entry</b>")
-	})
-
-	tests := []struct {
-		name        string
-		headers     map[string]string
-		contentType string
-		body        string
-	}{
-		{
-			name:        "a service gets JSON",
-			contentType: MIMEApplicationJSONCharsetUTF8,
-			body:        `{"status":403,"error":"no <b>entry</b>"}`,
-		},
-		{
-			name:        "a browser gets HTML",
-			headers:     map[string]string{HeaderAccept: "text/html"},
-			contentType: MIMETextHTMLCharsetUTF8,
-			body:        "no &lt;b&gt;entry&lt;/b&gt;",
-		},
-		{
-			name:        "htmx gets escaped HTML",
-			headers:     map[string]string{HeaderAccept: "*/*", HeaderHXRequest: "true"},
-			contentType: MIMETextHTMLCharsetUTF8,
-			body:        "no &lt;b&gt;entry&lt;/b&gt;",
-		},
-		{
-			name: "an htmx request that asks for JSON still gets JSON",
-			headers: map[string]string{
-				HeaderAccept:    MIMEApplicationJSON,
-				HeaderHXRequest: "true",
-			},
-			contentType: MIMEApplicationJSONCharsetUTF8,
-			body:        `{"status":403,"error":"no <b>entry</b>"}`,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := hxDo(r, http.MethodGet, "/boom", tc.headers)
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("status = %d, want 403", rec.Code)
-			}
-			if got := rec.Header().Get(HeaderContentType); got != tc.contentType {
-				t.Errorf("%s = %q, want %q", HeaderContentType, got, tc.contentType)
-			}
-			if got := rec.Body.String(); got != tc.body {
-				t.Errorf("body = %q, want %q", got, tc.body)
-			}
-			wantVary := []string{HeaderAccept, HeaderHXRequest}
-			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, wantVary) {
-				t.Errorf("%s = %q, want %q", HeaderVary, got, wantVary)
-			}
-		})
-	}
-}
-
-func TestDefaultErrorHandlerNegotiatesQuality(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/boom", func(*tctx) error {
-		return ErrForbidden.WithMessage("no <b>entry</b>")
-	})
-
-	tests := []struct {
-		name        string
-		accept      string
-		htmx        bool
-		contentType string
-		body        string
-	}{
-		{
-			"no Accept defaults to JSON", "", false, MIMEApplicationJSONCharsetUTF8,
-			`{"status":403,"error":"no <b>entry</b>"}`,
-		},
-		{
-			"media types ignore case", "APPLICATION/JSON", false, MIMEApplicationJSONCharsetUTF8,
-			`{"status":403,"error":"no <b>entry</b>"}`,
-		},
-		{
-			"an explicit JSON refusal is respected", "application/json;q=0, text/plain;q=1", false,
-			MIMETextPlainCharsetUTF8, "no <b>entry</b>",
-		},
-		{
-			"a preferred HTML representation wins", "application/json;q=0.2, text/html;q=0.9", false,
-			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
-		},
-		{
-			"HTML is not replaced by refused plain text", "text/html;q=1, text/plain;q=0, application/json;q=0", false,
-			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
-		},
-		{
-			"a preferred JSON representation wins", "text/plain;q=0.2, application/json;q=0.9", false,
-			MIMEApplicationJSONCharsetUTF8, `{"status":403,"error":"no <b>entry</b>"}`,
-		},
-		{
-			"an unsupported media type falls back to text", "application/xml", false,
-			MIMETextPlainCharsetUTF8, "no <b>entry</b>",
-		},
-		{
-			"htmx wildcard prefers escaped HTML", "*/*", true,
-			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
-		},
-		{
-			"htmx can prefer JSON", "text/html;q=0.5, application/json;q=0.9", true,
-			MIMEApplicationJSONCharsetUTF8, `{"status":403,"error":"no <b>entry</b>"}`,
-		},
-		{
-			"htmx JSON refusal prefers escaped HTML", "application/json;q=0, */*;q=1", true,
-			MIMETextHTMLCharsetUTF8, "no &lt;b&gt;entry&lt;/b&gt;",
-		},
-		{
-			"htmx emits negotiated plain text", "text/plain;q=1, text/html;q=0", true,
-			MIMETextPlainCharsetUTF8, "no <b>entry</b>",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			headers := map[string]string{}
-			if tc.accept != "" {
-				headers[HeaderAccept] = tc.accept
-			}
-			if tc.htmx {
-				headers[HeaderHXRequest] = "true"
-			}
-			rec := hxDo(r, http.MethodGet, "/boom", headers)
-
-			if got := rec.Header().Get(HeaderContentType); got != tc.contentType {
-				t.Errorf("Content-Type = %q, want %q", got, tc.contentType)
-			}
-			if got := rec.Body.String(); got != tc.body {
-				t.Errorf("body = %q, want %q", got, tc.body)
-			}
-			wantVary := []string{HeaderAccept, HeaderHXRequest}
-			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, wantVary) {
-				t.Errorf("Vary = %v, want %v", got, wantVary)
-			}
-		})
-	}
-}
-
-func TestDefaultErrorHandlerCombinesAcceptHeaderFields(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/boom", func(*tctx) error { return ErrForbidden })
-
-	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
-	req.Header.Add(HeaderAccept, "text/plain;q=0")
-	req.Header.Add(HeaderAccept, "application/json;q=1")
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-
-	if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationJSONCharsetUTF8 {
-		t.Errorf("Content-Type = %q, want %q", got, MIMEApplicationJSONCharsetUTF8)
-	}
-	if got, want := rec.Body.String(), `{"status":403,"error":"Forbidden"}`; got != want {
-		t.Errorf("body = %q, want %q", got, want)
-	}
-}
-
 func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/boom", func(*tctx) error { return ErrForbidden })
@@ -526,36 +348,6 @@ func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 				t.Errorf("HEAD body = %q, want empty", head.Body.String())
 			}
 		})
-	}
-}
-
-// RFC 6839: a +json subtype is JSON with a name on it, and text/plain is not
-// what a JSON:API client asked for.
-func TestErrorNegotiationAcceptsAStructuredJSONSuffix(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/e", func(*tctx) error { return ErrBadRequest })
-
-	for _, accept := range []string{
-		MIMEApplicationJSON,
-		"application/vnd.api+json",
-		"application/problem+json",
-	} {
-		req := httptest.NewRequest(http.MethodGet, "/e", nil)
-		req.Header.Set(HeaderAccept, accept)
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationJSONCharsetUTF8 {
-			t.Errorf("Accept %s answered %s, want JSON", accept, got)
-		}
-	}
-
-	// A type that names itself still wins over the suffix match.
-	req := httptest.NewRequest(http.MethodGet, "/e", nil)
-	req.Header.Set(HeaderAccept, "text/html, application/vnd.api+json;q=0.5")
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	if got := rec.Header().Get(HeaderContentType); got != MIMETextHTMLCharsetUTF8 {
-		t.Errorf("an exact text/html offer answered %s, want HTML", got)
 	}
 }
 

@@ -194,7 +194,7 @@ func TestBindQueryReportsAParseError(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), `"field":"page"`) {
+	if !strings.Contains(rec.Body.String(), "page: ") {
 		t.Errorf("body does not name the field: %q", rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "cannot parse") {
@@ -293,7 +293,7 @@ func TestDecodeValuesFlattensEmbeddedStructs(t *testing.T) {
 	}
 
 	var got query
-	fields, err := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query", false)
+	fields, err := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query")
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -367,17 +367,20 @@ func multipartBody(t *testing.T, values url.Values, files ...upload) (body, cont
 	return buf.String(), w.FormDataContentType()
 }
 
+// details reads the field errors back out of a plain-text error body, which
+// carries them one per line after the message as "field: message".
 func details(t *testing.T, rec *httptest.ResponseRecorder) []FieldError {
 	t.Helper()
-	var body struct {
-		Status  int          `json:"status"`
-		Error   string       `json:"error"`
-		Details []FieldError `json:"details"`
+	lines := strings.Split(strings.TrimRight(rec.Body.String(), "\n"), "\n")
+	var out []FieldError
+	for _, line := range lines[1:] {
+		field, msg, ok := strings.Cut(line, ": ")
+		if !ok {
+			continue
+		}
+		out = append(out, FieldError{Field: field, Message: msg})
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
-	}
-	return body.Details
+	return out
 }
 
 func TestBindFormAppliesTheBodyLimit(t *testing.T) {
@@ -964,153 +967,6 @@ func TestBindReportsEveryFieldThatDidNotFit(t *testing.T) {
 	}
 }
 
-func TestStrictBindFillsOnlyTaggedFields(t *testing.T) {
-	type user struct {
-		Name    string `form:"name"`
-		IsAdmin bool
-	}
-	handler := func(c *tctx) error {
-		in, err := c.BindForm[user]()
-		if err != nil {
-			return err
-		}
-		return c.Stringf(http.StatusOK, "%s/%v", in.Name, in.IsAdmin)
-	}
-	body := url.Values{"name": {"bo"}, "isadmin": {"true"}}
-
-	loose := newTestRouter()
-	loose.POST("/users", handler)
-	if got, want := postForm(loose, "/users", body).Body.String(), "bo/true"; got != want {
-		t.Errorf("loose body = %q, want %q", got, want)
-	}
-
-	strict := newTestRouter()
-	strict.StrictBind(true)
-	strict.POST("/users", handler)
-	if got, want := postForm(strict, "/users", body).Body.String(), "bo/false"; got != want {
-		t.Errorf("strict body = %q, want %q", got, want)
-	}
-}
-
-func TestStrictBindFillsOnlyTaggedFieldsOfAJSONBody(t *testing.T) {
-	type profile struct {
-		City  string `json:"city"`
-		Level int
-	}
-	type user struct {
-		Name    string    `json:"name"`
-		Profile profile   `json:"profile"`
-		Friends []profile `json:"friends"`
-		Since   time.Time `json:"since"`
-		IsAdmin bool
-	}
-	handler := func(c *tctx) error {
-		in, err := c.Bind[user]()
-		if err != nil {
-			return err
-		}
-		return c.Stringf(http.StatusOK, "%s/%v/%s/%d/%d/%d",
-			in.Name, in.IsAdmin, in.Profile.City, in.Profile.Level,
-			len(in.Friends), in.Since.Year())
-	}
-	body := `{"name":"bo","IsAdmin":true,"since":"2026-01-02T03:04:05Z",
-		"profile":{"city":"lviv","Level":9},"friends":[{"city":"kyiv","Level":8}]}`
-
-	loose := newTestRouter()
-	loose.POST("/users", handler)
-	if got, want := post(loose, "/users", MIMEApplicationJSON, body).Body.String(), "bo/true/lviv/9/1/2026"; got != want {
-		t.Errorf("loose body = %q, want %q", got, want)
-	}
-
-	strict := newTestRouter()
-	strict.StrictBind(true)
-	strict.POST("/users", handler)
-	if got, want := post(strict, "/users", MIMEApplicationJSON, body).Body.String(), "bo/false/lviv/0/1/2026"; got != want {
-		t.Errorf("strict body = %q, want %q", got, want)
-	}
-}
-
-type strictNode struct {
-	Label string      `json:"label"`
-	Next  *strictNode `json:"next"`
-	Depth int
-}
-
-type strictCoin struct {
-	Amount int
-	Code   string
-}
-
-func (c *strictCoin) UnmarshalJSON(b []byte) error {
-	var s string
-	if err := json.Unmarshal(b, &s); err != nil {
-		return err
-	}
-	_, err := fmt.Sscanf(s, "%d %s", &c.Amount, &c.Code)
-	return err
-}
-
-func TestStripUntaggedWalksTheValuesItHolds(t *testing.T) {
-	type in struct {
-		Node  *strictNode           `json:"node"`
-		Items map[string]strictNode `json:"items"`
-		Names map[string]string     `json:"names"`
-		Price strictCoin            `json:"price"`
-		Loose string
-	}
-	v := in{
-		Node:  &strictNode{Label: "a", Depth: 3, Next: &strictNode{Label: "b", Depth: 4}},
-		Items: map[string]strictNode{"x": {Label: "c", Depth: 5}},
-		Names: map[string]string{"k": "v"},
-		Price: strictCoin{Amount: 12, Code: "EUR"},
-		Loose: "reached",
-	}
-	stripUntagged(reflect.ValueOf(&v).Elem())
-
-	if v.Loose != "" {
-		t.Errorf("Loose = %q, want the untagged field blanked", v.Loose)
-	}
-	if v.Node.Label != "a" || v.Node.Depth != 0 {
-		t.Errorf("Node = %+v, want the label kept and the depth blanked", *v.Node)
-	}
-	if v.Node.Next.Depth != 0 {
-		t.Errorf("Node.Next = %+v, want the walk to reach through a pointer", *v.Node.Next)
-	}
-	if got := v.Items["x"]; got.Label != "c" || got.Depth != 0 {
-		t.Errorf("Items[x] = %+v, want the walk to reach a map value", got)
-	}
-	if v.Names["k"] != "v" {
-		t.Errorf("Names = %v, want a map of strings left alone", v.Names)
-	}
-	if want := (strictCoin{Amount: 12, Code: "EUR"}); v.Price != want {
-		t.Errorf("Price = %+v, want %+v: a type that decodes itself keeps what it read", v.Price, want)
-	}
-}
-
-func TestStrictBindKeepsEmbeddedTaggedFields(t *testing.T) {
-	type page struct {
-		Offset int `query:"offset"`
-	}
-	type filter struct {
-		page
-		Term string `query:"q"`
-	}
-
-	r := newTestRouter()
-	r.StrictBind(true)
-	r.GET("/search", func(c *tctx) error {
-		in, err := c.BindQuery[filter]()
-		if err != nil {
-			return err
-		}
-		return c.Stringf(http.StatusOK, "%d/%s", in.Offset, in.Term)
-	})
-
-	if got, want := do(r, http.MethodGet, "/search?offset=40&q=go").Body.String(), "40/go"; got != want {
-		t.Errorf("body = %q, want %q", got, want)
-	}
-}
-
 func TestQueryAs(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/search", func(c *tctx) error {
@@ -1315,54 +1171,6 @@ func TestValidateRunsForAPointerTypeArgument(t *testing.T) {
 	}
 }
 
-type optionOnlyTags struct {
-	Name  string `json:"name"`
-	Email string `json:",omitempty"`
-	Age   int    `json:",string"`
-}
-
-// An empty tag name with options still names the field, so StrictBind must not
-// treat it as untagged and zero it.
-func TestStrictBindKeepsFieldsTaggedWithOptionsOnly(t *testing.T) {
-	for _, strict := range []bool{true, false} {
-		r := newTestRouter()
-		r.StrictBind(strict)
-		r.POST("/x", func(c *tctx) error {
-			v, err := c.Bind[optionOnlyTags]()
-			if err != nil {
-				return err
-			}
-			return c.String(http.StatusOK, fmt.Sprintf("%s/%s/%d", v.Name, v.Email, v.Age))
-		})
-		got := doBody(r, http.MethodPost, "/x", MIMEApplicationJSON,
-			`{"name":"bo","Email":"bo@x","Age":"7"}`).Body.String()
-		if got != "bo/bo@x/7" {
-			t.Errorf("StrictBind(%v) = %q, want %q", strict, got, "bo/bo@x/7")
-		}
-	}
-}
-
-// Untagged fields are still stripped: the allowlist is what StrictBind is for.
-func TestStrictBindStillStripsUntaggedFields(t *testing.T) {
-	type mixed struct {
-		Name  string `json:"name"`
-		Admin bool
-	}
-	r := newTestRouter()
-	r.StrictBind(true)
-	r.POST("/x", func(c *tctx) error {
-		v, err := c.Bind[mixed]()
-		if err != nil {
-			return err
-		}
-		return c.String(http.StatusOK, fmt.Sprintf("%s/%v", v.Name, v.Admin))
-	})
-	if got := doBody(r, http.MethodPost, "/x", MIMEApplicationJSON,
-		`{"name":"bo","Admin":true}`).Body.String(); got != "bo/false" {
-		t.Errorf("untagged field = %q, want %q", got, "bo/false")
-	}
-}
-
 // ParseForm on a multipart body fills PostForm and leaves MultipartForm nil, so
 // PostForm alone cannot say whether the body has been read.
 func TestFormFileSurvivesAnEarlierParseForm(t *testing.T) {
@@ -1453,22 +1261,18 @@ func TestOversizedBodyClosesTheConnection(t *testing.T) {
 	}
 }
 
-// A JSON body of "null" bound into a pointer leaves a nil T, which satisfies
-// Validator but has no value to check.
-func TestBindPointerWithANullBodySkipsValidate(t *testing.T) {
+// A body of "null" is the client's choice, and leaves nothing to hand the
+// handler, so it is refused rather than passed on as a nil pointer.
+func TestBindPointerWithANullBodyIsRefused(t *testing.T) {
 	r := newTestRouter()
 	r.POST("/p", func(c *tctx) error {
-		v, err := c.Bind[*pointerValidated]()
-		if err != nil {
+		if _, err := c.Bind[*pointerValidated](); err != nil {
 			return err
 		}
-		if v != nil {
-			return c.String(http.StatusOK, "value")
-		}
-		return c.String(http.StatusOK, "nil")
+		return c.String(http.StatusOK, "handler ran")
 	})
 	rec := doBody(r, http.MethodPost, "/p", MIMEApplicationJSON, `null`)
-	if rec.Code != http.StatusOK || rec.Body.String() != "nil" {
-		t.Errorf("null body = %d %q, want 200 %q", rec.Code, rec.Body.String(), "nil")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("null body = %d %q, want 400", rec.Code, rec.Body.String())
 	}
 }

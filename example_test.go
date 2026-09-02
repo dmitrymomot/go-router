@@ -52,8 +52,8 @@ func Example() {
 	fmt.Println(serve(r, http.MethodDelete, "/users/7"))
 	// Output:
 	// 200 {"id":"7","name":"ann"}
-	// 404 {"status":404,"error":"no user 9"}
-	// 405 {"status":405,"error":"Method Not Allowed"}
+	// 404 no user 9
+	// 405 Method Not Allowed
 }
 
 func ExampleRouter_Route() {
@@ -78,7 +78,7 @@ func ExampleRouter_Route() {
 	fmt.Println(serve(r, http.MethodGet, "/admin/stats"))
 	// Output:
 	// 200 ok
-	// 403 {"status":403,"error":"Forbidden"}
+	// 403 Forbidden
 }
 
 func ExampleRouter_Mount() {
@@ -188,8 +188,8 @@ func ExampleRouter_HostRouter() {
 	api := router.New(func(http.ResponseWriter, *http.Request) *APIContext {
 		return &APIContext{Version: "v1"}
 	})
-	api.NotFound(func(c *APIContext) error {
-		return c.Stringf(http.StatusNotFound, "%s: no such endpoint", c.Version)
+	api.ErrorHandler(func(c *APIContext, err error) {
+		_ = c.Stringf(router.StatusOf(err), "%s: no such endpoint", c.Version)
 	})
 	api.GET("/users/{id}", func(c *APIContext) error {
 		return c.Stringf(http.StatusOK, "%s user %s", c.Version, c.Param("id"))
