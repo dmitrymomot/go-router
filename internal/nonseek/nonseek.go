@@ -30,6 +30,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ReadSeeker trusts size. It caps every read at size - pos and reports size for
@@ -39,6 +40,10 @@ import (
 // client waiting for bytes that never come. A regular file always reports its
 // own length, but a synthetic fs.FS that computes one has to make it match the
 // bytes it will hand over.
+
+// The skip buffer escapes through the io.Reader interface call below it, so it
+// is heap-allocated on every ranged request without this.
+var skipBuffers = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
 
 // MaxRangeSkip is the furthest into a non-seekable file a Range may start.
 // Reaching a later offset means reading and throwing away everything before it.
@@ -189,7 +194,8 @@ func (s *reader) move() error {
 	if skip > MaxRangeSkip {
 		return s.fail("range starts too late for a non-seekable file")
 	}
-	var buf [32 * 1024]byte
+	buf := skipBuffers.Get().(*[32 * 1024]byte)
+	defer skipBuffers.Put(buf)
 	for skip > 0 {
 		if err := s.ctx.Err(); err != nil {
 			return err
