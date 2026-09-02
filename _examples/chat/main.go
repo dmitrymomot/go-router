@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
-	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/serve"
 )
 
 type Context struct {
@@ -28,39 +29,36 @@ const addr = "localhost:8080"
 const maxBodyBytes = 8 << 10
 
 func main() {
-	rm := newRoom()
-	r := newRouter(rm)
-
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           r,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		IdleTimeout:       time.Minute,
-		MaxHeaderBytes:    16 << 10,
-	}
-
 	// SIGTERM is what a container runtime sends.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	drained := make(chan struct{})
+	rm := newRoom()
+	// Every open stream is blocked on the room, so the room has to close
+	// before the drain starts. A drain that waits for a stream never ends.
 	go func() {
-		defer close(drained)
 		<-ctx.Done()
 		rm.close()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		//nolint:errcheck // The process is going away either way.
-		srv.Shutdown(shutdown)
 	}()
 
-	log.Printf("chat on http://%s", addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	if err := serve.Run(ctx, newRouter(rm), serve.Config{
+		Addr:              addr,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       time.Minute,
+		ShutdownTimeout:   5 * time.Second,
+		// No WriteTimeout: it would cut every stream at the deadline.
+		OnListen: func(a net.Addr) { slog.Info("chat is listening", "url", "http://"+a.String()) },
+		// Config carries what a server usually needs. OnServer reaches the
+		// rest of http.Server.
+		OnServer: func(srv *http.Server) error {
+			srv.MaxHeaderBytes = 16 << 10
+			return nil
+		},
+	}); err != nil {
+		slog.Error("the server stopped", "error", err)
+		os.Exit(1)
 	}
-	// ListenAndServe returns as soon as Shutdown begins, not when it finishes.
-	<-drained
 }
 
 func newRouter(rm *room) *router.Router[Ctx] {
