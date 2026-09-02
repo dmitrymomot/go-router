@@ -6,7 +6,6 @@ import (
 	"sync"
 )
 
-// User is one record of the API.
 type User struct {
 	Name  string `json:"name"`
 	Email string `json:"email"`

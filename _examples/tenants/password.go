@@ -31,8 +31,7 @@ func derive(password string, salt []byte) []byte {
 	return sum
 }
 
-// passwordMatches compares in constant time, so the answer takes the same
-// time whatever the first wrong byte is.
+// passwordMatches compares in constant time.
 func passwordMatches(password string, salt, want []byte) bool {
 	return subtle.ConstantTimeCompare(derive(password, salt), want) == 1
 }

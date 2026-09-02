@@ -24,7 +24,6 @@ type NoUserError struct{ ID int }
 func (e NoUserError) Error() string   { return "no user " + strconv.Itoa(e.ID) }
 func (e NoUserError) StatusCode() int { return http.StatusNotFound }
 
-// UserInput is the body of a create and of an update.
 type UserInput struct {
 	Name  string `json:"name"`
 	Email string `json:"email"`
@@ -42,7 +41,6 @@ func (in UserInput) Validate() error {
 	return errors.Join(errs...)
 }
 
-// ErrorBody is what a client reads when a request fails.
 type ErrorBody struct {
 	Error  string              `json:"error"`
 	Fields []router.FieldError `json:"fields,omitempty"`

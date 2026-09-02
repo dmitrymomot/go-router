@@ -9,8 +9,7 @@ import (
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
-// showUser is the handler the examples below drive. appContext is the type of
-// this application: any struct that embeds router.Base will do.
+// showUser is the handler the examples below drive.
 func showUser(c *appContext) error {
 	return c.Stringf(http.StatusOK, "user %s", c.Param("id"))
 }

@@ -22,7 +22,6 @@ func newTestRouter(t *testing.T) *router.Router[Ctx] {
 	return newRouter(NewStore(), router.NewCookieCodec([]byte(strings.Repeat("k", 32))))
 }
 
-// host is where a workspace answers: its door, its dashboard and its tickets.
 func host(slug string) string { return slug + "." + apex }
 
 // csrf issues a token by asking for a page, and gives back the cookie that
@@ -68,7 +67,6 @@ func logIn(t *testing.T, h http.Handler, slug, email, password string) *routerte
 		url.Values{"email": {email}, "password": {password}})
 }
 
-// enter follows the ticket that signup handed out, on the host it names.
 func enterWith(t *testing.T, h http.Handler, location string) *routertest.Response {
 	t.Helper()
 
@@ -269,7 +267,6 @@ func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 	}
 }
 
-// hiddenToken reads the token out of the _csrf field of a rendered form.
 func hiddenToken(t *testing.T, body string) string {
 	t.Helper()
 

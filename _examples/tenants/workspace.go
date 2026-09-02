@@ -7,9 +7,8 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// workspaceRoutes answers on every workspace subdomain: the dashboard, the
-// door and the ticket that signup hands over. One route table serves them all,
-// because the subdomain is a route parameter.
+// workspaceRoutes answers on every workspace subdomain. One route table serves
+// them all, because the subdomain is a route parameter.
 func workspaceRoutes(h *router.Router[Ctx]) {
 	h.Use(loadWorkspace)
 

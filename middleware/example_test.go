@@ -17,8 +17,8 @@ import (
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
-// Context is the type the handlers of this package are written against. Any
-// struct that embeds router.Base will do.
+// Context is this application's own type. Any struct that embeds router.Base
+// will do.
 type Context struct {
 	router.Base
 }

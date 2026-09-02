@@ -29,8 +29,8 @@ func usersAPI(apiKey string) *router.Router[*Context] {
 	return r
 }
 
-// requireAPIKey reads the key from "Authorization: Bearer ...", which is the
-// default source of KeyAuth.
+// requireAPIKey reads "Authorization: Bearer ...", the default source of
+// KeyAuth.
 func requireAPIKey(key string) router.Middleware[*Context] {
 	return middleware.KeyAuth(func(_ *Context, sent string) (bool, error) {
 		return middleware.SecureCompare(sent, key), nil

@@ -68,7 +68,6 @@ func NewStore() *Store {
 	}
 }
 
-// accountKey names one account inside one workspace.
 func accountKey(slug, email string) string { return slug + "\x00" + email }
 
 func (s *Store) Create(name string) (Workspace, error) {

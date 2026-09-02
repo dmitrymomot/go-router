@@ -77,7 +77,6 @@ func newRouter(rm *room) *router.Router[Ctx] {
 		}),
 	)
 
-	// The door. Anybody may knock.
 	r.GET("/", index)
 	r.POST("/join", join)
 	r.POST("/leave", leave)

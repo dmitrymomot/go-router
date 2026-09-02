@@ -32,9 +32,9 @@ func signupForm(c Ctx) error {
 	}))
 }
 
-// signup makes the workspace and the account that owns it, then hands the new
-// owner to the workspace host with a ticket. The session cookie belongs to
-// that host, and the apex cannot set a cookie for a host below it.
+// signup makes the workspace and its first account, then hands the new owner
+// to the workspace host with a ticket, because the apex cannot set a cookie
+// for a host below it.
 func signup(c Ctx) error {
 	in, err := c.Bind[credentialsInput]()
 	if err != nil {
@@ -68,8 +68,6 @@ func signup(c Ctx) error {
 	return c.Redirect(http.StatusSeeOther, enterURL(c, w.Slug, c.Store.NewTicket(w.Slug, email)))
 }
 
-// nameRefused turns a slug rule into a sentence for the reader, and says
-// whether the error was one of those rules at all.
 func nameRefused(err error) (string, bool) {
 	switch {
 	case errors.Is(err, ErrSlugEmpty), errors.Is(err, ErrSlugReserved), errors.Is(err, ErrSlugTaken):
@@ -79,8 +77,7 @@ func nameRefused(err error) (string, bool) {
 	}
 }
 
-// enter spends the ticket that signup issued and starts the session here, on
-// the host the session belongs to.
+// enter spends the ticket signup issued, on the host the session belongs to.
 func enter(c Ctx) error {
 	t, ok := c.Store.Redeem(c.Query("ticket"))
 	if !ok || t.workspace != c.Workspace.Slug {
@@ -90,8 +87,6 @@ func enter(c Ctx) error {
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
-// loginForm is a page of the workspace, not of the apex: each workspace has
-// its own door, at its own address, and its own accounts behind it.
 func loginForm(c Ctx) error {
 	return c.Render(http.StatusOK, tmpl("login", credentialsPage{
 		CSRFToken: middleware.CSRFTokenFrom(c),
@@ -128,8 +123,8 @@ func signout(c Ctx) error {
 	return c.Redirect(http.StatusSeeOther, "/login")
 }
 
-// refuse renders the form again, with the reason and a 422 rather than the
-// 200 that would tell a client the request went through.
+// refuse renders the form again with a 422, not the 200 that would tell a
+// client the request went through.
 func refuse(c Ctx, name string, page credentialsPage, reason string) error {
 	page.Error = reason
 	return c.Render(http.StatusUnprocessableEntity, tmpl(name, page))

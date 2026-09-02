@@ -7,10 +7,8 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// apexRoutes answers on the base domain itself: the pitch and the form that
-// makes a workspace. There is no session here and no login. An account belongs
-// to one workspace, so its door is that workspace's own address, and
-// workspaceRoutes answers it.
+// apexRoutes answers on the base domain itself. There is no login here: an
+// account belongs to one workspace, so its door is that workspace's address.
 func apexRoutes(h *router.Router[Ctx]) {
 	h.GET("/", landing)
 	h.GET("/signup", signupForm)
