@@ -101,7 +101,7 @@
 <!doctype html>
 <html lang="en">
 <head>{{template "head" "Chat"}}</head>
-<body class="chat" hx-ext="sse" sse-connect="/events">
+<body class="chat" hx-ext="sse" sse-connect="/room/events">
 	<header>
 		<h1>go-router chat</h1>
 		<div class="identity">
@@ -126,7 +126,7 @@
 		the stream instead, like everybody else's. The answer also fires
 		message-sent, which empties the input.
 	-->
-	<form action="/messages" method="post" hx-post="/messages" hx-on:message-sent="this.reset()" autocomplete="off">
+	<form action="/room/messages" method="post" hx-post="/room/messages" hx-on:message-sent="this.reset()" autocomplete="off">
 		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 		<input name="text" placeholder="Write a message" maxlength="500" required autofocus>
 		<button type="submit">Send</button>

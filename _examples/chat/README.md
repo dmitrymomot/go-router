@@ -1,6 +1,6 @@
 # chat
 
-A chat room in about 300 lines: `html/template` for the HTML, htmx for the requests, and server-sent events for everything that arrives without one.
+A chat room in about 400 lines: `html/template` for the HTML, htmx for the requests, and server-sent events for everything that arrives without one.
 
 ```bash
 go run .
@@ -16,20 +16,39 @@ The page loads version-pinned htmx and SSE extension assets from jsDelivr with s
 
 | Step | Request | Answer |
 | --- | --- | --- |
-| Type a name | `POST /join`, from htmx | `HX-Redirect: /chat`, or the form again with the reason |
-| Open the room | `GET /chat` | the whole page |
-| Watch the room | `GET /events`, from an `EventSource` | a stream of rendered HTML |
-| Send a message | `POST /messages`, from htmx | `204`, and `HX-Trigger: message-sent` |
+| Type a name | `POST /join`, from htmx | `HX-Redirect: /room`, or the form again with the reason |
+| Open the room | `GET /room` | the whole page |
+| Watch the room | `GET /room/events`, from an `EventSource` | a stream of rendered HTML |
+| Send a message | `POST /room/messages`, from htmx | `204`, and `HX-Trigger: message-sent` |
 | Leave the room | `POST /leave`, from htmx | `HX-Redirect: /` |
 
 The answer to a message carries no HTML. The room attempts to deliver the message to every connected window over the stream, the sender's window included. A full listener buffer is skipped so one slow window cannot delay the room. The page uses the same rendering path for its own messages and those from somebody else.
+
+## The two halves
+
+**A door anybody may knock on**, and **a room only a named reader may enter**. The room is a router of its own, mounted once, so its name check sits at its door and no handler inside repeats it:
+
+```go
+r.Mount("/room", roomRouter())
+```
+
+The prefix appears at that line and nowhere else. `roomRouter` registers `/`, `/messages` and `/events`, and `Use(requireUser)` covers all three.
+
+**A server that stops when its context does.** `serve.Run` owns the listener, the signal and the drain, so `main` says what the timeouts are and nothing about how to shut down. The room closes first, because a drain that waits for an open stream never ends:
+
+```go
+go func() {
+	<-ctx.Done()
+	rm.close()
+}()
+```
 
 ## The three htmx pieces
 
 **A redirect that htmx can follow.** htmx follows a `303` inside the request that it made and swaps whatever the new page answers into the form. `HX()` asks the browser to go there instead, and falls back to the `303` for a client that runs no JavaScript:
 
 ```go
-return c.HX().Redirect("/chat")
+return c.HX().Redirect("/room")
 ```
 
 `middleware.HTMXRedirect` does the same to every redirect of a scope, for an application with more pages than this one.
@@ -41,7 +60,7 @@ return c.HX().Trigger("message-sent").NoSwap()
 ```
 
 ```html
-<form action="/messages" method="post" hx-post="/messages" hx-on:message-sent="this.reset()">
+<form action="/room/messages" method="post" hx-post="/room/messages" hx-on:message-sent="this.reset()">
 	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 ```
 
@@ -72,7 +91,9 @@ func sendTo(reader string) router.SSESender[message] {
 
 | File | Holds |
 | --- | --- |
-| `main.go` | the context type, the routes and the handlers |
+| `main.go` | the context type, the server, and the root router |
+| `join.go` | the door: the form, the name check, and the two redirects |
+| `chat.go` | the mounted room router and its three handlers |
 | `room.go` | the broadcast, and the sender of one connection |
 | `view.go` | the templates, the name in the cookie, and the input limits |
 | `templates/` | the two pages and the three fragments |

@@ -85,15 +85,15 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 		"name":                          {"  Alice  "},
 	}, true, s.csrfCookie)
 	wantStatus(t, joined, http.StatusOK)
-	if got := joined.Header().Get(router.HeaderHXRedirect); got != "/chat" {
-		t.Errorf("HX-Redirect = %q, want /chat", got)
+	if got := joined.Header().Get(router.HeaderHXRedirect); got != "/room" {
+		t.Errorf("HX-Redirect = %q, want /room", got)
 	}
 	s.userCookie = responseCookie(t, joined, cookieName)
 	if s.userCookie.Value != "Alice" || !s.userCookie.HttpOnly || s.userCookie.SameSite != http.SameSiteLaxMode {
 		t.Errorf("user cookie = %#v", s.userCookie)
 	}
 
-	chat := send(t, h, http.MethodGet, "/chat", nil, false, s.csrfCookie, s.userCookie)
+	chat := send(t, h, http.MethodGet, "/room", nil, false, s.csrfCookie, s.userCookie)
 	wantStatus(t, chat, http.StatusOK)
 	body := chat.Body.String()
 	if !strings.Contains(body, "<strong>Alice</strong>") {
@@ -104,7 +104,7 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	}
 	for _, form := range []string{
 		`action="/leave" method="post" hx-post="/leave"`,
-		`action="/messages" method="post" hx-post="/messages"`,
+		`action="/room/messages" method="post" hx-post="/room/messages"`,
 	} {
 		if !strings.Contains(body, form) {
 			t.Errorf("chat page does not contain %q", form)
@@ -115,19 +115,19 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 func TestAuthenticationRedirectsPagesAndRejectsAnonymousSSE(t *testing.T) {
 	h := newRouter(newRoom())
 
-	page := send(t, h, http.MethodGet, "/chat", nil, false)
+	page := send(t, h, http.MethodGet, "/room", nil, false)
 	wantStatus(t, page, http.StatusSeeOther)
 	if got := page.Header().Get(router.HeaderLocation); got != "/" {
 		t.Errorf("Location = %q, want /", got)
 	}
 
-	hx := send(t, h, http.MethodGet, "/chat", nil, true)
+	hx := send(t, h, http.MethodGet, "/room", nil, true)
 	wantStatus(t, hx, http.StatusOK)
 	if got := hx.Header().Get(router.HeaderHXRedirect); got != "/" {
 		t.Errorf("HX-Redirect = %q, want /", got)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	req := httptest.NewRequest(http.MethodGet, "/room/events", nil)
 	req.Header.Set(router.HeaderAccept, router.MIMETextEventStream)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -173,12 +173,12 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 	messages, unsubscribe := rm.join()
 	defer unsubscribe()
 
-	missing := send(t, h, http.MethodPost, "/messages", url.Values{"text": {"forged"}}, true,
+	missing := send(t, h, http.MethodPost, "/room/messages", url.Values{"text": {"forged"}}, true,
 		s.csrfCookie, s.userCookie)
 	wantStatus(t, missing, http.StatusForbidden)
 	wantNoMessage(t, messages)
 
-	sent := send(t, h, http.MethodPost, "/messages", url.Values{
+	sent := send(t, h, http.MethodPost, "/room/messages", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"text":                          {" hello\x00   room "},
 	}, true, s.csrfCookie, s.userCookie)
@@ -195,7 +195,7 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 		t.Fatal("room did not receive the message")
 	}
 
-	empty := send(t, h, http.MethodPost, "/messages", url.Values{
+	empty := send(t, h, http.MethodPost, "/room/messages", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"text":                          {" \t "},
 	}, true, s.csrfCookie, s.userCookie)
@@ -205,7 +205,7 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 	}
 	wantNoMessage(t, messages)
 
-	large := send(t, h, http.MethodPost, "/messages", url.Values{
+	large := send(t, h, http.MethodPost, "/room/messages", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"text":                          {strings.Repeat("x", maxBodyBytes)},
 	}, true, s.csrfCookie, s.userCookie)
@@ -268,7 +268,7 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	eventsReq, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/events", nil)
+	eventsReq, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/room/events", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
