@@ -57,9 +57,13 @@ func joinPattern(prefix, pattern string) string {
 	return prefix + pattern
 }
 
-// ValidatePattern reports whether Handle would accept pattern. Registration
-// panics on a bad pattern, so a table that comes from configuration can check
-// each entry here first.
+// ValidatePattern reports whether pattern is well formed, so that a table read
+// from configuration can be checked before registration, which panics.
+//
+// It sees the pattern alone. Handle rejects more than this: a parameter the
+// scope prefix or the host pattern already names, a route that collides with
+// one registered earlier, and a name a scope has already used. A nil here does
+// not promise that Handle will accept the pattern in every scope.
 func ValidatePattern(pattern string) error {
 	_, _, err := parsePattern(pattern)
 	return err

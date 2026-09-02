@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// betteralign:check
+//betteralign:check
 type Response struct {
 	http.ResponseWriter
 	before    []func()

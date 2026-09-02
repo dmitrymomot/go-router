@@ -32,6 +32,14 @@ import (
 	"strings"
 )
 
+// ReadSeeker trusts size. It caps every read at size - pos and reports size for
+// a seek to the end, because a reader that cannot seek has no other way to know
+// where the file ends. Content-Length is therefore whatever Stat said: a size
+// too small truncates the body without an error, and one too large leaves the
+// client waiting for bytes that never come. A regular file always reports its
+// own length, but a synthetic fs.FS that computes one has to make it match the
+// bytes it will hand over.
+
 // MaxRangeSkip is the furthest into a non-seekable file a Range may start.
 // Reaching a later offset means reading and throwing away everything before it.
 const MaxRangeSkip int64 = 1 << 20

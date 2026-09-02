@@ -47,7 +47,7 @@ const (
 	HXSwapNone        = "none"
 )
 
-// betteralign:check
+//betteralign:check
 type HTMXRequest struct {
 	CurrentURL     string
 	Prompt         string
