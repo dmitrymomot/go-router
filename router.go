@@ -19,7 +19,6 @@ type Route struct {
 	Method  string
 	Pattern string
 	Host    string
-	Name    string
 	Meta    any
 
 	// Params counts the host and path parameters together. A route over
@@ -41,7 +40,6 @@ type registration[C Context] struct {
 	pattern string
 	handler HandlerFunc[C]
 	mws     []Middleware[C]
-	name    string
 	meta    any
 }
 
@@ -75,19 +73,15 @@ type Router[C Context] struct {
 	owner            *Router[C]
 	hasRoutes        bool
 	closed           bool
-	routeBatch       int
 	refreshDepth     int
-	name             string
 	meta             any
 	tagged           bool
-	nameUsed         bool
 	hosts            []hostSpec
 	inHost           bool
 	notFound         HandlerFunc[C]
 	methodNotAllowed HandlerFunc[C]
 	errHandler       ErrorHandlerFunc[C]
 	preMws           []Middleware[C]
-	named            map[string]namedRoute
 	info             map[routeKey]routeInfo
 }
 
@@ -161,21 +155,6 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 }
 
 func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
-	r.handleNamed(method, pattern, h, mws, r.name)
-}
-
-// inOneRoute groups the registrations one registrar call makes, so a Name scope
-// holds all of them: MountHandler installs two patterns, Match one per method.
-func (r *Router[C]) inOneRoute(fn func()) {
-	r.routeBatch++
-	fn()
-	r.routeBatch--
-	if r.routeBatch == 0 && r.name != "" {
-		r.nameUsed = true
-	}
-}
-
-func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []Middleware[C], name string) {
 	// Ordered against the freeze: without it the check below is a guess, and a
 	// route could go into a trie a request had already started reading.
 	r.root.regMu.Lock()
@@ -191,15 +170,6 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 		panic("router: Handle needs a handler for " + method + " " + pattern)
 	}
 	validateMiddleware(mws)
-	if r.name != "" {
-		if r.nameUsed {
-			panic("router: the scope named " + r.name + " already registered a route; open another Name scope for " + method + " " + pattern)
-		}
-		// In a batch the flag waits, so a call cannot trip over its own entries.
-		if r.routeBatch == 0 {
-			r.nameUsed = true
-		}
-	}
 	for s := r; s != nil; s = s.owner {
 		s.hasRoutes = true
 	}
@@ -208,7 +178,6 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 		pattern: pattern,
 		handler: h,
 		mws:     slices.Clone(mws),
-		name:    name,
 		meta:    r.meta,
 	}
 	r.regs = append(r.regs, reg)
@@ -240,9 +209,7 @@ func (r *Router[C]) install(reg registration[C]) {
 }
 
 func (r *Router[C]) record(reg registration[C], e *hostEntry[C], full string) {
-	if err := r.top().describe(reg, e, normalizePattern(full)); err != nil {
-		panic(err.Error())
-	}
+	r.top().describe(reg, e, normalizePattern(full))
 }
 
 // scopePrefix joins the prefixes of every scope between the root and this one.
@@ -348,11 +315,9 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 			panic("router: Match needs non-empty methods")
 		}
 	}
-	r.inOneRoute(func() {
-		for _, m := range methods {
-			r.handle(m, pattern, h, mws)
-		}
-	})
+	for _, m := range methods {
+		r.handle(m, pattern, h, mws)
+	}
 }
 
 func (r *Router[C]) Use(mws ...Middleware[C]) {
@@ -455,15 +420,6 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 	validateMiddleware(mws)
 	r.preMws = append(r.preMws, mws...)
 	r.settingChanged()
-}
-
-func (r *Router[C]) Name(name string) *Router[C] {
-	if name == "" {
-		panic("router: Name needs a name")
-	}
-	c := r.tag()
-	c.name = name
-	return c
 }
 
 func (r *Router[C]) Meta(v any) *Router[C] {
@@ -641,12 +597,8 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 		h.ServeHTTP(b.res, req)
 		return nil
 	}
-	r.inOneRoute(func() {
-		r.handle(anyMethod, prefix, handler, nil)
-		// The name belongs to the prefix, which is what URL resolves; naming
-		// the catch-all too would give one name two patterns.
-		r.handleNamed(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil, "")
-	})
+	r.handle(anyMethod, prefix, handler, nil)
+	r.handle(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil)
 }
 
 func stripMountPrefix(r *http.Request, tail string, escaped, tailSlash bool) *http.Request {
@@ -976,32 +928,19 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	eng.rootErrorHandler = rootErrHandler
 }
 
-func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) error {
-	if reg.name == "" && reg.meta == nil {
-		return nil
+// describe records the metadata a route was tagged with, for Routes.
+func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) {
+	if reg.meta == nil {
+		return
 	}
 	host := ""
 	if e != nil {
 		host = e.pattern
 	}
-	if reg.name != "" {
-		if prev, ok := r.named[reg.name]; ok && prev.pattern != pattern {
-			return fmt.Errorf("router: the route name %q names both %q and %q", reg.name, prev.pattern, pattern)
-		}
-		if r.named == nil {
-			r.named = make(map[string]namedRoute)
-		}
-		nr := namedRoute{pattern: pattern, parts: parseURLTemplate(pattern)}
-		if segs, _, err := parsePattern(pattern); err == nil {
-			nr.segs, nr.recheck = segs, needsRoundTrip(segs)
-		}
-		r.named[reg.name] = nr
-	}
 	if r.info == nil {
 		r.info = make(map[routeKey]routeInfo)
 	}
-	r.info[routeKey{host: host, method: reg.method, pattern: pattern}] = routeInfo{name: reg.name, meta: reg.meta}
-	return nil
+	r.info[routeKey{host: host, method: reg.method, pattern: pattern}] = routeInfo{meta: reg.meta}
 }
 
 func (r *Router[C]) preTerminal(c C) error { return r.eng.route(c, c.base().req, false) }
@@ -1193,10 +1132,7 @@ func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
 
 type routeKey struct{ host, method, pattern string }
 
-type routeInfo struct {
-	name string
-	meta any
-}
+type routeInfo struct{ meta any }
 
 func (r *Router[C]) collectRoutes() []Route {
 	var out []Route
@@ -1204,7 +1140,7 @@ func (r *Router[C]) collectRoutes() []Route {
 		return func(pattern, method string, params int) {
 			rt := Route{Host: host, Method: method, Pattern: pattern, Params: params}
 			if info, ok := r.info[routeKey{host: host, method: method, pattern: pattern}]; ok {
-				rt.Name, rt.Meta = info.name, info.meta
+				rt.Meta = info.meta
 			}
 			out = append(out, rt)
 		}

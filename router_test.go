@@ -1034,11 +1034,11 @@ func TestMountedRoutesKeepTheFallbackOfTheirPrefix(t *testing.T) {
 	}
 }
 
-func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
+func TestRoutesReportsTheMetadata(t *testing.T) {
 	type op struct{ Summary string }
 
 	r := newTestRouter()
-	r.Name("user").Meta(op{Summary: "read a user"}).GET("/users/{id}", echoRoute)
+	r.Meta(op{Summary: "read a user"}).GET("/users/{id}", echoRoute)
 	r.Meta(op{Summary: "create a user"}).POST("/users", echoRoute)
 	r.GET("/health", echoRoute)
 
@@ -1046,7 +1046,7 @@ func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	want := []Route{
 		{Method: http.MethodGet, Pattern: "/health"},
 		{Method: http.MethodPost, Pattern: "/users", Meta: op{Summary: "create a user"}},
-		{Method: http.MethodGet, Pattern: "/users/{id}", Name: "user", Meta: op{Summary: "read a user"}, Params: 1},
+		{Method: http.MethodGet, Pattern: "/users/{id}", Meta: op{Summary: "read a user"}, Params: 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
@@ -1054,25 +1054,6 @@ func TestRoutesReportsTheNameAndTheMetadata(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("route %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}
-
-func TestNameAndMetaComposeInEitherOrder(t *testing.T) {
-	r := newTestRouter()
-	r.Meta("first").Name("a").GET("/a", echoRoute)
-	r.Name("b").Meta("second").GET("/b", echoRoute)
-
-	for _, rt := range r.Routes() {
-		switch rt.Pattern {
-		case "/a":
-			if rt.Name != "a" || rt.Meta != "first" {
-				t.Errorf("/a = %+v, want the name a and the meta first", rt)
-			}
-		case "/b":
-			if rt.Name != "b" || rt.Meta != "second" {
-				t.Errorf("/b = %+v, want the name b and the meta second", rt)
-			}
 		}
 	}
 }
@@ -1240,10 +1221,6 @@ func TestRegistrationPanicsOnABadTable(t *testing.T) {
 		{"a router mounted inside itself", func(r *Router[*tctx]) {
 			r.Mount("/self", r)
 		}, "mounted inside itself"},
-		{"a duplicate route name", func(r *Router[*tctx]) {
-			r.Name("dup").GET("/a", echoRoute)
-			r.Name("dup").GET("/b", echoRoute)
-		}, `the route name "dup" names both`},
 		{"a route on a mounted subrouter", func(r *Router[*tctx]) {
 			sub := newTestRouter()
 			sub.GET("/a", echoRoute)
@@ -1431,25 +1408,12 @@ func TestRegistrationPanics(t *testing.T) {
 			do(r, http.MethodGet, "/")
 			r.Pre(setHeader("X", "1"))
 		}, "after the router started serving"},
-		{"a second route on a named scope", func() {
-			r := newTestRouter()
-			named := r.Name("both")
-			named.GET("/a", echoRoute)
-			named.POST("/b", echoRoute)
-		}, "already registered a route"},
-		{"an empty name", func() { newTestRouter().Name("") }, "Name needs a name"},
 		{"Match with no methods", func() {
 			newTestRouter().Match(nil, "/x", echoRoute)
 		}, "Match needs at least one method"},
 		{"Match with an empty method", func() {
 			newTestRouter().Match([]string{""}, "/x", echoRoute)
 		}, "Match needs non-empty methods"},
-		{"a duplicate name", func() {
-			r := newTestRouter()
-			r.Name("dup").GET("/a", echoRoute)
-			r.Name("dup").GET("/b", echoRoute)
-			r.Routes()
-		}, "names both"},
 		{"Observe after serving", func() {
 			r := newTestRouter()
 			r.GET("/", echoRoute)
@@ -1731,7 +1695,6 @@ func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
 
 func TestUseAfterATaggedRoutePanics(t *testing.T) {
 	register := map[string]func(*Router[*tctx]){
-		"Name":  func(r *Router[*tctx]) { r.Name("u").GET("/u", echoRoute) },
 		"Meta":  func(r *Router[*tctx]) { r.Meta("op").GET("/u", echoRoute) },
 		"With":  func(r *Router[*tctx]) { r.With().GET("/u", echoRoute) },
 		"plain": func(r *Router[*tctx]) { r.GET("/u", echoRoute) },
@@ -2221,8 +2184,7 @@ func TestRouteParamsCountsHostAndPathTogether(t *testing.T) {
 // maxInlineParams that the sample tables cannot afford fails here.
 func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
 	for name, build := range map[string]func() *Router[*tctx]{
-		"siteRouter":  siteRouter,
-		"namedRouter": namedRouter,
+		"siteRouter": siteRouter,
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, rt := range build().Routes() {
@@ -2583,47 +2545,6 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 	if got != "sub=acme tid=42" {
 		t.Errorf("scope 404 under a host = %q, want %q", got, "sub=acme tid=42")
 	}
-}
-
-// A registrar that installs several tree entries is still one route to the
-// caller, so one Name scope has to cover all of them.
-func TestOneRegistrarCallHoldsOneName(t *testing.T) {
-	t.Run("MountHandler", func(t *testing.T) {
-		r := newTestRouter()
-		r.Name("assets").MountHandler("/static", http.NotFoundHandler())
-		got, err := r.URL("assets", nil)
-		if err != nil {
-			t.Fatalf("URL(assets) = %v", err)
-		}
-		if got != "/static" {
-			t.Errorf("URL(assets) = %q, want %q", got, "/static")
-		}
-	})
-
-	t.Run("Match", func(t *testing.T) {
-		r := newTestRouter()
-		r.Name("save").Match([]string{http.MethodPost, http.MethodPut}, "/items", echoRoute)
-		got, err := r.URL("save", nil)
-		if err != nil {
-			t.Fatalf("URL(save) = %v", err)
-		}
-		if got != "/items" {
-			t.Errorf("URL(save) = %q, want %q", got, "/items")
-		}
-		for _, m := range []string{http.MethodPost, http.MethodPut} {
-			if code := do(r, m, "/items").Code; code != http.StatusOK {
-				t.Errorf("%s /items = %d, want 200", m, code)
-			}
-		}
-	})
-
-	// A named scope still holds one route, not two.
-	t.Run("two routes still panic", func(t *testing.T) {
-		r := newTestRouter()
-		named := r.Name("twice")
-		named.GET("/a", echoRoute)
-		mustPanicContaining(t, "already registered a route", func() { named.GET("/b", echoRoute) })
-	})
 }
 
 // A path arrives canonicalised, so a literal spelled any other way is compared
