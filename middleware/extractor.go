@@ -10,12 +10,24 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// MaxTokenSources is how many [TokenSource] values one configuration may
+// declare.
 const MaxTokenSources = 20
 
+// MaxTokensPerRequest is how many candidate tokens one request may offer
+// across every source. It bounds the work a client can ask for by repeating a
+// header.
 const MaxTokensPerRequest = 8
 
+// TokenSource reads the candidate tokens of one request out of one place. Each
+// value it reports is tried in turn, so a header the client repeats offers
+// several. See [FromHeader], [FromQuery], [FromCookie] and [FromForm].
 type TokenSource func(c router.Context) []string
 
+// FromHeader reads a header. cutPrefix is a scheme to strip, as in
+// FromHeader("Authorization", "Bearer "), and the space after it is trimmed; an
+// empty cutPrefix takes the whole value. A value that does not carry the prefix
+// is dropped.
 func FromHeader(name, cutPrefix string) TokenSource {
 	key := textproto.CanonicalMIMEHeaderKey(name)
 	n := len(cutPrefix)
@@ -37,6 +49,8 @@ func FromHeader(name, cutPrefix string) TokenSource {
 	}
 }
 
+// FromQuery reads a query parameter. It suits a link a browser cannot send a
+// header on, and it puts the token in the logs of every proxy on the way.
 func FromQuery(name string) TokenSource {
 	return func(c router.Context) []string {
 		b, ok := router.FromContext(c)
@@ -47,6 +61,7 @@ func FromQuery(name string) TokenSource {
 	}
 }
 
+// FromCookie reads a cookie.
 func FromCookie(name string) TokenSource {
 	return func(c router.Context) []string {
 		cookies := c.Request().CookiesNamed(name)
@@ -60,6 +75,9 @@ func FromCookie(name string) TokenSource {
 	}
 }
 
+// FromForm reads a field of the form body, which is how a plain HTML form
+// sends its CSRF token. It parses the body once per request, so the handler
+// can still read the form.
 func FromForm(name string) TokenSource {
 	return func(c router.Context) []string {
 		b, ok := router.FromContext(c)
