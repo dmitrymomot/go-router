@@ -13,10 +13,12 @@ import (
 const (
 	apex      = baseDomain + ":8080"
 	signupURL = "http://" + apex + "/signup"
-	loginURL  = "http://" + apex + "/login"
 
 	testPassword = "correct horse"
 )
+
+// workspaceHost is where a workspace answers, the login form included.
+func workspaceHost(slug string) string { return slug + "." + apex }
 
 func newTestRouter(t *testing.T) *router.Router[Ctx] {
 	t.Helper()
@@ -48,19 +50,29 @@ func signUp(t *testing.T, h http.Handler, name, email string) *routertest.Respon
 	})
 }
 
-func logIn(t *testing.T, h http.Handler, email, password string) *routertest.Response {
+// logIn signs in at the address of one workspace, which is the only place a
+// login form exists.
+func logIn(t *testing.T, h http.Handler, slug, email, password string) *routertest.Response {
 	t.Helper()
-	return post(t, h, loginURL, url.Values{"email": {email}, "password": {password}})
+
+	host := workspaceHost(slug)
+	return postTo(t, h, host, "http://"+host+"/login",
+		url.Values{"email": {email}, "password": {password}})
 }
 
-// post sends a form with a CSRF token that matches its cookie.
+// post sends a form to the apex with a CSRF token that matches its cookie.
 func post(t *testing.T, h http.Handler, target string, form url.Values) *routertest.Response {
+	t.Helper()
+	return postTo(t, h, apex, target, form)
+}
+
+func postTo(t *testing.T, h http.Handler, host, target string, form url.Values) *routertest.Response {
 	t.Helper()
 
 	token := csrf(t, h)
 	form.Set("_csrf", token.Value)
 	return routertest.Do(h, http.MethodPost, target,
-		routertest.Host(apex),
+		routertest.Host(host),
 		routertest.Cookie(token),
 		routertest.FormBody(form))
 }
@@ -114,6 +126,9 @@ func TestTheWorkspaceAnswersOnItsOwnHost(t *testing.T) {
 	guest.AssertStatus(t, http.StatusOK)
 	if !strings.Contains(guest.String(), "as a guest") {
 		t.Error("an anonymous reader is not told they are a guest")
+	}
+	if !strings.Contains(guest.String(), `href="/login"`) {
+		t.Error("a guest is not offered the login form of this workspace")
 	}
 }
 
@@ -175,16 +190,43 @@ func sessionOf(t *testing.T, res *routertest.Response) *http.Cookie {
 	return nil
 }
 
-func TestLoginTakesAnOwnerToTheirFirstWorkspace(t *testing.T) {
+func TestTheApexHasNoLoginForm(t *testing.T) {
+	h := newTestRouter(t)
+
+	routertest.Get(h, "http://"+apex+"/login", routertest.Host(apex)).
+		AssertStatus(t, http.StatusNotFound)
+}
+
+func TestLoginBelongsToTheWorkspaceAndLandsOnIt(t *testing.T) {
 	h := newTestRouter(t)
 	signUp(t, h, "Acme", "ann@example.com").AssertStatus(t, http.StatusSeeOther)
 
-	res := logIn(t, h, "ann@example.com", testPassword)
+	host := workspaceHost("acme")
+	form := routertest.Get(h, "http://"+host+"/login", routertest.Host(host))
+	form.AssertStatus(t, http.StatusOK)
+	if !strings.Contains(form.String(), "Sign in to Acme") {
+		t.Errorf("the login form does not name its workspace: %s", form)
+	}
+
+	res := logIn(t, h, "acme", "ann@example.com", testPassword)
 	res.AssertStatus(t, http.StatusSeeOther)
-	res.AssertHeader(t, router.HeaderLocation, "http://acme."+apex+"/")
+	res.AssertHeader(t, router.HeaderLocation, "/")
 
 	if got := sessionOf(t, res); got.Domain != baseDomain {
 		t.Errorf("session cookie domain = %q, want %q", got.Domain, baseDomain)
+	}
+}
+
+func TestOneWorkspaceDoorDoesNotOpenForAnotherOwner(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, h, "Acme", "ann@example.com")
+	signUp(t, h, "Beta", "bob@example.com")
+
+	// Bob has an account and typed it correctly. It owns Beta, not Acme.
+	res := logIn(t, h, "acme", "bob@example.com", testPassword)
+	res.AssertStatus(t, http.StatusUnprocessableEntity)
+	if !strings.Contains(res.String(), "do not match") {
+		t.Errorf("a stranger is told more than that the pair is wrong: %s", res)
 	}
 }
 
@@ -192,8 +234,8 @@ func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 	h := newTestRouter(t)
 	signUp(t, h, "Acme", "ann@example.com")
 
-	wrong := logIn(t, h, "ann@example.com", "not the password")
-	unknown := logIn(t, h, "nobody@example.com", testPassword)
+	wrong := logIn(t, h, "acme", "ann@example.com", "not the password")
+	unknown := logIn(t, h, "acme", "nobody@example.com", testPassword)
 
 	// The same answer either way: the form must not say who has an account.
 	for _, res := range []*routertest.Response{wrong, unknown} {
@@ -237,7 +279,7 @@ func TestAnAnonymousReaderCannotAddAWorkspace(t *testing.T) {
 
 	res := post(t, h, "http://"+apex+"/workspaces", url.Values{"name": {"Beta"}})
 	res.AssertStatus(t, http.StatusSeeOther)
-	res.AssertHeader(t, router.HeaderLocation, "/login")
+	res.AssertHeader(t, router.HeaderLocation, "/")
 }
 
 func TestASignedInOwnerAddsASecondWorkspace(t *testing.T) {

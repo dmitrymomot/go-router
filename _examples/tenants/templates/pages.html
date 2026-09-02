@@ -28,10 +28,8 @@
 
 <form action="/signout" method="post"><button type="submit">Sign out {{.Email}}</button></form>
 {{else}}
-<p>
-	<a class="button" href="/signup">Create a workspace</a>
-	<a class="button" href="/login">Sign in</a>
-</p>
+<p><a class="button" href="/signup">Create a workspace</a></p>
+<p class="hint">Already have one? Sign in at its own address, such as <code>acme.lvh.me:8080</code>. This page has no login form, because a login belongs to a workspace.</p>
 {{end}}
 {{template "foot"}}
 {{- end}}
@@ -57,14 +55,14 @@
 	{{- end}}
 	<button type="submit">Create it</button>
 </form>
-<p class="hint">"Acme, Inc." becomes <code>acme-inc.lvh.me</code>. Already have an account? <a href="/login">Sign in</a>.</p>
+<p class="hint">"Acme, Inc." becomes <code>acme-inc.lvh.me</code>, and that is where you sign in from then on.</p>
 {{template "foot"}}
 {{- end}}
 
 {{define "login" -}}
 {{template "head" "Sign in"}}
-<h1>Sign in</h1>
-<p class="lede">This takes you to your first workspace.</p>
+<h1>Sign in to {{.Workspace}}</h1>
+<p class="lede">This door opens for the owner of this workspace alone.</p>
 
 <form class="stack" action="/login" method="post" autocomplete="off">
 	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
@@ -79,7 +77,7 @@
 	{{- end}}
 	<button type="submit">Sign in</button>
 </form>
-<p class="hint">No account yet? <a href="/signup">Create a workspace</a>.</p>
+<p class="hint">No workspace yet? Create one on the landing page.</p>
 {{template "foot"}}
 {{- end}}
 
@@ -99,6 +97,7 @@
 <form action="/signout" method="post"><button type="submit">Sign out</button></form>
 {{else}}
 <p class="hint">You are reading this workspace as a guest.</p>
+<p><a class="button" href="/login">Sign in to {{.Workspace.Name}}</a></p>
 {{end}}
 <p><a href="{{.ApexURL}}">Back to the landing page</a></p>
 {{template "foot"}}

@@ -6,12 +6,15 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// workspaceRoutes answers on every workspace subdomain. One route table
-// serves them all, because the subdomain is a route parameter.
+// workspaceRoutes answers on every workspace subdomain, the login page
+// included. One route table serves them all, because the subdomain is a route
+// parameter.
 func workspaceRoutes(h *router.Router[Ctx]) {
 	h.Use(loadWorkspace)
 
 	h.GET("/", dashboard)
+	h.GET("/login", loginForm)
+	h.POST("/login", login)
 	h.POST("/signout", signout)
 }
 

@@ -16,6 +16,7 @@ type credentialsPage struct {
 	Name      string
 	Email     string
 	Error     string
+	Workspace string
 }
 
 type credentialsInput struct {
@@ -71,15 +72,16 @@ func signup(c Ctx) error {
 	return c.Redirect(http.StatusSeeOther, workspaceURL(c, w.Slug))
 }
 
+// loginForm is a page of the workspace, not of the apex: each workspace has
+// its own door, at its own address.
 func loginForm(c Ctx) error {
 	return c.Render(http.StatusOK, tmpl("login", credentialsPage{
 		CSRFToken: middleware.CSRFTokenFrom(c),
 		Email:     c.Email,
+		Workspace: c.Workspace.Name,
 	}))
 }
 
-// login sends an owner to their first workspace, and anybody else back to the
-// landing page, which lists none.
 func login(c Ctx) error {
 	in, err := c.Bind[credentialsInput]()
 	if err != nil {
@@ -90,20 +92,20 @@ func login(c Ctx) error {
 	page := credentialsPage{
 		CSRFToken: middleware.CSRFTokenFrom(c),
 		Email:     email,
+		Workspace: c.Workspace.Name,
 	}
 
-	if err := c.Store.Authenticate(email, in.Password); err != nil {
-		// The message is the same for an unknown address and a wrong
-		// password, so the form says nothing about who has an account.
+	// One sentence for three failures: an unknown address, a wrong password,
+	// and an account that owns some other workspace. The form gives away
+	// neither who has an account nor who owns what.
+	err = c.Store.Authenticate(email, in.Password)
+	if err != nil || email != c.Workspace.Owner {
 		return refuse(c, "login", page, "That email and password do not match.")
 	}
 
 	writeSession(c, email)
 
-	if owned := c.Store.OwnedBy(email); len(owned) > 0 {
-		return c.Redirect(http.StatusSeeOther, workspaceURL(c, owned[0].Slug))
-	}
-	return c.Redirect(http.StatusSeeOther, apexURL(c))
+	return c.Redirect(http.StatusSeeOther, "/")
 }
 
 // refuse renders the form again, with the reason and a 422 rather than the

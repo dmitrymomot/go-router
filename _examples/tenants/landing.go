@@ -8,14 +8,14 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-// apexRoutes answers on the base domain itself: the landing page, the two
-// forms that let somebody in, and the one that adds another workspace.
+// apexRoutes answers on the base domain itself: the landing page, the signup
+// form and the one that adds another workspace. There is no login here. An
+// owner signs in at the address of their workspace, and workspaceRoutes
+// answers that.
 func apexRoutes(h *router.Router[Ctx]) {
 	h.GET("/", landing)
 	h.GET("/signup", signupForm)
 	h.POST("/signup", signup)
-	h.GET("/login", loginForm)
-	h.POST("/login", login)
 	h.POST("/signout", signout)
 
 	// One more middleware, and the same tree. Only this route needs a session.
@@ -86,11 +86,12 @@ func nameRefused(err error) (string, bool) {
 	}
 }
 
-// requireSession sends an anonymous reader to the login form.
+// requireSession sends an anonymous reader back to the landing page, which
+// says where the doors are: signup here, login at a workspace.
 func requireSession(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
 	return func(c Ctx) error {
 		if c.Email == "" {
-			return c.Redirect(http.StatusSeeOther, "/login")
+			return c.Redirect(http.StatusSeeOther, "/")
 		}
 		return next(c)
 	}
