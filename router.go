@@ -554,8 +554,6 @@ func (r *Router[C]) mustNotCarryRootOnlySettings() {
 		lost = "MaxBodyBytes"
 	case r.ropts.maxMultipart != 0:
 		lost = "MaxMultipartMemory"
-	case r.ropts.strictBind:
-		lost = "StrictBind"
 	case r.ropts.logger != nil:
 		lost = "a logger"
 	case len(r.ropts.jsonOpts) > 0:
@@ -703,11 +701,6 @@ func (r *Router[C]) MaxBodyBytes(n int64) {
 func (r *Router[C]) MaxMultipartMemory(n int64) {
 	r.mustNotBeServing("the multipart memory limit")
 	r.root.ropts.maxMultipart = n
-}
-
-func (r *Router[C]) StrictBind(on bool) {
-	r.mustNotBeServing("the strict binding setting")
-	r.root.ropts.strictBind = on
 }
 
 func (r *Router[C]) Logger(l *slog.Logger) {

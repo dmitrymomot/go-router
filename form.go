@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func decodeValues(vals url.Values, dst any, tag string, strict bool) ([]FieldError, error) {
+func decodeValues(vals url.Values, dst any, tag string) ([]FieldError, error) {
 	rv := reflect.ValueOf(dst)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return nil, fmt.Errorf("decode target must be a non-nil pointer, got %T", dst)
@@ -23,7 +23,7 @@ func decodeValues(vals url.Values, dst any, tag string, strict bool) ([]FieldErr
 		return nil, fmt.Errorf("decode target must point at a struct, got %s", rv.Kind())
 	}
 	var fields []FieldError
-	decodeStruct(vals, rv, tag, strict, &fields, make(map[reflect.Type]bool))
+	decodeStruct(vals, rv, tag, &fields, make(map[reflect.Type]bool))
 	return fields, nil
 }
 
@@ -31,7 +31,6 @@ func decodeStruct(
 	vals url.Values,
 	rv reflect.Value,
 	tag string,
-	strict bool,
 	fields *[]FieldError,
 	active map[reflect.Type]bool,
 ) {
@@ -52,20 +51,17 @@ func decodeStruct(
 			}
 			if fv.Kind() == reflect.Pointer {
 				if fv.IsNil() {
-					if !fv.CanSet() || !structHasValue(vals, ft, tag, strict, active) {
+					if !fv.CanSet() || !structHasValue(vals, ft, tag, active) {
 						continue
 					}
 					fv.Set(reflect.New(fv.Type().Elem()))
 				}
 				fv = fv.Elem()
 			}
-			decodeStruct(vals, fv, tag, strict, fields, active)
+			decodeStruct(vals, fv, tag, fields, active)
 			continue
 		}
 
-		if strict && !f.tagged {
-			continue
-		}
 		key, raw, ok := lookupValues(vals, f.keys)
 		if !ok {
 			continue
@@ -76,7 +72,7 @@ func decodeStruct(
 	}
 }
 
-func structHasValue(vals url.Values, rt reflect.Type, tag string, strict bool, active map[reflect.Type]bool) bool {
+func structHasValue(vals url.Values, rt reflect.Type, tag string, active map[reflect.Type]bool) bool {
 	if active[rt] {
 		return false
 	}
@@ -85,12 +81,9 @@ func structHasValue(vals url.Values, rt reflect.Type, tag string, strict bool, a
 
 	for _, f := range structFields(rt, tag) {
 		if f.embedded {
-			if structHasValue(vals, indirectType(rt.Field(f.index).Type), tag, strict, active) {
+			if structHasValue(vals, indirectType(rt.Field(f.index).Type), tag, active) {
 				return true
 			}
-			continue
-		}
-		if strict && !f.tagged {
 			continue
 		}
 		if _, _, ok := lookupValues(vals, f.keys); ok {
@@ -104,7 +97,6 @@ type fieldInfo struct {
 	keys     []string
 	layout   string
 	index    int
-	tagged   bool
 	embedded bool
 }
 
@@ -140,7 +132,7 @@ func buildFields(rt reflect.Type, tag string) []fieldInfo {
 			continue
 		}
 
-		f := fieldInfo{layout: layout, index: i, tagged: tagged, embedded: embedded}
+		f := fieldInfo{layout: layout, index: i, embedded: embedded}
 		if !embedded {
 			f.keys = fieldKeys(name, ft.Name)
 		}

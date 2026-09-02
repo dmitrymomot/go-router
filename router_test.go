@@ -2436,7 +2436,6 @@ func TestMountRefusesARouterCarryingRootOnlySettings(t *testing.T) {
 		{"RedirectTrailingSlash", "RedirectTrailingSlash(true)", func(s *Router[*tctx]) { s.RedirectTrailingSlash(true) }},
 		{"MaxBodyBytes", "MaxBodyBytes", func(s *Router[*tctx]) { s.MaxBodyBytes(1 << 10) }},
 		{"MaxMultipartMemory", "MaxMultipartMemory", func(s *Router[*tctx]) { s.MaxMultipartMemory(1 << 10) }},
-		{"StrictBind", "StrictBind", func(s *Router[*tctx]) { s.StrictBind(true) }},
 		{"JSONOptions", "JSONOptions", func(s *Router[*tctx]) { s.JSONOptions(json.Deterministic(true)) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

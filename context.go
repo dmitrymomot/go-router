@@ -75,7 +75,6 @@ type routerOpts struct {
 	logger       *slog.Logger
 	maxBody      int64
 	maxMultipart int64
-	strictBind   bool
 }
 
 var defaultRouterOpts = &routerOpts{maxBody: DefaultMaxBodyBytes}
