@@ -1453,22 +1453,18 @@ func TestOversizedBodyClosesTheConnection(t *testing.T) {
 	}
 }
 
-// A JSON body of "null" bound into a pointer leaves a nil T, which satisfies
-// Validator but has no value to check.
-func TestBindPointerWithANullBodySkipsValidate(t *testing.T) {
+// A body of "null" is the client's choice, and leaves nothing to hand the
+// handler, so it is refused rather than passed on as a nil pointer.
+func TestBindPointerWithANullBodyIsRefused(t *testing.T) {
 	r := newTestRouter()
 	r.POST("/p", func(c *tctx) error {
-		v, err := c.Bind[*pointerValidated]()
-		if err != nil {
+		if _, err := c.Bind[*pointerValidated](); err != nil {
 			return err
 		}
-		if v != nil {
-			return c.String(http.StatusOK, "value")
-		}
-		return c.String(http.StatusOK, "nil")
+		return c.String(http.StatusOK, "handler ran")
 	})
 	rec := doBody(r, http.MethodPost, "/p", MIMEApplicationJSON, `null`)
-	if rec.Code != http.StatusOK || rec.Body.String() != "nil" {
-		t.Errorf("null body = %d %q, want 200 %q", rec.Code, rec.Body.String(), "nil")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("null body = %d %q, want 400", rec.Code, rec.Body.String())
 	}
 }

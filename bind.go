@@ -114,13 +114,14 @@ type Validator interface {
 // pointer T that makes **T, whose method set is empty, so the value is tried
 // too.
 func validate[T any](v *T) error {
+	// A body of "null" bound into a pointer leaves nothing to hand the handler,
+	// and the client chose that, not the caller. Refusing it here keeps a nil
+	// out of every handler that binds a pointer.
+	if rv := reflect.ValueOf(*v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+		return ErrBadRequest.WithMessage("the request body is null")
+	}
 	sv, ok := any(v).(Validator)
 	if !ok {
-		// A nil T -- a JSON body of "null" bound into a pointer -- satisfies
-		// Validator but has no value to check, and calling through it panics.
-		if rv := reflect.ValueOf(*v); rv.Kind() == reflect.Pointer && rv.IsNil() {
-			return nil
-		}
 		sv, ok = any(*v).(Validator)
 	}
 	if !ok {
