@@ -82,6 +82,13 @@ func parsePattern(pattern string) ([]segment, []string, error) {
 
 		switch {
 		case raw == "*":
+			// {*} spells the same name through the brace branch, which checks
+			// for duplicates. This one did not, so "/{*}/*" registered with two
+			// parameters called "*": Param returned only the first and URL
+			// expansion failed on the second.
+			if slices.Contains(names, mountParam) {
+				return nil, nil, fmt.Errorf("router: duplicate parameter %q in %q", mountParam, pattern)
+			}
 			segs = append(segs, segment{kind: segWildcard, value: mountParam})
 			names = append(names, mountParam)
 
@@ -124,10 +131,52 @@ func parsePattern(pattern string) ([]segment, []string, error) {
 			if strings.Contains(raw, "*") {
 				return nil, nil, fmt.Errorf("router: a catch-all must span a whole segment, but %q does not in %q", raw, pattern)
 			}
+			if err := checkStaticLiteral(raw, pattern); err != nil {
+				return nil, nil, err
+			}
 			segs = append(segs, segment{kind: segStatic, value: raw})
 		}
 	}
 	return segs, names, nil
+}
+
+// checkStaticLiteral rejects a literal segment that no request can reach.
+//
+// A path arrives at the trie in the canonical form requestPath produces: %, \
+// and / stay percent-encoded with upper-case hex, every other escape is
+// decoded, and a % that starts no escape is left alone. A literal is compared
+// against that form byte for byte, so it has to be spelled the same way. The
+// three spellings that can never match used to register happily and answer 404
+// for ever with nothing to say why.
+func checkStaticLiteral(raw, pattern string) error {
+	for i := range len(raw) {
+		if raw[i] == '\\' {
+			return fmt.Errorf(
+				"router: %q in %q can never match: the path arrives with a backslash escaped, so write %%5C",
+				raw, pattern)
+		}
+		if raw[i] != '%' || i+2 >= len(raw) {
+			continue
+		}
+		v, ok := unhex(raw[i+1], raw[i+2])
+		if !ok {
+			// requestPath leaves this alone, so the literal reaches the trie
+			// exactly as written and matches.
+			continue
+		}
+		if v != '/' && v != '\\' && v != '%' {
+			return fmt.Errorf(
+				"router: %q in %q can never match: the path arrives with %%%s decoded, so write %q",
+				raw, pattern, raw[i+1:i+3], string(rune(v)))
+		}
+		const hex = "0123456789ABCDEF"
+		if raw[i+1] != hex[v>>4] || raw[i+2] != hex[v&15] {
+			return fmt.Errorf(
+				"router: %q in %q can never match: the path arrives with upper-case escapes, so write %%%c%c",
+				raw, pattern, hex[v>>4], hex[v&15])
+		}
+	}
+	return nil
 }
 
 func isWholeBrace(raw string) bool {

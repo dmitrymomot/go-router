@@ -356,7 +356,6 @@ func TestPercentEscapeCanonicalization(t *testing.T) {
 	r.GET("/slash/a%2Fb", func(c *tctx) error { return c.String(http.StatusOK, "escaped slash") })
 	r.GET("/slash/a/b", func(c *tctx) error { return c.String(http.StatusOK, "split slash") })
 	r.GET("/backslash/a%5Cb", func(c *tctx) error { return c.String(http.StatusOK, "escaped backslash") })
-	r.GET(`/backslash/a\b`, func(c *tctx) error { return c.String(http.StatusOK, "plain backslash") })
 	r.GET("/value/{value}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
 
 	tests := []struct{ path, want string }{
@@ -2668,4 +2667,39 @@ func TestOneRegistrarCallHoldsOneName(t *testing.T) {
 		named.GET("/a", echoRoute)
 		mustPanicContaining(t, "already registered a route", func() { named.GET("/b", echoRoute) })
 	})
+}
+
+// A path arrives canonicalised: %, \ and / stay percent-encoded in upper case
+// and every other escape is decoded. A literal spelled any other way is
+// compared against text no request can produce, and used to register happily
+// and answer 404 for ever with nothing to say why.
+func TestUnmatchableStaticLiteralsAreRejected(t *testing.T) {
+	for _, tc := range []struct{ pattern, want string }{
+		{`/backslash/a\b`, "write %5C"},
+		{"/lower/a%2fb", "upper-case escapes"},
+		{"/decoded/%41", `decoded, so write "A"`},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			err := ValidatePattern(tc.pattern)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ValidatePattern(%q) = %v, want one that reads %q", tc.pattern, err, tc.want)
+			}
+			mustPanicContaining(t, tc.want, func() { newTestRouter().GET(tc.pattern, echoRoute) })
+		})
+	}
+
+	// A % that starts no escape reaches the trie as written, so it still works.
+	if err := ValidatePattern("/discount/50%"); err != nil {
+		t.Errorf("ValidatePattern(/discount/50%%) = %v, want nil", err)
+	}
+}
+
+// {*} spells the same name through the brace branch, which rejects duplicates.
+// The bare form did not, so a pattern could carry two parameters called "*":
+// Param returned only the first and URL expansion failed on the second.
+func TestBareStarChecksForADuplicateName(t *testing.T) {
+	if err := ValidatePattern("/{*}/*"); err == nil ||
+		!strings.Contains(err.Error(), "duplicate parameter") {
+		t.Errorf("ValidatePattern(/{*}/*) = %v, want a duplicate-parameter error", err)
+	}
 }
