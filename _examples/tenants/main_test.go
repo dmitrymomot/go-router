@@ -17,165 +17,66 @@ const (
 	testPassword = "correct horse"
 )
 
-// workspaceHost is where a workspace answers, the login form included.
-func workspaceHost(slug string) string { return slug + "." + apex }
-
 func newTestRouter(t *testing.T) *router.Router[Ctx] {
 	t.Helper()
 	return newRouter(NewStore(), router.NewCookieCodec([]byte(strings.Repeat("k", 32))))
 }
 
-// csrf issues a token by asking for the form, and gives back the cookie that
+// host is where a workspace answers: its door, its dashboard and its tickets.
+func host(slug string) string { return slug + "." + apex }
+
+// csrf issues a token by asking for a page, and gives back the cookie that
 // signs it. The token is the value of that cookie.
-func csrf(t *testing.T, h http.Handler) *http.Cookie {
+func csrf(t *testing.T, h http.Handler, atHost, target string) *http.Cookie {
 	t.Helper()
 
-	res := routertest.Get(h, signupURL, routertest.Host(apex))
-	res.AssertStatus(t, http.StatusOK)
+	res := routertest.Get(h, target, routertest.Host(atHost))
 	for _, c := range res.Cookies() {
 		if c.Name == "_csrf" {
 			return c
 		}
 	}
-	t.Fatal("the signup form issued no CSRF cookie")
+	t.Fatalf("%s issued no CSRF cookie (status %d)", target, res.StatusCode)
 	return nil
 }
 
-func signUp(t *testing.T, h http.Handler, name, email string) *routertest.Response {
-	t.Helper()
-	return post(t, h, signupURL, url.Values{
-		"name":     {name},
-		"email":    {email},
-		"password": {testPassword},
-	})
-}
-
-// logIn signs in at the address of one workspace, which is the only place a
-// login form exists.
-func logIn(t *testing.T, h http.Handler, slug, email, password string) *routertest.Response {
+func postTo(t *testing.T, h http.Handler, atHost, target string, form url.Values) *routertest.Response {
 	t.Helper()
 
-	host := workspaceHost(slug)
-	return postTo(t, h, host, "http://"+host+"/login",
-		url.Values{"email": {email}, "password": {password}})
-}
-
-// post sends a form to the apex with a CSRF token that matches its cookie.
-func post(t *testing.T, h http.Handler, target string, form url.Values) *routertest.Response {
-	t.Helper()
-	return postTo(t, h, apex, target, form)
-}
-
-func postTo(t *testing.T, h http.Handler, host, target string, form url.Values) *routertest.Response {
-	t.Helper()
-
-	token := csrf(t, h)
+	token := csrf(t, h, atHost, target)
 	form.Set("_csrf", token.Value)
 	return routertest.Do(h, http.MethodPost, target,
-		routertest.Host(host),
+		routertest.Host(atHost),
 		routertest.Cookie(token),
 		routertest.FormBody(form))
 }
 
-func TestTheApexAnswersOnItselfAndOnWWW(t *testing.T) {
-	h := newTestRouter(t)
-
-	for _, host := range []string{apex, "www." + apex} {
-		res := routertest.Get(h, "http://"+host+"/", routertest.Host(host))
-		res.AssertStatus(t, http.StatusOK)
-		if !strings.Contains(res.String(), "Create a workspace") {
-			t.Errorf("%s: the landing page has no signup link", host)
-		}
-	}
+func signUp(t *testing.T, h http.Handler, name, email, password string) *routertest.Response {
+	t.Helper()
+	return postTo(t, h, apex, signupURL, url.Values{
+		"name":     {name},
+		"email":    {email},
+		"password": {password},
+	})
 }
 
-func TestSignupRedirectsToTheNewSubdomain(t *testing.T) {
-	h := newTestRouter(t)
+func logIn(t *testing.T, h http.Handler, slug, email, password string) *routertest.Response {
+	t.Helper()
 
-	res := signUp(t, h, "Acme, Inc.", "ann@example.com")
-	res.AssertStatus(t, http.StatusSeeOther)
-	res.AssertHeader(t, router.HeaderLocation, "http://acme-inc."+apex+"/")
-
-	// The session must reach every subdomain, so it names the base domain.
-	var session *http.Cookie
-	for _, c := range res.Cookies() {
-		if c.Name == sessionCookie {
-			session = c
-		}
-	}
-	if session == nil {
-		t.Fatal("signup set no session cookie")
-	}
-	if session.Domain != baseDomain || !session.HttpOnly {
-		t.Errorf("session cookie = %+v, want Domain %q and HttpOnly", session, baseDomain)
-	}
+	at := host(slug)
+	return postTo(t, h, at, "http://"+at+"/login",
+		url.Values{"email": {email}, "password": {password}})
 }
 
-func TestTheWorkspaceAnswersOnItsOwnHost(t *testing.T) {
-	h := newTestRouter(t)
-	session := sessionOf(t, signUp(t, h, "Acme", "ann@example.com"))
+// enter follows the ticket that signup handed out, on the host it names.
+func enterWith(t *testing.T, h http.Handler, location string) *routertest.Response {
+	t.Helper()
 
-	host := "acme." + apex
-	owner := routertest.Get(h, "http://"+host+"/", routertest.Host(host), routertest.Cookie(session))
-	owner.AssertStatus(t, http.StatusOK)
-	if !strings.Contains(owner.String(), "acme.lvh.me") {
-		t.Errorf("the dashboard does not name its host: %s", owner)
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("signup redirected to %q: %v", location, err)
 	}
-
-	guest := routertest.Get(h, "http://"+host+"/", routertest.Host(host))
-	guest.AssertStatus(t, http.StatusOK)
-	if !strings.Contains(guest.String(), "as a guest") {
-		t.Error("an anonymous reader is not told they are a guest")
-	}
-	if !strings.Contains(guest.String(), `href="/login"`) {
-		t.Error("a guest is not offered the login form of this workspace")
-	}
-}
-
-func TestAnUnknownSubdomainIsNotFound(t *testing.T) {
-	h := newTestRouter(t)
-
-	host := "nope." + apex
-	routertest.Get(h, "http://"+host+"/", routertest.Host(host)).
-		AssertStatus(t, http.StatusNotFound)
-}
-
-func TestAnUnknownHostSaysWhichHostsAnswer(t *testing.T) {
-	h := newTestRouter(t)
-
-	res := routertest.Get(h, "http://127.0.0.1:8080/", routertest.Host("127.0.0.1:8080"))
-	res.AssertStatus(t, http.StatusNotFound)
-	if !strings.Contains(res.String(), baseDomain) {
-		t.Errorf("the unknown-host page does not name the base domain: %s", res)
-	}
-}
-
-func TestANameWithoutLettersIsRefused(t *testing.T) {
-	h := newTestRouter(t)
-
-	res := signUp(t, h, "!!!", "ann@example.com")
-	res.AssertStatus(t, http.StatusUnprocessableEntity)
-	if !strings.Contains(res.String(), "Pick another name") {
-		t.Errorf("the form does not say why it refused: %s", res)
-	}
-}
-
-func TestAReservedSubdomainIsRefused(t *testing.T) {
-	h := newTestRouter(t)
-
-	res := signUp(t, h, "WWW", "ann@example.com")
-	res.AssertStatus(t, http.StatusUnprocessableEntity)
-	if !strings.Contains(res.String(), "reserved") {
-		t.Errorf("the form does not say the subdomain is reserved: %s", res)
-	}
-}
-
-func TestSignupNeedsTheCSRFToken(t *testing.T) {
-	h := newTestRouter(t)
-
-	res := routertest.Do(h, http.MethodPost, signupURL, routertest.Host(apex),
-		routertest.FormBody(url.Values{"name": {"Acme"}, "email": {"ann@example.com"}}))
-	res.AssertStatus(t, http.StatusForbidden)
+	return routertest.Get(h, location, routertest.Host(u.Host))
 }
 
 func sessionOf(t *testing.T, res *routertest.Response) *http.Cookie {
@@ -186,23 +87,116 @@ func sessionOf(t *testing.T, res *routertest.Response) *http.Cookie {
 			return c
 		}
 	}
-	t.Fatal("the response set no session cookie")
+	t.Fatalf("the response set no session cookie: %s", res)
 	return nil
 }
 
-func TestTheApexHasNoLoginForm(t *testing.T) {
+func TestTheApexAnswersOnItselfAndOnWWW(t *testing.T) {
 	h := newTestRouter(t)
 
-	routertest.Get(h, "http://"+apex+"/login", routertest.Host(apex)).
-		AssertStatus(t, http.StatusNotFound)
+	for _, at := range []string{apex, "www." + apex} {
+		res := routertest.Get(h, "http://"+at+"/", routertest.Host(at))
+		res.AssertStatus(t, http.StatusOK)
+		if !strings.Contains(res.String(), "Create a workspace") {
+			t.Errorf("%s: the landing page has no signup link", at)
+		}
+	}
 }
 
-func TestLoginBelongsToTheWorkspaceAndLandsOnIt(t *testing.T) {
+func TestTheApexHasNoDoorOfItsOwn(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com").AssertStatus(t, http.StatusSeeOther)
 
-	host := workspaceHost("acme")
-	form := routertest.Get(h, "http://"+host+"/login", routertest.Host(host))
+	for _, path := range []string{"/login", "/enter"} {
+		routertest.Get(h, "http://"+apex+path, routertest.Host(apex)).
+			AssertStatus(t, http.StatusNotFound)
+	}
+}
+
+func TestSignupHandsTheOwnerToTheWorkspaceHost(t *testing.T) {
+	h := newTestRouter(t)
+
+	made := signUp(t, h, "Acme, Inc.", "ann@example.com", testPassword)
+	made.AssertStatus(t, http.StatusSeeOther)
+
+	location := made.Header.Get(router.HeaderLocation)
+	if !strings.HasPrefix(location, "http://acme-inc."+apex+"/enter?ticket=") {
+		t.Fatalf("signup redirected to %q, want a ticket on the workspace host", location)
+	}
+	// The apex cannot set a cookie for a host below it, so it sets none.
+	for _, c := range made.Cookies() {
+		if c.Name == sessionCookie {
+			t.Error("the apex started a session it cannot own")
+		}
+	}
+
+	entered := enterWith(t, h, location)
+	entered.AssertStatus(t, http.StatusSeeOther)
+	entered.AssertHeader(t, router.HeaderLocation, "/")
+
+	// No Domain: the session belongs to this workspace host alone.
+	if got := sessionOf(t, entered); got.Domain != "" || !got.HttpOnly {
+		t.Errorf("session cookie = %+v, want no Domain and HttpOnly", got)
+	}
+}
+
+func TestATicketWorksOnceAndOnItsOwnHost(t *testing.T) {
+	h := newTestRouter(t)
+	location := signUp(t, h, "Acme", "ann@example.com", testPassword).Header.Get(router.HeaderLocation)
+
+	enterWith(t, h, location).AssertHeader(t, router.HeaderLocation, "/")
+
+	// Spent. A second visit is sent to the door instead.
+	again := enterWith(t, h, location)
+	again.AssertHeader(t, router.HeaderLocation, "/login")
+	for _, c := range again.Cookies() {
+		if c.Name == sessionCookie && c.MaxAge >= 0 {
+			t.Error("a spent ticket still started a session")
+		}
+	}
+}
+
+func TestATicketOfOneWorkspaceIsNoUseAtAnother(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, h, "Beta", "bob@example.com", testPassword)
+	location := signUp(t, h, "Acme", "ann@example.com", testPassword).Header.Get(router.HeaderLocation)
+
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stolen := "http://" + host("beta") + "/enter?" + u.RawQuery
+	res := routertest.Get(h, stolen, routertest.Host(host("beta")))
+	res.AssertHeader(t, router.HeaderLocation, "/login")
+}
+
+func TestTheWorkspaceAnswersOnItsOwnHost(t *testing.T) {
+	h := newTestRouter(t)
+	location := signUp(t, h, "Acme", "ann@example.com", testPassword).Header.Get(router.HeaderLocation)
+	session := sessionOf(t, enterWith(t, h, location))
+
+	at := host("acme")
+	owner := routertest.Get(h, "http://"+at+"/", routertest.Host(at), routertest.Cookie(session))
+	owner.AssertStatus(t, http.StatusOK)
+	if !strings.Contains(owner.String(), "ann@example.com") {
+		t.Errorf("the dashboard does not name the signed-in account: %s", owner)
+	}
+
+	guest := routertest.Get(h, "http://"+at+"/", routertest.Host(at))
+	guest.AssertStatus(t, http.StatusOK)
+	if !strings.Contains(guest.String(), "as a guest") {
+		t.Error("an anonymous reader is not told they are a guest")
+	}
+	if !strings.Contains(guest.String(), `href="/login"`) {
+		t.Error("a guest is not offered the login form of this workspace")
+	}
+}
+
+func TestLoginBelongsToTheWorkspace(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, h, "Acme", "ann@example.com", testPassword)
+
+	at := host("acme")
+	form := routertest.Get(h, "http://"+at+"/login", routertest.Host(at))
 	form.AssertStatus(t, http.StatusOK)
 	if !strings.Contains(form.String(), "Sign in to Acme") {
 		t.Errorf("the login form does not name its workspace: %s", form)
@@ -211,28 +205,26 @@ func TestLoginBelongsToTheWorkspaceAndLandsOnIt(t *testing.T) {
 	res := logIn(t, h, "acme", "ann@example.com", testPassword)
 	res.AssertStatus(t, http.StatusSeeOther)
 	res.AssertHeader(t, router.HeaderLocation, "/")
-
-	if got := sessionOf(t, res); got.Domain != baseDomain {
-		t.Errorf("session cookie domain = %q, want %q", got.Domain, baseDomain)
+	if got := sessionOf(t, res); got.Domain != "" {
+		t.Errorf("session cookie domain = %q, want none", got.Domain)
 	}
 }
 
-func TestOneWorkspaceDoorDoesNotOpenForAnotherOwner(t *testing.T) {
+func TestAnAccountOfOneWorkspaceCannotOpenAnother(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com")
-	signUp(t, h, "Beta", "bob@example.com")
+	signUp(t, h, "Acme", "ann@example.com", testPassword)
+	signUp(t, h, "Beta", "ann@example.com", "another password")
 
-	// Bob has an account and typed it correctly. It owns Beta, not Acme.
-	res := logIn(t, h, "acme", "bob@example.com", testPassword)
-	res.AssertStatus(t, http.StatusUnprocessableEntity)
-	if !strings.Contains(res.String(), "do not match") {
-		t.Errorf("a stranger is told more than that the pair is wrong: %s", res)
-	}
+	// The same address holds two accounts, and they are two accounts.
+	logIn(t, h, "beta", "ann@example.com", "another password").
+		AssertStatus(t, http.StatusSeeOther)
+	logIn(t, h, "beta", "ann@example.com", testPassword).
+		AssertStatus(t, http.StatusUnprocessableEntity)
 }
 
 func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com")
+	signUp(t, h, "Acme", "ann@example.com", testPassword)
 
 	wrong := logIn(t, h, "acme", "ann@example.com", "not the password")
 	unknown := logIn(t, h, "acme", "nobody@example.com", testPassword)
@@ -251,48 +243,83 @@ func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 	}
 }
 
-func TestSignupRefusesAnEmailThatAlreadyHasAnAccount(t *testing.T) {
+func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com")
+	signUp(t, h, "Acme", "ann@example.com", testPassword)
+	session := sessionOf(t, logIn(t, h, "acme", "ann@example.com", testPassword))
 
-	res := signUp(t, h, "Beta", "ann@example.com")
+	at := host("acme")
+	token := csrf(t, h, at, "http://"+at+"/login")
+	res := routertest.Do(h, http.MethodPost, "http://"+at+"/signout",
+		routertest.Host(at),
+		routertest.Cookie(token),
+		routertest.Cookie(session),
+		routertest.FormBody(url.Values{"_csrf": {token.Value}}))
+
+	res.AssertStatus(t, http.StatusSeeOther)
+	res.AssertHeader(t, router.HeaderLocation, "/login")
+	if got := sessionOf(t, res); got.MaxAge >= 0 {
+		t.Errorf("sign out left the session alive: %+v", got)
+	}
+}
+
+func TestAnUnknownSubdomainIsNotFound(t *testing.T) {
+	h := newTestRouter(t)
+
+	at := host("nope")
+	routertest.Get(h, "http://"+at+"/", routertest.Host(at)).
+		AssertStatus(t, http.StatusNotFound)
+}
+
+func TestAnUnknownHostSaysWhichHostsAnswer(t *testing.T) {
+	h := newTestRouter(t)
+
+	res := routertest.Get(h, "http://127.0.0.1:8080/", routertest.Host("127.0.0.1:8080"))
+	res.AssertStatus(t, http.StatusNotFound)
+	if !strings.Contains(res.String(), baseDomain) {
+		t.Errorf("the unknown-host page does not name the base domain: %s", res)
+	}
+}
+
+func TestSignupRefusesANameWithoutLettersAndAReservedOne(t *testing.T) {
+	h := newTestRouter(t)
+
+	for _, name := range []string{"!!!", "WWW"} {
+		res := signUp(t, h, name, "ann@example.com", testPassword)
+		res.AssertStatus(t, http.StatusUnprocessableEntity)
+		if !strings.Contains(res.String(), "Pick another name") {
+			t.Errorf("%q: the form does not say why it refused: %s", name, res)
+		}
+	}
+}
+
+func TestSignupRefusesATakenSubdomain(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, h, "Acme", "ann@example.com", testPassword)
+
+	res := signUp(t, h, "acme", "bob@example.com", testPassword)
 	res.AssertStatus(t, http.StatusUnprocessableEntity)
-	if !strings.Contains(res.String(), "Sign in instead") {
-		t.Errorf("the form does not send them to the login page: %s", res)
+	if !strings.Contains(res.String(), "taken") {
+		t.Errorf("the form does not say the subdomain is taken: %s", res)
 	}
 }
 
 func TestSignupNeedsAPasswordOfEightCharacters(t *testing.T) {
 	h := newTestRouter(t)
 
-	res := post(t, h, signupURL, url.Values{
-		"name": {"Acme"}, "email": {"ann@example.com"}, "password": {"short"},
-	})
+	res := signUp(t, h, "Acme", "ann@example.com", "short")
 	res.AssertStatus(t, http.StatusUnprocessableEntity)
 	if !strings.Contains(res.String(), "at least 8 characters") {
 		t.Errorf("the form does not name the password rule: %s", res)
 	}
 }
 
-func TestAnAnonymousReaderCannotAddAWorkspace(t *testing.T) {
+func TestSignupNeedsTheCSRFToken(t *testing.T) {
 	h := newTestRouter(t)
 
-	res := post(t, h, "http://"+apex+"/workspaces", url.Values{"name": {"Beta"}})
-	res.AssertStatus(t, http.StatusSeeOther)
-	res.AssertHeader(t, router.HeaderLocation, "/")
-}
-
-func TestASignedInOwnerAddsASecondWorkspace(t *testing.T) {
-	h := newTestRouter(t)
-	session := sessionOf(t, signUp(t, h, "Acme", "ann@example.com"))
-
-	token := csrf(t, h)
-	res := routertest.Do(h, http.MethodPost, "http://"+apex+"/workspaces",
-		routertest.Host(apex),
-		routertest.Cookie(token),
-		routertest.Cookie(session),
-		routertest.FormBody(url.Values{"_csrf": {token.Value}, "name": {"Beta, Ltd."}}))
-
-	res.AssertStatus(t, http.StatusSeeOther)
-	res.AssertHeader(t, router.HeaderLocation, "http://beta-ltd."+apex+"/")
+	res := routertest.Do(h, http.MethodPost, signupURL, routertest.Host(apex),
+		routertest.FormBody(url.Values{
+			"name": {"Acme"}, "email": {"ann@example.com"}, "password": {testPassword},
+		}))
+	res.AssertStatus(t, http.StatusForbidden)
 }

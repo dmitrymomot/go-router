@@ -1,7 +1,7 @@
 package main
 
 import (
-	"cmp"
+	"crypto/rand"
 	"errors"
 	"slices"
 	"strings"
@@ -15,7 +15,6 @@ type Workspace struct {
 	Created time.Time
 	Slug    string
 	Name    string
-	Owner   string
 }
 
 var (
@@ -23,19 +22,32 @@ var (
 	ErrSlugReserved = errors.New("that subdomain is reserved")
 	ErrSlugTaken    = errors.New("that subdomain is taken")
 
-	ErrEmailTaken = errors.New("that email already has an account")
+	ErrEmailTaken = errors.New("that email already has an account here")
 	// ErrBadCredentials never says which half was wrong, so the form cannot be
 	// used to learn which addresses have an account.
 	ErrBadCredentials = errors.New("that email and password do not match")
 )
 
-// An account owns the workspaces it creates. The password is kept as a salt
-// and a derived key, never as itself.
+// An account belongs to one workspace. The same address may hold an account in
+// two of them, and they are two accounts: a password changed in one leaves the
+// other alone. The password is kept as a salt and a derived key, never as
+// itself.
 type Account struct {
-	Email string
-	Salt  []byte
-	Key   []byte
+	Workspace string
+	Email     string
+	Salt      []byte
+	Key       []byte
 }
+
+// A ticket carries a new owner from the apex, where the workspace was made, to
+// the workspace host, which is the only place that can set its session cookie.
+type ticket struct {
+	expires   time.Time
+	workspace string
+	email     string
+}
+
+const ticketMaxAge = time.Minute
 
 // reserved names never become a workspace, because the apex router already
 // answers on them.
@@ -44,6 +56,7 @@ var reserved = []string{"www", "api", "admin", "static", "mail"}
 type Store struct {
 	bySlug   map[string]Workspace
 	accounts map[string]Account
+	tickets  map[string]ticket
 	mu       sync.RWMutex
 }
 
@@ -51,41 +64,14 @@ func NewStore() *Store {
 	return &Store{
 		bySlug:   make(map[string]Workspace),
 		accounts: make(map[string]Account),
+		tickets:  make(map[string]ticket),
 	}
 }
 
-func (s *Store) Register(email, password string) error {
-	salt := newSalt()
-	key := derive(password, salt)
+// accountKey names one account inside one workspace.
+func accountKey(slug, email string) string { return slug + "\x00" + email }
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, taken := s.accounts[email]; taken {
-		return ErrEmailTaken
-	}
-	s.accounts[email] = Account{Email: email, Salt: salt, Key: key}
-	return nil
-}
-
-func (s *Store) Authenticate(email, password string) error {
-	s.mu.RLock()
-	a, ok := s.accounts[email]
-	s.mu.RUnlock()
-
-	if !ok {
-		// Derive anyway. An address with no account must not answer faster
-		// than one with a wrong password.
-		derive(password, make([]byte, saltLen))
-		return ErrBadCredentials
-	}
-	if !passwordMatches(password, a.Salt, a.Key) {
-		return ErrBadCredentials
-	}
-	return nil
-}
-
-func (s *Store) Create(name, owner string) (Workspace, error) {
+func (s *Store) Create(name string) (Workspace, error) {
 	slug := slugify(name)
 	switch {
 	case slug == "":
@@ -100,7 +86,7 @@ func (s *Store) Create(name, owner string) (Workspace, error) {
 	if _, taken := s.bySlug[slug]; taken {
 		return Workspace{}, ErrSlugTaken
 	}
-	w := Workspace{Slug: slug, Name: name, Owner: owner, Created: time.Now()}
+	w := Workspace{Slug: slug, Name: name, Created: time.Now()}
 	s.bySlug[slug] = w
 	return w, nil
 }
@@ -113,18 +99,60 @@ func (s *Store) Get(slug string) (Workspace, bool) {
 	return w, ok
 }
 
-func (s *Store) OwnedBy(owner string) []Workspace {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *Store) Register(slug, email, password string) error {
+	salt := newSalt()
+	key := derive(password, salt)
 
-	var out []Workspace
-	for _, w := range s.bySlug {
-		if w.Owner == owner {
-			out = append(out, w)
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, taken := s.accounts[accountKey(slug, email)]; taken {
+		return ErrEmailTaken
 	}
-	slices.SortFunc(out, func(a, b Workspace) int { return cmp.Compare(a.Slug, b.Slug) })
-	return out
+	s.accounts[accountKey(slug, email)] = Account{
+		Workspace: slug, Email: email, Salt: salt, Key: key,
+	}
+	return nil
+}
+
+func (s *Store) Authenticate(slug, email, password string) error {
+	s.mu.RLock()
+	a, ok := s.accounts[accountKey(slug, email)]
+	s.mu.RUnlock()
+
+	if !ok {
+		// Derive anyway. An address with no account here must not answer
+		// faster than one with a wrong password.
+		derive(password, make([]byte, saltLen))
+		return ErrBadCredentials
+	}
+	if !passwordMatches(password, a.Salt, a.Key) {
+		return ErrBadCredentials
+	}
+	return nil
+}
+
+func (s *Store) NewTicket(slug, email string) string {
+	id := rand.Text()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.tickets[id] = ticket{workspace: slug, email: email, expires: time.Now().Add(ticketMaxAge)}
+	return id
+}
+
+// Redeem spends a ticket. It works once, and only inside its minute.
+func (s *Store) Redeem(id string) (ticket, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	t, ok := s.tickets[id]
+	if !ok {
+		return ticket{}, false
+	}
+	delete(s.tickets, id)
+	return t, time.Now().Before(t.expires)
 }
 
 // slugify turns "Acme, Inc." into "acme-inc". A subdomain is one DNS label, so

@@ -28,15 +28,15 @@ const sessionCookie = "tenants_session"
 
 const sessionMaxAge = 12 * time.Hour
 
-// writeSession signs the email into a cookie scoped to the whole base domain,
-// so every workspace subdomain reads the same session. A cookie without the
-// Domain attribute belongs to the host that set it, and the apex could not
-// hand it to acme.lvh.me.
+// writeSession signs the email into a cookie with no Domain attribute, so it
+// belongs to the host that set it and to no other. An account lives in one
+// workspace, and so does its session: signing in at acme.lvh.me leaves
+// beta.lvh.me signed out. It also means the apex cannot start a session, which
+// is why signup hands over a ticket instead.
 func writeSession(c Ctx, email string) {
 	c.SetSignedCookie(c.Codec, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    email,
-		Domain:   baseDomain,
 		Path:     "/",
 		MaxAge:   int(sessionMaxAge / time.Second),
 		Secure:   router.SchemeOf(c.Request()) == "https",
@@ -57,7 +57,6 @@ func readSession(c Ctx) (string, bool) {
 func clearSession(c Ctx) {
 	c.SetCookie(&http.Cookie{
 		Name:     sessionCookie,
-		Domain:   baseDomain,
 		Path:     "/",
 		MaxAge:   -1,
 		Secure:   router.SchemeOf(c.Request()) == "https",

@@ -6,13 +6,14 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// workspaceRoutes answers on every workspace subdomain, the login page
-// included. One route table serves them all, because the subdomain is a route
-// parameter.
+// workspaceRoutes answers on every workspace subdomain: the dashboard, the
+// door and the ticket that signup hands over. One route table serves them all,
+// because the subdomain is a route parameter.
 func workspaceRoutes(h *router.Router[Ctx]) {
 	h.Use(loadWorkspace)
 
 	h.GET("/", dashboard)
+	h.GET("/enter", enter)
 	h.GET("/login", loginForm)
 	h.POST("/login", login)
 	h.POST("/signout", signout)
@@ -36,7 +37,6 @@ type dashboardPage struct {
 	Workspace Workspace
 	Email     string
 	ApexURL   string
-	IsOwner   bool
 }
 
 func dashboard(c Ctx) error {
@@ -44,7 +44,6 @@ func dashboard(c Ctx) error {
 		Workspace: c.Workspace,
 		Email:     c.Email,
 		ApexURL:   apexURL(c),
-		IsOwner:   c.Email != "" && c.Email == c.Workspace.Owner,
 	}))
 }
 
