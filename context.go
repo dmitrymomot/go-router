@@ -50,6 +50,7 @@ type Base struct {
 	host        string
 	hostPattern string
 	rawTail     string
+	matchPath   string
 	paramNames  []string
 	paramVals   []string
 	ropts       *routerOpts
@@ -59,7 +60,6 @@ type Base struct {
 	deferred      *deferredErrors
 	resStorage    Response
 	hostIdx       int32
-	errorScopeIdx int32
 	hostKnown     bool
 	pathEscaped   bool
 	errorRouted   bool
@@ -114,7 +114,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 		res = &b.resStorage
 	}
 	b.req, b.res = r, res
-	b.pattern, b.rawTail = "", ""
+	b.pattern, b.rawTail, b.matchPath = "", "", ""
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
 	b.hostIdx = -1
@@ -138,7 +138,7 @@ func (b *Base) clearRequestSlow() {
 		clear(b.store)
 	}
 	b.deferred = nil
-	b.host, b.rawTail = "", ""
+	b.host, b.rawTail, b.matchPath = "", "", ""
 	b.needsCleanup = false
 }
 

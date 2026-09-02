@@ -1558,12 +1558,12 @@ func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 	if !b.errorRouted {
 		return r.rootErrorHandler
 	}
-	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(r.errScopes) {
-		return r.errScopes[b.errorScopeIdx].errHandler
-	}
 	var host *hostEntry[C]
 	if b.hostIdx >= 0 && r.hostSet != nil && int(b.hostIdx) < len(r.hostSet.all) {
 		host = r.hostSet.all[b.hostIdx]
+	}
+	if s := scopeFor(r.errScopes, host, b.matchPath, b.pathEscaped); s != nil {
+		return s.errHandler
 	}
 	if host != nil && host.errHandler != nil {
 		return host.errHandler
@@ -1571,16 +1571,16 @@ func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 	return r.rootErrorHandler
 }
 
+// selectErrorTarget records what the error handler will need if one is needed.
+// The scan for the owning scope waits for errorHandlerFor: every matched
+// request paid for it here, and almost none of them fail.
 func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
 	b.errorRouted = true
-	b.errorScopeIdx = -1
+	b.matchPath = path
 	if host != nil {
 		b.hostIdx = host.idx
 	} else {
 		b.hostIdx = -1
-	}
-	if s := scopeFor(r.errScopes, host, path, escaped); s != nil {
-		b.errorScopeIdx = s.errorIdx
 	}
 }
 
