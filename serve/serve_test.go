@@ -1012,3 +1012,37 @@ func Example() {
 	// 200 ok
 	// <nil>
 }
+
+// Run closes a caller-supplied listener when it serves, so it owns one from the
+// moment it is handed it.
+func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := map[string]func(net.Listener) error{
+		"cancelled context": func(ln net.Listener) error {
+			return serve.Run(cancelled, http.NotFoundHandler(), serve.Config{Listener: ln})
+		},
+		"nil handler": func(ln net.Listener) error {
+			return serve.Run(context.Background(), nil, serve.Config{Listener: ln})
+		},
+		"nil option": func(ln net.Listener) error {
+			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{Listener: ln}, nil)
+		},
+	}
+	for name, run := range tests {
+		t.Run(name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close() //nolint:errcheck // Already closed on the happy path.
+
+			_ = run(ln)
+
+			if _, err := ln.Accept(); err == nil {
+				t.Error("the listener is still accepting after Run returned")
+			}
+		})
+	}
+}

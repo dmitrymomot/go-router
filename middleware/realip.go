@@ -219,8 +219,13 @@ func parseHop(s string) (netip.Addr, string, bool) {
 	if s = strings.TrimSpace(s); s == "" {
 		return netip.Addr{}, "", false
 	}
-	if ap, err := netip.ParseAddrPort(s); err == nil {
-		return ap.Addr(), ap.String(), true
+	// ParseAddrPort allocates an error for every hop without a port, which is
+	// most of them. A bare IPv6 address has colons too, so the bracket is what
+	// tells the two apart.
+	if strings.IndexByte(s, ':') >= 0 && (s[0] == '[' || strings.Count(s, ":") == 1) {
+		if ap, err := netip.ParseAddrPort(s); err == nil {
+			return ap.Addr(), ap.String(), true
+		}
 	}
 	if addr, err := netip.ParseAddr(strings.Trim(s, "[]")); err == nil {
 		return addr, addr.String(), true

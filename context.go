@@ -35,11 +35,11 @@ type Context interface {
 // under it answers without a second allocation. Host parameters count too: a
 // "{tenant}.example.com" scope spends one before the path spends any. Going
 // over is not an error, it costs one allocation per request, and on a pooled
-// router that is the difference between zero and one. Router.Params and
+// router that is the difference between zero and one. Route.Params and
 // InlineParamBudget let a route table assert it stays under.
 const maxInlineParams = 4
 
-// betteralign:check
+//betteralign:check
 type Base struct {
 	req         *http.Request
 	res         *Response
@@ -64,6 +64,14 @@ type Base struct {
 	pathEscaped   bool
 	errorRouted   bool
 	needsCleanup  bool
+
+	// Routing matches the path trimmed of its trailing slash, so a mounted
+	// handler has to be told the slash was there.
+	tailSlash bool
+
+	// retained keeps this context out of the pool: something the router cannot
+	// wait for still holds it.
+	retained bool
 }
 
 type routerOpts struct {
@@ -108,7 +116,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
 	b.hostIdx = -1
-	b.pathEscaped, b.errorRouted = false, false
+	b.pathEscaped, b.errorRouted, b.tailSlash = false, false, false
 	b.queryCache = nil
 	b.deferred = nil
 	// clear on a map is a runtime call even when the map is nil, and most
@@ -208,6 +216,18 @@ func (b *Base) Response() *Response { return b.res }
 
 func (b *Base) ResponseWriter() http.ResponseWriter { return b.res }
 
+// releasedRequest stands in for the request once the handler has returned, so a
+// Base held past its request reads as a finished context rather than
+// dereferencing nil. Holding one is still a mistake: on a pooled router its
+// values belong to whoever has it next.
+var releasedRequest = func() *http.Request {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// URL and Header are filled in: Path, URL and Header reach through them,
+	// and a nil one would dereference exactly where this is meant to stop.
+	return (&http.Request{URL: new(url.URL), Header: http.Header{}}).WithContext(ctx)
+}()
+
 func (b *Base) Deadline() (time.Time, bool) { return b.req.Context().Deadline() }
 
 func (b *Base) Done() <-chan struct{} { return b.req.Context().Done() }
@@ -277,8 +297,19 @@ func (b *Base) UserAgent() string { return b.req.UserAgent() }
 
 func (b *Base) Referer() string { return b.req.Referer() }
 
+// Accepts picks the best of offers for this request, or "" when none is
+// acceptable. A client may send Accept more than once; every line counts.
 func (b *Base) Accepts(offers ...string) string {
-	return negotiate(b.req.Header.Get(HeaderAccept), offers)
+	return negotiate(joinAccept(b.req), offers)
+}
+
+// joinAccept folds repeated Accept lines into the one list they stand for.
+func joinAccept(r *http.Request) string {
+	values := r.Header.Values(HeaderAccept)
+	if len(values) < 2 {
+		return r.Header.Get(HeaderAccept)
+	}
+	return strings.Join(values, ",")
 }
 
 func (b *Base) Param(name string) string {

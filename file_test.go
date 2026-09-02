@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -740,3 +741,50 @@ func TestSafeFileNameRejectsAmbiguousRootsAndTraversal(t *testing.T) {
 		}
 	}
 }
+
+// ServeContent answers a read failure with its own 500 and returns nothing, so
+// the error has to reach the pipeline another way.
+func TestNonSeekableReadFailureReachesTheErrorPipeline(t *testing.T) {
+	var (
+		handled  error
+		observed error
+	)
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) { handled = err })
+	r.Observe(func(_ Context, _ int, _ int64, _ time.Duration, err error) { observed = err })
+	r.GET("/f", func(c *tctx) error { return c.FileFS("a.txt", brokenReadFS{}) })
+
+	rec := do(r, http.MethodGet, "/f")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if handled == nil || !strings.Contains(handled.Error(), "disk is on fire") {
+		t.Errorf("error handler saw %v, want the read failure", handled)
+	}
+	if observed == nil {
+		t.Error("Observe saw no error for a request that could not be read")
+	}
+}
+
+type brokenReadFS struct{}
+
+func (brokenReadFS) Open(string) (fs.File, error) {
+	return brokenReadFile{}, nil
+}
+
+type brokenReadFile struct{}
+
+func (brokenReadFile) Read([]byte) (int, error) { return 0, errors.New("disk is on fire") }
+func (brokenReadFile) Close() error             { return nil }
+func (brokenReadFile) Stat() (fs.FileInfo, error) {
+	return brokenReadInfo{}, nil
+}
+
+type brokenReadInfo struct{}
+
+func (brokenReadInfo) Name() string       { return "a.txt" }
+func (brokenReadInfo) Size() int64        { return 10 }
+func (brokenReadInfo) Mode() fs.FileMode  { return 0o644 }
+func (brokenReadInfo) ModTime() time.Time { return time.Unix(0, 0) }
+func (brokenReadInfo) IsDir() bool        { return false }
+func (brokenReadInfo) Sys() any           { return nil }

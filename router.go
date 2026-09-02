@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type Route struct {
@@ -76,6 +78,9 @@ type Router[C Context] struct {
 	children         []*Router[C]
 	owner            *Router[C]
 	hasRoutes        bool
+	closed           bool
+	routeBatch       int
+	refreshDepth     int
 	name             string
 	meta             any
 	tagged           bool
@@ -94,15 +99,14 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	if newContext == nil {
 		panic("router: New needs a context factory")
 	}
+	// The fallback fields stay nil until a setter fills one, so "did the caller
+	// choose this?" has an answer. refresh substitutes the defaults.
 	r := &Router[C]{
-		newCtx:           newContext,
-		notFound:         defaultNotFound[C],
-		methodNotAllowed: defaultMethodNotAllowed[C],
-		errHandler:       DefaultErrorHandler[C],
-		autoOptions:      true,
-		tree:             new(node[C]),
-		allowCache:       map[*node[C]]string{},
-		ropts:            &routerOpts{maxBody: DefaultMaxBodyBytes},
+		newCtx:      newContext,
+		autoOptions: true,
+		tree:        new(node[C]),
+		allowCache:  map[*node[C]]string{},
+		ropts:       &routerOpts{maxBody: DefaultMaxBodyBytes},
 	}
 	r.root = r
 	// A router that never calls a setter still has to answer, so the fallbacks
@@ -135,9 +139,25 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 }
 
 func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
+	r.handleNamed(method, pattern, h, mws, r.name)
+}
+
+// inOneRoute groups the registrations one registrar call makes, so a Name scope
+// holds all of them: MountHandler installs two patterns, Match one per method.
+func (r *Router[C]) inOneRoute(fn func()) {
+	r.routeBatch++
+	fn()
+	r.routeBatch--
+	if r.routeBatch == 0 && r.name != "" {
+		r.nameUsed = true
+	}
+}
+
+func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []Middleware[C], name string) {
 	if r.root.started.Load() {
 		panic("router: cannot register " + method + " " + pattern + " after the router started serving")
 	}
+	r.mustBeOpen("register " + method + " " + pattern)
 	if method == "" {
 		panic("router: Handle needs a method")
 	}
@@ -149,7 +169,10 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 		if r.nameUsed {
 			panic("router: the scope named " + r.name + " already registered a route; open another Name scope for " + method + " " + pattern)
 		}
-		r.nameUsed = true
+		// In a batch the flag waits, so a call cannot trip over its own entries.
+		if r.routeBatch == 0 {
+			r.nameUsed = true
+		}
 	}
 	for s := r; s != nil; s = s.owner {
 		s.hasRoutes = true
@@ -159,7 +182,7 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 		pattern: pattern,
 		handler: h,
 		mws:     slices.Clone(mws),
-		name:    r.name,
+		name:    name,
 		meta:    r.meta,
 	}
 	r.regs = append(r.regs, reg)
@@ -299,9 +322,11 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 			panic("router: Match needs non-empty methods")
 		}
 	}
-	for _, m := range methods {
-		r.handle(m, pattern, h, mws)
-	}
+	r.inOneRoute(func() {
+		for _, m := range methods {
+			r.handle(m, pattern, h, mws)
+		}
+	})
 }
 
 func (r *Router[C]) Use(mws ...Middleware[C]) {
@@ -318,7 +343,27 @@ func (r *Router[C]) Use(mws ...Middleware[C]) {
 
 // settingChanged rebuilds the derived state so the router is ready to serve the
 // moment the setter returns.
-func (r *Router[C]) settingChanged() { r.top().refresh() }
+func (r *Router[C]) settingChanged() {
+	if root := r.top(); root.refreshDepth == 0 {
+		root.refresh()
+	}
+}
+
+// inOneScope holds the graph rebuild until the outermost scope callback
+// returns. refresh walks the whole graph, so one per nested Route, Group or
+// Hosts made building a table quadratic in its size. The router is still ready
+// to serve the moment that outermost call returns.
+func (r *Router[C]) inOneScope(fn func()) {
+	root := r.top()
+	root.refreshDepth++
+	defer func() {
+		root.refreshDepth--
+		if root.refreshDepth == 0 {
+			root.refresh()
+		}
+	}()
+	fn()
+}
 
 func validateMiddleware[C Context](mws []Middleware[C]) {
 	for _, mw := range mws {
@@ -333,6 +378,7 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 	if r.root.started.Load() {
 		panic("router: cannot create a scope after the router started serving")
 	}
+	r.mustBeOpen("open a scope")
 	if _, _, err := parsePattern(prefix); err != nil {
 		panic(err.Error())
 	}
@@ -345,18 +391,24 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 }
 
 func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
-	c := r.newChild("", nil)
-	if fn != nil {
-		fn(c)
-	}
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild("", nil)
+		if fn != nil {
+			fn(c)
+		}
+	})
 	return c
 }
 
 func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
-	c := r.newChild(prefix, nil)
-	if fn != nil {
-		fn(c)
-	}
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild(prefix, nil)
+		if fn != nil {
+			fn(c)
+		}
+	})
 	return c
 }
 
@@ -415,6 +467,12 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 		if err != nil {
 			panic(err.Error())
 		}
+		// Two spellings of one host resolve to one entry, so the second copy of
+		// every route landed in a trie that already held it and the insert
+		// blamed the route rather than the duplicate host.
+		if i := slices.IndexFunc(specs, func(o hostSpec) bool { return o.pattern == spec.pattern }); i >= 0 {
+			panic("router: Hosts got " + patterns[i] + " and " + p + ", which name the same host " + spec.pattern)
+		}
 		specs = append(specs, spec)
 	}
 	if r.root.started.Load() {
@@ -423,17 +481,20 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	if r.inHost || len(r.hosts) > 0 {
 		panic("router: a host scope cannot sit inside another host scope")
 	}
-	c := r.newChild("", nil)
-	c.hosts = specs
-	for _, spec := range specs {
-		if _, err := r.root.hostEntry(spec); err != nil {
-			panic(err.Error())
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild("", nil)
+		c.hosts = specs
+		for _, spec := range specs {
+			if _, err := r.root.hostEntry(spec); err != nil {
+				panic(err.Error())
+			}
 		}
-	}
-	if fn != nil {
-		fn(c)
-	}
-	c.settingChanged()
+		if fn != nil {
+			fn(c)
+		}
+		c.settingChanged()
+	})
 	return c
 }
 
@@ -455,17 +516,70 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")
 	}
+	if sub.root != sub {
+		panic("router: Mount needs a top-level router; a scope of another router cannot be mounted, " +
+			"because closing it would close the router that owns it")
+	}
 	if slices.Contains(r.lineage(), sub) {
 		panic("router: a router is mounted inside itself")
 	}
+	sub.mustNotCarryRootOnlySettings()
+
 	shim := r.newChild(prefix, nil)
 	shim.children = append(shim.children, sub)
 	// The subtree registers into this parent from now on, so replay what it
 	// already holds and close it: a later route would have nowhere to go.
 	sub.owner = shim
+	if sub.hasRoutes {
+		// install does not mark the owners, so Use above the mount would pass
+		// its guard and apply to none of these routes.
+		for s := shim; s != nil; s = s.owner {
+			s.hasRoutes = true
+		}
+	}
 	sub.installSubtree()
-	freezeRouterGraph(sub, make(map[*Router[C]]bool))
+	closeSubtree(sub)
 	r.settingChanged()
+}
+
+// closeSubtree shuts a mounted subtree to further registration: its routes are
+// replayed into the parent, so a later one would land in a trie nobody serves.
+// Per-scope on purpose, so a router can still be mounted into two parents.
+func closeSubtree[C Context](r *Router[C]) {
+	r.closed = true
+	for _, ch := range r.children {
+		closeSubtree(ch)
+	}
+}
+
+// mustNotCarryRootOnlySettings refuses a mount that would lose a setting.
+// These live on the root the request path reads, one per served router.
+func (r *Router[C]) mustNotCarryRootOnlySettings() {
+	lost := ""
+	switch {
+	case len(r.preMws) > 0:
+		lost = "Pre middleware"
+	case r.observer != nil:
+		lost = "an observer"
+	case !r.autoOptions:
+		lost = "HandleOPTIONS(false)"
+	case r.redirectSlash:
+		lost = "RedirectTrailingSlash(true)"
+	case r.ropts.maxBody != DefaultMaxBodyBytes:
+		lost = "MaxBodyBytes"
+	case r.ropts.maxMultipart != 0:
+		lost = "MaxMultipartMemory"
+	case r.ropts.strictBind:
+		lost = "StrictBind"
+	case r.ropts.logger != nil:
+		lost = "a logger"
+	case len(r.ropts.jsonOpts) > 0:
+		lost = "JSONOptions"
+	default:
+		return
+	}
+	panic("router: the mounted router carries " + lost +
+		", which belongs to the router that serves; set it on the parent instead")
 }
 
 func (r *Router[C]) installSubtree() {
@@ -491,16 +605,20 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 	prefix = normalizePattern(prefix)
 	handler := func(c C) error {
 		b := c.base()
-		req := stripMountPrefix(b.req, b.rawTail, b.pathEscaped)
+		req := stripMountPrefix(b.req, b.rawTail, b.pathEscaped, b.tailSlash)
 		b.SetRequest(req)
 		h.ServeHTTP(b.res, req)
 		return nil
 	}
-	r.handle(anyMethod, prefix, handler, nil)
-	r.handle(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil)
+	r.inOneRoute(func() {
+		r.handle(anyMethod, prefix, handler, nil)
+		// The name belongs to the prefix, which is what URL resolves; naming
+		// the catch-all too would give one name two patterns.
+		r.handleNamed(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil, "")
+	})
 }
 
-func stripMountPrefix(r *http.Request, tail string, escaped bool) *http.Request {
+func stripMountPrefix(r *http.Request, tail string, escaped, tailSlash bool) *http.Request {
 	r2 := new(http.Request)
 	*r2 = *r
 	u := new(url.URL)
@@ -511,7 +629,13 @@ func stripMountPrefix(r *http.Request, tail string, escaped bool) *http.Request 
 		u.Path, u.RawPath = "/", ""
 		return r2
 	}
+	// The router matched without the trailing slash; the handler below the
+	// mount is a stranger to that and needs the path the client sent, or it
+	// redirects to a directory URL that routes back through here.
 	rest := "/" + tail
+	if tailSlash {
+		rest += "/"
+	}
 	u.Path, u.RawPath = rest, ""
 	if escaped {
 		if unescaped, err := url.PathUnescape(rest); err == nil && unescaped != rest {
@@ -525,6 +649,27 @@ func (r *Router[C]) mustNotBeServing(what string) {
 	if r.root.started.Load() {
 		panic("router: cannot change " + what + " after the router started serving")
 	}
+	r.mustBeOpen("change " + what)
+}
+
+// mustBeOpen rejects work on a subtree that Mount already replayed and closed.
+// Anything added now would sit in a router nobody serves, silently.
+func (r *Router[C]) mustBeOpen(what string) {
+	if r.closed {
+		panic("router: cannot " + what + " on a mounted router; do it before Mount")
+	}
+}
+
+// mustOwnFallbacks rejects a fallback setter on a scope that cannot express
+// one. Scopes are keyed by path prefix, so a prefix-less child covers the whole
+// tree and would displace the root's. The root, a host scope and any prefixed
+// scope each name a region the router can match.
+func (r *Router[C]) mustOwnFallbacks(what string) {
+	if r == r.root || len(r.hosts) > 0 || normalizePattern(r.scopePrefix()) != "/" {
+		return
+	}
+	panic("router: a scope without a prefix cannot own " + what +
+		"; set it on the router itself, or open a Route with a prefix")
 }
 
 func (r *Router[C]) NotFound(h HandlerFunc[C]) {
@@ -532,6 +677,7 @@ func (r *Router[C]) NotFound(h HandlerFunc[C]) {
 		panic("router: NotFound needs a handler")
 	}
 	r.mustNotBeServing("the not-found handler")
+	r.mustOwnFallbacks("the not-found handler")
 	r.notFound = h
 	r.settingChanged()
 }
@@ -541,6 +687,7 @@ func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
 		panic("router: MethodNotAllowed needs a handler")
 	}
 	r.mustNotBeServing("the method-not-allowed handler")
+	r.mustOwnFallbacks("the method-not-allowed handler")
 	r.methodNotAllowed = h
 	r.settingChanged()
 }
@@ -550,6 +697,7 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 		panic("router: ErrorHandler needs a handler")
 	}
 	r.mustNotBeServing("the error handler")
+	r.mustOwnFallbacks("the error handler")
 	r.errHandler = h
 	r.settingChanged()
 }
@@ -564,7 +712,6 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 			e.tree.recacheAllow(on, root.allowCache)
 		}
 	}
-	root.refresh()
 }
 
 func (r *Router[C]) MaxBodyBytes(n int64) {
@@ -636,9 +783,20 @@ func (r *Router[C]) refresh() {
 			e.errHandler, e.rawNotFound, e.rawNotAllowed = nil, nil, nil
 		}
 	}
-	rootNotFound := r.notFound
-	rootNotAllowed := r.methodNotAllowed
-	rootErrHandler := r.errHandler
+	// A nil field reads as the package default here, because elsewhere nil is
+	// what says nobody chose a handler.
+	rootNotFound := HandlerFunc[C](defaultNotFound[C])
+	if r.notFound != nil {
+		rootNotFound = r.notFound
+	}
+	rootNotAllowed := HandlerFunc[C](defaultMethodNotAllowed[C])
+	if r.methodNotAllowed != nil {
+		rootNotAllowed = r.methodNotAllowed
+	}
+	rootErrHandler := ErrorHandlerFunc[C](DefaultErrorHandler[C])
+	if r.errHandler != nil {
+		rootErrHandler = r.errHandler
+	}
 	r.notFoundChain = chain(rootNotFound, r.mws)
 	r.notAllowedChain = chain(rootNotAllowed, r.mws)
 	r.optionsChain = chain(autoOptions[C], r.mws)
@@ -672,9 +830,9 @@ func (r *Router[C]) refresh() {
 
 			own := inherited
 			switch {
-			case rt != r && rt.root == rt:
-
-			case len(rt.hosts) > 0 || normalizePattern(p) == "/":
+			// Only the router itself and a host scope own the root fallbacks;
+			// mustOwnFallbacks rejects the rest at the setter.
+			case rt == r || len(rt.hosts) > 0:
 				if e == nil {
 					if rt.notFound != nil {
 						rootNotFound = rt.notFound
@@ -734,8 +892,8 @@ func (r *Router[C]) refresh() {
 		})
 	}
 	for _, ps := range pending {
-		segs, _, _ := parsePattern(ps.prefix) //nolint:errcheck // newChild rejected a bad prefix already.
-		s := &scopeFallback[C]{prefix: ps.prefix, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
+		segs, names, _ := parsePattern(ps.prefix) //nolint:errcheck // newChild rejected a bad prefix already.
+		s := &scopeFallback[C]{prefix: ps.prefix, names: names, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
@@ -843,6 +1001,7 @@ func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
 
 type scopeFallback[C Context] struct {
 	prefix          string
+	names           []string
 	pattern         []segment
 	depth           int
 	hostIdx         int32
@@ -854,12 +1013,28 @@ type scopeFallback[C Context] struct {
 }
 
 func (s *scopeFallback[C]) covers(path string, escaped bool) bool {
+	_, ok := s.walk(path, escaped, nil)
+	return ok
+}
+
+// coversInto is covers, keeping the parameter values it decodes on the way.
+func (s *scopeFallback[C]) coversInto(path string, escaped bool, vals []string) ([]string, bool) {
+	return s.walk(path, escaped, vals)
+}
+
+// walk matches the scope prefix against the path, collecting the value of every
+// non-static segment when vals is non-nil. covers passes nil: it must not
+// allocate.
+func (s *scopeFallback[C]) walk(path string, escaped bool, vals []string) ([]string, bool) {
 	for _, want := range s.pattern {
 		if want.kind == segWildcard {
-			return true
+			if vals != nil {
+				vals = append(vals, strings.TrimPrefix(path, "/"))
+			}
+			return vals, true
 		}
 		if path == "" {
-			return false
+			return vals, false
 		}
 		raw, rest := cutSegment(path)
 		got := raw
@@ -867,15 +1042,18 @@ func (s *scopeFallback[C]) covers(path string, escaped bool) bool {
 			var ok bool
 			got, ok = decodePathSegment(raw, escaped)
 			if !ok {
-				return false
+				return vals, false
 			}
 		}
 		if !segmentMatches(want, got) {
-			return false
+			return vals, false
+		}
+		if vals != nil && want.kind != segStatic {
+			vals = append(vals, got)
 		}
 		path = rest
 	}
-	return true
+	return vals, true
 }
 
 func cutSegment(p string) (seg, rest string) {
@@ -902,14 +1080,40 @@ func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path st
 	return nil
 }
 
-func (r *Router[C]) fallbackChains(host *hostEntry[C], path string, escaped bool) (notFound, notAllowed, options HandlerFunc[C]) {
+func (r *Router[C]) fallbackChains(
+	host *hostEntry[C], path string, escaped bool,
+) (scope *scopeFallback[C], notFound, notAllowed, options HandlerFunc[C]) {
 	if s := scopeFor(r.scopes, host, path, escaped); s != nil {
-		return s.notFoundChain, s.notAllowedChain, s.optionsChain
+		return s, s.notFoundChain, s.notAllowedChain, s.optionsChain
 	}
 	if host != nil {
-		return host.notFoundChain, host.notAllowedChain, host.optionsChain
+		return nil, host.notFoundChain, host.notAllowedChain, host.optionsChain
 	}
-	return r.notFoundChain, r.notAllowedChain, r.optionsChain
+	return nil, r.notFoundChain, r.notAllowedChain, r.optionsChain
+}
+
+// bindPrefixParams gives a scope fallback the parameters of its own prefix, so
+// a 404 under /t/{tid} can read the tenant. There is no matched route here.
+func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) {
+	if len(s.names) == 0 {
+		return
+	}
+	// walk collects only into a non-nil slice; a request that matched no host
+	// has none, so the inline array gives it somewhere to write.
+	seed := b.paramVals
+	if seed == nil {
+		seed = b.paramArr[:0]
+	}
+	vals, ok := s.coversInto(path, escaped, seed)
+	if !ok {
+		return
+	}
+	names := s.names
+	if len(b.paramNames) > 0 {
+		names = append(slices.Clip(b.paramNames), s.names...)
+	}
+	b.needsCleanup = true
+	b.setRoute(s.prefix, names, vals)
 }
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
@@ -1071,9 +1275,15 @@ func (r *Router[C]) release(c C) {
 		return
 	}
 	if r.pool != nil {
-		r.reset(c)
 		b := c.base()
-		b.req, b.res = nil, nil
+		if b.retained {
+			// A goroutine outlived the handler and still points at this
+			// context. Recycling it would hand the two the same memory.
+			b.req, b.res = releasedRequest, nil
+			return
+		}
+		r.reset(c)
+		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()
@@ -1086,9 +1296,15 @@ func (r *Router[C]) release(c C) {
 
 func (r *Router[C]) recycle(c C) {
 	if r.pool != nil {
-		r.reset(c)
 		b := c.base()
-		b.req, b.res = nil, nil
+		if b.retained {
+			// A goroutine outlived the handler and still points at this
+			// context. Recycling it would hand the two the same memory.
+			b.req, b.res = releasedRequest, nil
+			return
+		}
+		r.reset(c)
+		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()
@@ -1113,6 +1329,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 	for len(trimmed) > 1 && trimmed[len(trimmed)-1] == '/' {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
+	b.tailSlash = len(trimmed) != len(path)
 
 	var (
 		host     *hostEntry[C]
@@ -1199,7 +1416,7 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		req.Pattern = match.pattern
 		b.res.Header().Set(HeaderAllow, r.allowHeader(&hostSt, &anySt))
 
-		_, notAllowed, options := r.fallbackChains(host, trimmed, escaped)
+		_, _, notAllowed, options := r.fallbackChains(host, trimmed, escaped)
 		if req.Method == http.MethodOptions && r.autoOptions {
 			if handleErrors {
 				return r.dispatch(c, options)
@@ -1215,7 +1432,10 @@ func (r *Router[C]) route(c C, req *http.Request, handleErrors bool) error {
 		if len(r.errScopes) > 0 || host != nil && host.errHandler != nil {
 			r.selectErrorTarget(b, host, trimmed, escaped)
 		}
-		notFound, _, _ := r.fallbackChains(host, trimmed, escaped)
+		scope, notFound, _, _ := r.fallbackChains(host, trimmed, escaped)
+		if scope != nil {
+			scope.bindPrefixParams(b, trimmed, escaped)
+		}
 		if handleErrors {
 			return r.dispatch(c, notFound)
 		}
@@ -1274,7 +1494,7 @@ func canonicalEscapedPath(path string) string {
 		if path[i] != '%' {
 			continue
 		}
-		v, ok := unhex(path[i+1], path[i+2])
+		v, ok := urlesc.Unhex(path[i+1], path[i+2])
 		if !ok {
 			continue
 		}
@@ -1286,7 +1506,7 @@ func canonicalEscapedPath(path string) string {
 		out = append(out, path[:i]...)
 		for i < len(path) {
 			if i+2 < len(path) && path[i] == '%' {
-				if v, ok := unhex(path[i+1], path[i+2]); ok {
+				if v, ok := urlesc.Unhex(path[i+1], path[i+2]); ok {
 					if v == '/' || v == '\\' || v == '%' {
 						out = append(out, '%', hex[v>>4], hex[v&15])
 					} else {
@@ -1302,27 +1522,6 @@ func canonicalEscapedPath(path string) string {
 		return string(out)
 	}
 	return path
-}
-
-func unhex(a, b byte) (byte, bool) {
-	hex := func(c byte) (byte, bool) {
-		switch {
-		case c >= '0' && c <= '9':
-			return c - '0', true
-		case c >= 'a' && c <= 'f':
-			return c - 'a' + 10, true
-		case c >= 'A' && c <= 'F':
-			return c - 'A' + 10, true
-		default:
-			return 0, false
-		}
-	}
-	hi, ok := hex(a)
-	if !ok {
-		return 0, false
-	}
-	lo, ok := hex(b)
-	return hi<<4 | lo, ok
 }
 
 func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
@@ -1369,16 +1568,19 @@ func (r *Router[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
 	return r.rootErrorHandler
 }
 
+// selectErrorTarget picks the scope whose error handler owns this request. It
+// runs while the routed path is still known: a handler is free to rewrite the
+// request, and that must not change who handles its failure.
 func (r *Router[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
 	b.errorRouted = true
 	b.errorScopeIdx = -1
+	if s := scopeFor(r.errScopes, host, path, escaped); s != nil {
+		b.errorScopeIdx = s.errorIdx
+	}
 	if host != nil {
 		b.hostIdx = host.idx
 	} else {
 		b.hostIdx = -1
-	}
-	if s := scopeFor(r.errScopes, host, path, escaped); s != nil {
-		b.errorScopeIdx = s.errorIdx
 	}
 }
 

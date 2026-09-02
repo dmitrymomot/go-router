@@ -174,12 +174,17 @@ func fieldName(ft reflect.StructField, tag string) (name, layout string, tagged,
 		if !ok {
 			continue
 		}
-		v, _, _ = strings.Cut(v, ",")
-		if v == "-" {
+		name, opts, hasOpts := strings.Cut(v, ",")
+		if name == "-" && !hasOpts {
 			return "", layout, true, true
 		}
-		if v != "" {
-			return v, layout, true, false
+		if name != "" {
+			return name, layout, true, false
+		}
+		// encoding/json reads `json:",omitempty"` as "this field, under its Go
+		// name": it is tagged, only the name is defaulted.
+		if hasOpts && opts != "" {
+			return ft.Name, layout, true, false
 		}
 	}
 	return ft.Name, layout, false, false

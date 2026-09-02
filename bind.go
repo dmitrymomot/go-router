@@ -37,7 +37,9 @@ func (b *Base) Bind[T any]() (T, error) {
 	case ct == MIMEApplicationForm, ct == MIMEMultipartForm:
 		return b.BindForm[T]()
 	case ct == "":
-		return b.BindQuery[T]()
+		// The bodiless methods returned above, so this one carries a body and
+		// does not say what it is.
+		return v, ErrUnsupportedMediaType.WithMessage("a %s body needs a Content-Type", b.req.Method)
 	default:
 		return v, ErrUnsupportedMediaType.WithMessage("cannot decode a %s body", ct)
 	}
@@ -108,8 +110,19 @@ type Validator interface {
 	Validate() error
 }
 
-func validate(v any) error {
-	sv, ok := v.(Validator)
+// validate takes &v so a Validator with a pointer receiver is found. For a
+// pointer T that makes **T, whose method set is empty, so the value is tried
+// too.
+func validate[T any](v *T) error {
+	sv, ok := any(v).(Validator)
+	if !ok {
+		// A nil T -- a JSON body of "null" bound into a pointer -- satisfies
+		// Validator but has no value to check, and calling through it panics.
+		if rv := reflect.ValueOf(*v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			return nil
+		}
+		sv, ok = any(*v).(Validator)
+	}
 	if !ok {
 		return nil
 	}
@@ -254,20 +267,29 @@ func (b *Base) limitedBody() io.ReadCloser {
 	if limit <= 0 {
 		return b.req.Body
 	}
-	return http.MaxBytesReader(b.res, b.req.Body, limit)
+	// MaxBytesReader marks the connection for closing through an unexported
+	// method on the writer it is handed, and does not unwrap, so it needs the
+	// one net/http gave us rather than the wrapper.
+	return http.MaxBytesReader(b.res.ResponseWriter, b.req.Body, limit)
 }
 
 func (b *Base) parseForm() error {
 	if err := b.formError(); err != nil {
 		return err
 	}
-	if b.req.PostForm != nil {
+	// Only the type matters here, and net/http parses the whole header again
+	// for the body, rejecting a malformed one there.
+	ct, _, _ := strings.Cut(b.req.Header.Get(HeaderContentType), ";")
+	multipart := strings.EqualFold(strings.TrimSpace(ct), MIMEMultipartForm)
+	// ParseForm leaves MultipartForm nil but fills PostForm, so which field
+	// says "already read" depends on the content type.
+	if multipart && b.req.MultipartForm != nil || !multipart && b.req.PostForm != nil {
 		return nil
 	}
 	b.req.Body = b.limitedBody()
 
 	var err error
-	if ct, _, _ := mime.ParseMediaType(b.req.Header.Get(HeaderContentType)); ct == MIMEMultipartForm {
+	if multipart {
 		memory := b.opts().maxMultipart
 		if memory <= 0 {
 			memory = defaultMaxMultipartMemory

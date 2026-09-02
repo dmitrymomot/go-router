@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"hash"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +34,9 @@ var cookieEnc = base64.RawURLEncoding
 type CookieCodec struct {
 	MaxAge time.Duration
 	key    []byte
+	// hmac.New builds and keys two hashes per call, and a flash is signed or
+	// verified at least twice per request.
+	macs sync.Pool
 }
 
 func NewCookieCodec(key []byte) *CookieCodec {
@@ -39,7 +44,9 @@ func NewCookieCodec(key []byte) *CookieCodec {
 		panic("router: NewCookieCodec needs a key of at least " +
 			strconv.Itoa(MinCookieKeyLen) + " bytes, and got " + strconv.Itoa(len(key)))
 	}
-	return &CookieCodec{MaxAge: DefaultCookieMaxAge, key: bytes.Clone(key)}
+	cc := &CookieCodec{MaxAge: DefaultCookieMaxAge, key: bytes.Clone(key)}
+	cc.macs.New = func() any { return hmac.New(sha256.New, cc.key) }
+	return cc
 }
 
 func (cc *CookieCodec) maxAge() time.Duration {
@@ -103,7 +110,11 @@ func (cc *CookieCodec) sign(name string, expiry int64, value []byte) []byte {
 	binary.BigEndian.PutUint64(header[:8], uint64(len(name)))
 	binary.BigEndian.PutUint64(header[8:], uint64(expiry))
 
-	mac := hmac.New(sha256.New, cc.key)
+	mac := cc.macs.Get().(hash.Hash)
+	defer func() {
+		mac.Reset()
+		cc.macs.Put(mac)
+	}()
 	mac.Write(header[:])
 	mac.Write([]byte(name))
 	mac.Write(value)

@@ -94,16 +94,25 @@ func fileNotFound(err error) error {
 func (b *Base) sendFile(name string, f fs.File, info fs.FileInfo) error {
 	req := b.req
 	rs, ok := f.(io.ReadSeeker)
+	var fake *nonseek.Reader
 	if !ok {
 		req = nonseek.Request(req, info.Size())
 		var err error
-		rs, err = nonseek.ReadSeeker("", b.res.Header(), req, name, f, info.Size())
+		fake, err = nonseek.ReadSeeker("", b.res.Header(), req, name, f, info.Size())
 		if err != nil {
 			return ErrInternalServerError.WithError(fmt.Errorf("router: read the file: %w", err))
 		}
+		rs = fake
 	}
 
 	http.ServeContent(b.res, req, path.Base(name), info.ModTime(), rs)
+	// ServeContent answers a read failure with its own 500 and returns nothing,
+	// so the error has to be picked back up to reach the error pipeline.
+	if fake != nil {
+		if err := fake.Err(); err != nil {
+			return ErrInternalServerError.WithError(fmt.Errorf("router: read the file: %w", err))
+		}
+	}
 	return nil
 }
 
@@ -121,6 +130,9 @@ func safeFileName(name string) bool {
 }
 
 func cleanFileName(name string) string {
+	if len(name) > 0 && name[0] == '/' {
+		return strings.TrimPrefix(path.Clean(name), "/")
+	}
 	return strings.TrimPrefix(path.Clean("/"+name), "/")
 }
 

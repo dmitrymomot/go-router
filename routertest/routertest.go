@@ -6,7 +6,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"io/fs"
 	"iter"
@@ -115,8 +114,9 @@ func writeFilePart(w *multipart.Writer, f FilePart) error {
 		contentType = "application/octet-stream"
 	}
 	h := make(textproto.MIMEHeader, 2)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
-		quoteEscaper.Replace(f.Field), quoteEscaper.Replace(filename)))
+	// FileContentDisposition also percent-encodes CR and LF, which the escaper
+	// here let through: a filename holding one produced a malformed part.
+	h.Set("Content-Disposition", multipart.FileContentDisposition(f.Field, filename))
 	h.Set("Content-Type", contentType)
 	p, err := w.CreatePart(h)
 	if err != nil {
@@ -125,8 +125,6 @@ func writeFilePart(w *multipart.Writer, f FilePart) error {
 	_, err = p.Write(f.Content)
 	return err
 }
-
-var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
 
 func setBody(req *http.Request, contentType string, r io.Reader) {
 	rc, ok := r.(io.ReadCloser)

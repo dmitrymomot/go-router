@@ -136,7 +136,11 @@ func StatusOf(err error) int {
 		return http.StatusOK
 	}
 	if he, ok := errors.AsType[*HTTPError](err); ok {
-		return he.Status
+		// The fields are exported, so a caller can build one with no status.
+		if he.Status != 0 {
+			return he.Status
+		}
+		return http.StatusInternalServerError
 	}
 	if sc, ok := errors.AsType[StatusCoder](err); ok {
 		if status := sc.StatusCode(); status != 0 {
@@ -180,8 +184,16 @@ func writeError(b *Base, err error, exposeCause bool) {
 		he = NewHTTPError(StatusOf(err)).WithError(err)
 	}
 
-	if he.Status >= http.StatusInternalServerError || he.Err != nil {
-		logFailure(b, err, he.Status)
+	// The fields are exported, so a caller can build one with no status, and
+	// WriteHeader panics on 0. Read it here rather than mutating the caller's
+	// error.
+	status := he.Status
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+
+	if status >= http.StatusInternalServerError || he.Err != nil {
+		logFailure(b, err, status)
 	}
 	if !writableFailure(b, err) {
 		return
@@ -197,28 +209,33 @@ func writeError(b *Base, err error, exposeCause bool) {
 	switch errorRepresentationFor(b.req) {
 	case errorRepresentationJSON:
 		b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
-		b.res.WriteHeader(he.Status)
+		b.res.WriteHeader(status)
 		if b.req.Method == http.MethodHead {
 			return
 		}
 		//nolint:errcheck // The connection is already failing; nothing to report.
 		json.MarshalWrite(b.res, errorBody{
-			Status: he.Status, Error: he.Message, Details: he.Details, Cause: cause,
+			Status: status, Error: he.Message, Details: he.Details, Cause: cause,
 		})
 		return
 	case errorRepresentationHTML:
 		b.res.Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
-		b.res.WriteHeader(he.Status)
+		b.res.WriteHeader(status)
 		if b.req.Method == http.MethodHead {
 			return
 		}
 		//nolint:errcheck // Same as above.
 		b.res.WriteString(html.EscapeString(he.Message))
+		if cause != "" {
+			// The other representations carry it; exposeCause already decided.
+			//nolint:errcheck // Same as above.
+			b.res.WriteString("\n<pre>" + html.EscapeString(cause) + "</pre>")
+		}
 		return
 	}
 
 	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
-	b.res.WriteHeader(he.Status)
+	b.res.WriteHeader(status)
 	if b.req.Method == http.MethodHead {
 		return
 	}
@@ -271,7 +288,7 @@ func errorRepresentationFor(r *http.Request) errorRepresentation {
 		offers = [...]string{MIMETextHTML, MIMEApplicationJSON, MIMETextPlain}
 	}
 
-	switch negotiate(strings.Join(r.Header.Values(HeaderAccept), ","), offers[:]) {
+	switch negotiate(joinAccept(r), offers[:]) {
 	case MIMEApplicationJSON:
 		return errorRepresentationJSON
 	case MIMETextHTML:

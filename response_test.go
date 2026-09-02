@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -385,4 +386,61 @@ func TestResponseBeforeRejectsNil(t *testing.T) {
 		}
 	}()
 	new(Response).Before(nil)
+}
+
+// After a hijack the caller owns the wire, so the router must not write on it
+// again or report a status the connection never carried.
+func TestHijackCommitsTheResponse(t *testing.T) {
+	var (
+		status   int
+		observed = make(chan int, 1)
+	)
+	r := newTestRouter()
+	r.Observe(func(_ Context, code int, _ int64, _ time.Duration, _ error) { observed <- code })
+	r.GET("/hj", func(c *tctx) error {
+		conn, bw, err := c.Response().Hijack()
+		if err != nil {
+			return err
+		}
+		status = c.Response().Status
+		if !c.Response().Committed {
+			t.Error("the response is not committed after a hijack")
+		}
+		_, _ = bw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\n")
+		_ = bw.Flush()
+		_ = conn.Close()
+		// An error after the hijack must not reach the wire again.
+		return ErrInternalServerError
+	})
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("GET /hj HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	if !strings.Contains(line, "101") {
+		t.Errorf("status line = %q, want the 101 the handler wrote", line)
+	}
+	if status != http.StatusSwitchingProtocols {
+		t.Errorf("Response.Status after a hijack = %d, want 101", status)
+	}
+	select {
+	case got := <-observed:
+		if got != http.StatusSwitchingProtocols {
+			t.Errorf("observed status = %d, want 101", got)
+		}
+	case <-time.After(time.Second):
+		t.Error("Observe never ran")
+	}
 }

@@ -132,3 +132,18 @@ func TestNewTrustSetRejectsANilOption(t *testing.T) {
 		middleware.NewTrustSet(nil)
 	})
 }
+
+// A zero Prefix matches nothing, so the proxy is never trusted and the
+// misconfiguration looks like working code.
+func TestTrustPrefixRejectsAnInvalidPrefix(t *testing.T) {
+	bad, err := netip.ParsePrefix("not-a-prefix")
+	if err == nil {
+		t.Fatal("ParsePrefix accepted nonsense")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("TrustPrefix accepted an invalid prefix")
+		}
+	}()
+	middleware.TrustPrefix(bad)
+}

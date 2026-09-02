@@ -4,12 +4,13 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"mime"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 
+	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/internal/nonseek"
 )
 
@@ -74,7 +75,7 @@ func (a *Assets) fallback(w http.ResponseWriter, r *http.Request, name string) b
 		w.Header().Set("Vary", "*")
 		return a.isNavigation(r)
 	}
-	addVary(w.Header(), "Accept")
+	router.AddVary(w.Header(), "Accept")
 	accept := strings.Join(r.Header.Values("Accept"), ",")
 	if strings.TrimSpace(accept) == "" {
 		return path.Ext(name) == ""
@@ -89,12 +90,11 @@ func (a *Assets) fallback(w http.ResponseWriter, r *http.Request, name string) b
 func htmlPreference(accept string) (int, float64) {
 	bestSpecificity, bestQuality := -1, 0.0
 	for v := range strings.SplitSeq(accept, ",") {
-		media, params, err := mime.ParseMediaType(strings.TrimSpace(v))
-		if err != nil {
-			continue
-		}
+		// ParseMediaType allocates a parameter map for every member; the only
+		// parameter that counts here is q, and quality reads it without one.
+		media, params, _ := strings.Cut(v, ";")
 		var specificity int
-		switch strings.ToLower(media) {
+		switch strings.ToLower(strings.TrimSpace(media)) {
 		case "text/html":
 			specificity = 2
 		case "text/*":
@@ -104,12 +104,9 @@ func htmlPreference(accept string) (int, float64) {
 		default:
 			continue
 		}
-		quality := 1.0
-		if raw, ok := params["q"]; ok {
-			quality, err = strconv.ParseFloat(raw, 64)
-			if err != nil || quality < 0 || quality > 1 {
-				continue
-			}
+		quality := acceptQualityOf(params)
+		if quality < 0 {
+			continue
 		}
 		if specificity > bestSpecificity || specificity == bestSpecificity && quality > bestQuality {
 			bestSpecificity, bestQuality = specificity, quality
@@ -118,16 +115,21 @@ func htmlPreference(accept string) (int, float64) {
 	return bestSpecificity, bestQuality
 }
 
-func addVary(h http.Header, name string) {
-	if h.Get("Vary") == "*" {
-		return
-	}
-	for value := range strings.SplitSeq(h.Get("Vary"), ",") {
-		if strings.EqualFold(strings.TrimSpace(value), name) {
-			return
+// acceptQualityOf reads the q parameter of one Accept member, or -1 when it is
+// present and malformed. Absent means 1, as RFC 9110 has it.
+func acceptQualityOf(params string) float64 {
+	for p := range strings.SplitSeq(params, ";") {
+		k, v, ok := strings.Cut(p, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+			continue
 		}
+		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || q < 0 || q > 1 {
+			return -1
+		}
+		return q
 	}
-	h.Add("Vary", name)
+	return 1
 }
 
 func (a *Assets) write(w http.ResponseWriter, r *http.Request, name string, versioned bool) error {
@@ -164,8 +166,18 @@ func (a *Assets) writePath(
 	return a.send(w, r, name, f, info, versioned)
 }
 
+// classifyFileError decides whether an open failure means "no such asset" or
+// something the operator needs to hear about. A path that walks through a
+// regular file, or past any limit the filesystem has, is a request for a file
+// that cannot exist -- not a fault. The Dir backend reports those as ENOTDIR
+// and ENAMETOOLONG, where the embedded one just says ErrNotExist; without this
+// the two backends answered the same URL 500 and 404.
 func classifyFileError(name string, err error) error {
-	if errors.Is(err, fs.ErrNotExist) || !fs.ValidPath(name) && errors.Is(err, fs.ErrInvalid) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist),
+		errors.Is(err, syscall.ENOTDIR),
+		errors.Is(err, syscall.ENAMETOOLONG),
+		!fs.ValidPath(name) && errors.Is(err, fs.ErrInvalid):
 		return errNoFile
 	}
 	return err
@@ -189,16 +201,23 @@ func (a *Assets) send(w http.ResponseWriter, r *http.Request, name string, f fs.
 
 	req := r
 	rs, ok := f.(io.ReadSeeker)
+	var fake *nonseek.Reader
 	if !ok {
 		req = nonseek.Request(req, info.Size())
 		var err error
-		rs, err = nonseek.ReadSeeker("static: ", w.Header(), req, name, f, info.Size())
+		fake, err = nonseek.ReadSeeker("static: ", w.Header(), req, name, f, info.Size())
 		if err != nil {
 			return err
 		}
+		rs = fake
 	}
 
 	http.ServeContent(w, req, path.Base(name), info.ModTime(), rs)
+	// ServeContent answers a read failure with its own 500 and returns nothing,
+	// so the error has to be picked back up here to reach the caller.
+	if fake != nil {
+		return fake.Err()
+	}
 	return nil
 }
 

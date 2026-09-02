@@ -14,6 +14,12 @@ import (
 )
 
 func (b *Base) contentType(value string) {
+	// An empty value is not a content type. Setting one writes a blank header,
+	// and net/http sniffs only when the key is absent, so the response went out
+	// with "Content-Type: " and the client had nothing to go on.
+	if value == "" {
+		return
+	}
 	h := b.res.Header()
 	if h.Get(HeaderContentType) == "" {
 		h.Set(HeaderContentType, value)

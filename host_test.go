@@ -773,10 +773,8 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 
 func TestHostInheritsTheFallbackOfTheRoot(t *testing.T) {
 	r := newTestRouter()
-	r.Group(func(g *Router[*tctx]) {
-		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "custom 404") })
-		g.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "custom 405") })
-	})
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "custom 404") })
+	r.MethodNotAllowed(func(c *tctx) error { return c.String(http.StatusMethodNotAllowed, "custom 405") })
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 
 	if got := doHost(r, http.MethodGet, "other.invalid", "/nope").Body.String(); got != "custom 404" {
@@ -888,4 +886,38 @@ func TestPerHostErrorHandlersIgnoreSetterOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A request from an IPv6 client arrives with its brackets stripped, so a host
+// scope has to be reachable by both spellings.
+func TestIPv6HostPatterns(t *testing.T) {
+	for _, pattern := range []string{"::1", "[::1]"} {
+		t.Run(pattern, func(t *testing.T) {
+			r := newTestRouter()
+			r.Host(pattern, func(h *Router[*tctx]) {
+				h.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "v6 "+c.RouteHost()) })
+			})
+			r.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "any host") })
+
+			for _, authority := range []string{"[::1]", "[::1]:8080"} {
+				if got := doHost(r, http.MethodGet, authority, "/x").Body.String(); got != "v6 ::1" {
+					t.Errorf("Host %s = %q, want %q", authority, got, "v6 ::1")
+				}
+			}
+			if got := doHost(r, http.MethodGet, "example.com", "/x").Body.String(); got != "any host" {
+				t.Errorf("another host = %q, want %q", got, "any host")
+			}
+		})
+	}
+}
+
+// parseHostPattern lower-cases and drops a trailing dot, so two spellings
+// resolve to one entry and the duplicate insert blames the route.
+func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {
+	r := newTestRouter()
+	mustPanicContaining(t, "which name the same host a.com", func() {
+		r.Hosts([]string{"a.com", "A.com."}, func(h *Router[*tctx]) {
+			h.GET("/x", echoRoute)
+		})
+	})
 }

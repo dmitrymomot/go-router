@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/urlesc"
 )
 
 type RewriteRule struct {
@@ -28,8 +29,10 @@ func Rewrite[C router.Context](rules ...RewriteRule) router.Middleware[C] {
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
 			req := c.Request()
+			// The path does not change between rules, so decode it once.
+			path := decodeUnreservedEscapes(req.URL.EscapedPath())
 			for _, rule := range compiled {
-				to, ok := rule.apply(decodeUnreservedEscapes(req.URL.EscapedPath()))
+				to, ok := rule.apply(path)
 				if !ok {
 					continue
 				}
@@ -96,7 +99,7 @@ func decodeUnreservedEscapes(s string) string {
 			i++
 			continue
 		}
-		v, ok := rewriteUnhex(s[i+1], s[i+2])
+		v, ok := urlesc.Unhex(s[i+1], s[i+2])
 		if !ok {
 			b.WriteByte(s[i])
 			i++
@@ -115,27 +118,6 @@ func decodeUnreservedEscapes(s string) string {
 	return b.String()
 }
 
-func rewriteUnhex(a, b byte) (byte, bool) {
-	hex := func(c byte) (byte, bool) {
-		switch {
-		case c >= '0' && c <= '9':
-			return c - '0', true
-		case c >= 'a' && c <= 'f':
-			return c - 'a' + 10, true
-		case c >= 'A' && c <= 'F':
-			return c - 'A' + 10, true
-		default:
-			return 0, false
-		}
-	}
-	hi, ok := hex(a)
-	if !ok {
-		return 0, false
-	}
-	lo, ok := hex(b)
-	return hi<<4 | lo, ok
-}
-
 func rewriteUnreserved(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
 		c == '-' || c == '.' || c == '_' || c == '~'
@@ -146,13 +128,13 @@ func rewriteBoundary(s string, i int) bool {
 		return false
 	}
 	if i > 0 && i+1 < len(s) && s[i-1] == '%' {
-		_, ok := rewriteUnhex(s[i], s[i+1])
+		_, ok := urlesc.Unhex(s[i], s[i+1])
 		if ok {
 			return false
 		}
 	}
 	if i > 1 && i < len(s) && s[i-2] == '%' {
-		_, ok := rewriteUnhex(s[i-1], s[i])
+		_, ok := urlesc.Unhex(s[i-1], s[i])
 		if ok {
 			return false
 		}
@@ -169,7 +151,7 @@ func rewriteIndex(s, part string) int {
 			break
 		}
 		if i+2 < len(s) && s[i] == '%' {
-			if _, ok := rewriteUnhex(s[i+1], s[i+2]); ok {
+			if _, ok := urlesc.Unhex(s[i+1], s[i+2]); ok {
 				i += 3
 				continue
 			}

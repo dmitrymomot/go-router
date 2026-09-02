@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bufio"
 	"compress/gzip"
 	"errors"
 	"io"
@@ -40,8 +41,14 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 				return next(c)
 			}
 
+			// gzip.Reader.Reset wraps a source without ReadByte in a fresh 4 KiB
+			// bufio.Reader, and *http.body has none.
+			src := byteReaders.Get().(*bufio.Reader)
+			src.Reset(req.Body)
+
 			zr := gzipReaders.Get().(*gzip.Reader)
-			if err := zr.Reset(req.Body); err != nil {
+			if err := zr.Reset(src); err != nil {
+				putByteReader(src)
 				putGzipReader(zr)
 				if errors.Is(err, io.EOF) {
 					return next(c)
@@ -55,6 +62,7 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 				body.zr = nil
 				if done {
 					putGzipReader(zr)
+					putByteReader(src)
 				}
 			}()
 
@@ -75,6 +83,13 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 			return tooLarge(err, "the expanded request body is limited to %d bytes", limit)
 		}
 	}
+}
+
+var byteReaders = sync.Pool{New: func() any { return bufio.NewReader(nil) }}
+
+func putByteReader(r *bufio.Reader) {
+	r.Reset(nil)
+	byteReaders.Put(r)
 }
 
 func putGzipReader(zr *gzip.Reader) {

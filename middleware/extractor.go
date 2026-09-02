@@ -28,10 +28,12 @@ func FromHeader(name, cutPrefix string) TokenSource {
 		var out []string
 		for _, v := range values {
 			if len(v) > n && strings.EqualFold(v[:n], cutPrefix) {
-				out = append(out, v[n:])
+				// RFC 6750 allows more than one space after the scheme, and
+				// RFC 9110 allows whitespace besides.
+				out = append(out, strings.TrimLeft(v[n:], " \t"))
 			}
 		}
-		return out
+		return nonEmpty(out)
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -33,6 +35,20 @@ func echoRoute(c *tctx) error {
 func do(h http.Handler, method, target string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
+	return rec
+}
+
+// doBody is do with a request body. An empty contentType sends none, which is
+// its own case: a body method that does not say what it carries.
+func doBody(h http.Handler, method, target, contentType, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	if contentType != "" {
+		req.Header.Set(HeaderContentType, contentType)
+	} else {
+		req.Header.Del(HeaderContentType)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
 	return rec
 }
 
@@ -340,7 +356,6 @@ func TestPercentEscapeCanonicalization(t *testing.T) {
 	r.GET("/slash/a%2Fb", func(c *tctx) error { return c.String(http.StatusOK, "escaped slash") })
 	r.GET("/slash/a/b", func(c *tctx) error { return c.String(http.StatusOK, "split slash") })
 	r.GET("/backslash/a%5Cb", func(c *tctx) error { return c.String(http.StatusOK, "escaped backslash") })
-	r.GET(`/backslash/a\b`, func(c *tctx) error { return c.String(http.StatusOK, "plain backslash") })
 	r.GET("/value/{value}", func(c *tctx) error { return c.String(http.StatusOK, c.Param("value")) })
 
 	tests := []struct{ path, want string }{
@@ -1270,7 +1285,7 @@ func TestRegistrationPanicsOnABadTable(t *testing.T) {
 			sub.GET("/a", echoRoute)
 			r.Mount("/sub", sub)
 			sub.GET("/b", echoRoute)
-		}, "after the router started serving"},
+		}, "on a mounted router"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2377,5 +2392,304 @@ func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
 	}
 	if got := do(r, http.MethodGet, "/a/missing").Body.String(); got != "/a" {
 		t.Errorf("any-host request answered by %q, want %q", got, "/a")
+	}
+}
+
+// A scope keyed by nothing covers everything, so it cannot own a fallback.
+func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		set  func(*Router[*tctx])
+	}{
+		{"NotFound", "the not-found handler", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error { return nil })
+		}},
+		{"MethodNotAllowed", "the method-not-allowed handler", func(g *Router[*tctx]) {
+			g.MethodNotAllowed(func(c *tctx) error { return nil })
+		}},
+		{"ErrorHandler", "the error handler", func(g *Router[*tctx]) {
+			g.ErrorHandler(func(c *tctx, err error) {})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			mustPanicContaining(t, "a scope without a prefix cannot own "+tc.want, func() {
+				r.Group(func(g *Router[*tctx]) { tc.set(g) })
+			})
+		})
+	}
+}
+
+// The root, a host scope and any prefixed scope all name a region the router
+// can match, so each keeps its own fallbacks.
+func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
+	r.GET("/outside", func(c *tctx) error { return ErrInternalServerError })
+	r.Route("/api", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "api err") })
+		g.GET("/inside", func(c *tctx) error { return ErrInternalServerError })
+	})
+	// A nested Group inherits the prefix of its owner, so it may own them too.
+	r.Route("/deep", func(g *Router[*tctx]) {
+		g.Group(func(h *Router[*tctx]) {
+			h.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "deep 404") })
+		})
+	})
+
+	for _, tc := range []struct{ path, want string }{
+		{"/outside", "root err"},
+		{"/api/inside", "api err"},
+		{"/nowhere", "root 404"},
+		{"/api/nowhere", "api 404"},
+		{"/deep/nowhere", "deep 404"},
+	} {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+// install does not run through handle, so Mount has to mark the owners itself
+// or Use will pass a guard that exists to catch exactly this.
+func TestUseAfterMountIsRefused(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/ping", echoRoute)
+	r := newTestRouter()
+	r.Mount("/api", sub)
+	mustPanicContaining(t, "Use must come before the routes of a scope", func() {
+		r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+	})
+}
+
+// A mounted router's fallbacks describe the region it was mounted at, so they
+// answer there and leave the rest of the tree to the parent.
+func TestMountKeepsTheFallbacksOfTheMountedRouter(t *testing.T) {
+	api := newTestRouter()
+	api.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "api 404") })
+	api.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "api err") })
+	api.GET("/boom", func(*tctx) error { return ErrInternalServerError })
+
+	r := newTestRouter()
+	r.NotFound(func(c *tctx) error { return c.String(http.StatusNotFound, "root 404") })
+	r.Mount("/api", api)
+	r.GET("/outside", func(*tctx) error { return ErrInternalServerError })
+
+	for _, tc := range []struct{ path, want string }{
+		{"/api/nope", "api 404"},
+		{"/api/boom", "api err"},
+		{"/nope", "root 404"},
+	} {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+	if got := do(r, http.MethodGet, "/outside").Code; got != http.StatusInternalServerError {
+		t.Errorf("GET /outside outside the mount = %d, want 500", got)
+	}
+}
+
+// These live on the router the request path reads, and there is one of those
+// per served router, so a mount would drop them without a word.
+func TestMountRefusesARouterCarryingRootOnlySettings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		set  func(*Router[*tctx])
+	}{
+		{"Pre", "Pre middleware", func(s *Router[*tctx]) {
+			s.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
+		}},
+		{"Observe", "an observer", func(s *Router[*tctx]) {
+			s.Observe(func(Context, int, int64, time.Duration, error) {})
+		}},
+		{"HandleOPTIONS", "HandleOPTIONS(false)", func(s *Router[*tctx]) { s.HandleOPTIONS(false) }},
+		{"RedirectTrailingSlash", "RedirectTrailingSlash(true)", func(s *Router[*tctx]) { s.RedirectTrailingSlash(true) }},
+		{"MaxBodyBytes", "MaxBodyBytes", func(s *Router[*tctx]) { s.MaxBodyBytes(1 << 10) }},
+		{"MaxMultipartMemory", "MaxMultipartMemory", func(s *Router[*tctx]) { s.MaxMultipartMemory(1 << 10) }},
+		{"StrictBind", "StrictBind", func(s *Router[*tctx]) { s.StrictBind(true) }},
+		{"JSONOptions", "JSONOptions", func(s *Router[*tctx]) { s.JSONOptions(json.Deterministic(true)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := newTestRouter()
+			sub.GET("/a", echoRoute)
+			tc.set(sub)
+			mustPanicContaining(t, "the mounted router carries "+tc.want, func() {
+				newTestRouter().Mount("/api", sub)
+			})
+		})
+	}
+}
+
+// Mount repoints the owner of what it is given. Handed a scope, it would tear
+// that scope out of the router that owns it.
+func TestMountRefusesAScopeOfAnotherRouter(t *testing.T) {
+	other := newTestRouter()
+	var scope *Router[*tctx]
+	other.Group(func(g *Router[*tctx]) {
+		scope = g
+		g.GET("/a", echoRoute)
+	})
+
+	mustPanicContaining(t, "Mount needs a top-level router", func() {
+		newTestRouter().Mount("/m", scope)
+	})
+	// The router that owns the scope is untouched and still open.
+	other.GET("/late", echoRoute)
+	if got := do(other, http.MethodGet, "/late").Code; got != http.StatusOK {
+		t.Errorf("GET /late on the owning router = %d, want 200", got)
+	}
+}
+
+// Routing trims the trailing slash before matching, but a mounted handler needs
+// the path the client sent: a FileServer redirects relative to it.
+func TestMountedHandlerKeepsTheTrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var seen string
+	r := newTestRouter()
+	r.MountHandler("/files", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		seen = req.URL.Path
+		http.FileServer(http.Dir(dir)).ServeHTTP(w, req)
+	}))
+
+	rec := do(r, http.MethodGet, "/files/sub/")
+	if seen != "/sub/" {
+		t.Errorf("path seen by the mounted handler = %q, want %q", seen, "/sub/")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /files/sub/ = %d, want 200 (Location %q)", rec.Code, rec.Header().Get("Location"))
+	}
+	if got := rec.Body.String(); got != "<h1>hi</h1>" {
+		t.Errorf("body = %q, want the index", got)
+	}
+
+	// A request without the slash still arrives without it.
+	do(r, http.MethodGet, "/files/sub/index.html")
+	if seen != "/sub/index.html" {
+		t.Errorf("path without a trailing slash = %q, want %q", seen, "/sub/index.html")
+	}
+}
+
+// The 405 branch reads the parameters off the matched route; the 404 branch has
+// no route and must take them from the scope prefix.
+func TestScopeFallbackSeesItsPrefixParams(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/t/{tid}", func(g *Router[*tctx]) {
+		g.NotFound(func(c *tctx) error {
+			return c.String(http.StatusNotFound, "404 tid="+c.Param("tid")+" pattern="+c.RoutePattern())
+		})
+		g.MethodNotAllowed(func(c *tctx) error {
+			return c.String(http.StatusMethodNotAllowed, "405 tid="+c.Param("tid"))
+		})
+		g.GET("/x", echoRoute)
+	})
+
+	if got := do(r, http.MethodGet, "/t/acme/missing").Body.String(); got != "404 tid=acme pattern=/t/{tid}" {
+		t.Errorf("scope 404 = %q, want %q", got, "404 tid=acme pattern=/t/{tid}")
+	}
+	if got := do(r, http.MethodPost, "/t/acme/x").Body.String(); got != "405 tid=acme" {
+		t.Errorf("scope 405 = %q, want %q", got, "405 tid=acme")
+	}
+}
+
+// A host scope contributes parameters too, and the scope prefix appends to them
+// rather than replacing them.
+func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
+	r := newTestRouter()
+	r.Host("{sub}.example.com", func(h *Router[*tctx]) {
+		h.Route("/t/{tid}", func(g *Router[*tctx]) {
+			g.NotFound(func(c *tctx) error {
+				return c.String(http.StatusNotFound, "sub="+c.Param("sub")+" tid="+c.Param("tid"))
+			})
+			g.GET("/x", echoRoute)
+		})
+	})
+
+	got := doHost(r, http.MethodGet, "acme.example.com", "/t/42/missing").Body.String()
+	if got != "sub=acme tid=42" {
+		t.Errorf("scope 404 under a host = %q, want %q", got, "sub=acme tid=42")
+	}
+}
+
+// A registrar that installs several tree entries is still one route to the
+// caller, so one Name scope has to cover all of them.
+func TestOneRegistrarCallHoldsOneName(t *testing.T) {
+	t.Run("MountHandler", func(t *testing.T) {
+		r := newTestRouter()
+		r.Name("assets").MountHandler("/static", http.NotFoundHandler())
+		got, err := r.URL("assets", nil)
+		if err != nil {
+			t.Fatalf("URL(assets) = %v", err)
+		}
+		if got != "/static" {
+			t.Errorf("URL(assets) = %q, want %q", got, "/static")
+		}
+	})
+
+	t.Run("Match", func(t *testing.T) {
+		r := newTestRouter()
+		r.Name("save").Match([]string{http.MethodPost, http.MethodPut}, "/items", echoRoute)
+		got, err := r.URL("save", nil)
+		if err != nil {
+			t.Fatalf("URL(save) = %v", err)
+		}
+		if got != "/items" {
+			t.Errorf("URL(save) = %q, want %q", got, "/items")
+		}
+		for _, m := range []string{http.MethodPost, http.MethodPut} {
+			if code := do(r, m, "/items").Code; code != http.StatusOK {
+				t.Errorf("%s /items = %d, want 200", m, code)
+			}
+		}
+	})
+
+	// A named scope still holds one route, not two.
+	t.Run("two routes still panic", func(t *testing.T) {
+		r := newTestRouter()
+		named := r.Name("twice")
+		named.GET("/a", echoRoute)
+		mustPanicContaining(t, "already registered a route", func() { named.GET("/b", echoRoute) })
+	})
+}
+
+// A path arrives canonicalised, so a literal spelled any other way is compared
+// against text no request can produce.
+func TestUnmatchableStaticLiteralsAreRejected(t *testing.T) {
+	for _, tc := range []struct{ pattern, want string }{
+		{`/backslash/a\b`, "write %5C"},
+		{"/lower/a%2fb", "upper-case escapes"},
+		{"/decoded/%41", `decoded, so write "A"`},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			err := ValidatePattern(tc.pattern)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ValidatePattern(%q) = %v, want one that reads %q", tc.pattern, err, tc.want)
+			}
+			mustPanicContaining(t, tc.want, func() { newTestRouter().GET(tc.pattern, echoRoute) })
+		})
+	}
+
+	// A % that starts no escape reaches the trie as written, so it still works.
+	if err := ValidatePattern("/discount/50%"); err != nil {
+		t.Errorf("ValidatePattern(/discount/50%%) = %v, want nil", err)
+	}
+}
+
+// {*} goes through the brace branch, which rejects duplicates; the bare form
+// has to do the same.
+func TestBareStarChecksForADuplicateName(t *testing.T) {
+	if err := ValidatePattern("/{*}/*"); err == nil ||
+		!strings.Contains(err.Error(), "duplicate parameter") {
+		t.Errorf("ValidatePattern(/{*}/*) = %v, want a duplicate-parameter error", err)
 	}
 }

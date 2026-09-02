@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// betteralign:check
+//betteralign:check
 type Response struct {
 	http.ResponseWriter
 	before    []func()
@@ -89,8 +89,20 @@ func (r *Response) ReadFrom(src io.Reader) (int64, error) {
 	return n, err
 }
 
+// Hijack takes the connection. The response counts as committed afterwards:
+// the caller owns the wire, and anything the router writes on top of that draws
+// "http: response.WriteHeader on hijacked connection" from net/http. Status is
+// recorded as 101, which is what a hijack is nearly always for, so an observer
+// does not report a 200 or a 500 for a connection that carried neither.
 func (r *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return http.NewResponseController(r.ResponseWriter).Hijack()
+	conn, rw, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err != nil {
+		return conn, rw, err
+	}
+	if !r.Committed {
+		r.Status, r.Committed = http.StatusSwitchingProtocols, true
+	}
+	return conn, rw, nil
 }
 
 const unwrapLimit = 16

@@ -528,3 +528,63 @@ func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 		})
 	}
 }
+
+// RFC 6839: a +json subtype is JSON with a name on it, and text/plain is not
+// what a JSON:API client asked for.
+func TestErrorNegotiationAcceptsAStructuredJSONSuffix(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/e", func(*tctx) error { return ErrBadRequest })
+
+	for _, accept := range []string{
+		MIMEApplicationJSON,
+		"application/vnd.api+json",
+		"application/problem+json",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/e", nil)
+		req.Header.Set(HeaderAccept, accept)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationJSONCharsetUTF8 {
+			t.Errorf("Accept %s answered %s, want JSON", accept, got)
+		}
+	}
+
+	// A type that names itself still wins over the suffix match.
+	req := httptest.NewRequest(http.MethodGet, "/e", nil)
+	req.Header.Set(HeaderAccept, "text/html, application/vnd.api+json;q=0.5")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if got := rec.Header().Get(HeaderContentType); got != MIMETextHTMLCharsetUTF8 {
+		t.Errorf("an exact text/html offer answered %s, want HTML", got)
+	}
+}
+
+// A client may send Accept more than once, and the error path reads them all.
+func TestAcceptsReadsEveryAcceptLine(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/a", func(c *tctx) error {
+		return c.String(http.StatusOK, c.Accepts(MIMETextHTML, MIMEApplicationJSON))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/a", nil)
+	req.Header.Add(HeaderAccept, MIMETextPlain)
+	req.Header.Add(HeaderAccept, MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if got := rec.Body.String(); got != MIMEApplicationJSON {
+		t.Errorf("Accepts over two Accept lines = %q, want %q", got, MIMEApplicationJSON)
+	}
+}
+
+// net/http sniffs only when the Content-Type key is absent, not when it is
+// present and empty.
+func TestBlobWithNoContentTypeLetsTheServerSniff(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/b", func(c *tctx) error { return c.Blob(http.StatusOK, "", []byte("<html>hi</html>")) })
+
+	rec := do(r, http.MethodGet, "/b")
+	if _, ok := rec.Result().Header[HeaderContentType]; ok {
+		t.Errorf("Content-Type = %q, want the header left out so the server sniffs",
+			rec.Header().Get(HeaderContentType))
+	}
+}

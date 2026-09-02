@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -39,9 +40,13 @@ func main() {
 		MaxHeaderBytes:    16 << 10,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// SIGTERM is what a container runtime sends.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
 		rm.close()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -54,6 +59,8 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	// ListenAndServe returns as soon as Shutdown begins, not when it finishes.
+	<-drained
 }
 
 func newRouter(rm *room) *router.Router[Ctx] {

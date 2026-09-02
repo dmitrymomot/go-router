@@ -1283,3 +1283,192 @@ func TestFieldErrorsReachesThroughAnErrorTree(t *testing.T) {
 		})
 	}
 }
+
+type pointerValidated struct {
+	Name string `json:"name"`
+}
+
+func (p *pointerValidated) Validate() error { return errors.New("validate ran") }
+
+// validate is handed &v, which is **T for a pointer T, and a pointer to a
+// pointer has an empty method set.
+func TestValidateRunsForAPointerTypeArgument(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/ptr", func(c *tctx) error {
+		if _, err := c.Bind[*pointerValidated](); err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, "ok")
+	})
+	r.POST("/val", func(c *tctx) error {
+		if _, err := c.Bind[pointerValidated](); err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, "ok")
+	})
+
+	for _, path := range []string{"/ptr", "/val"} {
+		rec := doBody(r, http.MethodPost, path, MIMEApplicationJSON, `{"name":"x"}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("POST %s = %d, want 422", path, rec.Code)
+		}
+	}
+}
+
+type optionOnlyTags struct {
+	Name  string `json:"name"`
+	Email string `json:",omitempty"`
+	Age   int    `json:",string"`
+}
+
+// An empty tag name with options still names the field, so StrictBind must not
+// treat it as untagged and zero it.
+func TestStrictBindKeepsFieldsTaggedWithOptionsOnly(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		r := newTestRouter()
+		r.StrictBind(strict)
+		r.POST("/x", func(c *tctx) error {
+			v, err := c.Bind[optionOnlyTags]()
+			if err != nil {
+				return err
+			}
+			return c.String(http.StatusOK, fmt.Sprintf("%s/%s/%d", v.Name, v.Email, v.Age))
+		})
+		got := doBody(r, http.MethodPost, "/x", MIMEApplicationJSON,
+			`{"name":"bo","Email":"bo@x","Age":"7"}`).Body.String()
+		if got != "bo/bo@x/7" {
+			t.Errorf("StrictBind(%v) = %q, want %q", strict, got, "bo/bo@x/7")
+		}
+	}
+}
+
+// Untagged fields are still stripped: the allowlist is what StrictBind is for.
+func TestStrictBindStillStripsUntaggedFields(t *testing.T) {
+	type mixed struct {
+		Name  string `json:"name"`
+		Admin bool
+	}
+	r := newTestRouter()
+	r.StrictBind(true)
+	r.POST("/x", func(c *tctx) error {
+		v, err := c.Bind[mixed]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%v", v.Name, v.Admin))
+	})
+	if got := doBody(r, http.MethodPost, "/x", MIMEApplicationJSON,
+		`{"name":"bo","Admin":true}`).Body.String(); got != "bo/false" {
+		t.Errorf("untagged field = %q, want %q", got, "bo/false")
+	}
+}
+
+// ParseForm on a multipart body fills PostForm and leaves MultipartForm nil, so
+// PostForm alone cannot say whether the body has been read.
+func TestFormFileSurvivesAnEarlierParseForm(t *testing.T) {
+	r := newTestRouter()
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			_ = c.Request().ParseForm()
+			return next(c)
+		}
+	})
+	r.POST("/upload", func(c *tctx) error {
+		_, fh, err := c.FormFile("doc")
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, fh.Filename)
+	})
+
+	body := "--B\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\nhello\r\n--B--\r\n"
+	rec := doBody(r, http.MethodPost, "/upload", "multipart/form-data; boundary=B", body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "a.txt" {
+		t.Errorf("upload after ParseForm = %d %q, want 200 %q", rec.Code, rec.Body.String(), "a.txt")
+	}
+}
+
+// A body method with no Content-Type must not fall through to the query.
+func TestBindRefusesABodyWithNoContentType(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/x", func(c *tctx) error {
+		v, err := c.Bind[struct {
+			Name string `json:"name"`
+		}]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, v.Name)
+	})
+	rec := doBody(r, http.MethodPost, "/x?name=fromquery", "", `{"name":"frombody"}`)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("POST with no Content-Type = %d %q, want 415", rec.Code, rec.Body.String())
+	}
+}
+
+// HTTPError has exported fields, so one can be built without a status, and
+// WriteHeader panics on 0.
+func TestHTTPErrorWithoutAStatusIsAnInternalError(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/z", func(*tctx) error { return &HTTPError{Message: "custom"} })
+	rec := do(r, http.MethodGet, "/z")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "custom") {
+		t.Errorf("body = %q, want it to carry the message", rec.Body.String())
+	}
+}
+
+// MaxBytesReader marks the connection for closing through an unexported method
+// on the writer it is handed, and does not unwrap.
+func TestOversizedBodyClosesTheConnection(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(16)
+	r.POST("/b", func(c *tctx) error {
+		_, err := c.Bind[map[string]any]()
+		return err
+	})
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body := `{"k":"` + strings.Repeat("a", 4096) + `"}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/b", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // The test is done with it.
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	if !resp.Close {
+		t.Error("the server kept the connection open after a 413")
+	}
+}
+
+// A JSON body of "null" bound into a pointer leaves a nil T, which satisfies
+// Validator but has no value to check.
+func TestBindPointerWithANullBodySkipsValidate(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/p", func(c *tctx) error {
+		v, err := c.Bind[*pointerValidated]()
+		if err != nil {
+			return err
+		}
+		if v != nil {
+			return c.String(http.StatusOK, "value")
+		}
+		return c.String(http.StatusOK, "nil")
+	})
+	rec := doBody(r, http.MethodPost, "/p", MIMEApplicationJSON, `null`)
+	if rec.Code != http.StatusOK || rec.Body.String() != "nil" {
+		t.Errorf("null body = %d %q, want 200 %q", rec.Code, rec.Body.String(), "nil")
+	}
+}

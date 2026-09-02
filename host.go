@@ -5,6 +5,7 @@ import (
 	"net"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -146,6 +147,11 @@ func parseHostPattern(pattern string) (hostSpec, error) {
 	if pattern == "*" {
 		return hostSpec{pattern: "*", any: true}, nil
 	}
+	// An IPv6 literal is all colons, and arrives with its brackets stripped, so
+	// it can only be matched exactly.
+	if host, ok := ipv6HostPattern(pattern); ok {
+		return hostSpec{pattern: host, labels: []hostLabel{{lit: host}}, statics: 1}, nil
+	}
 	if indexOutsideBraces(pattern, ':') >= 0 {
 		return hostSpec{}, fmt.Errorf("router: host pattern %q must not carry a port; the router matches the host without one", raw)
 	}
@@ -205,6 +211,19 @@ func parseHostPattern(pattern string) (hostSpec, error) {
 
 	slices.Reverse(s.labels)
 	return s, nil
+}
+
+// ipv6HostPattern reports the address in an IPv6 host pattern, bare or
+// bracketed. The text is kept as written, as normalizeHostOK keeps it too.
+func ipv6HostPattern(pattern string) (string, bool) {
+	host := pattern
+	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	if strings.IndexByte(host, ':') < 0 || net.ParseIP(host) == nil {
+		return "", false
+	}
+	return host, true
 }
 
 func hostLiteralsASCII(pattern string) bool {
@@ -508,20 +527,8 @@ func normalizeIPAuthority(authority string) (string, bool) {
 }
 
 func validPort(port string) bool {
-	if port == "" {
-		return false
-	}
-	n := 0
-	for i := range len(port) {
-		if port[i] < '0' || port[i] > '9' {
-			return false
-		}
-		n = n*10 + int(port[i]-'0')
-		if n > 65535 {
-			return false
-		}
-	}
-	return true
+	_, err := strconv.ParseUint(port, 10, 16)
+	return err == nil
 }
 
 func asciiLower(s string) string {

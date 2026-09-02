@@ -16,6 +16,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/static"
 )
 
@@ -1197,5 +1198,95 @@ func TestDirModeRedirectsADirectory(t *testing.T) {
 	}
 	if rec := get(a, "/css"); rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404; the directory holds no index", rec.Code)
+	}
+}
+
+// A path through a regular file names a file that cannot exist. The Dir backend
+// reports ENOTDIR where the embedded one reports ErrNotExist.
+func TestAPathThroughAFileIsNotFoundOnEveryBackend(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "css"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		"css/app.css": "body{}",
+		"index.html":  "<html>",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	backends := map[string]*static.Assets{
+		"dir": static.Must(static.Config{Dir: dir}),
+		"embed": static.Must(static.Config{FS: fstest.MapFS{
+			"css/app.css": {Data: []byte("body{}")},
+			"index.html":  {Data: []byte("<html>")},
+		}}),
+	}
+	for name, assets := range backends {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			assets.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/css/app.css/extra", nil))
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("GET /css/app.css/extra = %d, want 404", rec.Code)
+			}
+		})
+	}
+}
+
+// Config.NotFound was read only by Assets.ServeHTTP, so Mount ignored it.
+func TestConfigNotFoundRunsThroughMount(t *testing.T) {
+	custom := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("custom static 404"))
+	})
+	assets := static.Must(static.Config{
+		FS:       fstest.MapFS{"index.html": {Data: []byte("<html>")}},
+		NotFound: custom,
+	})
+
+	r := newRouter()
+	static.Mount(r, assets)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope.js", nil))
+	if got := strings.TrimSpace(rec.Body.String()); got != "custom static 404" {
+		t.Errorf("mounted miss = %q, want %q", got, "custom static 404")
+	}
+}
+
+// Without a NotFound the miss stays router.ErrNotFound, so the router's error
+// handler renders it as it renders any other 404.
+func TestMountWithoutNotFoundLeavesTheRouterInCharge(t *testing.T) {
+	assets := static.Must(static.Config{FS: fstest.MapFS{"index.html": {Data: []byte("<html>")}}})
+	r := newRouter()
+	var handled error
+	r.ErrorHandler(func(c *appContext, err error) {
+		handled = err
+		_ = c.String(http.StatusNotFound, "router 404")
+	})
+	static.Mount(r, assets)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope.js", nil))
+	if got := rec.Body.String(); got != "router 404" {
+		t.Errorf("mounted miss = %q, want %q", got, "router 404")
+	}
+	if !errors.Is(handled, router.ErrNotFound) {
+		t.Errorf("error reaching the handler = %v, want router.ErrNotFound", handled)
+	}
+}
+
+// "." and ".." survive Trim and read as path segments, so URL would hand out
+// /./app.js and the tag would never match back.
+func TestBuildTagRejectsDotSegments(t *testing.T) {
+	for _, tag := range []string{".", ".."} {
+		_, err := static.New(static.Config{
+			FS:    fstest.MapFS{"index.html": {Data: []byte("x")}, "app.js": {Data: []byte("y")}},
+			Build: tag,
+		})
+		if err == nil {
+			t.Errorf("Build %q was accepted, want an error", tag)
+		}
 	}
 }
