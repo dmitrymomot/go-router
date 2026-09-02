@@ -299,8 +299,20 @@ func (b *Base) UserAgent() string { return b.req.UserAgent() }
 
 func (b *Base) Referer() string { return b.req.Referer() }
 
+// Accepts picks the best of offers for this request, or "" when none of them
+// is acceptable. Every Accept line counts: a client is free to send the header
+// more than once, and Get would have read only the first.
 func (b *Base) Accepts(offers ...string) string {
-	return negotiate(b.req.Header.Get(HeaderAccept), offers)
+	return negotiate(joinAccept(b.req), offers)
+}
+
+// joinAccept folds repeated Accept lines into the one list they stand for.
+func joinAccept(r *http.Request) string {
+	values := r.Header.Values(HeaderAccept)
+	if len(values) < 2 {
+		return r.Header.Get(HeaderAccept)
+	}
+	return strings.Join(values, ",")
 }
 
 func (b *Base) Param(name string) string {
