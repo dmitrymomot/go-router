@@ -68,7 +68,10 @@
 
 {{if .Email}}
 <p class="hint">Signed in as {{.Email}}. The session cookie names no domain, so it belongs to this host alone and no other workspace can read it.</p>
-<form action="/signout" method="post"><button type="submit">Sign out</button></form>
+<form action="/signout" method="post">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+	<button type="submit">Sign out</button>
+</form>
 {{else}}
 <p class="hint">You are reading this workspace as a guest.</p>
 <p><a class="button" href="/login">Sign in to {{.Workspace.Name}}</a></p>

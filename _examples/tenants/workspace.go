@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/middleware"
 )
 
 // workspaceRoutes answers on every workspace subdomain: the dashboard, the
@@ -37,6 +38,7 @@ type dashboardPage struct {
 	Workspace Workspace
 	Email     string
 	ApexURL   string
+	CSRFToken string
 }
 
 func dashboard(c Ctx) error {
@@ -44,6 +46,8 @@ func dashboard(c Ctx) error {
 		Workspace: c.Workspace,
 		Email:     c.Email,
 		ApexURL:   apexURL(c),
+		// The sign-out form posts, so it carries a token like any other.
+		CSRFToken: middleware.CSRFTokenFrom(c),
 	}))
 }
 

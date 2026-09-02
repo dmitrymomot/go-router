@@ -246,21 +246,54 @@ func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 	h := newTestRouter(t)
 	signUp(t, h, "Acme", "ann@example.com", testPassword)
-	session := sessionOf(t, logIn(t, h, "acme", "ann@example.com", testPassword))
 
+	signedIn := logIn(t, h, "acme", "ann@example.com", testPassword)
+	session := sessionOf(t, signedIn)
+
+	// Read the dashboard and post its own sign-out form, token and all. A
+	// form that carries no token has to fail here, as it does in a browser.
 	at := host("acme")
-	token := csrf(t, h, at, "http://"+at+"/login")
+	page := routertest.Get(h, "http://"+at+"/", routertest.Host(at), routertest.Cookie(session))
+	page.AssertStatus(t, http.StatusOK)
+
 	res := routertest.Do(h, http.MethodPost, "http://"+at+"/signout",
 		routertest.Host(at),
-		routertest.Cookie(token),
+		routertest.Cookie(csrfCookieOf(t, page)),
 		routertest.Cookie(session),
-		routertest.FormBody(url.Values{"_csrf": {token.Value}}))
+		routertest.FormBody(url.Values{"_csrf": {hiddenToken(t, page.String())}}))
 
 	res.AssertStatus(t, http.StatusSeeOther)
 	res.AssertHeader(t, router.HeaderLocation, "/login")
 	if got := sessionOf(t, res); got.MaxAge >= 0 {
 		t.Errorf("sign out left the session alive: %+v", got)
 	}
+}
+
+// hiddenToken reads the token out of the _csrf field of a rendered form.
+func hiddenToken(t *testing.T, body string) string {
+	t.Helper()
+
+	_, rest, ok := strings.Cut(body, `name="_csrf" value="`)
+	if !ok {
+		t.Fatalf("the page carries no _csrf field: %s", body)
+	}
+	token, _, _ := strings.Cut(rest, `"`)
+	if token == "" {
+		t.Fatalf("the _csrf field of the page is empty: %s", body)
+	}
+	return token
+}
+
+func csrfCookieOf(t *testing.T, res *routertest.Response) *http.Cookie {
+	t.Helper()
+
+	for _, c := range res.Cookies() {
+		if c.Name == "_csrf" {
+			return c
+		}
+	}
+	t.Fatal("the page issued no CSRF cookie")
+	return nil
 }
 
 func TestAnUnknownSubdomainIsNotFound(t *testing.T) {
