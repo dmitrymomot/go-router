@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -2692,4 +2694,109 @@ func TestBareStarChecksForADuplicateName(t *testing.T) {
 		!strings.Contains(err.Error(), "duplicate parameter") {
 		t.Errorf("ValidatePattern(/{*}/*) = %v, want a duplicate-parameter error", err)
 	}
+}
+
+// Registration overlapping the first request used to race on the trie: the
+// started guard is a check-then-act, so a route could be inserted while a
+// request was walking the same nodes. With ConcurrentRegistration the table is
+// rebuilt and swapped instead, so a request reads one version or the other.
+func TestConcurrentRegistrationWhileServing(t *testing.T) {
+	r := newTestRouter()
+	r.ConcurrentRegistration(true)
+	r.GET("/always", echoRoute)
+
+	var (
+		wg    sync.WaitGroup
+		stop  = make(chan struct{})
+		adds  = 64
+		mu    sync.Mutex
+		added int
+	)
+
+	// Readers hammer a route that exists throughout.
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if code := do(r, http.MethodGet, "/always").Code; code != http.StatusOK {
+					t.Errorf("GET /always during registration = %d, want 200", code)
+					return
+				}
+			}
+		})
+	}
+
+	// One writer adds routes while those requests are in flight.
+	wg.Go(func() {
+		for i := range adds {
+			r.GET("/late/"+strconv.Itoa(i), echoRoute)
+			mu.Lock()
+			added++
+			mu.Unlock()
+		}
+	})
+
+	// Wait for the writer, then stop the readers.
+	time.Sleep(20 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	mu.Lock()
+	got := added
+	mu.Unlock()
+	if got != adds {
+		t.Fatalf("registered %d routes, want %d", got, adds)
+	}
+	for i := range adds {
+		path := "/late/" + strconv.Itoa(i)
+		if code := do(r, http.MethodGet, path).Code; code != http.StatusOK {
+			t.Errorf("GET %s after registration = %d, want 200", path, code)
+		}
+	}
+	if code := do(r, http.MethodGet, "/always").Code; code != http.StatusOK {
+		t.Errorf("GET /always after registration = %d, want 200", code)
+	}
+}
+
+// Without the opt-in a late registration is still refused, and now says how to
+// allow it.
+func TestLateRegistrationIsStillRefusedByDefault(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/a", echoRoute)
+	do(r, http.MethodGet, "/a")
+	mustPanicContaining(t, "ConcurrentRegistration(true) to allow it", func() {
+		r.GET("/b", echoRoute)
+	})
+}
+
+// A wrapped engine sees every request, and a later registration republishes the
+// built-in table, which the doc comment warns about.
+func TestSetEngineWraps(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/a", echoRoute)
+
+	var seen int
+	r.SetEngine(countingEngine[*tctx]{Engine: r.Engine(), n: &seen})
+	do(r, http.MethodGet, "/a")
+	do(r, http.MethodGet, "/a")
+	if seen != 2 {
+		t.Errorf("wrapped engine saw %d requests, want 2", seen)
+	}
+	if len(r.Engine().Routes()) == 0 {
+		t.Error("the wrapped engine reports no routes")
+	}
+}
+
+type countingEngine[C Context] struct {
+	Engine[C]
+	n *int
+}
+
+func (e countingEngine[C]) Serve(c C, req *http.Request, handleErrors bool) error {
+	*e.n++
+	return e.Engine.Serve(c, req, handleErrors)
 }

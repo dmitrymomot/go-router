@@ -58,9 +58,18 @@ type Router[C Context] struct {
 	reset    func(C)
 	ropts    *routerOpts
 
-	// eng is the compiled route table. Only the root holds one; every scope
-	// reaches it through root.
-	eng *engine[C]
+	// eng is the table registration builds. Only the root holds one; every
+	// scope reaches it through root. live is what requests read: the same
+	// table until a registration during serving replaces it.
+	eng  *engine[C]
+	live atomic.Pointer[servedEngine[C]]
+
+	// concurrent allows registration after the first request, by rebuilding
+	// the table and swapping it in rather than editing one being read. regMu
+	// serializes registrations against each other and against the one-time
+	// freeze, so nobody edits a table a request has already started reading.
+	concurrent atomic.Bool
+	regMu      sync.Mutex
 
 	// Registration only, from here down.
 	prefix           string
@@ -86,6 +95,27 @@ type Router[C Context] struct {
 	info             map[routeKey]routeInfo
 }
 
+// Engine is a compiled route table. A Router builds one during registration and
+// answers every request from it; the table is replaced whole rather than
+// changed, so a request always reads one consistent version of it.
+//
+// The interface exists so a table can be wrapped -- for tracing, metrics or
+// measurement -- without the router knowing. Implementing one from scratch
+// means reproducing host trees, scope fallbacks, the 405 state and Allow
+// caching, so wrapping the built-in table is usually what is wanted.
+type Engine[C Context] interface {
+	// Serve routes one request and runs its handler. handleErrors is false
+	// when a caller upstream will dispatch the error itself.
+	Serve(c C, req *http.Request, handleErrors bool) error
+
+	// Routes reports the table as it stands.
+	Routes() []Route
+}
+
+// servedEngine boxes the Engine so it can live in an atomic.Pointer; an
+// interface value is two words and cannot be swapped atomically on its own.
+type servedEngine[C Context] struct{ Engine[C] }
+
 // engine is the route table as the request path sees it: everything routing
 // reads, and nothing registration keeps. The split is what lets the table be
 // rebuilt and swapped whole rather than mutated under a live request.
@@ -107,6 +137,14 @@ type engine[C Context] struct {
 	redirectSlash    bool
 	anyHostRoutes    bool
 }
+
+// Serve implements [Engine].
+func (e *engine[C]) Serve(c C, req *http.Request, handleErrors bool) error {
+	return e.route(c, req, handleErrors)
+}
+
+// Routes implements [Engine].
+func (e *engine[C]) Routes() []Route { return e.owner.collectRoutes() }
 
 func newEngine[C Context]() *engine[C] {
 	return &engine[C]{
@@ -134,6 +172,7 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	}
 	r.root = r
 	r.eng.owner = r
+	r.publish(r.eng)
 	return r
 }
 
@@ -173,8 +212,15 @@ func (r *Router[C]) inOneRoute(fn func()) {
 }
 
 func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []Middleware[C], name string) {
-	if r.root.started.Load() {
-		panic("router: cannot register " + method + " " + pattern + " after the router started serving")
+	if r.root.concurrent.Load() {
+		// Held across the whole registration: regs, the trie and the published
+		// table all move together, and the freeze cannot land in the middle.
+		r.root.regMu.Lock()
+		defer r.root.regMu.Unlock()
+	}
+	if r.root.started.Load() && !r.root.concurrent.Load() {
+		panic("router: cannot register " + method + " " + pattern +
+			" after the router started serving; call ConcurrentRegistration(true) to allow it")
 	}
 	r.mustBeOpen("register " + method + " " + pattern)
 	if method == "" {
@@ -205,7 +251,49 @@ func (r *Router[C]) handleNamed(method, pattern string, h HandlerFunc[C], mws []
 		meta:    r.meta,
 	}
 	r.regs = append(r.regs, reg)
+	if r.root.started.Load() {
+		// A request may be reading the live table right now, so it is left
+		// alone: the route goes into a fresh one that replaces it.
+		r.top().swapInRebuilt()
+		return
+	}
 	r.install(reg)
+}
+
+// ConcurrentRegistration allows routes to be added after the first request.
+//
+// While it is off -- the default -- a late registration panics, because editing
+// a table another goroutine is reading corrupts it. While it is on, a late
+// registration compiles a whole new table and publishes it atomically, so a
+// request reads either the table before the route or the table after it, never
+// one being written. Requests pay nothing for this: they load a pointer, with
+// no lock and no contention.
+//
+// The cost lands on the registration, which is O(routes) rather than O(1).
+// Building the table up front is unaffected; only registrations that overlap
+// serving rebuild.
+func (r *Router[C]) ConcurrentRegistration(on bool) { r.root.concurrent.Store(on) }
+
+// swapInRebuilt compiles a fresh table from the scope tree and publishes it.
+func (r *Router[C]) swapInRebuilt() {
+	eng := newEngine[C]()
+	eng.owner = r
+	eng.autoOptions = r.eng.autoOptions
+	eng.redirectSlash = r.eng.redirectSlash
+	r.replayInto(eng)
+	r.compile(eng)
+	r.eng = eng
+	r.publish(eng)
+}
+
+// replayInto puts every registered route into a table being built.
+func (r *Router[C]) replayInto(eng *engine[C]) {
+	for _, reg := range r.regs {
+		r.installInto(reg, eng, false)
+	}
+	for _, ch := range r.children {
+		ch.replayInto(eng)
+	}
 }
 
 // install puts the route in its trie now, so a malformed pattern or a conflict
@@ -379,7 +467,30 @@ func (r *Router[C]) settingChanged() {
 // refresh recompiles the live table in place. Every setter that can change a
 // fallback calls it, so the router is ready to serve the moment the setter
 // returns.
-func (r *Router[C]) refresh() { r.compile(r.eng) }
+func (r *Router[C]) refresh() {
+	r.compile(r.eng)
+	r.publish(r.eng)
+}
+
+// publish makes a table the one requests read from here on.
+func (r *Router[C]) publish(e Engine[C]) { r.live.Store(&servedEngine[C]{e}) }
+
+// SetEngine replaces the table requests are answered from. It is meant for
+// wrapping the built-in one:
+//
+//	r.SetEngine(tracing{r.Engine()})
+//
+// A later registration recompiles the built-in table and publishes it plain, so
+// a wrapper has to be reapplied after one.
+func (r *Router[C]) SetEngine(e Engine[C]) {
+	if e == nil {
+		panic("router: SetEngine needs an engine")
+	}
+	r.root.publish(e)
+}
+
+// Engine reports the table requests are currently answered from.
+func (r *Router[C]) Engine() Engine[C] { return r.root.live.Load().Engine }
 
 // inOneScope holds the graph rebuild until the outermost scope callback
 // returns. refresh walks the whole graph, so one per nested Route, Group or
@@ -788,6 +899,15 @@ func (r *Router[C]) Routes() []Route { return r.top().collectRoutes() }
 // Idempotent: it reads the graph and stores a flag, so two first requests can
 // run it at once without a Once to serialize them.
 func (r *Router[C]) freeze() {
+	if r.concurrent.Load() {
+		// Ordered against registration: whoever gets here first decides
+		// whether the next route is installed in place or into a new table.
+		r.regMu.Lock()
+		defer r.regMu.Unlock()
+		if r.started.Load() {
+			return
+		}
+	}
 	freezeRouterGraph(r, make(map[*Router[C]]bool))
 }
 
@@ -1000,7 +1120,7 @@ func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern strin
 	return nil
 }
 
-func (r *Router[C]) preTerminal(c C) error { return r.eng.route(c, c.base().req, false) }
+func (r *Router[C]) preTerminal(c C) error { return r.live.Load().Serve(c, c.base().req, false) }
 
 type pendingScope[C Context] struct {
 	prefix string
@@ -1253,7 +1373,7 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	//nolint:errcheck // Same as above.
-	root.eng.route(c, req, true)
+	root.live.Load().Serve(c, req, true)
 }
 
 func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
@@ -1279,7 +1399,7 @@ func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
 		err = r.dispatch(c, r.preChain)
 		return
 	}
-	err = r.eng.route(c, req, true)
+	err = r.live.Load().Serve(c, req, true)
 }
 
 func (r *Router[C]) acquire(w http.ResponseWriter, req *http.Request) C {
