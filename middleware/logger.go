@@ -7,6 +7,12 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// LoggerConfig configures [LoggerWithConfig]. A nil Logger takes
+// [slog.Default], and an empty Message logs "request".
+//
+// Level is the level of an answer under 400, ClientErrorLevel of a 4xx, and
+// ServerErrorLevel of a 5xx; they default to info, warn and error. Attrs adds
+// attributes of your own, and DisableUserAgent leaves the User-Agent out.
 type LoggerConfig struct {
 	Skip             func(c router.Context) bool
 	Logger           *slog.Logger
@@ -18,10 +24,17 @@ type LoggerConfig struct {
 	DisableUserAgent bool
 }
 
+// Logger writes one line per request, with the method, the path, the route,
+// the status, how long it took, the size, the client address, the host and the
+// protocol. It adds the request id when [RequestID] ran ahead of it.
+//
+// It builds nothing when the logger discards the level, so a quiet level costs
+// almost nothing.
 func Logger[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return LoggerWithConfig[C](LoggerConfig{})(next)
 }
 
+// LoggerWithConfig is [Logger] with a configuration.
 func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()

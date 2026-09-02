@@ -6,15 +6,24 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// BodyLimitConfig configures [BodyLimitWithConfig]. A Limit of zero or less
+// takes [router.DefaultMaxBodyBytes].
 type BodyLimitConfig struct {
 	Skip  func(c router.Context) bool
 	Limit int64
 }
 
+// BodyLimit caps the request body at limit bytes for the routes it covers,
+// which is what a single upload route needs above the setting of the router.
+//
+// A Content-Length over the limit is refused before the handler runs, and a
+// body that understates its length is cut off as it is read. Both report
+// [router.ErrPayloadTooLarge].
 func BodyLimit[C router.Context](limit int64) router.Middleware[C] {
 	return BodyLimitWithConfig[C](BodyLimitConfig{Limit: limit})
 }
 
+// BodyLimitWithConfig is [BodyLimit] with a configuration.
 func BodyLimitWithConfig[C router.Context](cfg BodyLimitConfig) router.Middleware[C] {
 	limit := cfg.Limit
 	if limit <= 0 {
