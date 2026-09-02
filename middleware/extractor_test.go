@@ -254,3 +254,25 @@ func TestFromFormReadsTheMethodsThatNetHTTPParses(t *testing.T) {
 		})
 	}
 }
+
+// RFC 6750 allows more than one space after the scheme. The cut was exactly
+// len("Bearer "), so "Bearer  tok" produced the key " tok", which matches no
+// key: BasicAuth in the same package already trimmed.
+func TestFromHeaderTrimsExtraSpaceAfterTheScheme(t *testing.T) {
+	src := middleware.FromHeader("Authorization", "Bearer ")
+	for _, header := range []string{"Bearer tok", "Bearer  tok", "Bearer \ttok"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Authorization", header)
+		got := src(tokenContext(req))
+		if len(got) != 1 || got[0] != "tok" {
+			t.Errorf("FromHeader(%q) = %q, want [tok]", header, got)
+		}
+	}
+
+	// A header carrying only the scheme yields no key rather than an empty one.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer   ")
+	if got := src(tokenContext(req)); len(got) != 0 {
+		t.Errorf("FromHeader with no key = %q, want none", got)
+	}
+}
