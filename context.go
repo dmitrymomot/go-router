@@ -57,13 +57,13 @@ type Base struct {
 
 	// One word rather than two error fields, which would push Base from 360 to
 	// 384 bytes and its embedder into the next size class.
-	deferred      *deferredErrors
-	resStorage    Response
-	hostIdx       int32
-	hostKnown     bool
-	pathEscaped   bool
-	errorRouted   bool
-	needsCleanup  bool
+	deferred     *deferredErrors
+	resStorage   Response
+	hostIdx      int32
+	hostKnown    bool
+	pathEscaped  bool
+	errorRouted  bool
+	needsCleanup bool
 
 	// Routing matches the path with its trailing slash trimmed, so a mounted
 	// handler has to be told the slash was there. Without it every directory
