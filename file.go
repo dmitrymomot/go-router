@@ -17,10 +17,18 @@ const (
 	dispositionInline     = "inline"
 )
 
+// File sends a file from the working directory. name is a relative slash
+// path, and it stays inside that directory: an absolute path, a "..", or a
+// symbolic link that points out reports [ErrNotFound].
+//
+// The answer carries a content type from the extension, and it honours
+// If-Modified-Since and Range.
 func (b *Base) File(name string) error {
 	return b.serveFile(name, nil, "", "")
 }
 
+// FileFS is [Base.File] from fsys, such as an [embed.FS] or an [os.DirFS].
+// The files of fsys have to seek, which the two above do.
 func (b *Base) FileFS(name string, fsys fs.FS) error {
 	if fsys == nil {
 		return ErrInternalServerError.WithError(errors.New("router: FileFS needs a file system"))
@@ -28,14 +36,20 @@ func (b *Base) FileFS(name string, fsys fs.FS) error {
 	return b.serveFile(name, fsys, "", "")
 }
 
+// AttachmentFile sends a file as a download named filename. An empty filename
+// takes the base name of name. See [Base.File].
 func (b *Base) AttachmentFile(name, filename string) error {
 	return b.serveFile(name, nil, dispositionAttachment, filename)
 }
 
+// InlineFile sends a file for the browser to display rather than save. See
+// [Base.File].
 func (b *Base) InlineFile(name, filename string) error {
 	return b.serveFile(name, nil, dispositionInline, filename)
 }
 
+// Inline writes data for the browser to display rather than save, under
+// filename. See [Base.Attachment] for the download.
 func (b *Base) Inline(status int, contentType, filename string, data []byte) error {
 	b.res.Header().Set(HeaderContentDisposition, contentDisposition(dispositionInline, filename))
 	return b.Blob(status, contentType, data)

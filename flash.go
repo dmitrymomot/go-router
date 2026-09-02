@@ -9,19 +9,31 @@ import (
 	"time"
 )
 
+// FlashCookieName is the cookie that carries the flash messages.
 const FlashCookieName = "_flash"
 
+// FlashMaxAge is how long a flash message survives before the browser drops
+// it.
 const FlashMaxAge = 5 * time.Minute
 
 const headerSetCookie = "Set-Cookie"
 
+// ErrFlashTooLarge reports that the messages exceed [MaxCookieSize] once
+// signed. The cookie is left as it was, so no message is lost, and the caller
+// has to shorten or drop one.
 var ErrFlashTooLarge = errors.New("router: the flash messages do not fit in one cookie")
 
+// Flash is one message that survives a redirect. Kind is yours to choose,
+// such as "error" or "success".
 type Flash struct {
 	Kind    string `json:"kind"`
 	Message string `json:"message"`
 }
 
+// AddFlash appends f to the flash cookie, which cc signs. The cookie is
+// HttpOnly, SameSite=Lax, and Secure over HTTPS.
+//
+// It reports [ErrFlashTooLarge] when the messages no longer fit.
 func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 	flashes := b.flashes(cc)
 	flashes = append(flashes, f)
@@ -43,6 +55,8 @@ func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 	return nil
 }
 
+// Flashes reports the messages and clears the cookie, so each message is shown
+// once. A second call in the same request reports nothing.
 func (b *Base) Flashes(cc *CookieCodec) []Flash {
 	raw, ok := b.flashCookie(cc)
 	if !ok || raw == "" {
