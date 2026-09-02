@@ -17,10 +17,26 @@ import (
 	"time"
 )
 
+// DefaultIndex is the file that answers a directory when Config.Index is
+// empty.
 const DefaultIndex = "index.html"
 
 const immutableCacheControl = "public, max-age=31536000, immutable"
 
+// Config is what [New] builds an asset set from. Set FS for an embedded set,
+// or Dir for a directory it reads on every request; the two exclude each
+// other, and only FS is fingerprinted.
+//
+// Root is a subdirectory of FS or Dir to serve from. Prefix is where the
+// assets live in the URL space. Build is the tag that goes into every URL; an
+// embedded set that leaves it empty gets one from the contents, so a release
+// invalidates the caches of the clients by itself.
+//
+// SPA answers an unknown path with Index, so a client-side router can take it,
+// and Fallback narrows that to the requests it recognizes as navigation.
+// RedirectDir sends a directory without a trailing slash to the path with one.
+// MaxAge is the cache lifetime of a set without a build tag. NotFound answers
+// a path the set does not hold.
 type Config struct {
 	FS          fs.FS
 	Dir         string
@@ -35,6 +51,9 @@ type Config struct {
 	NotFound    http.Handler
 }
 
+// Assets is a set of static files and the URLs that reach them. It is safe for
+// concurrent use, and it is an [http.Handler] of its own. See [Mount] to put
+// it on a router.
 type Assets struct {
 	fsys         fs.FS
 	notFound     http.Handler
@@ -54,6 +73,12 @@ type Assets struct {
 	hasNotFound bool
 }
 
+// New reads cfg and builds the asset set. An embedded set is walked once here,
+// which fingerprints every file for its ETag and builds the tag of the set.
+//
+// New reports an error for a cfg that names neither FS nor Dir or names both,
+// a build tag that is not one path segment, an index that is not a file name,
+// a directory it cannot read, and an index that is a directory.
 func New(cfg Config) (*Assets, error) {
 	switch {
 	case cfg.FS == nil && cfg.Dir == "":
@@ -158,6 +183,8 @@ func (a *Assets) setURLBase() {
 	}
 }
 
+// Must is [New] for a package-level variable. It panics where New reports an
+// error.
 func Must(cfg Config) *Assets {
 	a, err := New(cfg)
 	if err != nil {
@@ -166,6 +193,8 @@ func Must(cfg Config) *Assets {
 	return a
 }
 
+// Prefix reports where the assets live in the URL space, "/" when Config named
+// none.
 func (a *Assets) Prefix() string {
 	if a.prefix == "" {
 		return "/"
@@ -173,8 +202,11 @@ func (a *Assets) Prefix() string {
 	return a.prefix
 }
 
+// Build reports the tag that every URL of this set carries. For an embedded
+// set that named none, it comes from the contents.
 func (a *Assets) Build() string { return a.build }
 
+// Has reports whether the set holds the file name.
 func (a *Assets) Has(name string) bool {
 	name = cleanName(name)
 	if a.etags != nil {
@@ -190,6 +222,9 @@ func (a *Assets) Has(name string) bool {
 	return !info.IsDir()
 }
 
+// URL reports the path that reaches the file name, with the prefix and the
+// build tag. The URL changes with the contents of an embedded set, which is
+// what lets the answer be cached forever.
 func (a *Assets) URL(name string) string {
 	name = cleanName(name)
 	if name == "" {
@@ -199,6 +234,8 @@ func (a *Assets) URL(name string) string {
 	return u.EscapedPath()
 }
 
+// FuncMap reports an "asset" function for [template.FuncMap], so a template
+// writes {{ asset "app.css" }} and gets the fingerprinted URL.
 func (a *Assets) FuncMap() map[string]any {
 	return map[string]any{"asset": a.URL}
 }
