@@ -50,20 +50,20 @@ type Base struct {
 	host        string
 	hostPattern string
 	rawTail     string
-	matchPath   string
 	paramNames  []string
 	paramVals   []string
 	ropts       *routerOpts
 
 	// One word rather than two error fields, which would push Base from 360 to
 	// 384 bytes and its embedder into the next size class.
-	deferred     *deferredErrors
-	resStorage   Response
-	hostIdx      int32
-	hostKnown    bool
-	pathEscaped  bool
-	errorRouted  bool
-	needsCleanup bool
+	deferred      *deferredErrors
+	resStorage    Response
+	hostIdx       int32
+	errorScopeIdx int32
+	hostKnown     bool
+	pathEscaped   bool
+	errorRouted   bool
+	needsCleanup  bool
 
 	// Routing matches the path trimmed of its trailing slash, so a mounted
 	// handler has to be told the slash was there.
@@ -112,7 +112,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 		res = &b.resStorage
 	}
 	b.req, b.res = r, res
-	b.pattern, b.rawTail, b.matchPath = "", "", ""
+	b.pattern, b.rawTail = "", ""
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
 	b.hostIdx = -1
@@ -136,7 +136,7 @@ func (b *Base) clearRequestSlow() {
 		clear(b.store)
 	}
 	b.deferred = nil
-	b.host, b.rawTail, b.matchPath = "", "", ""
+	b.host, b.rawTail = "", ""
 	b.needsCleanup = false
 }
 
