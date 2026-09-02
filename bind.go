@@ -13,10 +13,23 @@ import (
 	"strings"
 )
 
+// DefaultMaxBodyBytes is the request body that the Bind methods read before
+// they report [ErrPayloadTooLarge]. [Router.MaxBodyBytes] changes it.
 const DefaultMaxBodyBytes int64 = 4 << 20
 
 const defaultMaxMultipartMemory int64 = 32 << 20
 
+// Bind fills a T from the request and validates it. A GET, HEAD, DELETE or
+// QUERY request binds from the query; anything else binds from the body, by
+// its Content-Type: JSON for application/json and any "+json" type, and a form
+// for the two form types.
+//
+// T names its sources with struct tags, one per source: `json`, `form`,
+// `query`, `param` for a route parameter, and `header`. A T that implements
+// [Validator] is validated last, and a failure becomes an
+// [ErrUnprocessableEntity] whose Details hold the [FieldError] list.
+//
+// The error is an [HTTPError], so a handler can return it as it stands.
 func (b *Base) Bind[T any]() (T, error) {
 	var v T
 
@@ -44,6 +57,11 @@ func (b *Base) Bind[T any]() (T, error) {
 	}
 }
 
+// BindJSON decodes the body as JSON into a T and validates it. opts win over
+// the options of [Router.JSONOptions].
+//
+// An empty body, a malformed one and a body over the limit each report their
+// own [HTTPError].
 func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 	var v T
 	body := countingBody{r: b.limitedBody()}
@@ -61,6 +79,9 @@ func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 	return v, validate(&v)
 }
 
+// BindForm fills a T from the form of the body and validates it. It reads a
+// URL-encoded form and a multipart one alike, through the `form` tag. Parsing
+// happens once per request, so a later form read costs nothing.
 func (b *Base) BindForm[T any]() (T, error) {
 	var v T
 	if err := b.parseForm(); err != nil {
@@ -72,6 +93,8 @@ func (b *Base) BindForm[T any]() (T, error) {
 	return v, validate(&v)
 }
 
+// BindQuery fills a T from the query string and validates it, through the
+// `query` tag.
 func (b *Base) BindQuery[T any]() (T, error) {
 	var v T
 	if err := b.decodeInto(b.queryValues(), &v, "query"); err != nil {
@@ -80,6 +103,8 @@ func (b *Base) BindQuery[T any]() (T, error) {
 	return v, validate(&v)
 }
 
+// BindPath fills a T from the route parameters and validates it, through the
+// `param` tag.
 func (b *Base) BindPath[T any]() (T, error) {
 	var v T
 	vals := make(url.Values, len(b.paramNames))
@@ -94,6 +119,8 @@ func (b *Base) BindPath[T any]() (T, error) {
 	return v, validate(&v)
 }
 
+// BindHeader fills a T from the request headers and validates it, through the
+// `header` tag, whose value is the header name.
 func (b *Base) BindHeader[T any]() (T, error) {
 	var v T
 	if err := b.decodeInto(url.Values(b.req.Header), &v, "header"); err != nil {
@@ -102,6 +129,10 @@ func (b *Base) BindHeader[T any]() (T, error) {
 	return v, validate(&v)
 }
 
+// Validator is a bound value that checks itself. Every Bind method calls
+// Validate after it fills the value. Return a [FieldError], a slice of them
+// joined with [errors.Join], or any other error, which becomes a plain
+// [ErrUnprocessableEntity].
 type Validator interface {
 	Validate() error
 }
@@ -248,6 +279,12 @@ func removeSpilledParts(req *http.Request) {
 	})
 }
 
+// ParamAs reads route parameter name as a T. T may be any string, bool,
+// integer, float, [time.Duration] or [time.Time], or a type that implements
+// [encoding.TextUnmarshaler].
+//
+// A missing parameter and one that does not parse each report an
+// [ErrBadRequest].
 func (b *Base) ParamAs[T any](name string) (T, error) {
 	raw, ok := b.ParamOK(name)
 	if !ok {
@@ -257,18 +294,27 @@ func (b *Base) ParamAs[T any](name string) (T, error) {
 	return parseAs[T](raw, "route parameter", name)
 }
 
+// ParamAsDefault reads route parameter name as a T, or reports def when the
+// parameter is absent, empty or malformed.
 func (b *Base) ParamAsDefault[T any](name string, def T) T {
 	return ParseValueDefault(b.Param(name), def)
 }
 
+// QueryAs reads query parameter name as a T. An absent parameter parses as the
+// zero value of T, which for a number is an [ErrBadRequest]; use
+// [Base.QueryAsOK] to tell the two apart.
 func (b *Base) QueryAs[T any](name string) (T, error) {
 	return parseAs[T](b.Query(name), "query parameter", name)
 }
 
+// QueryAsDefault reads query parameter name as a T, or reports def when the
+// parameter is absent, empty or malformed.
 func (b *Base) QueryAsDefault[T any](name string, def T) T {
 	return ParseValueDefault(b.Query(name), def)
 }
 
+// QueryAsOK reads query parameter name as a T. ok is false when the query
+// carries no such parameter, and the error is nil in that case.
 func (b *Base) QueryAsOK[T any](name string) (T, bool, error) {
 	raw, ok := b.QueryOK(name)
 	if !ok {
@@ -279,6 +325,8 @@ func (b *Base) QueryAsOK[T any](name string) (T, bool, error) {
 	return v, true, err
 }
 
+// QueryAllAs reads every value of query parameter name as a T, for a parameter
+// the client repeats. It reports a nil slice when the parameter is absent.
 func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 	var out []T
 	raw, ok := b.queryValues()[name]
@@ -291,6 +339,10 @@ func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 	return out, nil
 }
 
+// ParseValue parses s as a T. T may be any string, bool, integer, float,
+// [time.Duration] or [time.Time], or a type that implements
+// [encoding.TextUnmarshaler]. The error is the parse failure itself, without a
+// status.
 func ParseValue[T any](s string) (T, error) {
 	var v T
 	if err := setScalar(reflect.ValueOf(&v).Elem(), s, ""); err != nil {
@@ -307,6 +359,8 @@ func parseAs[T any](raw, kind, name string) (T, error) {
 	return v, nil
 }
 
+// ParseValueDefault parses s as a T, or reports def when s is empty or does
+// not parse.
 func ParseValueDefault[T any](s string, def T) T {
 	if s == "" {
 		return def
@@ -318,12 +372,18 @@ func ParseValueDefault[T any](s string, def T) T {
 	return v
 }
 
+// FormValue reads form field name from the body, or "" when the field is
+// absent or the body does not parse. Unlike [http.Request.FormValue] it reads
+// the body alone and never the query. Use [Base.FormValues] to see the parse
+// error.
 func (b *Base) FormValue(name string) string {
 	//nolint:errcheck // The caller asked for a value, not for the parse error.
 	b.parseForm()
 	return b.req.PostForm.Get(name)
 }
 
+// FormDefault reads form field name from the body, or reports def when the
+// field is absent or empty.
 func (b *Base) FormDefault(name, def string) string {
 	//nolint:errcheck // Same as FormValue.
 	b.parseForm()
@@ -333,6 +393,8 @@ func (b *Base) FormDefault(name, def string) string {
 	return def
 }
 
+// FormValues reports the parsed form of the body. The router parses it once
+// per request and hands back the same map, so the caller must not change it.
 func (b *Base) FormValues() (url.Values, error) {
 	if err := b.parseForm(); err != nil {
 		return nil, err
@@ -340,6 +402,8 @@ func (b *Base) FormValues() (url.Values, error) {
 	return b.req.PostForm, nil
 }
 
+// FormAs reads form field name as a T. See [Base.ParamAs] for the types it
+// takes.
 func (b *Base) FormAs[T any](name string) (T, error) {
 	var v T
 	if err := b.parseForm(); err != nil {
@@ -348,6 +412,9 @@ func (b *Base) FormAs[T any](name string) (T, error) {
 	return parseAs[T](b.req.PostForm.Get(name), "form field", name)
 }
 
+// FormFile opens the first file uploaded under name. The caller closes the
+// file. A request with no such file reports an [ErrBadRequest] that wraps
+// [http.ErrMissingFile].
 func (b *Base) FormFile(name string) (multipart.File, *multipart.FileHeader, error) {
 	fhs, err := b.formFiles(name)
 	if err != nil {
@@ -360,6 +427,9 @@ func (b *Base) FormFile(name string) (multipart.File, *multipart.FileHeader, err
 	return f, fhs[0], nil
 }
 
+// FormFiles reports every file uploaded under name, for a field the client
+// repeats. A request with no such file reports an [ErrBadRequest] that wraps
+// [http.ErrMissingFile].
 func (b *Base) FormFiles(name string) ([]*multipart.FileHeader, error) {
 	return b.formFiles(name)
 }
@@ -376,6 +446,9 @@ func (b *Base) formFiles(name string) ([]*multipart.FileHeader, error) {
 	return nil, ErrBadRequest.WithMessage("no uploaded file named %q", name).WithError(http.ErrMissingFile)
 }
 
+// MultipartForm reports the parsed multipart form. A body that is not
+// multipart reports an [ErrBadRequest]. A part that spilled to a temporary
+// file is removed once the request ends.
 func (b *Base) MultipartForm() (*multipart.Form, error) {
 	if err := b.parseForm(); err != nil {
 		return nil, err
