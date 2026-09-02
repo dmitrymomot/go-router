@@ -223,7 +223,9 @@ func (b *Base) ResponseWriter() http.ResponseWriter { return b.res }
 var releasedRequest = func() *http.Request {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	return (&http.Request{}).WithContext(ctx)
+	// URL and Header are filled in: Path, URL and Header reach through them,
+	// and a nil one would dereference exactly where this is meant to stop.
+	return (&http.Request{URL: new(url.URL), Header: http.Header{}}).WithContext(ctx)
 }()
 
 func (b *Base) Deadline() (time.Time, bool) { return b.req.Context().Deadline() }

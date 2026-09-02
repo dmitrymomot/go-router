@@ -443,3 +443,26 @@ func TestBaseHeldPastItsRequestReadsAsCancelled(t *testing.T) {
 		t.Errorf("Value() = %v, want nil", v)
 	}
 }
+
+// Path, URL and Header reach through the request, so the released sentinel has
+// to carry both or it dereferences nil where it is meant to stop.
+func TestReleasedBaseReadsItsRequestFields(t *testing.T) {
+	r := newPooledRouter()
+	held := make(chan *pctx, 1)
+	r.GET("/a", func(c *pctx) error {
+		held <- c
+		return c.NoContent(http.StatusNoContent)
+	})
+	do(r, http.MethodGet, "/a")
+
+	c := <-held
+	if got := c.Path(); got != "" {
+		t.Errorf("Path() on a released context = %q, want empty", got)
+	}
+	if c.URL() == nil {
+		t.Error("URL() on a released context is nil")
+	}
+	if c.Header() == nil {
+		t.Error("Header() on a released context is nil")
+	}
+}
