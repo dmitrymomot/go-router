@@ -83,7 +83,7 @@ Each line links to the example that proves it.
 
 | Directory | Shows |
 | --- | --- |
-| [`_examples/restapi`](_examples/restapi) | a JSON API: binding, validation, domain errors, a JSON error handler |
+| [`_examples/restapi`](_examples/restapi) | a JSON API: a mounted sub-router, binding, validation, domain errors, a JSON error handler |
 | [`_examples/chat`](_examples/chat) | a chat room: `html/template`, htmx and server-sent events |
 
 ## License
