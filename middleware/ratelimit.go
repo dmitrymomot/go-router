@@ -12,15 +12,29 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
+// The defaults of the memory store: how long it keeps a client it has not
+// heard from, and how many clients it tracks.
 const (
 	DefaultRateLimitExpiry       = 3 * time.Minute
 	DefaultMemoryStoreMaxEntries = 64 << 10
 )
 
+// RateLimitStore decides whether one client may make one more request. Allow
+// reports whether the request passes and, when it does not, how long the
+// client has to wait. An error from Allow reaches the client as a 500.
+//
+// [NewMemoryStore] holds the counters in this process. Implement the interface
+// to share them across several, such as through Redis.
 type RateLimitStore[C router.Context] interface {
 	Allow(c C, id string) (bool, time.Duration, error)
 }
 
+// RateLimitConfig configures [RateLimitWithConfig].
+//
+// Store is required. KeyFunc says who the client is, and a nil one takes
+// [ClientIP]; return the account id instead to limit a signed-in user rather
+// than an address. OnDeny answers a refused request itself, in place of the
+// 429 with Retry-After.
 type RateLimitConfig[C router.Context] struct {
 	Skip    func(c router.Context) bool
 	Store   RateLimitStore[C]
@@ -28,6 +42,10 @@ type RateLimitConfig[C router.Context] struct {
 	OnDeny  func(c C, id string, retryAfter time.Duration) error
 }
 
+// MemoryStoreConfig configures [NewMemoryStoreWithConfig]. Rate is the
+// requests per second that refill the bucket, and Burst is how many the bucket
+// holds. ExpiresIn is how long a client that went quiet is remembered, and
+// zero takes [DefaultRateLimitExpiry].
 type MemoryStoreConfig struct {
 	Rate      float64
 	Burst     int
@@ -44,10 +62,19 @@ type MemoryStoreConfig struct {
 	MaxEntries int
 }
 
+// RateLimit refuses a request that store turns away, with a 429 and a
+// Retry-After header. The client is the address that [ClientIP] reports, so
+// put [RealIP] in front where a proxy is.
+//
+// RateLimit panics if store is nil.
 func RateLimit[C router.Context](store RateLimitStore[C]) router.Middleware[C] {
 	return RateLimitWithConfig[C](RateLimitConfig[C]{Store: store})
 }
 
+// RateLimitWithConfig is [RateLimit] with a configuration. A KeyFunc that
+// reports an error refuses the request with a 403.
+//
+// RateLimitWithConfig panics on a nil Store.
 func RateLimitWithConfig[C router.Context](cfg RateLimitConfig[C]) router.Middleware[C] {
 	if cfg.Store == nil {
 		panic("middleware: RateLimitWithConfig needs a Store")
@@ -94,6 +121,13 @@ func denyTooManyRequests[C router.Context](c C, _ string, retryAfter time.Durati
 	return router.ErrTooManyRequests
 }
 
+// NewMemoryStore builds a token bucket store in this process: rate tokens per
+// second, burst tokens at most, and a client forgotten after expiresIn of
+// quiet. An expiresIn of zero or less takes [DefaultRateLimitExpiry].
+//
+// The counters live in one process, so several instances each hold their own.
+//
+// NewMemoryStore panics on a rate that is not above zero.
 func NewMemoryStore[C router.Context](rate float64, burst int, expiresIn time.Duration) RateLimitStore[C] {
 	return NewMemoryStoreWithConfig[C](MemoryStoreConfig{
 		Rate:      rate,
@@ -102,6 +136,11 @@ func NewMemoryStore[C router.Context](rate float64, burst int, expiresIn time.Du
 	})
 }
 
+// NewMemoryStoreWithConfig is [NewMemoryStore] with a configuration, which
+// also caps how many clients the store tracks.
+//
+// NewMemoryStoreWithConfig panics on a rate that is not above zero and on a
+// negative MaxEntries.
 func NewMemoryStoreWithConfig[C router.Context](cfg MemoryStoreConfig) RateLimitStore[C] {
 	if cfg.Rate <= 0 || math.IsNaN(cfg.Rate) || math.IsInf(cfg.Rate, 0) {
 		panic("middleware: NewMemoryStore needs a rate above zero")
