@@ -286,7 +286,7 @@ func errorRepresentationFor(r *http.Request) errorRepresentation {
 		offers = [...]string{MIMETextHTML, MIMEApplicationJSON, MIMETextPlain}
 	}
 
-	switch negotiate(strings.Join(r.Header.Values(HeaderAccept), ","), offers[:]) {
+	switch negotiate(joinAccept(r), offers[:]) {
 	case MIMEApplicationJSON:
 		return errorRepresentationJSON
 	case MIMETextHTML:
