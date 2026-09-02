@@ -1,0 +1,96 @@
+{{define "landing" -}}
+{{template "head" "Workspaces"}}
+<h1>One app, one subdomain for each customer</h1>
+<p class="lede">Create a workspace and the app sends you to its own address.</p>
+
+<p><a class="button" href="/signup">Create a workspace</a></p>
+
+<p class="hint">Already have a workspace? Its address is its door: <code>{{.Example}}</code>. This page has no login form, because an account belongs to one workspace and not to this site.</p>
+{{template "foot"}}
+{{- end}}
+
+{{define "signup" -}}
+{{template "head" "Create a workspace"}}
+<h1>Create a workspace</h1>
+<p class="lede">The name becomes the subdomain, and you become its first account.</p>
+
+<form class="stack" action="/signup" method="post" autocomplete="off">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+	<label>Workspace name
+		<input name="name" value="{{.Name}}" maxlength="40" placeholder="Acme, Inc." required autofocus>
+	</label>
+	<label>Your email
+		<input name="email" type="email" value="{{.Email}}" maxlength="120" placeholder="you@example.com" required>
+	</label>
+	<label>Password
+		<input name="password" type="password" minlength="8" maxlength="200" autocomplete="new-password" required>
+	</label>
+	{{- with .Error}}
+	<p class="error" role="alert">{{.}}</p>
+	{{- end}}
+	<button type="submit">Create it</button>
+</form>
+<p class="hint">"Acme, Inc." becomes <code>acme-inc.lvh.me</code>. That address holds the workspace and the account you are making now.</p>
+{{template "foot"}}
+{{- end}}
+
+{{define "login" -}}
+{{template "head" "Sign in"}}
+<h1>Sign in to {{.Workspace}}</h1>
+<p class="lede">This door opens for the accounts of this workspace alone.</p>
+
+<form class="stack" action="/login" method="post" autocomplete="off">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+	<label>Your email
+		<input name="email" type="email" value="{{.Email}}" maxlength="120" placeholder="you@example.com" required autofocus>
+	</label>
+	<label>Password
+		<input name="password" type="password" maxlength="200" autocomplete="current-password" required>
+	</label>
+	{{- with .Error}}
+	<p class="error" role="alert">{{.}}</p>
+	{{- end}}
+	<button type="submit">Sign in</button>
+</form>
+<p class="hint">No workspace yet? Create one on the landing page.</p>
+{{template "foot"}}
+{{- end}}
+
+{{define "dashboard" -}}
+{{template "head" .Workspace.Name}}
+<h1>{{.Workspace.Name}}</h1>
+<p class="lede">This page answers on <code>{{.Workspace.Slug}}.lvh.me</code> and on no other host.</p>
+
+<ul class="spaces">
+	<li>Subdomain: <code>{{.Workspace.Slug}}</code>, read from the host as a route parameter</li>
+	<li>Created: {{.Workspace.Created.Format "2 Jan 2006, 15:04"}}</li>
+</ul>
+
+{{if .Email}}
+<p class="hint">Signed in as {{.Email}}. The session cookie names no domain, so it belongs to this host alone and no other workspace can read it.</p>
+<form action="/signout" method="post">
+	<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+	<button type="submit">Sign out</button>
+</form>
+{{else}}
+<p class="hint">You are reading this workspace as a guest.</p>
+<p><a class="button" href="/login">Sign in to {{.Workspace.Name}}</a></p>
+{{end}}
+<p><a href="{{.ApexURL}}">Back to the landing page</a></p>
+{{template "foot"}}
+{{- end}}
+
+{{define "unknown" -}}
+{{template "head" "Unknown host"}}
+<h1>Nothing answers on {{.Host}}</h1>
+<p class="lede">This app routes on the host. Ask for <code>{{.Base}}</code>, or for the subdomain of a workspace.</p>
+{{template "foot"}}
+{{- end}}
+
+{{define "error" -}}
+{{template "head" "Sorry"}}
+<h1>{{.Status}}</h1>
+<p class="lede">{{.Message}}</p>
+<p><a href="{{.ApexURL}}">Back to the landing page</a></p>
+{{template "foot"}}
+{{- end}}

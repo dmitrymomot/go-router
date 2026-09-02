@@ -2,8 +2,10 @@ package router_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -469,4 +471,91 @@ func ExampleHTMXPartial() {
 	// Output:
 	// <li id="user-7">ann</li>
 	// <h1>users</h1><p>/users</p>
+}
+
+func ExampleBase_AddFlash() {
+	// The key signs the cookie. NewCookieCodec panics under 32 bytes, so read
+	// it from the environment rather than writing one here.
+	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/users", func(c *Context) error {
+		if err := c.AddFlash(codec, router.Flash{Kind: "success", Message: "user created"}); err != nil {
+			return err
+		}
+		return c.Redirect(http.StatusSeeOther, "/users")
+	})
+	r.GET("/users", func(c *Context) error {
+		// Flashes reads once: it clears the cookie on the way out.
+		return c.Stringf(http.StatusOK, "%v", c.Flashes(codec))
+	})
+
+	created := serveRequest(r, httptest.NewRequest(http.MethodPost, "/users", nil))
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	req.Header.Set("Cookie", created.Header().Get("Set-Cookie"))
+
+	fmt.Println(created.Code, created.Header().Get("Location"))
+	fmt.Println(serveRequest(r, req).Body)
+	// Output:
+	// 303 /users
+	// [{success user created}]
+}
+
+func serveRequest(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func ExampleBase_RenderStream() {
+	half := router.ComponentFunc(func(_ context.Context, w io.Writer) error {
+		//nolint:errcheck // The next line reports the failure that matters.
+		fmt.Fprint(w, "<h1>half a page</h1>")
+		return errors.New("the rest of the page failed")
+	})
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	// Render buffers, so a failure halfway through still becomes a 500.
+	r.GET("/buffered", func(c *Context) error { return c.Render(http.StatusOK, half) })
+	// RenderStream writes as it goes, so the 200 has already left.
+	r.GET("/streamed", func(c *Context) error { return c.RenderStream(http.StatusOK, half) })
+
+	fmt.Println(serve(r, http.MethodGet, "/buffered"))
+	fmt.Println(serve(r, http.MethodGet, "/streamed"))
+	// Output:
+	// 500 Internal Server Error
+	// 200 <h1>half a page</h1>
+}
+
+func ExampleWrapHandler() {
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The route parameters reach a stdlib handler through PathValue.
+		//nolint:errcheck // A stdlib handler has nowhere to return it.
+		fmt.Fprintf(w, "user %s", r.PathValue("id"))
+	})
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.GET("/users/{id}", router.WrapHandler[*Context](legacy))
+
+	fmt.Println(serve(r, http.MethodGet, "/users/7"))
+	// Output:
+	// 200 user 7
+}
+
+func ExampleHTTPError_WithMessage() {
+	// Every sentinel is a template. WithMessage copies it, so the original
+	// keeps its own message and errors.Is still matches on the status.
+	missing := router.ErrNotFound.WithMessage("no user %s", "7")
+	invalid := router.ErrUnprocessableEntity.WithDetails([]router.FieldError{
+		{Field: "name", Message: "is required"},
+	})
+
+	fmt.Println(missing, errors.Is(missing, router.ErrNotFound))
+	fmt.Println(router.ErrNotFound)
+	fmt.Println(router.StatusOf(invalid), invalid.Details)
+	// Output:
+	// 404 no user 7 true
+	// 404 Not Found
+	// 422 [name: is required]
 }

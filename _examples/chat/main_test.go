@@ -24,7 +24,7 @@ type session struct {
 
 func TestIndexIssuesCSRFAndPinsAssets(t *testing.T) {
 	rm := newRoom()
-	rec := serve(t, newRouter(rm), http.MethodGet, "/", nil, false)
+	rec := send(t, newRouter(rm), http.MethodGet, "/", nil, false)
 	wantStatus(t, rec, http.StatusOK)
 
 	token := hiddenToken(t, rec.Body.String())
@@ -62,12 +62,12 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	rm := newRoom()
 	h := newRouter(rm)
 
-	missing := serve(t, h, http.MethodPost, "/join", url.Values{"name": {"Alice"}}, true)
+	missing := send(t, h, http.MethodPost, "/join", url.Values{"name": {"Alice"}}, true)
 	wantStatus(t, missing, http.StatusForbidden)
 	wantNoResponseCookie(t, missing, cookieName)
 
 	s := startSession(t, h)
-	invalid := serve(t, h, http.MethodPost, "/join", url.Values{
+	invalid := send(t, h, http.MethodPost, "/join", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"name":                          {"\x00 \t"},
 	}, true, s.csrfCookie)
@@ -80,20 +80,20 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	}
 	wantNoResponseCookie(t, invalid, cookieName)
 
-	joined := serve(t, h, http.MethodPost, "/join", url.Values{
+	joined := send(t, h, http.MethodPost, "/join", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"name":                          {"  Alice  "},
 	}, true, s.csrfCookie)
 	wantStatus(t, joined, http.StatusOK)
-	if got := joined.Header().Get(router.HeaderHXRedirect); got != "/chat" {
-		t.Errorf("HX-Redirect = %q, want /chat", got)
+	if got := joined.Header().Get(router.HeaderHXRedirect); got != "/room" {
+		t.Errorf("HX-Redirect = %q, want /room", got)
 	}
 	s.userCookie = responseCookie(t, joined, cookieName)
 	if s.userCookie.Value != "Alice" || !s.userCookie.HttpOnly || s.userCookie.SameSite != http.SameSiteLaxMode {
 		t.Errorf("user cookie = %#v", s.userCookie)
 	}
 
-	chat := serve(t, h, http.MethodGet, "/chat", nil, false, s.csrfCookie, s.userCookie)
+	chat := send(t, h, http.MethodGet, "/room", nil, false, s.csrfCookie, s.userCookie)
 	wantStatus(t, chat, http.StatusOK)
 	body := chat.Body.String()
 	if !strings.Contains(body, "<strong>Alice</strong>") {
@@ -104,7 +104,7 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	}
 	for _, form := range []string{
 		`action="/leave" method="post" hx-post="/leave"`,
-		`action="/messages" method="post" hx-post="/messages"`,
+		`action="/room/messages" method="post" hx-post="/room/messages"`,
 	} {
 		if !strings.Contains(body, form) {
 			t.Errorf("chat page does not contain %q", form)
@@ -115,19 +115,19 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 func TestAuthenticationRedirectsPagesAndRejectsAnonymousSSE(t *testing.T) {
 	h := newRouter(newRoom())
 
-	page := serve(t, h, http.MethodGet, "/chat", nil, false)
+	page := send(t, h, http.MethodGet, "/room", nil, false)
 	wantStatus(t, page, http.StatusSeeOther)
 	if got := page.Header().Get(router.HeaderLocation); got != "/" {
 		t.Errorf("Location = %q, want /", got)
 	}
 
-	hx := serve(t, h, http.MethodGet, "/chat", nil, true)
+	hx := send(t, h, http.MethodGet, "/room", nil, true)
 	wantStatus(t, hx, http.StatusOK)
 	if got := hx.Header().Get(router.HeaderHXRedirect); got != "/" {
 		t.Errorf("HX-Redirect = %q, want /", got)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	req := httptest.NewRequest(http.MethodGet, "/room/events", nil)
 	req.Header.Set(router.HeaderAccept, router.MIMETextEventStream)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -138,14 +138,14 @@ func TestLogoutIsPOSTAndCSRFProtected(t *testing.T) {
 	h := newRouter(newRoom())
 	s := joinedSession(t, h, "Alice")
 
-	get := serve(t, h, http.MethodGet, "/leave", nil, false, s.csrfCookie, s.userCookie)
+	get := send(t, h, http.MethodGet, "/leave", nil, false, s.csrfCookie, s.userCookie)
 	wantStatus(t, get, http.StatusMethodNotAllowed)
 
-	missing := serve(t, h, http.MethodPost, "/leave", nil, true, s.csrfCookie, s.userCookie)
+	missing := send(t, h, http.MethodPost, "/leave", nil, true, s.csrfCookie, s.userCookie)
 	wantStatus(t, missing, http.StatusForbidden)
 	wantNoResponseCookie(t, missing, cookieName)
 
-	left := serve(t, h, http.MethodPost, "/leave", url.Values{
+	left := send(t, h, http.MethodPost, "/leave", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 	}, true, s.csrfCookie, s.userCookie)
 	wantStatus(t, left, http.StatusOK)
@@ -157,7 +157,7 @@ func TestLogoutIsPOSTAndCSRFProtected(t *testing.T) {
 		t.Errorf("cleared user cookie = %#v", cleared)
 	}
 
-	regular := serve(t, h, http.MethodPost, "/leave", url.Values{
+	regular := send(t, h, http.MethodPost, "/leave", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 	}, false, s.csrfCookie, s.userCookie)
 	wantStatus(t, regular, http.StatusSeeOther)
@@ -173,12 +173,12 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 	messages, unsubscribe := rm.join()
 	defer unsubscribe()
 
-	missing := serve(t, h, http.MethodPost, "/messages", url.Values{"text": {"forged"}}, true,
+	missing := send(t, h, http.MethodPost, "/room/messages", url.Values{"text": {"forged"}}, true,
 		s.csrfCookie, s.userCookie)
 	wantStatus(t, missing, http.StatusForbidden)
 	wantNoMessage(t, messages)
 
-	sent := serve(t, h, http.MethodPost, "/messages", url.Values{
+	sent := send(t, h, http.MethodPost, "/room/messages", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"text":                          {" hello\x00   room "},
 	}, true, s.csrfCookie, s.userCookie)
@@ -195,7 +195,7 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 		t.Fatal("room did not receive the message")
 	}
 
-	empty := serve(t, h, http.MethodPost, "/messages", url.Values{
+	empty := send(t, h, http.MethodPost, "/room/messages", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"text":                          {" \t "},
 	}, true, s.csrfCookie, s.userCookie)
@@ -205,7 +205,7 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 	}
 	wantNoMessage(t, messages)
 
-	large := serve(t, h, http.MethodPost, "/messages", url.Values{
+	large := send(t, h, http.MethodPost, "/room/messages", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"text":                          {strings.Repeat("x", maxBodyBytes)},
 	}, true, s.csrfCookie, s.userCookie)
@@ -268,7 +268,7 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	eventsReq, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/events", nil)
+	eventsReq, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/room/events", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 	}
 }
 
-func serve(t *testing.T, h http.Handler, method, target string, form url.Values, hx bool,
+func send(t *testing.T, h http.Handler, method, target string, form url.Values, hx bool,
 	cookies ...*http.Cookie,
 ) *httptest.ResponseRecorder {
 	t.Helper()
@@ -340,7 +340,7 @@ func serve(t *testing.T, h http.Handler, method, target string, form url.Values,
 
 func startSession(t *testing.T, h http.Handler) session {
 	t.Helper()
-	rec := serve(t, h, http.MethodGet, "/", nil, false)
+	rec := send(t, h, http.MethodGet, "/", nil, false)
 	wantStatus(t, rec, http.StatusOK)
 	return session{
 		csrfToken:  hiddenToken(t, rec.Body.String()),
@@ -351,7 +351,7 @@ func startSession(t *testing.T, h http.Handler) session {
 func joinedSession(t *testing.T, h http.Handler, name string) session {
 	t.Helper()
 	s := startSession(t, h)
-	rec := serve(t, h, http.MethodPost, "/join", url.Values{
+	rec := send(t, h, http.MethodPost, "/join", url.Values{
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 		"name":                          {name},
 	}, true, s.csrfCookie)

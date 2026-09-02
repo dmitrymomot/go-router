@@ -1,0 +1,32 @@
+{{define "head" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.}}</title>
+<style>
+:root { color-scheme: light dark; --line: color-mix(in srgb, currentColor 18%, transparent); }
+body { margin: 0 auto; padding: 3rem 1.25rem; max-width: 42rem; font: 16px/1.6 system-ui, sans-serif; }
+h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+p.lede { margin: 0 0 2rem; opacity: .75; }
+a.button, button { font: inherit; padding: .55rem 1rem; border: 1px solid var(--line); border-radius: .5rem; background: none; color: inherit; cursor: pointer; text-decoration: none; display: inline-block; }
+form.stack { display: grid; gap: .85rem; max-width: 24rem; }
+label { display: grid; gap: .25rem; font-size: .9rem; }
+input { font: inherit; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .5rem; background: none; color: inherit; }
+p.error { color: #b3261e; margin: 0; }
+p.hint, footer { font-size: .9rem; opacity: .7; }
+ul.spaces { list-style: none; padding: 0; display: grid; gap: .5rem; }
+ul.spaces li { border: 1px solid var(--line); border-radius: .5rem; padding: .75rem 1rem; }
+code { font-family: ui-monospace, monospace; }
+footer { margin-top: 3rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+</style>
+</head>
+<body>
+{{- end}}
+
+{{define "foot" -}}
+<footer>Every name under <code>lvh.me</code> resolves to 127.0.0.1, so the subdomains work with no entry in <code>/etc/hosts</code>.</footer>
+</body>
+</html>
+{{- end}}
