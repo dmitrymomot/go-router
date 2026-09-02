@@ -84,6 +84,14 @@ func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 }
 
 func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error {
+	// Run closes a caller-supplied listener on the serving path, so it owns it
+	// from here on and has to close it on every path. It used to return early
+	// -- a nil handler, a bad option, a context already cancelled -- with the
+	// listener still accepting, and the caller had no way to tell whether it
+	// had been taken over or not.
+	if cfg.Listener != nil {
+		defer cfg.Listener.Close() //nolint:errcheck // Reported by whoever opened it.
+	}
 	if ctx == nil {
 		return errors.New("serve: Run needs a context")
 	}
@@ -135,7 +143,9 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	if err != nil {
 		return err
 	}
-	defer ln.Close() //nolint:errcheck // The listener is going away either way.
+	if cfg.Listener == nil {
+		defer ln.Close() //nolint:errcheck // The listener is going away either way.
+	}
 
 	if cfg.OnListen != nil {
 		cfg.OnListen(ln.Addr())
