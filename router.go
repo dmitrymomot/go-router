@@ -1311,12 +1311,6 @@ func (r *Router[C]) release(c C) {
 	}
 	if r.pool != nil {
 		b := c.base()
-		if b.retained {
-			// A goroutine outlived the handler and still points at this
-			// context. Recycling it would hand the two the same memory.
-			b.req, b.res = releasedRequest, nil
-			return
-		}
 		r.reset(c)
 		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil
@@ -1332,12 +1326,6 @@ func (r *Router[C]) release(c C) {
 func (r *Router[C]) recycle(c C) {
 	if r.pool != nil {
 		b := c.base()
-		if b.retained {
-			// A goroutine outlived the handler and still points at this
-			// context. Recycling it would hand the two the same memory.
-			b.req, b.res = releasedRequest, nil
-			return
-		}
 		r.reset(c)
 		b.req, b.res = releasedRequest, nil
 		b.resStorage.ResponseWriter = nil

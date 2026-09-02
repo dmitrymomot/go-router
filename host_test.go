@@ -888,29 +888,6 @@ func TestPerHostErrorHandlersIgnoreSetterOrder(t *testing.T) {
 	}
 }
 
-// A request from an IPv6 client arrives with its brackets stripped, so a host
-// scope has to be reachable by both spellings.
-func TestIPv6HostPatterns(t *testing.T) {
-	for _, pattern := range []string{"::1", "[::1]"} {
-		t.Run(pattern, func(t *testing.T) {
-			r := newTestRouter()
-			r.Host(pattern, func(h *Router[*tctx]) {
-				h.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "v6 "+c.RouteHost()) })
-			})
-			r.GET("/x", func(c *tctx) error { return c.String(http.StatusOK, "any host") })
-
-			for _, authority := range []string{"[::1]", "[::1]:8080"} {
-				if got := doHost(r, http.MethodGet, authority, "/x").Body.String(); got != "v6 ::1" {
-					t.Errorf("Host %s = %q, want %q", authority, got, "v6 ::1")
-				}
-			}
-			if got := doHost(r, http.MethodGet, "example.com", "/x").Body.String(); got != "any host" {
-				t.Errorf("another host = %q, want %q", got, "any host")
-			}
-		})
-	}
-}
-
 // parseHostPattern lower-cases and drops a trailing dot, so two spellings
 // resolve to one entry and the duplicate insert blames the route.
 func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {

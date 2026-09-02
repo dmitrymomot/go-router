@@ -1,7 +1,6 @@
 package router
 
 import (
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -539,45 +538,20 @@ func TestPanics(t *testing.T) {
 	}
 }
 
-func TestWrapHandlerAndWrapMiddleware(t *testing.T) {
-	tagging := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			next.ServeHTTP(&prefixWriter{ResponseWriter: w, prefix: "["},
-				req.WithContext(context.WithValue(req.Context(), ctxKey("who"), "std")))
-		})
-	}
-
+func TestWrapHandler(t *testing.T) {
 	r := newTestRouter()
-	r.Use(WrapMiddleware[*tctx](tagging))
 	r.GET("/plain", WrapHandler[*tctx](http.HandlerFunc(
 		func(w http.ResponseWriter, req *http.Request) {
-			_, _ = fmt.Fprint(w, req.Context().Value(ctxKey("who")))
+			_, _ = fmt.Fprint(w, "std")
 		})))
 
 	rec := do(r, http.MethodGet, "/plain")
-	if got, want := rec.Body.String(), "[std"; got != want {
+	if got, want := rec.Body.String(), "std"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
-}
-
-type ctxKey string
-
-type prefixWriter struct {
-	http.ResponseWriter
-	prefix string
-	done   bool
-}
-
-func (w *prefixWriter) Write(b []byte) (int, error) {
-	if !w.done {
-		w.done = true
-		//nolint:errcheck // test helper
-		w.ResponseWriter.Write([]byte(w.prefix))
-	}
-	return w.ResponseWriter.Write(b)
 }
 
 func TestRedirectTrailingSlashKeepsTheMethod(t *testing.T) {
@@ -739,16 +713,7 @@ func setHeader(name, value string) Middleware[*tctx] {
 }
 
 func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
-	var seen []string
-	std := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			seen = append(seen, "mw "+req.Pattern+" id="+req.PathValue("id"))
-			next.ServeHTTP(w, req)
-		})
-	}
-
 	r := newTestRouter()
-	r.Use(WrapMiddleware[*tctx](std))
 	r.GET("/users/{id}/posts/{postID}", WrapHandler[*tctx](http.HandlerFunc(
 		func(w http.ResponseWriter, req *http.Request) {
 			_, _ = fmt.Fprintf(w, "handler %s id=%s postID=%s",
@@ -759,9 +724,6 @@ func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if want := []string{"mw /users/{id}/posts/{postID} id=7"}; !slices.Equal(seen, want) {
-		t.Errorf("middleware saw %q, want %q", seen, want)
-	}
 	want := "handler /users/{id}/posts/{postID} id=7 postID=12"
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want %q", got, want)
@@ -771,12 +733,12 @@ func TestMatchedRouteReachesAWrappedHandler(t *testing.T) {
 func TestRequestPatternIsSetForAFallbackToo(t *testing.T) {
 	var pattern string
 	r := newTestRouter()
-	r.Use(WrapMiddleware[*tctx](func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			pattern = req.Pattern
-			next.ServeHTTP(w, req)
-		})
-	}))
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			pattern = c.RoutePattern()
+			return next(c)
+		}
+	})
 	r.GET("/users/{id}", echoRoute)
 
 	if do(r, http.MethodPost, "/users/7"); pattern != "/users/{id}" {

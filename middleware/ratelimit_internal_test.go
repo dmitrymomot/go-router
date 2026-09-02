@@ -268,16 +268,13 @@ func TestMemoryStoreConfigDefaults(t *testing.T) {
 	}
 }
 
-// A full store fails closed, which is the right default but the wrong trade for
-// some services. A negative capacity lifts the cap, so that choice can be made.
-func TestMemoryStoreNegativeCapacityIsUnbounded(t *testing.T) {
-	s := newTestMemoryStoreWithConfig(t, MemoryStoreConfig{Rate: 1000, Burst: 1000, MaxEntries: -1})
-	for i := range DefaultMemoryStoreMaxEntries/1000 + 8 {
-		id := "ip" + strconv.Itoa(i)
-		if ok, _, err := s.Allow(nil, id); err != nil || !ok {
-			t.Fatalf("first request from %s: allowed=%v err=%v, want allowed", id, ok, err)
+func TestMemoryStoreRejectsNegativeCapacity(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewMemoryStoreWithConfig accepted a negative capacity")
 		}
-	}
+	}()
+	newTestMemoryStoreWithConfig(t, MemoryStoreConfig{Rate: 1, MaxEntries: -1})
 }
 
 func TestMemoryStoreCapacityFailsClosed(t *testing.T) {
