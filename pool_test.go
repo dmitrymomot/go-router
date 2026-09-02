@@ -177,13 +177,9 @@ func TestPoolUnderConcurrentRequests(t *testing.T) {
 func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 	var seen *pctx
 	r := newPooledRouter()
-	r.NotFound(func(c *pctx) error {
+	r.ErrorHandler(func(c *pctx, err error) {
 		seen = c
-		return c.NoContent(http.StatusNotFound)
-	})
-	r.MethodNotAllowed(func(c *pctx) error {
-		seen = c
-		return c.NoContent(http.StatusMethodNotAllowed)
+		_ = c.NoContent(StatusOf(err))
 	})
 	r.GET("/backtrack/{value}/wanted", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
 	r.GET("/method/{value}", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })

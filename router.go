@@ -64,23 +64,21 @@ type Router[C Context] struct {
 	regMu sync.Mutex
 
 	// Registration only, from here down.
-	prefix           string
-	mws              []Middleware[C]
-	regs             []registration[C]
-	children         []*Router[C]
-	owner            *Router[C]
-	hasRoutes        bool
-	closed           bool
-	refreshDepth     int
-	meta             any
-	tagged           bool
-	hosts            []hostSpec
-	inHost           bool
-	notFound         HandlerFunc[C]
-	methodNotAllowed HandlerFunc[C]
-	errHandler       ErrorHandlerFunc[C]
-	preMws           []Middleware[C]
-	info             map[routeKey]routeInfo
+	prefix       string
+	mws          []Middleware[C]
+	regs         []registration[C]
+	children     []*Router[C]
+	owner        *Router[C]
+	hasRoutes    bool
+	closed       bool
+	refreshDepth int
+	meta         any
+	tagged       bool
+	hosts        []hostSpec
+	inHost       bool
+	errHandler   ErrorHandlerFunc[C]
+	preMws       []Middleware[C]
+	info         map[routeKey]routeInfo
 }
 
 // engine is the route table as the request path sees it: everything routing
@@ -639,36 +637,16 @@ func (r *Router[C]) mustBeOpen(what string) {
 	}
 }
 
-// mustOwnFallbacks rejects a fallback setter on a scope that cannot express
-// one. Scopes are keyed by path prefix, so a prefix-less child covers the whole
-// tree and would displace the root's. The root, a host scope and any prefixed
-// scope each name a region the router can match.
+// mustOwnFallbacks rejects an error handler on a scope that cannot express one.
+// Scopes are keyed by path prefix, so a prefix-less child covers the whole tree
+// and would displace the root's. The root, a host scope and any prefixed scope
+// each name a region the router can match.
 func (r *Router[C]) mustOwnFallbacks(what string) {
 	if r == r.root || len(r.hosts) > 0 || normalizePattern(r.scopePrefix()) != "/" {
 		return
 	}
 	panic("router: a scope without a prefix cannot own " + what +
 		"; set it on the router itself, or open a Route with a prefix")
-}
-
-func (r *Router[C]) NotFound(h HandlerFunc[C]) {
-	if h == nil {
-		panic("router: NotFound needs a handler")
-	}
-	r.mustNotBeServing("the not-found handler")
-	r.mustOwnFallbacks("the not-found handler")
-	r.notFound = h
-	r.settingChanged()
-}
-
-func (r *Router[C]) MethodNotAllowed(h HandlerFunc[C]) {
-	if h == nil {
-		panic("router: MethodNotAllowed needs a handler")
-	}
-	r.mustNotBeServing("the method-not-allowed handler")
-	r.mustOwnFallbacks("the method-not-allowed handler")
-	r.methodNotAllowed = h
-	r.settingChanged()
 }
 
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
@@ -758,19 +736,14 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		for _, e := range eng.hostSet.all {
 			e.mws, e.haveMWs = nil, false
 			e.notFoundChain, e.notAllowedChain, e.optionsChain = nil, nil, nil
-			e.errHandler, e.rawNotFound, e.rawNotAllowed = nil, nil, nil
+			e.errHandler = nil
 		}
 	}
-	// A nil field reads as the package default here, because elsewhere nil is
-	// what says nobody chose a handler.
+	// A miss and a wrong method are errors like any other; only the error
+	// handler is replaceable. The chains exist so a scope's middleware still
+	// runs on the way to them.
 	rootNotFound := HandlerFunc[C](defaultNotFound[C])
-	if r.notFound != nil {
-		rootNotFound = r.notFound
-	}
 	rootNotAllowed := HandlerFunc[C](defaultMethodNotAllowed[C])
-	if r.methodNotAllowed != nil {
-		rootNotAllowed = r.methodNotAllowed
-	}
 	rootErrHandler := ErrorHandlerFunc[C](DefaultErrorHandler[C])
 	if r.errHandler != nil {
 		rootErrHandler = r.errHandler
@@ -812,29 +785,11 @@ func (r *Router[C]) compile(eng *engine[C]) {
 			// mustOwnFallbacks rejects the rest at the setter.
 			case rt == r || len(rt.hosts) > 0:
 				if e == nil {
-					if rt.notFound != nil {
-						rootNotFound = rt.notFound
-						eng.notFoundChain = chain(rt.notFound, m)
-					}
-					if rt.methodNotAllowed != nil {
-						rootNotAllowed = rt.methodNotAllowed
-						eng.notAllowedChain = chain(rt.methodNotAllowed, m)
-					}
 					if rt.errHandler != nil {
 						rootErrHandler = rt.errHandler
 					}
-				} else {
-					if rt.notFound != nil {
-						e.notFoundChain = chain(rt.notFound, m)
-						e.rawNotFound = rt.notFound
-					}
-					if rt.methodNotAllowed != nil {
-						e.notAllowedChain = chain(rt.methodNotAllowed, m)
-						e.rawNotAllowed = rt.methodNotAllowed
-					}
-					if rt.errHandler != nil {
-						e.errHandler = rt.errHandler
-					}
+				} else if rt.errHandler != nil {
+					e.errHandler = rt.errHandler
 				}
 			default:
 				sets := own.take(rt)
@@ -875,21 +830,8 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
-		notFound, notAllowed := ps.fb.notFound, ps.fb.notAllowed
-		if notFound == nil {
-			notFound = rootNotFound
-			if ps.host != nil && ps.host.rawNotFound != nil {
-				notFound = ps.host.rawNotFound
-			}
-		}
-		if notAllowed == nil {
-			notAllowed = rootNotAllowed
-			if ps.host != nil && ps.host.rawNotAllowed != nil {
-				notAllowed = ps.host.rawNotAllowed
-			}
-		}
-		s.notFoundChain = chain(notFound, ps.mws)
-		s.notAllowedChain = chain(notAllowed, ps.mws)
+		s.notFoundChain = chain(rootNotFound, ps.mws)
+		s.notAllowedChain = chain(rootNotAllowed, ps.mws)
 		s.optionsChain = chain(autoOptions[C], ps.mws)
 		s.errHandler = ps.fb.errHandler
 		eng.scopes = append(eng.scopes, s)
@@ -945,23 +887,15 @@ type pendingScope[C Context] struct {
 }
 
 type scopeFallbacks[C Context] struct {
-	notFound   HandlerFunc[C]
-	notAllowed HandlerFunc[C]
 	errHandler ErrorHandlerFunc[C]
 }
 
 func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
-	set := false
-	if rt.notFound != nil {
-		f.notFound, set = rt.notFound, true
+	if rt.errHandler == nil {
+		return false
 	}
-	if rt.methodNotAllowed != nil {
-		f.notAllowed, set = rt.methodNotAllowed, true
-	}
-	if rt.errHandler != nil {
-		f.errHandler, set = rt.errHandler, true
-	}
-	return set
+	f.errHandler = rt.errHandler
+	return true
 }
 
 type scopeFallback[C Context] struct {

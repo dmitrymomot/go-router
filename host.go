@@ -41,8 +41,6 @@ type hostEntry[C Context] struct {
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
 	errHandler      ErrorHandlerFunc[C]
-	rawNotFound     HandlerFunc[C]
-	rawNotAllowed   HandlerFunc[C]
 }
 
 type hostSet[C Context] struct {

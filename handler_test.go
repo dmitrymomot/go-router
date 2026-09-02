@@ -30,12 +30,6 @@ func TestNilRouterCallbacksPanicAtRegistration(t *testing.T) {
 		"Use":           func(r *Router[*tctx]) { r.Use(nil) },
 		"Pre":           func(r *Router[*tctx]) { r.Pre(nil) },
 		"With":          func(r *Router[*tctx]) { r.With(nil) },
-		"NotFound": func(r *Router[*tctx]) {
-			r.NotFound(nil)
-		},
-		"MethodNotAllowed": func(r *Router[*tctx]) {
-			r.MethodNotAllowed(nil)
-		},
 		"ErrorHandler": func(r *Router[*tctx]) {
 			r.ErrorHandler(nil)
 		},
