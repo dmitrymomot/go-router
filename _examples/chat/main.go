@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"syscall"
 	"strings"
 	"time"
 
@@ -39,9 +40,14 @@ func main() {
 		MaxHeaderBytes:    16 << 10,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// SIGTERM is what a container runtime sends, so leaving it out meant
+	// docker stop killed the process outright: no room close, no drain.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
 		rm.close()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -54,6 +60,9 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	// ListenAndServe returns as soon as Shutdown begins, so returning here
+	// would end the process while requests were still being drained.
+	<-drained
 }
 
 func newRouter(rm *room) *router.Router[Ctx] {
