@@ -93,7 +93,7 @@ func TestTimeoutPassesTheDeadlineToTheHandler(t *testing.T) {
 	}
 }
 
-func TestTimeoutRestoresTheContextAfterTheHandlerReplacedIt(t *testing.T) {
+func TestTimeoutKeepsTheRequestOfTheHandlerWithTheContextFromBefore(t *testing.T) {
 	type key struct{}
 	var after []string
 	r := newRouter()
@@ -101,19 +101,29 @@ func TestTimeoutRestoresTheContextAfterTheHandlerReplacedIt(t *testing.T) {
 		return func(c *appContext) error {
 			err := next(c)
 			if _, ok := c.Request().Context().Deadline(); ok {
-				after = append(after, "a deadline")
+				after = append(after, "kept a deadline")
 			}
 			if c.Err() != nil {
-				after = append(after, "an ended context")
+				after = append(after, "kept an ended context")
 			}
 			if c.Value(key{}) != nil {
-				after = append(after, "the value of the handler")
+				after = append(after, "kept the value of the handler")
+			}
+			if c.Request().Header.Get("X-Handler") == "" {
+				after = append(after, "lost the header of the handler")
+			}
+			if c.Query("q") != "handler" {
+				after = append(after, "lost the query of the handler")
 			}
 			return err
 		}
 	})
 	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: time.Minute}))
 	r.GET("/", func(c *appContext) error {
+		req := c.Request().Clone(c.Request().Context())
+		req.Header.Set("X-Handler", "1")
+		req.URL.RawQuery = "q=handler"
+		c.SetRequest(req)
 		c.SetContext(context.WithValue(c.Request().Context(), key{}, "v"))
 		if _, ok := c.Deadline(); !ok {
 			return router.ErrInternalServerError.WithMessage("no deadline")
@@ -125,7 +135,7 @@ func TestTimeoutRestoresTheContextAfterTheHandlerReplacedIt(t *testing.T) {
 		t.Errorf("status = %d, want 200: %s", rec.Code, rec.Body)
 	}
 	if after != nil {
-		t.Errorf("after Timeout the context kept %q, want the context from before it", after)
+		t.Errorf("after Timeout the request %q, want the request of the handler with the context from before Timeout", after)
 	}
 }
 
