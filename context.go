@@ -332,8 +332,8 @@ func (b *Base) Scheme() string { return SchemeOf(b.req) }
 // SchemeOf reports "https" when the connection is TLS or when
 // X-Forwarded-Proto names https, and "http" otherwise.
 //
-// The header counts whoever sent it. The RealIP middleware in front keeps a
-// trusted proxy's header, reduced to one value, and deletes anyone else's.
+// The header counts whoever sent it. The RealIP middleware in front by default
+// keeps only a trusted proxy's header, reduced to one value.
 func SchemeOf(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
