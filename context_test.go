@@ -148,6 +148,10 @@ func TestContextConstructionRejectsNilInputs(t *testing.T) {
 		{name: "response writer", call: func() { NewBase(nil, httptest.NewRequest(http.MethodGet, "/", nil)) }},
 		{name: "request", call: func() { NewBase(httptest.NewRecorder(), nil) }},
 		{name: "replacement request", call: func() { newBase("/").SetRequest(nil) }},
+		{name: "replacement context", call: func() {
+			var ctx context.Context
+			newBase("/").SetContext(ctx)
+		}},
 		{name: "route base", call: func() { SetRouteForTest(nil, "/", nil, nil) }},
 	}
 	for _, tt := range tests {
@@ -236,7 +240,7 @@ func TestSetRequestDropsTheCachedHost(t *testing.T) {
 	}
 }
 
-func TestSetRequestRefusesAContextDerivedFromTheBase(t *testing.T) {
+func TestSetContextAndSetRequestRefuseAContextDerivedFromTheBase(t *testing.T) {
 	type key struct{ n int }
 	derive := []struct {
 		name string
@@ -280,6 +284,7 @@ func TestSetRequestRefusesAContextDerivedFromTheBase(t *testing.T) {
 		call func(b *Base, ctx context.Context)
 	}{
 		{"SetRequest", func(b *Base, ctx context.Context) { b.SetRequest(b.Request().WithContext(ctx)) }},
+		{"SetContext", func(b *Base, ctx context.Context) { b.SetContext(ctx) }},
 	}
 	for _, d := range derive {
 		for _, s := range set {
@@ -311,12 +316,68 @@ func TestAContextDerivedFromAnotherBaseIsNotALoop(t *testing.T) {
 	type key struct{}
 	b1, b2 := newBase("/"), newBase("/")
 
-	b1.SetRequest(b1.Request().WithContext(context.WithValue(b2, key{}, "v")))
-	if got := b1.Value(key{}); got != "v" {
-		t.Errorf("Value = %v, want v", got)
+	for name, set := range map[string]func(ctx context.Context){
+		"SetRequest": func(ctx context.Context) { b1.SetRequest(b1.Request().WithContext(ctx)) },
+		"SetContext": b1.SetContext,
+	} {
+		set(context.WithValue(b2, key{}, name))
+		if got := b1.Value(key{}); got != name {
+			t.Errorf("%s: Value = %v, want %s", name, got, name)
+		}
+		if got, _ := FromContext(b1); got != b1 {
+			t.Errorf("%s: FromContext(b1) did not return b1", name)
+		}
 	}
-	if got, _ := FromContext(b1); got != b1 {
-		t.Error("FromContext(b1) did not return b1")
+}
+
+func TestSetContextKeepsTheCachedQueryAndHost(t *testing.T) {
+	type key struct{}
+	b := newBase("/search?q=go")
+	host := b.Host()
+	b.QueryValues().Set("q", "cached")
+
+	b.SetContext(context.WithValue(b.Request().Context(), key{}, "v"))
+	if got := b.Query("q"); got != "cached" {
+		t.Errorf("Query(%q) = %q, want the cached parse", "q", got)
+	}
+	if got := b.Host(); got != host {
+		t.Errorf("Host() = %q, want %q", got, host)
+	}
+	if b.Value(key{}) != "v" || b.Request().Context().Value(key{}) != "v" {
+		t.Error("the new context value is not visible through b and its request")
+	}
+}
+
+func TestSetContextLeavesTheOldRequestAlone(t *testing.T) {
+	type key struct{}
+	b := newBase("/")
+	old := b.Request()
+
+	b.SetContext(context.WithValue(old.Context(), key{}, "v"))
+	if b.Request() == old {
+		t.Error("SetContext kept the old request, want a copy")
+	}
+	if old.Context().Value(key{}) != nil {
+		t.Error("SetContext changed the context of the old request")
+	}
+}
+
+func TestSetContextCarriesCancellation(t *testing.T) {
+	b := newBase("/")
+	ctx, cancel := context.WithCancel(b.Request().Context())
+	b.SetContext(ctx)
+	if b.Err() != nil {
+		t.Fatalf("Err() = %v before cancel, want nil", b.Err())
+	}
+
+	cancel()
+	select {
+	case <-b.Done():
+	default:
+		t.Error("Done() is open after cancel")
+	}
+	if !errors.Is(b.Err(), context.Canceled) {
+		t.Errorf("Err() = %v, want context.Canceled", b.Err())
 	}
 }
 

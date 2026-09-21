@@ -277,6 +277,38 @@ func TestReadmeContracts(t *testing.T) {
 	}
 }
 
+type localeKey struct{}
+
+// localeOf stands in for domain code that takes a context.Context.
+func localeOf(ctx context.Context) string {
+	if lang, ok := ctx.Value(localeKey{}).(string); ok {
+		return lang
+	}
+	return "en"
+}
+
+func ExampleBase_SetContext() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			if lang := c.Query("lang"); lang != "" {
+				// Derive from Request().Context(), never from c.
+				c.SetContext(context.WithValue(c.Request().Context(), localeKey{}, lang))
+			}
+			return next(c)
+		}
+	})
+	r.GET("/", func(c *Context) error {
+		return c.String(http.StatusOK, localeOf(c))
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/"))
+	fmt.Println(serve(r, http.MethodGet, "/?lang=uk"))
+	// Output:
+	// 200 en
+	// 200 uk
+}
+
 func ExampleNewPooled() {
 	r := router.NewPooled(
 		func() *Context { return &Context{DB: &store{}} },
