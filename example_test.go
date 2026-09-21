@@ -505,6 +505,47 @@ func ExampleHTMXPartial() {
 	// <h1>users</h1><p>/users</p>
 }
 
+func ExampleHTMXRequest_TargetID() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.GET("/users", func(c *Context) error {
+		c.Vary(router.HeaderHXTarget)
+		switch c.HTMX().TargetID() {
+		case "user-list":
+			return c.Render(http.StatusOK, card(&User{ID: "7", Name: "ann"}))
+		default:
+			return c.Render(http.StatusOK, page("users"))
+		}
+	})
+
+	for _, target := range []string{"ul#user-list", "body"} {
+		req := httptest.NewRequest(http.MethodGet, "/users", nil)
+		req.Header.Set(router.HeaderHXRequest, "true")
+		req.Header.Set(router.HeaderHXTarget, target)
+		fmt.Println(serveRequest(r, req).Body)
+	}
+	// Output:
+	// <li id="user-7">ann</li>
+	// <h1>users</h1><p>/users</p>
+}
+
+func ExampleHTMXRequest_SourceID() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	// htmx 4 names the element that made the request in HX-Source. This is
+	// what HX-Trigger carried as a request header in htmx 2.
+	r.POST("/users/actions", func(c *Context) error {
+		return c.String(http.StatusOK, c.HTMX().SourceID())
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/users/actions", nil)
+	req.Header.Set(router.HeaderHXRequest, "true")
+	req.Header.Set(router.HeaderHXSource, "button#delete-7")
+	fmt.Println(serveRequest(r, req).Body)
+	// Output:
+	// delete-7
+}
+
 func ExampleBase_AddFlash() {
 	// The key signs the cookie. NewCookieCodec panics under 32 bytes, so read
 	// it from the environment rather than writing one here.

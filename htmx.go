@@ -6,22 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"unicode/utf8"
 )
 
 // The htmx headers that a request carries. [Base.HTMX] reads them into an
-// [HTMXRequest].
+// [HTMXRequest]. They are the headers htmx 4 sends; htmx 2 is not supported.
 const (
 	HeaderHXRequest               = "Hx-Request"
+	HeaderHXRequestType           = "Hx-Request-Type"
 	HeaderHXBoosted               = "Hx-Boosted"
 	HeaderHXCurrentURL            = "Hx-Current-Url"
 	HeaderHXHistoryRestoreRequest = "Hx-History-Restore-Request"
-	HeaderHXPrompt                = "Hx-Prompt"
+	HeaderHXSource                = "Hx-Source"
 	HeaderHXTarget                = "Hx-Target"
-	HeaderHXTriggerName           = "Hx-Trigger-Name"
-	HeaderHXTrigger               = "Hx-Trigger"
 )
 
 // The htmx headers that a response carries. [Base.HX] sets them.
@@ -34,6 +34,7 @@ const (
 	HeaderHXReswap             = "Hx-Reswap"
 	HeaderHXRetarget           = "Hx-Retarget"
 	HeaderHXReselect           = "Hx-Reselect"
+	HeaderHXTrigger            = "Hx-Trigger"
 	HeaderHXTriggerAfterSettle = "Hx-Trigger-After-Settle"
 	HeaderHXTriggerAfterSwap   = "Hx-Trigger-After-Swap"
 )
@@ -54,13 +55,22 @@ const (
 // HTMXRequest is what the htmx headers of one request say. Request is false
 // when htmx did not make the request, and the other fields are then empty.
 //
+// RequestType is "full" when htmx swaps the whole page, as for a boosted link
+// or a history restore, and "partial" when it swaps one element; it is what
+// [Base.WantsPartial] reads. Source names the element that made the request
+// and Target the one the answer goes into, both in the tag#id form htmx 4
+// sends, such as "ul#user-list". [HTMXRequest.TargetID] and
+// [HTMXRequest.SourceID] read the id alone.
+//
+// htmx 4 swaps a 4xx or 5xx answer into the target too, so a scope that serves
+// htmx wants an error handler that renders a fragment.
+//
 //betteralign:check
 type HTMXRequest struct {
 	CurrentURL     string
-	Prompt         string
+	RequestType    string
+	Source         string
 	Target         string
-	Trigger        string
-	TriggerName    string
 	Request        bool
 	Boosted        bool
 	HistoryRestore bool
@@ -71,14 +81,34 @@ func (b *Base) HTMX() HTMXRequest {
 	h := b.req.Header
 	return HTMXRequest{
 		CurrentURL:     h.Get(HeaderHXCurrentURL),
-		Prompt:         h.Get(HeaderHXPrompt),
+		RequestType:    h.Get(HeaderHXRequestType),
+		Source:         h.Get(HeaderHXSource),
 		Target:         h.Get(HeaderHXTarget),
-		Trigger:        h.Get(HeaderHXTrigger),
-		TriggerName:    h.Get(HeaderHXTriggerName),
 		Request:        hxTrue(h.Get(HeaderHXRequest)),
 		Boosted:        hxTrue(h.Get(HeaderHXBoosted)),
 		HistoryRestore: hxTrue(h.Get(HeaderHXHistoryRestoreRequest)),
 	}
+}
+
+// TargetID reports the id of the element the answer goes into: "user-list"
+// for the target "ul#user-list". It is "" when the target has no id.
+func (h HTMXRequest) TargetID() string { return idOf(h.Target) }
+
+// SourceID reports the id of the element that made the request: "delete-7"
+// for the source "button#delete-7". It is "" when the source has no id.
+func (h HTMXRequest) SourceID() string { return idOf(h.Source) }
+
+// idOf reads the id out of the tag#id form of htmx 4, which escapes it as a
+// URI component. An escape that does not decode is returned as sent.
+func idOf(v string) string {
+	_, id, ok := strings.Cut(v, "#")
+	if !ok {
+		return ""
+	}
+	if s, err := url.PathUnescape(id); err == nil {
+		return s
+	}
+	return id
 }
 
 // IsHTMX reports whether htmx made the request.

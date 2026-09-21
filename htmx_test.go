@@ -21,13 +21,12 @@ func hxDo(h http.Handler, method, target string, headers map[string]string) *htt
 
 var htmxHeaders = map[string]string{
 	HeaderHXRequest:               "true",
+	HeaderHXRequestType:           "partial",
 	HeaderHXBoosted:               "true",
 	HeaderHXCurrentURL:            "https://example.com/chat",
 	HeaderHXHistoryRestoreRequest: "true",
-	HeaderHXPrompt:                "Ada",
-	HeaderHXTarget:                "log",
-	HeaderHXTrigger:               "send",
-	HeaderHXTriggerName:           "message",
+	HeaderHXSource:                "button#send",
+	HeaderHXTarget:                "ul#log",
 }
 
 func TestHTMXRequest(t *testing.T) {
@@ -42,10 +41,9 @@ func TestHTMXRequest(t *testing.T) {
 
 	want := HTMXRequest{
 		CurrentURL:     "https://example.com/chat",
-		Prompt:         "Ada",
-		Target:         "log",
-		Trigger:        "send",
-		TriggerName:    "message",
+		RequestType:    "partial",
+		Source:         "button#send",
+		Target:         "ul#log",
 		Request:        true,
 		Boosted:        true,
 		HistoryRestore: true,
@@ -72,6 +70,35 @@ func TestHTMXRequestEmpty(t *testing.T) {
 	if isHTMX || boosted {
 		t.Errorf("IsHTMX() = %v, IsBoosted() = %v, want false and false", isHTMX, boosted)
 	}
+}
+
+func TestHTMXRequestTargetID(t *testing.T) {
+	for _, tc := range htmxIDCases {
+		if got := (HTMXRequest{Target: tc.in}).TargetID(); got != tc.want {
+			t.Errorf("TargetID() of %q = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestHTMXRequestSourceID(t *testing.T) {
+	for _, tc := range htmxIDCases {
+		if got := (HTMXRequest{Source: tc.in}).SourceID(); got != tc.want {
+			t.Errorf("SourceID() of %q = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+var htmxIDCases = []struct{ in, want string }{
+	{"ul#user-list", "user-list"},
+	{"div", ""},
+	{"body", ""},
+	{"", ""},
+	{"#list", "list"},
+	{"li#row%207", "row 7"},
+	{"div#%D0%BA%D0%BB", "кл"},
+	{"div#50%", "50%"},
+	{"div#a#b", "a#b"},
+	{"div#a+b", "a+b"},
 }
 
 func TestIsHTMXIgnoresCase(t *testing.T) {
@@ -102,9 +129,9 @@ func TestIsHTMXIgnoresCase(t *testing.T) {
 
 func TestHTMXRequestSpelling(t *testing.T) {
 	for _, name := range []string{
-		HeaderHXRequest, HeaderHXBoosted, HeaderHXCurrentURL,
-		HeaderHXHistoryRestoreRequest, HeaderHXPrompt, HeaderHXTarget,
-		HeaderHXTriggerName, HeaderHXTrigger, HeaderHXLocation,
+		HeaderHXRequest, HeaderHXRequestType, HeaderHXBoosted, HeaderHXCurrentURL,
+		HeaderHXHistoryRestoreRequest, HeaderHXSource, HeaderHXTarget,
+		HeaderHXTrigger, HeaderHXLocation,
 		HeaderHXPushURL, HeaderHXRedirect, HeaderHXRefresh, HeaderHXReplaceURL,
 		HeaderHXReswap, HeaderHXRetarget, HeaderHXReselect,
 		HeaderHXTriggerAfterSettle, HeaderHXTriggerAfterSwap,
@@ -597,6 +624,21 @@ func BenchmarkIsHTMX(b *testing.B) {
 	for b.Loop() {
 		if !base.IsHTMX() {
 			b.Fatal("IsHTMX() = false")
+		}
+	}
+}
+
+func BenchmarkHTMX(b *testing.B) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	for k, v := range htmxHeaders {
+		req.Header.Set(k, v)
+	}
+	base := NewBase(httptest.NewRecorder(), req)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if base.HTMX().TargetID() != "log" {
+			b.Fatal("TargetID() != log")
 		}
 	}
 }
