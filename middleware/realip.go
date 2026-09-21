@@ -175,19 +175,26 @@ func (cfg RealIPConfig) trustedHop(values []string, rfc7239 bool) hop {
 }
 
 func leftmostHop(values []string, rfc7239 bool) hop {
-	for _, v := range values {
-		for e := range strings.SplitSeq(v, ",") {
-			if e = strings.TrimSpace(e); e == "" {
-				continue
-			}
-			h := parseEntry(e, rfc7239)
-			if _, text, ok := parseHop(h.addr); ok {
-				h.addr = text
-				return h
-			}
+	for e := range entriesLeft(values) {
+		h := parseEntry(e, rfc7239)
+		if _, text, ok := parseHop(h.addr); ok {
+			h.addr = text
+			return h
 		}
 	}
 	return hop{}
+}
+
+func entriesLeft(values []string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for _, v := range values {
+			for e := range strings.SplitSeq(v, ",") {
+				if e = strings.TrimSpace(e); e != "" && !yield(e) {
+					return
+				}
+			}
+		}
+	}
 }
 
 func entriesRight(values []string) iter.Seq[string] {
@@ -240,19 +247,30 @@ func scheme(v string) string {
 }
 
 func parseHop(s string) (netip.Addr, string, bool) {
-	if s = strings.TrimSpace(s); s == "" {
+	ap, hasPort, ok := splitHop(s)
+	switch {
+	case !ok:
 		return netip.Addr{}, "", false
+	case hasPort:
+		return ap.Addr(), ap.String(), true
+	}
+	return ap.Addr(), ap.Addr().String(), true
+}
+
+func splitHop(s string) (ap netip.AddrPort, hasPort, ok bool) {
+	if s = strings.TrimSpace(s); s == "" {
+		return netip.AddrPort{}, false, false
 	}
 	// ParseAddrPort allocates an error for every hop without a port, which is
 	// most of them. A bare IPv6 address has colons too, so the bracket is what
 	// tells the two apart.
 	if strings.IndexByte(s, ':') >= 0 && (s[0] == '[' || strings.Count(s, ":") == 1) {
 		if ap, err := netip.ParseAddrPort(s); err == nil {
-			return ap.Addr(), ap.String(), true
+			return ap, true, true
 		}
 	}
 	if addr, err := netip.ParseAddr(strings.Trim(s, "[]")); err == nil {
-		return addr, addr.String(), true
+		return netip.AddrPortFrom(addr, 0), false, true
 	}
-	return netip.Addr{}, "", false
+	return netip.AddrPort{}, false, false
 }
