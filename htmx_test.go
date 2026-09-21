@@ -163,13 +163,18 @@ func TestHTMXPartial(t *testing.T) {
 		{"a browser gets the page", nil, "page"},
 		{"htmx gets the partial", map[string]string{HeaderHXRequest: "true"}, "partial"},
 		{
+			"a partial request gets the partial",
+			map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "partial"},
+			"partial",
+		},
+		{
 			"a boosted request gets the page",
-			map[string]string{HeaderHXRequest: "true", HeaderHXBoosted: "true"},
+			map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "full", HeaderHXBoosted: "true"},
 			"page",
 		},
 		{
 			"a history restore gets the page",
-			map[string]string{HeaderHXRequest: "true", HeaderHXHistoryRestoreRequest: "true"},
+			map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "full", HeaderHXHistoryRestoreRequest: "true"},
 			"page",
 		},
 	}
@@ -179,7 +184,7 @@ func TestHTMXPartial(t *testing.T) {
 			if got := rec.Body.String(); got != tc.want {
 				t.Errorf("body = %q, want %q", got, tc.want)
 			}
-			wantVary := []string{HeaderHXRequest, HeaderHXBoosted, HeaderHXHistoryRestoreRequest}
+			wantVary := []string{HeaderHXRequest, HeaderHXRequestType}
 			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, wantVary) {
 				t.Errorf("Vary = %v, want %v", got, wantVary)
 			}
@@ -741,23 +746,43 @@ func TestHXTriggerRejectsARepeatedName(t *testing.T) {
 }
 
 func TestHTMXWantsPartial(t *testing.T) {
+	hx := func(kv ...string) map[string]string {
+		h := map[string]string{}
+		for i := 0; i < len(kv); i += 2 {
+			h[kv[i]] = kv[i+1]
+		}
+		return h
+	}
 	tests := []struct {
 		name    string
 		headers map[string]string
 		want    bool
 	}{
-		{"a browser", nil, false},
-		{"htmx", map[string]string{HeaderHXRequest: "true"}, true},
+		{"no headers", nil, false},
+		{"htmx with no type", hx(HeaderHXRequest, "true"), true},
+		{"partial", hx(HeaderHXRequest, "true", HeaderHXRequestType, "partial"), true},
+		{"PARTIAL", hx(HeaderHXRequest, "true", HeaderHXRequestType, "PARTIAL"), true},
+		{"full", hx(HeaderHXRequest, "true", HeaderHXRequestType, "full"), false},
+		{"FULL", hx(HeaderHXRequest, "true", HeaderHXRequestType, "FULL"), false},
 		{
-			"boosted",
-			map[string]string{HeaderHXRequest: "true", HeaderHXBoosted: "true"},
+			"full and boosted",
+			hx(HeaderHXRequest, "true", HeaderHXRequestType, "full", HeaderHXBoosted, "true"),
 			false,
 		},
 		{
-			"a history restore",
-			map[string]string{HeaderHXRequest: "true", HeaderHXHistoryRestoreRequest: "true"},
+			"partial and boosted",
+			hx(HeaderHXRequest, "true", HeaderHXRequestType, "partial", HeaderHXBoosted, "true"),
+			true,
+		},
+		{
+			"full and a history restore",
+			hx(HeaderHXRequest, "true", HeaderHXRequestType, "full", HeaderHXHistoryRestoreRequest, "true"),
 			false,
 		},
+		{"htmx 2 boosted with no type", hx(HeaderHXRequest, "true", HeaderHXBoosted, "true"), true},
+		{"a type without HX-Request", hx(HeaderHXRequestType, "partial"), false},
+		{"an HX-Request that is not true", hx(HeaderHXRequest, "1"), false},
+		{"a type htmx does not send", hx(HeaderHXRequest, "true", HeaderHXRequestType, "sideways"), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

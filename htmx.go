@@ -111,23 +111,31 @@ func idOf(v string) string {
 	return id
 }
 
-// IsHTMX reports whether htmx made the request.
+// IsHTMX reports whether htmx made the request. It says who sent the
+// request, not what to answer: a boosted link and a history restore come from
+// htmx too and want a whole page. [Base.WantsPartial] decides that.
 func (b *Base) IsHTMX() bool { return hxTrue(b.req.Header.Get(HeaderHXRequest)) }
 
-// IsBoosted reports whether the request comes from an hx-boost link or form,
-// which wants a whole page rather than a fragment.
+// IsBoosted reports whether the request comes from an hx-boost link or form.
+// htmx 4 sends such a request as a full one, so [Base.WantsPartial] already
+// answers it with the page.
 func (b *Base) IsBoosted() bool { return hxTrue(b.req.Header.Get(HeaderHXBoosted)) }
 
-// HTMXWantsPartial reports whether r wants a fragment: htmx made it, and it is
-// neither boosted nor a history restore.
+// HTMXWantsPartial reports whether r wants a fragment: htmx made it, and its
+// HX-Request-Type is not "full". htmx 4 sends "full" for a boosted link, a
+// history restore and a request that swaps the whole body, and a request
+// without the type counts as partial. htmx 2 sends no type, so it is not
+// supported: its boosted links and history restores would get fragments.
 func HTMXWantsPartial(r *http.Request) bool {
 	h := r.Header
-	return hxTrue(h.Get(HeaderHXRequest)) &&
-		!hxTrue(h.Get(HeaderHXBoosted)) &&
-		!hxTrue(h.Get(HeaderHXHistoryRestoreRequest))
+	return hxTrue(h.Get(HeaderHXRequest)) && !strings.EqualFold(h.Get(HeaderHXRequestType), "full")
 }
 
 func hxTrue(v string) bool { return strings.EqualFold(v, "true") }
+
+// hxVary lists the headers that [HTMXWantsPartial] reads. The HTMXRedirect
+// middleware names the same two, in the same order.
+var hxVary = []string{HeaderHXRequest, HeaderHXRequestType}
 
 // HTMXPartial picks between two handlers for one route: partial for a request
 // that wants a fragment, page for anything else. It adds the htmx headers to
@@ -140,7 +148,7 @@ func HTMXPartial[C Context](partial, page HandlerFunc[C]) HandlerFunc[C] {
 	}
 	return func(c C) error {
 		b := c.base()
-		b.Vary(HeaderHXRequest, HeaderHXBoosted, HeaderHXHistoryRestoreRequest)
+		b.Vary(hxVary...)
 		if HTMXWantsPartial(b.req) {
 			return partial(c)
 		}

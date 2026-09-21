@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
@@ -29,6 +30,12 @@ func redirectRouter(mw router.Middleware[*appContext]) *router.Router[*appContex
 func TestHTMXRedirect(t *testing.T) {
 	r := redirectRouter(middleware.HTMXRedirect[*appContext])
 
+	const (
+		hxRequest = router.HeaderHXRequest
+		hxType    = router.HeaderHXRequestType
+		hxBoosted = router.HeaderHXBoosted
+		hxRestore = router.HeaderHXHistoryRestoreRequest
+	)
 	tests := []struct {
 		name     string
 		headers  map[string]string
@@ -37,8 +44,8 @@ func TestHTMXRedirect(t *testing.T) {
 		location string
 	}{
 		{
-			name:    "htmx gets the client-side redirect",
-			headers: map[string]string{router.HeaderHXRequest: "true"},
+			name:    "a partial request gets the client-side redirect",
+			headers: map[string]string{hxRequest: "true", hxType: "partial"},
 			status:  http.StatusOK,
 			hx:      "/there",
 		},
@@ -48,22 +55,41 @@ func TestHTMXRedirect(t *testing.T) {
 			location: "/there",
 		},
 		{
-			name: "a boosted request keeps the 303",
-			headers: map[string]string{
-				router.HeaderHXRequest: "true",
-				router.HeaderHXBoosted: "true",
-			},
+			name:     "a full request keeps the 303",
+			headers:  map[string]string{hxRequest: "true", hxType: "full"},
 			status:   http.StatusSeeOther,
 			location: "/there",
 		},
 		{
-			name: "a history restore keeps the 303",
-			headers: map[string]string{
-				router.HeaderHXRequest:               "true",
-				router.HeaderHXHistoryRestoreRequest: "true",
-			},
+			name:     "a full boosted request keeps the 303",
+			headers:  map[string]string{hxRequest: "true", hxType: "full", hxBoosted: "true"},
 			status:   http.StatusSeeOther,
 			location: "/there",
+		},
+		{
+			name:     "a full history restore keeps the 303",
+			headers:  map[string]string{hxRequest: "true", hxType: "full", hxRestore: "true"},
+			status:   http.StatusSeeOther,
+			location: "/there",
+		},
+		{
+			name:    "a partial boosted request gets the client-side redirect",
+			headers: map[string]string{hxRequest: "true", hxType: "partial", hxBoosted: "true"},
+			status:  http.StatusOK,
+			hx:      "/there",
+		},
+		{
+			name:    "a request with no type gets the client-side redirect",
+			headers: map[string]string{hxRequest: "true"},
+			status:  http.StatusOK,
+			hx:      "/there",
+		},
+		{
+			// htmx 2 sends no type, and it is not supported.
+			name:    "an htmx 2 boosted request gets the client-side redirect",
+			headers: map[string]string{hxRequest: "true", hxBoosted: "true"},
+			status:  http.StatusOK,
+			hx:      "/there",
 		},
 	}
 	for _, tc := range tests {
@@ -78,14 +104,9 @@ func TestHTMXRedirect(t *testing.T) {
 			if got := rec.Header().Get(router.HeaderLocation); got != tc.location {
 				t.Errorf("%s = %q, want %q", router.HeaderLocation, got, tc.location)
 			}
-			for _, name := range []string{
-				router.HeaderHXRequest,
-				router.HeaderHXBoosted,
-				router.HeaderHXHistoryRestoreRequest,
-			} {
-				if got := rec.Header().Values(router.HeaderVary); !containsFold(got, name) {
-					t.Errorf("%s = %q, want %q", router.HeaderVary, got, name)
-				}
+			want := []string{hxRequest, hxType}
+			if got := rec.Header().Values(router.HeaderVary); !slices.Equal(got, want) {
+				t.Errorf("%s = %q, want %q", router.HeaderVary, got, want)
 			}
 		})
 	}
