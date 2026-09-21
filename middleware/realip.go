@@ -246,8 +246,8 @@ func firstEntry(values []string, leftmost bool) string {
 		}
 		return ""
 	}
-	for i := len(values) - 1; i >= 0; i-- {
-		for v := values[i]; v != ""; {
+	for _, v := range slices.Backward(values) {
+		for v != "" {
 			e := v
 			if j := strings.LastIndexByte(v, ','); j >= 0 {
 				e, v = v[j+1:], v[:j]
