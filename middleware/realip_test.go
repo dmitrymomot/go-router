@@ -12,6 +12,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/routertest"
 )
 
 func realIPRouter(cfg middleware.RealIPConfig) *router.Router[*appContext] {
@@ -739,5 +740,55 @@ func TestRealIPWithConfigPanicsWhenHeadersNameTheScheme(t *testing.T) {
 				})
 			})
 		})
+	}
+}
+
+func TestClientAddr(t *testing.T) {
+	tests := []struct {
+		remote string
+		want   netip.Addr
+		ok     bool
+	}{
+		{"203.0.113.7:1234", netip.MustParseAddr("203.0.113.7"), true},
+		{"[2001:db8::1]:443", netip.MustParseAddr("2001:db8::1"), true},
+		{"203.0.113.7", netip.MustParseAddr("203.0.113.7"), true},
+		{"2001:db8::1", netip.MustParseAddr("2001:db8::1"), true},
+		{"[::ffff:192.0.2.1]:80", netip.MustParseAddr("192.0.2.1"), true},
+		{"::ffff:192.0.2.1", netip.MustParseAddr("192.0.2.1"), true},
+		{"[fe80::1%en0]:80", netip.MustParseAddr("fe80::1"), true},
+		{"", netip.Addr{}, false},
+		{"@", netip.Addr{}, false},
+		{"pipe", netip.Addr{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remote, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tt.remote
+			c, _ := routertest.NewContext(t, func(http.ResponseWriter, *http.Request) *appContext {
+				return &appContext{}
+			}, routertest.WithRequest(req))
+
+			got, ok := middleware.ClientAddr(c)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("ClientAddr = %v, %t, want %v, %t", got, ok, tt.want, tt.ok)
+			}
+			if ok && (got.Is4In6() || got.Zone() != "") {
+				t.Errorf("ClientAddr = %v, want no mapping and no zone", got)
+			}
+		})
+	}
+}
+
+func TestClientAddrAfterRealIP(t *testing.T) {
+	r := newRouter()
+	r.Use(namedRealIP(router.HeaderXForwardedFor))
+	r.GET("/", func(c *appContext) error {
+		addr, ok := middleware.ClientAddr(c)
+		return c.String(http.StatusOK, addr.String()+" "+strconv.FormatBool(ok))
+	})
+
+	req := forwarded(router.HeaderXForwardedFor, "::ffff:203.0.113.9", "10.0.0.1:9000")
+	if got := do(r, req).Body.String(); got != "203.0.113.9 true" {
+		t.Errorf("client addr = %q, want %q", got, "203.0.113.9 true")
 	}
 }

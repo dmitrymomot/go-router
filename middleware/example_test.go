@@ -122,6 +122,28 @@ func ExampleRealIPWithConfig() {
 	// 203.0.113.9 http
 }
 
+func ExampleClientAddr() {
+	r := newAPI()
+	r.Use(middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
+		Headers: []string{router.HeaderXForwardedFor},
+		Trust: middleware.NewTrustSet(
+			middleware.TrustPrefix(netip.MustParsePrefix("192.0.2.0/24"))),
+	}))
+	r.GET("/", func(c *Context) error {
+		addr, ok := middleware.ClientAddr(c)
+		if !ok {
+			return router.ErrBadRequest
+		}
+		return c.String(http.StatusOK, fmt.Sprint(addr, " ", addr.Is4()))
+	})
+
+	// The proxy wrote an IPv4-mapped address, which comes back unmapped.
+	fmt.Println(routertest.Get(r, "/",
+		routertest.Header(router.HeaderXForwardedFor, "::ffff:203.0.113.9")).String())
+	// Output:
+	// 203.0.113.9 true
+}
+
 func ExampleKeyAuth() {
 	r := newAPI()
 	// The default source is the Authorization header, less the "Bearer "

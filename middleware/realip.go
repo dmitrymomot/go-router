@@ -144,12 +144,26 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 
 // ClientIP reports the address of the peer, without its port. Put [RealIP] in
 // front for this to be the address of the client rather than of the proxy.
+// [ClientAddr] reports the same address as a [netip.Addr].
 func ClientIP[C router.Context](c C) string {
 	host, _, err := net.SplitHostPort(c.Request().RemoteAddr)
 	if err != nil {
 		return c.Request().RemoteAddr
 	}
 	return host
+}
+
+// ClientAddr reports the address of the peer, the client when [RealIP] runs in
+// front, without its port or zone and with an IPv4-mapped address unmapped. ok
+// is false when RemoteAddr holds no IP address, as under a Unix socket.
+//
+// It allocates nothing when it succeeds.
+func ClientAddr[C router.Context](c C) (netip.Addr, bool) {
+	ap, _, ok := splitHop(c.Request().RemoteAddr)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	return ap.Addr().WithZone("").Unmap(), true
 }
 
 type hop struct {
