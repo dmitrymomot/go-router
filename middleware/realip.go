@@ -173,8 +173,8 @@ type hop struct {
 
 func (cfg RealIPConfig) client(req *http.Request) (hop, bool) {
 	if !cfg.Leftmost {
-		peer, _, ok := parseHop(req.RemoteAddr)
-		if !ok || !cfg.Trust.Trusted(peer) {
+		peer, _, ok := splitHop(req.RemoteAddr)
+		if !ok || !cfg.Trust.Trusted(peer.Addr()) {
 			return hop{}, false
 		}
 	}
@@ -225,17 +225,41 @@ func (cfg RealIPConfig) trustedHop(values []string, rfc7239 bool) hop {
 func keptProto(leftmost bool, forwarded string, values []string) (proto string, fix bool) {
 	proto = forwarded
 	if proto == "" {
-		entries := entriesRight(values)
-		if leftmost {
-			entries = entriesLeft(values)
-		}
-		for e := range entries {
-			proto = scheme(e)
-			break
-		}
+		proto = scheme(firstEntry(values, leftmost))
 	}
 	unchanged := (len(values) == 0 && proto == "") || (len(values) == 1 && values[0] == proto)
 	return proto, !unchanged
+}
+
+// firstEntry is the first entry of entriesLeft or entriesRight, found without
+// an iterator: a closure picked at run time escapes to the heap.
+func firstEntry(values []string, leftmost bool) string {
+	if leftmost {
+		for _, v := range values {
+			for v != "" {
+				var e string
+				e, v, _ = strings.Cut(v, ",")
+				if e = strings.TrimSpace(e); e != "" {
+					return e
+				}
+			}
+		}
+		return ""
+	}
+	for i := len(values) - 1; i >= 0; i-- {
+		for v := values[i]; v != ""; {
+			e := v
+			if j := strings.LastIndexByte(v, ','); j >= 0 {
+				e, v = v[j+1:], v[:j]
+			} else {
+				v = ""
+			}
+			if e = strings.TrimSpace(e); e != "" {
+				return e
+			}
+		}
+	}
+	return ""
 }
 
 func leftmostHop(values []string, rfc7239 bool) hop {
