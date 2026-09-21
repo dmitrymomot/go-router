@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -177,4 +178,33 @@ func BenchmarkHostAny(b *testing.B) {
 func BenchmarkHostFallback(b *testing.B) {
 	r, w := benchHostRouter()
 	benchServeHost(b, r, w, "api.example.com", "/healthz")
+}
+
+// A request context three values deep, so the ancestor check walks a chain.
+func benchSetBase() (*Base, *http.Request) {
+	type key struct{ n int }
+	req := httptest.NewRequest(http.MethodGet, "/search?q=go", nil)
+	ctx := req.Context()
+	for i := range 3 {
+		ctx = context.WithValue(ctx, key{i}, i)
+	}
+	req = req.WithContext(ctx)
+	return NewBase(&nopWriter{h: make(http.Header)}, req), req
+}
+
+func BenchmarkSetRequest(b *testing.B) {
+	base, req := benchSetBase()
+	b.ReportAllocs()
+	for b.Loop() {
+		base.SetRequest(req)
+	}
+}
+
+func BenchmarkSetContext(b *testing.B) {
+	base, req := benchSetBase()
+	ctx := req.Context()
+	b.ReportAllocs()
+	for b.Loop() {
+		base.SetContext(ctx)
+	}
 }
