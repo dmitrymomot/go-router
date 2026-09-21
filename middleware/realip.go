@@ -72,7 +72,7 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // cannot read one this middleware did not check. X-Forwarded-Proto is the
 // exception: a trusted peer's scheme is kept, so [router.Base.Scheme] reports
 // https behind a proxy that ends TLS. Every forwarding header of an untrusted
-// peer is deleted.
+// peer is deleted, unless Leftmost is set.
 //
 // RealIPWithConfig panics when Headers names X-Forwarded-Proto.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
