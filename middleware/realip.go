@@ -15,17 +15,29 @@ import (
 // RealIPConfig configures [RealIPWithConfig].
 //
 // Trust names the peers whose forwarding headers count, and a nil one takes
-// [NewTrustSet]. Headers names the headers to read, in order of preference;
-// an empty list reads none, so a server behind a proxy has to name them.
+// [NewTrustSet]. Headers names the headers to read the client address from, in
+// order of preference; an empty list reads none, so a server behind a proxy has
+// to name them.
+//
+// X-Forwarded-Proto carries no address and does not go in Headers. A trusted
+// peer's scheme is kept, reduced to "http" or "https": the entry that peer
+// wrote last, or the first entry under Leftmost. A proto= in a named Forwarded
+// header wins over it. An untrusted peer's scheme is always deleted.
+//
+// A trusted proxy that passes the client's X-Forwarded-Proto through unchanged
+// lets the client choose the scheme. Set DropProto behind such a proxy: it
+// deletes X-Forwarded-Proto and ignores Forwarded proto=, so
+// [router.Base.Scheme] follows the connection alone.
 //
 // Leftmost takes the first address of the chain in place of the nearest
-// untrusted hop. The first address is whatever the client wrote, so use it
-// only where the chain itself is trusted.
+// untrusted hop, and vouches for the scheme of any peer. The first address is
+// whatever the client wrote, so use it only where the chain itself is trusted.
 type RealIPConfig struct {
-	Skip     func(c router.Context) bool
-	Trust    *TrustSet
-	Headers  []string
-	Leftmost bool
+	Skip      func(c router.Context) bool
+	Trust     *TrustSet
+	Headers   []string
+	Leftmost  bool
+	DropProto bool
 }
 
 var forwardingHeaders = canonicalHeaders(
@@ -41,9 +53,10 @@ func canonicalHeaders(names ...string) []string {
 	return out
 }
 
-// RealIP reads no header and deletes every forwarding header of an untrusted
-// peer, which is the safe default: a server with no proxy in front cannot be
-// told a false client address.
+// RealIP reads no address header, which is the safe default: a server with no
+// proxy in front cannot be told a false client address. It deletes every
+// forwarding header of an untrusted peer. Of a trusted peer it deletes all of
+// them except the scheme that peer states.
 //
 // Name the headers your proxy actually sets, through [RealIPWithConfig], to
 // have the address of the client replace RemoteAddr.
@@ -52,18 +65,30 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 }
 
 // RealIPWithConfig is [RealIP] with a configuration. It rewrites RemoteAddr
-// with the address the named headers give, when the peer is trusted, and
-// X-Forwarded-Proto then also decides [router.Base.Scheme].
+// with the address the named headers give, when the peer is trusted.
 //
 // A header the configuration does not name is deleted, so a later handler
-// cannot read one this middleware did not check. Every forwarding header of an
-// untrusted peer is deleted.
+// cannot read one this middleware did not check. X-Forwarded-Proto is the
+// exception: a trusted peer's scheme is kept, so [router.Base.Scheme] reports
+// https behind a proxy that ends TLS. Every forwarding header of an untrusted
+// peer is deleted.
+//
+// RealIPWithConfig panics when Headers names X-Forwarded-Proto.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
+	if slices.ContainsFunc(cfg.Headers, func(name string) bool {
+		return strings.EqualFold(name, router.HeaderXForwardedProto)
+	}) {
+		panic("middleware: RealIPConfig.Headers names X-Forwarded-Proto, which carries no address; " +
+			"a trusted peer's scheme is kept without it, and DropProto deletes it")
+	}
 	if cfg.Trust == nil {
 		cfg.Trust = NewTrustSet()
 	}
 	cfg.Headers = canonicalHeaders(cfg.Headers...)
 	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {
+		if name == router.HeaderXForwardedProto {
+			return !cfg.DropProto
+		}
 		return slices.ContainsFunc(cfg.Headers, func(named string) bool {
 			return strings.EqualFold(name, named)
 		})
@@ -77,6 +102,12 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 			req := c.Request()
 			h, vouched := cfg.client(req)
 
+			var proto string
+			var fix bool
+			if vouched && !cfg.DropProto {
+				proto, fix = keptProto(cfg.Leftmost, h.proto,
+					req.Header.Values(router.HeaderXForwardedProto))
+			}
 			del := unnamed
 			if !vouched {
 				del = forwardingHeaders
@@ -84,7 +115,7 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 			carries := slices.ContainsFunc(del, func(name string) bool {
 				return len(req.Header.Values(name)) > 0
 			})
-			if h.addr == "" && h.proto == "" && !carries {
+			if h.addr == "" && !fix && !carries {
 				return next(c)
 			}
 
@@ -93,15 +124,16 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 			if h.addr != "" {
 				r.RemoteAddr = h.addr
 			}
-			if h.proto != "" || carries {
+			if fix || carries {
 				r.Header = req.Header.Clone()
-				if carries {
-					for _, name := range del {
-						r.Header.Del(name)
-					}
+				for _, name := range del {
+					r.Header.Del(name)
 				}
-				if h.proto != "" {
-					r.Header.Set(router.HeaderXForwardedProto, h.proto)
+				switch {
+				case fix && proto != "":
+					r.Header.Set(router.HeaderXForwardedProto, proto)
+				case fix:
+					r.Header.Del(router.HeaderXForwardedProto)
 				}
 			}
 			c.SetRequest(r)
@@ -172,6 +204,24 @@ func (cfg RealIPConfig) trustedHop(values []string, rfc7239 bool) hop {
 		}
 	}
 	return best
+}
+
+// keptProto reduces the X-Forwarded-Proto of a trusted peer to one scheme, or
+// to none. fix reports whether the header has to be rewritten to hold it.
+func keptProto(leftmost bool, forwarded string, values []string) (proto string, fix bool) {
+	proto = forwarded
+	if proto == "" {
+		entries := entriesRight(values)
+		if leftmost {
+			entries = entriesLeft(values)
+		}
+		for e := range entries {
+			proto = scheme(e)
+			break
+		}
+	}
+	unchanged := (len(values) == 0 && proto == "") || (len(values) == 1 && values[0] == proto)
+	return proto, !unchanged
 }
 
 func leftmostHop(values []string, rfc7239 bool) hop {
