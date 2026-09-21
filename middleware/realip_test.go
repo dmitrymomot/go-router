@@ -792,3 +792,48 @@ func TestClientAddrAfterRealIP(t *testing.T) {
 		t.Errorf("client addr = %q, want %q", got, "203.0.113.9 true")
 	}
 }
+
+func BenchmarkRealIP(b *testing.B) {
+	mw := namedRealIP(router.HeaderXForwardedFor)
+	h := mw(func(*appContext) error { return nil })
+
+	tls := forwarded(router.HeaderXForwardedFor, "198.51.100.5", "10.0.0.1:9000")
+	tls.Header.Set(router.HeaderXForwardedProto, "https")
+	benchmarks := []struct {
+		req  *http.Request
+		name string
+	}{
+		{tls, "a trusted proxy that ends TLS"},
+		{fromProxy(httptest.NewRequest(http.MethodGet, "/", nil), "10.0.0.1:9000"), "a trusted peer with no header"},
+		{forwarded(router.HeaderXForwardedFor, "198.51.100.5", "192.0.2.1:1234"), "an untrusted peer"},
+	}
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			c, _ := routertest.NewContext(b, func(http.ResponseWriter, *http.Request) *appContext {
+				return &appContext{}
+			}, routertest.WithRequest(bm.req))
+			b.ReportAllocs()
+			for b.Loop() {
+				c.SetRequest(bm.req)
+				if err := h(c); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkClientAddr(b *testing.B) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[::ffff:203.0.113.7]:1234"
+	c, _ := routertest.NewContext(b, func(http.ResponseWriter, *http.Request) *appContext {
+		return &appContext{}
+	}, routertest.WithRequest(req))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, ok := middleware.ClientAddr(c); !ok {
+			b.Fatal("ClientAddr found no address")
+		}
+	}
+}
