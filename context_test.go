@@ -236,6 +236,90 @@ func TestSetRequestDropsTheCachedHost(t *testing.T) {
 	}
 }
 
+func TestSetRequestRefusesAContextDerivedFromTheBase(t *testing.T) {
+	type key struct{ n int }
+	derive := []struct {
+		name string
+		make func() (*Base, context.Context)
+	}{
+		{"the Base itself", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, b
+		}},
+		{"a value", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, context.WithValue(b, key{1}, "v")
+		}},
+		{"a cancel", func() (*Base, context.Context) {
+			b := newBase("/")
+			ctx, cancel := context.WithCancel(b)
+			t.Cleanup(cancel)
+			return b, ctx
+		}},
+		{"a timeout", func() (*Base, context.Context) {
+			b := newBase("/")
+			ctx, cancel := context.WithTimeout(b, time.Hour)
+			t.Cleanup(cancel)
+			return b, ctx
+		}},
+		{"no cancel", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, context.WithoutCancel(b)
+		}},
+		{"two levels deep", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, context.WithValue(context.WithValue(b, key{1}, "v"), key{2}, "w")
+		}},
+		{"the embedding context", func() (*Base, context.Context) {
+			c := &tctx{Base: *newBase("/")}
+			return &c.Base, context.WithValue(c, key{1}, "v")
+		}},
+	}
+	set := []struct {
+		name string
+		call func(b *Base, ctx context.Context)
+	}{
+		{"SetRequest", func(b *Base, ctx context.Context) { b.SetRequest(b.Request().WithContext(ctx)) }},
+	}
+	for _, d := range derive {
+		for _, s := range set {
+			t.Run(s.name+"/"+d.name, func(t *testing.T) {
+				b, ctx := d.make()
+				old := b.Request()
+				func() {
+					defer func() {
+						msg, _ := recover().(string)
+						if !strings.Contains(msg, "Request().Context()") {
+							t.Errorf("panic = %q, want one that points to Request().Context()", msg)
+						}
+					}()
+					s.call(b, ctx)
+				}()
+				if b.Request() != old {
+					t.Error("the refused call replaced the request")
+				}
+				// Each of these would recurse without end had the call gone through.
+				_ = b.Value("missing")
+				_ = b.Done()
+				_ = b.Err()
+			})
+		}
+	}
+}
+
+func TestAContextDerivedFromAnotherBaseIsNotALoop(t *testing.T) {
+	type key struct{}
+	b1, b2 := newBase("/"), newBase("/")
+
+	b1.SetRequest(b1.Request().WithContext(context.WithValue(b2, key{}, "v")))
+	if got := b1.Value(key{}); got != "v" {
+		t.Errorf("Value = %v, want v", got)
+	}
+	if got, _ := FromContext(b1); got != b1 {
+		t.Error("FromContext(b1) did not return b1")
+	}
+}
+
 func TestParamNamesReturnsACopy(t *testing.T) {
 	b := newBase("/")
 	b.setRoute("/users/{id}", []string{"id"}, []string{"7"})

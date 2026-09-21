@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -559,6 +560,33 @@ func TestConfigurationAfterServingPanics(t *testing.T) {
 		}
 	}()
 	r.MaxBodyBytes(1)
+}
+
+func TestHandlerThatFeedsItsContextBackAnswers500(t *testing.T) {
+	var panics []string
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) {
+		if pv, ok := errors.AsType[*PanicValue](err); ok {
+			panics = append(panics, fmt.Sprint(pv.Value))
+		}
+		_ = c.String(StatusOf(err), "handled")
+	})
+	r.GET("/request", func(c *tctx) error {
+		c.SetRequest(c.Request().WithContext(context.WithValue(c, wrapKey{}, 1)))
+		return c.NoContent(http.StatusOK)
+	})
+
+	for _, path := range []string{"/request"} {
+		t.Run(path, func(t *testing.T) {
+			panics = nil
+			if rec := do(r, http.MethodGet, path); rec.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want 500", rec.Code)
+			}
+			if len(panics) != 1 || !strings.Contains(panics[0], "Request().Context()") {
+				t.Errorf("panics = %q, want one that points to Request().Context()", panics)
+			}
+		})
+	}
 }
 
 func TestErrorHandlerCatchesEverything(t *testing.T) {

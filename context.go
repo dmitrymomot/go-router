@@ -215,14 +215,24 @@ func (b *Base) Request() *http.Request { return b.req }
 // body or adds a value to the request context. The cached query and host are
 // dropped, so the next read takes them from r.
 //
-// SetRequest panics if r is nil.
+// SetRequest panics if r is nil, or if the context of r derives from b.
 func (b *Base) SetRequest(r *http.Request) {
 	if r == nil {
 		panic("router: SetRequest needs a request")
 	}
+	b.mustNotBeAncestorOf(r.Context(), "SetRequest")
 	b.req = r
 	b.queryCache = nil
 	b.host, b.hostKnown = "", false
+}
+
+// mustNotBeAncestorOf refuses a request context that looks up in b, since b
+// looks up in the request context and the two would recurse until the stack
+// runs out. The lookup stops at the first Base it meets.
+func (b *Base) mustNotBeAncestorOf(ctx context.Context, what string) {
+	if ctx.Value(baseKeyType{}) == b {
+		panic("router: " + what + " got a context derived from the handler context itself; derive it from Request().Context()")
+	}
 }
 
 // Logger reports the logger of the router, or [slog.Default] when the router
