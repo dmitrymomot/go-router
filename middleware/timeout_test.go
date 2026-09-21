@@ -93,6 +93,42 @@ func TestTimeoutPassesTheDeadlineToTheHandler(t *testing.T) {
 	}
 }
 
+func TestTimeoutRestoresTheContextAfterTheHandlerReplacedIt(t *testing.T) {
+	type key struct{}
+	var after []string
+	r := newRouter()
+	r.Use(func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+		return func(c *appContext) error {
+			err := next(c)
+			if _, ok := c.Request().Context().Deadline(); ok {
+				after = append(after, "a deadline")
+			}
+			if c.Err() != nil {
+				after = append(after, "an ended context")
+			}
+			if c.Value(key{}) != nil {
+				after = append(after, "the value of the handler")
+			}
+			return err
+		}
+	})
+	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: time.Minute}))
+	r.GET("/", func(c *appContext) error {
+		c.SetContext(context.WithValue(c.Request().Context(), key{}, "v"))
+		if _, ok := c.Deadline(); !ok {
+			return router.ErrInternalServerError.WithMessage("no deadline")
+		}
+		return c.NoContent(http.StatusOK)
+	})
+
+	if rec := get(r, "/"); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if after != nil {
+		t.Errorf("after Timeout the context kept %q, want the context from before it", after)
+	}
+}
+
 func TestTimeoutWithConfigNeedsADuration(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		mustPanicContaining(t, "Duration", func() {
