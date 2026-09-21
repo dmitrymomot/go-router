@@ -22,7 +22,8 @@ import (
 // X-Forwarded-Proto carries no address and does not go in Headers. A trusted
 // peer's scheme is kept, reduced to "http" or "https": the entry that peer
 // wrote last, or the first entry under Leftmost. A proto= in a named Forwarded
-// header wins over it. An untrusted peer's scheme is always deleted.
+// header wins over it. An untrusted peer's scheme is deleted, unless Leftmost
+// is set.
 //
 // A trusted proxy that passes the client's X-Forwarded-Proto through unchanged
 // lets the client choose the scheme. Set DropProto behind such a proxy: it
