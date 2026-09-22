@@ -28,6 +28,11 @@ type LoggerConfig struct {
 // the status, how long it took, the size, the client address, the host and the
 // protocol. It adds the request id when [RequestID] ran ahead of it.
 //
+// Logger answers an error through [router.HandleError] before it logs, so the
+// status and the size are the ones the client got. That commits the answer, so
+// put Logger outside a middleware that replaces an error after next, such as
+// [Timeout], and put [Recover] inside Logger to get a line for a panic.
+//
 // It builds nothing when the logger discards the level, so a quiet level costs
 // almost nothing.
 func Logger[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -60,6 +65,7 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
 
 			start := time.Now()
 			err := next(c)
+			router.HandleError(c, err)
 			req := c.Request()
 			status := router.ResolveStatus(c.Response(), err)
 

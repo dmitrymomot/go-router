@@ -316,8 +316,11 @@ func writeText(b *Base, err error, exposeCause bool) error {
 // HandleError panics if c is not the context type of the router that serves
 // it, such as the *Base inside an application context.
 func HandleError(c Context, err error) {
+	if err == nil {
+		return
+	}
 	b := c.base()
-	if err == nil || b.errorHandled {
+	if b.errorHandled {
 		return
 	}
 	if answer := b.opts().answer; answer != nil {
