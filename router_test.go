@@ -2697,6 +2697,48 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 	}
 }
 
+// A template segment holds several parameters. The 404 of its scope must bind
+// each of them, as a matched route does, and not the whole segment to the first.
+func TestScopeFallbackBindsEveryParameterOfATemplatePrefix(t *testing.T) {
+	report := func(c *tctx, err error) error {
+		return c.String(StatusOf(err), "sub="+c.Param("sub")+" env="+c.Param("env")+
+			" name="+c.Param("name")+" id="+c.Param("id"))
+	}
+	r := newTestRouter()
+	r.Route("/r/{env}-{name}/{id}", func(g *Router[*tctx]) {
+		g.ErrorHandler(report)
+		g.GET("/x", echoRoute)
+	})
+	r.Host("{sub}.example.com", func(h *Router[*tctx]) {
+		h.Route("/r/{env}-{name}/{id}", func(g *Router[*tctx]) {
+			g.ErrorHandler(report)
+			g.GET("/x", echoRoute)
+		})
+	})
+
+	if got, want := do(r, http.MethodGet, "/r/prod-api/42/missing").Body.String(),
+		"sub= env=prod name=api id=42"; got != want {
+		t.Errorf("scope 404 = %q, want %q", got, want)
+	}
+	if got, want := doHost(r, http.MethodGet, "acme.example.com", "/r/prod-api/42/missing").Body.String(),
+		"sub=acme env=prod name=api id=42"; got != want {
+		t.Errorf("scope 404 under a host = %q, want %q", got, want)
+	}
+}
+
+// covers runs for every 404 under a scope; a template prefix must not make it
+// allocate.
+func TestScopeCoverageDoesNotAllocate(t *testing.T) {
+	segs, _, err := parsePattern("/r/{env}-{name}/{id}", builtinClass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := scopeFallback[*tctx]{pattern: segs}
+	if allocs := testing.AllocsPerRun(100, func() { scope.covers("/r/prod-api/42/missing", false) }); allocs != 0 {
+		t.Errorf("covers allocates %v times per run, want 0", allocs)
+	}
+}
+
 // {*} goes through the brace branch, which rejects duplicates; the bare form
 // has to do the same.
 func TestBareStarChecksForADuplicateName(t *testing.T) {

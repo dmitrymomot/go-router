@@ -54,10 +54,16 @@ func (s *scopeFallback[C]) walk(path string, escaped bool, vals []string) ([]str
 				return vals, false
 			}
 		}
-		if !segmentMatches(want, got) {
+		switch {
+		case vals != nil && want.kind == segTemplate:
+			// One value per parameter of the segment, as search binds them.
+			var ok bool
+			if vals, ok = appendTemplateValues(vals, want.parts, got); !ok {
+				return vals, false
+			}
+		case !segmentMatches(want, got):
 			return vals, false
-		}
-		if vals != nil && want.kind != segStatic {
+		case vals != nil && want.kind != segStatic:
 			vals = append(vals, got)
 		}
 		path = rest
