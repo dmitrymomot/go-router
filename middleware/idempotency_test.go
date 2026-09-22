@@ -822,6 +822,36 @@ func TestIdempotencyReplaysOnlyTheCookiesTheHandlerSet(t *testing.T) {
 	}
 }
 
+// Regression: a replay sent the session cookie that a callback in front set on
+// the first request, next to the one it set for the repeat.
+func TestIdempotencyDoesNotReplayACookieAnOuterCallbackSet(t *testing.T) {
+	var sessions atomic.Int32
+	session := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+		return func(c *appContext) error {
+			sid := strconv.Itoa(int(sessions.Add(1)))
+			c.Response().Before(func() {
+				http.SetCookie(c.Response(), &http.Cookie{Name: "sid", Value: sid})
+			})
+			return next(c)
+		}
+	}
+	r := idempotencyRouter(nil, session, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r.POST("/pay", func(c *appContext) error {
+		http.SetCookie(c.Response(), &http.Cookie{Name: "receipt", Value: "r1"})
+		return c.String(http.StatusCreated, "paid")
+	})
+
+	postKey(r, "/pay", "k", amount("5"))
+	replay := postKey(r, "/pay", "k", amount("5"))
+	got := map[string][]string{}
+	for _, c := range replay.Result().Cookies() {
+		got[c.Name] = append(got[c.Name], c.Value)
+	}
+	if strings.Join(got["sid"], "|") != "2" || strings.Join(got["receipt"], "|") != "r1" || len(got) != 2 {
+		t.Errorf("replay cookies = %v, want sid 2 and receipt r1", got)
+	}
+}
+
 func TestIdempotencyUnderAnOuterHTMXRedirect(t *testing.T) {
 	var runs atomic.Int32
 	r := idempotencyRouter(nil,

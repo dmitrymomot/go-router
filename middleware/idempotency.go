@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -121,8 +122,12 @@ func Idempotency[C router.Context](store IdempotencyStore[C]) router.Middleware[
 // it expires, and a repeat gets 409.
 //
 // A replay carries the header fields the handler set, and the Set-Cookie lines
-// it added, on top of what the middleware in front set for the repeat. It
-// never calls the error handler itself: an error goes back up the chain.
+// it added, on top of what the middleware in front set for the repeat. A
+// recorded cookie is left out when the repeat sets one of the same name. The
+// header is recorded after the callbacks of [router.Response.Before] ran, those
+// of the middleware in front included, so a cookie that such a callback sets
+// only on the first request goes out again with the replay. A replay never
+// calls the error handler itself: an error goes back up the chain.
 //
 // The default fingerprint covers the method, the path and a form body; see
 // [IdempotencyFormFingerprint]. Set Fingerprint for a JSON body.
@@ -335,11 +340,14 @@ func replayIdempotent(res *router.Response, rec *router.Recorded) error {
 
 	h := res.Header()
 	for k, vs := range rec.Header {
-		if k == headerSetCookie {
-			h[k] = append(h[k], vs...)
-			continue
+		if k != headerSetCookie {
+			h[k] = slices.Clone(vs)
 		}
-		h[k] = slices.Clone(vs)
+	}
+	if cookies := rec.Header[headerSetCookie]; len(cookies) > 0 {
+		// The callbacks of the middleware in front were added first, so they
+		// run before this one, and a cookie they set for the repeat wins.
+		res.Before(func() { addMissingCookies(res.Header(), cookies) })
 	}
 	res.WriteHeader(rec.Status)
 	if len(rec.Body) == 0 {
@@ -609,8 +617,25 @@ func cloneRecorded(rec *router.Recorded) *router.Recorded {
 // each other.
 const headerSetCookie = "Set-Cookie"
 
-// idempotencyHeaderDelta reports what the handler added to the header: the
-// fields it changed, and the Set-Cookie lines it added.
+// addMissingCookies adds each Set-Cookie line whose cookie h does not set yet.
+func addMissingCookies(h http.Header, lines []string) {
+	set := h[headerSetCookie]
+	for _, line := range lines {
+		name := setCookieName(line)
+		if !slices.ContainsFunc(set, func(v string) bool { return setCookieName(v) == name }) {
+			h[headerSetCookie] = append(h[headerSetCookie], line)
+		}
+	}
+}
+
+func setCookieName(line string) string {
+	name, _, _ := strings.Cut(line, "=")
+	return strings.TrimSpace(name)
+}
+
+// idempotencyHeaderDelta reports what changed in the header while the handler
+// ran, the callbacks of [router.Response.Before] included: the fields that
+// changed, and the Set-Cookie lines that were added.
 func idempotencyHeaderDelta(before, after http.Header) http.Header {
 	delta := make(http.Header, len(after))
 	for k, vs := range after {
