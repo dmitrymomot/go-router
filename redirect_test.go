@@ -65,6 +65,23 @@ func TestRedirectNeverPointsAtAnotherHost(t *testing.T) {
 	}
 }
 
+// A Location of "/new/.." would take the browser to "/".
+func TestRedirectRefusesADotSegment(t *testing.T) {
+	captureLogs(t)
+	r := newTestRouter()
+	r.Redirect("/old/{id}", "/new/{id}", http.StatusMovedPermanently)
+	r.Redirect("/files/{p...}", "/docs/{p...}", http.StatusMovedPermanently)
+
+	for _, target := range []string{"/old/%2E%2E", "/old/%2e", "/files/a/%2E%2E/%2E%2E/admin"} {
+		if code, loc := follow(r, http.MethodGet, "", target); code != http.StatusNotFound {
+			t.Errorf("GET %s = %d to %q, want 404", target, code, loc)
+		}
+	}
+	if code, loc := follow(r, http.MethodGet, "", "/old/..."); code != http.StatusMovedPermanently || loc != "/new/..." {
+		t.Errorf("GET /old/... = %d to %q, want 301 to /new/...", code, loc)
+	}
+}
+
 func TestRedirectKeepsTheRequestQuery(t *testing.T) {
 	r := newTestRouter()
 	r.Redirect("/old", "/new", http.StatusMovedPermanently)
@@ -226,6 +243,9 @@ func TestRedirectPanicsOnABadCall(t *testing.T) {
 		{"status 0", func(r *Router[*tctx]) { r.Redirect("/a", "/b", 0) }, "redirect status"},
 		{"a target that is not a path", func(r *Router[*tctx]) { r.Redirect("/a", "cashbox", http.StatusFound) }, `starts with "/"`},
 		{"an absolute URL", func(r *Router[*tctx]) { r.Redirect("/a", "https://example.com/", http.StatusFound) }, `starts with "/"`},
+		{"a network-path target", func(r *Router[*tctx]) { r.Redirect("/a", "//evil.com/x", http.StatusFound) }, "another host"},
+		{"a target with a dot segment", func(r *Router[*tctx]) { r.Redirect("/a", "/b/../c", http.StatusFound) }, `segment ".."`},
+		{"a target with a dot", func(r *Router[*tctx]) { r.Redirect("/a/{id}", "/b/./{id}", http.StatusFound) }, `segment "."`},
 		{"a parameter the route lacks", func(r *Router[*tctx]) { r.Redirect("/x/{id}", "/x/{nope}", http.StatusFound) }, `"nope"`},
 		{"a malformed target", func(r *Router[*tctx]) { r.Redirect("/x/{id}", "/x/{", http.StatusFound) }, "unbalanced"},
 		{"a malformed route", func(r *Router[*tctx]) { r.Redirect("/x/{", "/y", http.StatusFound) }, "unbalanced"},

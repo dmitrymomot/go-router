@@ -412,14 +412,19 @@ func HandleError(c Context, err error) {
 func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	b := c.base()
 	// The flag goes up before h runs, so an h that calls HandleError does not
-	// recurse. needsCleanup takes a pooled context through the slow clear,
-	// which lowers the flag again.
-	b.errorHandled, b.needsCleanup = true, true
+	// recurse. A pooled router lowers it again on release.
+	b.errorHandled = true
 	committedBefore := b.res.Committed
-	if !committedBefore && !errors.Is(err, context.Canceled) {
+	he, isHTTP := errors.AsType[*HTTPError](err)
+	// A typed nil *HTTPError has no fields to read; it answers as a plain error.
+	isHTTP = isHTTP && he != nil
+	// A sentinel such as ErrNotFound, returned as it stands, wraps nothing and
+	// so cannot be context.Canceled; the check skips the walk for a 404.
+	bare := isHTTP && he.Err == nil && error(he) == err
+	if !committedBefore && (bare || !errors.Is(err, context.Canceled)) {
 		runErrorHandler(c, err, h)
 	}
-	logFailure(b, err, committedBefore)
+	logFailure(b, err, he, isHTTP, committedBefore)
 }
 
 // runErrorHandler runs h and answers a bare 500 when h fails before it wrote
@@ -456,8 +461,9 @@ func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 // logFailure logs err with the status that went out: the one the error
 // handler wrote, or the one err asks for when the response committed before.
 // A bare HTTPError under 500 is an answer, not a failure, so it goes unlogged.
-func logFailure(b *Base, err error, committedBefore bool) {
-	he, isHTTP := errors.AsType[*HTTPError](err)
+//
+// he and isHTTP are errors.AsType[*HTTPError](err), which the caller has.
+func logFailure(b *Base, err error, he *HTTPError, isHTTP, committedBefore bool) {
 	var status int
 	switch {
 	case !committedBefore && b.res.Committed:

@@ -44,6 +44,10 @@
 // Gzip and HTMXRedirect go outside Idempotency, so a replay is compressed, or
 // its redirect turned, for the request that asks again.
 //
+// HTMXRedirect answers the error of a partial request itself, so that a
+// redirect of the error handler is turned too. Like Logger, it goes outside
+// Timeout, BodyLimit and Decompress, which replace an error on the way out.
+//
 // BodyLimit goes before anything that reads the body. ParseForm reads it under
 // the cap in force, and it goes after auth and CSRF, so a stranger cannot make
 // it read a large body. It goes outside Idempotency, so a form that is too

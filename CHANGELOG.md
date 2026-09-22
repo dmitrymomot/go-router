@@ -28,14 +28,15 @@ Ordered by risk, the silent ones first.
 11. **The `Context` interface gains three methods, and `SetRequest` refuses a context derived from the Base.** `Context` gains `SetContext(ctx)`, `SetBodyLimit(n)` and `RouteMeta() []any`, in the order `SetRequest, SetContext, SetBodyLimit, Response, …, RoutePattern, RouteMeta, RouteHost`. A context type that embeds `Base` gets them for free, but one that declares its own member of that name with another signature no longer satisfies `Context`. `SetRequest` panics when the request's context is the Base or derives from it, as in `c.SetRequest(c.Request().WithContext(context.WithValue(c, k, v)))`; that code used to end in a fatal stack overflow on the first `Value`, `Done`, `Err` or `Deadline` lookup that missed.
 12. **routertest: the Assert methods are gone.** `(*Response).AssertStatus`, `AssertBody` and `AssertHeader` are removed in favor of `Expect`. `Expect(t).Body` and `Header` report a miss with `Errorf` and let the test go on, where `AssertBody` and `AssertHeader` stopped it with `Fatalf`. Without `WithRequest` or `WithTarget`, `NewContext` builds its request on `tb.Context()` instead of `context.Background()`, so a handler that outlives the test sees a canceled context, and a fake `testing.TB` whose embedded TB is nil must implement `Context()`. `Serve`, `Do` and `Get` now fill `Response.Request`, which was nil.
 13. **serve: two new Config fields and an earlier TLS check.** `Config` gains `DrainDelay` and `OnDrain`, so a positional `Config{...}` literal no longer compiles. `Run` reports a TLS config with no certificate (no `Certificates`, `GetCertificate` or `GetConfigForClient`) before it listens, after `OnServer`, so `OnListen` no longer runs in that case, and the error changes from net/http's `open : no such file or directory` to `serve: the TLS config has no certificate; ...`. Two messages no longer name Run: `serve: Run needs a handler` becomes `serve: the server needs a handler`, and `serve: Run needs Config.Addr or Config.Listener` becomes `serve: the server needs Config.Addr or Config.Listener`.
+14. **`SetRouteForTest` is gone.** Package router no longer exports a function that only a test calls. Build the context with `routertest.NewContext(t, newCtx, routertest.WithPattern(pattern), routertest.WithParams(params))`, which fills the route and its parameters the same way.
 
 ### Added
 
 Routing and URLs:
 
 - Parameter classes: the built-in `{id:int}`, `{t:slug}` and `{id:uuid}` (the canonical 8-4-4-4-12 form in either case), and `Router.ParamClass(name, match)` for classes of your own. A value outside the class does not match the route.
-- `Expand` and `MustExpand` fill a route or host pattern with escaped values, and refuse a value that would not route back to the same parameters or a path that would start with `//`.
-- `Router.Redirect(pattern, target, status)`, a GET and HEAD route that redirects with the route's values and keeps the request query after the target's own pairs, so `Query().Get` reads the target's value.
+- `Expand` and `MustExpand` fill a route or host pattern with escaped values, and refuse a value that would not route back to the same parameters, a path that would start with `//`, and a path that would hold a `.` or `..` segment, which a browser resolves to another path.
+- `Router.Redirect(pattern, target, status)`, a GET and HEAD route that redirects with the route's values and keeps the request query after the target's own pairs, so `Query().Get` reads the target's value. A value that would build a `//` or dot-segment Location answers 404, and a target that starts with `//` or holds a dot segment of its own panics at the call.
 - `Router.RedirectHost(pattern, target, status)` sends every request for a host to another, keeping the scheme, port, path and query, and owns that host: a route there panics. A request that already names the target gets 404 instead of a loop, so `RedirectHost("*", apex, ...)` also answers load-balancer probes on unknown hosts with a redirect.
 - `Base.RouteMeta()` and `MetaAs[T](c)` read route metadata while the route answers. `unsafe.Sizeof(Base{})` shrinks from 304 to 296 bytes.
 
@@ -62,12 +63,11 @@ Cookies and flashes:
 - `Router.CookieCodec(cc)`, one codec for signed cookies and flashes, and `ErrNoCookieCodec`.
 - `NewCookieCodec(key, previous...)` signs with `key` and also verifies with each previous key, for key rotation. A `CookieCodec` may now be copied; a copy shares the keys. The wire format is unchanged, so v0.1 cookies still verify with the same key.
 - `Base.NewCookie(name, value, maxAge)`, a cookie with safe defaults whose `Secure` follows `Scheme()`, and `Base.ClearCookie(name)`.
-- `CookieCodecOf(h)` and `SetCookieCodecForTest(b, cc)` let test tooling reach the codec of a router.
 
 Responses:
 
 - `Response.Capture(limit)` records an answer as it goes out and returns `Recorded{Header, Body, Status, Truncated}`.
-- `HeaderIdempotencyKey`.
+- `HeaderIdempotencyKey` and `HeaderSetCookie`.
 
 middleware:
 
@@ -103,6 +103,7 @@ serve:
 - A 413 behind a wrapped writer, such as Gzip, closes the connection again, and a body that BodyLimit cuts off closes the connection too.
 - One upload route can raise the body cap above `Router.MaxBodyBytes` with `BodyLimit`.
 - A Validator error keeps its own status instead of a stock 422, so a handler no longer validates twice to answer 409.
+- `middleware.HTMXRedirect` answers the error of a partial request itself, through `HandleError`, so a redirect that the error handler writes, such as one to a sign-in page, reaches htmx as `HX-Redirect` instead of a 3xx that fetch follows and swaps into the target. That commits the answer, so a middleware that replaces an error after `next` goes inside HTMXRedirect, as `Timeout`, `BodyLimit` and `Decompress` already do in the documented order.
 - The JSON decoder text, which names Go types and changes between runs, no longer reaches the client.
 - Examples: `_examples/restapi` no longer sends `err.Error()` to the client, so a 500 does not leak its cause nor a `StatusCoder` its text. Its middleware follows the canonical order, so a 429 from `RateLimit` carries CORS headers and a panic gets the request line of `Logger`. The README and a comment there no longer claim that `Mount` refuses a sub-router with an error handler; it refuses `MaxBodyBytes` and a cookie codec. `_examples/chat` closes the room from `OnDrain`, where a goroutine on `ctx.Done` raced `Shutdown`.
 
@@ -110,6 +111,7 @@ serve:
 
 - htmx 2 only: `HeaderHXPrompt`, `HeaderHXTriggerName`, `HeaderHXTriggerAfterSwap`, `HeaderHXTriggerAfterSettle`, the `HTMXRequest` fields `Prompt`, `Trigger` and `TriggerName`, the `HXResponse` methods `TriggerAfterSwap`, `TriggerAfterSettle`, `TriggerEventsAfterSwap` and `TriggerEventsAfterSettle`, and `HXLocation.Handler`. `HeaderHXTrigger` stays as a response header.
 - routertest: `(*Response).AssertStatus`, `AssertBody` and `AssertHeader`.
+- `SetRouteForTest`. `routertest.NewContext` with `WithPattern` and `WithParams` replaces it.
 
 ### Known limits
 
@@ -265,7 +267,7 @@ if err := c.AddFlash(router.Flash{Kind: "success", Message: "saved"}); err != ni
 flashes := c.Flashes()
 ```
 
-A handler that treats every `SignedCookie` error as signed out checks `errors.Is(err, router.ErrNoCookieCodec)` first. In tests, pass `routertest.WithCookieCodec(cc)` to `NewContext`, or call `router.SetCookieCodecForTest(b, cc)`. Set the codec on the parent of a mounted router; a router given to `MountRouter` or `HostRouter` calls `sub.CookieCodec(cc)` itself. A function value of `NewCookieCodec` becomes `func(k []byte) *router.CookieCodec { return router.NewCookieCodec(k) }`. A test that expected a `Max-Age=0` `_flash` line after an add and a read in one request now expects no `_flash` line.
+A handler that treats every `SignedCookie` error as signed out checks `errors.Is(err, router.ErrNoCookieCodec)` first. In tests, pass `routertest.WithCookieCodec(cc)` to `NewContext`. Set the codec on the parent of a mounted router; a router given to `MountRouter` or `HostRouter` calls `sub.CookieCodec(cc)` itself. A function value of `NewCookieCodec` becomes `func(k []byte) *router.CookieCodec { return router.NewCookieCodec(k) }`. A test that expected a `Max-Age=0` `_flash` line after an add and a read in one request now expects no `_flash` line.
 
 ```sh
 grep -rnE '\.AddFlash\(|\.Flashes\(|SignedCookie\(|NewCookieCodec' --include='*.go' .

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"mime"
 	"mime/multipart"
 	"net/http"
 	"slices"
@@ -341,14 +340,14 @@ func replayIdempotent(res *router.Response, rec *router.Recorded) error {
 	h := res.Header()
 	for k, vs := range rec.Header {
 		switch {
-		case k == headerSetCookie:
+		case k == router.HeaderSetCookie:
 		case len(vs) == 0:
 			delete(h, k)
 		default:
 			h[k] = slices.Clone(vs)
 		}
 	}
-	if cookies := rec.Header[headerSetCookie]; len(cookies) > 0 {
+	if cookies := rec.Header[router.HeaderSetCookie]; len(cookies) > 0 {
 		// The callbacks of the middleware in front were added first, so they
 		// run before this one, and a cookie they set for the repeat wins.
 		res.Before(func() { addMissingCookies(res.Header(), cookies) })
@@ -390,9 +389,10 @@ func IdempotencyFormFingerprint(c router.Context) ([]byte, error) {
 	req := c.Request()
 	buf := appendIdempotencyFields(nil, req.Method, req.URL.Path)
 
+	// The rule of ParseForm and of the form readers, so the fingerprint covers
+	// every body that the handler reads as a form.
 	b, ok := router.FromContext(c)
-	mediaType, _, _ := mime.ParseMediaType(req.Header.Get(router.HeaderContentType))
-	if ok && (mediaType == router.MIMEApplicationForm || mediaType == router.MIMEMultipartForm) {
+	if ok && isFormType(req.Header.Get(router.HeaderContentType)) {
 		form, err := b.FormValues()
 		if err != nil {
 			return nil, err
@@ -618,17 +618,13 @@ func cloneRecorded(rec *router.Recorded) *router.Recorded {
 	return &out
 }
 
-// headerSetCookie is the one header whose lines add up rather than replace
-// each other.
-const headerSetCookie = "Set-Cookie"
-
 // addMissingCookies adds each Set-Cookie line whose cookie h does not set yet.
 func addMissingCookies(h http.Header, lines []string) {
-	set := h[headerSetCookie]
+	set := h[router.HeaderSetCookie]
 	for _, line := range lines {
 		name := setCookieName(line)
 		if !slices.ContainsFunc(set, func(v string) bool { return setCookieName(v) == name }) {
-			h[headerSetCookie] = append(h[headerSetCookie], line)
+			h[router.HeaderSetCookie] = append(h[router.HeaderSetCookie], line)
 		}
 	}
 }
@@ -645,13 +641,13 @@ func setCookieName(line string) string {
 func idempotencyHeaderDelta(before, after http.Header) http.Header {
 	delta := make(http.Header, len(after))
 	for k := range before {
-		if _, ok := after[k]; !ok && k != headerSetCookie {
+		if _, ok := after[k]; !ok && k != router.HeaderSetCookie {
 			delta[k] = nil
 		}
 	}
 	for k, vs := range after {
 		old := before[k]
-		if k == headerSetCookie {
+		if k == router.HeaderSetCookie {
 			added := slices.DeleteFunc(slices.Clone(vs), func(v string) bool { return slices.Contains(old, v) })
 			if len(added) > 0 {
 				delta[k] = added

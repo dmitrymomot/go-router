@@ -935,43 +935,6 @@ func ExampleBase_Flashes() {
 	// 303 1 /users
 }
 
-// CookieCodecOf hands test tooling the codec of a router, so it can read the
-// signed cookies the router set.
-func ExampleCookieCodecOf() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
-	r.CookieCodec(codec)
-
-	fmt.Println(router.CookieCodecOf(r) == codec)
-	fmt.Println(router.CookieCodecOf(http.NotFoundHandler()) != nil)
-	// Output:
-	// true
-	// false
-}
-
-// SetCookieCodecForTest lets a test call a handler that signs cookies without
-// building a router.
-func ExampleSetCookieCodecForTest() {
-	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
-	rec := httptest.NewRecorder()
-	b := router.NewBase(rec, httptest.NewRequest(http.MethodPost, "/signin", nil))
-	router.SetCookieCodecForTest(b, codec)
-
-	if err := b.SetSignedCookie(b.NewCookie("session", "ann", time.Hour)); err != nil {
-		fmt.Println(err)
-		return
-	}
-	c, err := http.ParseSetCookie(rec.Header().Get("Set-Cookie"))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	value, err := codec.Decode("session", c.Value)
-	fmt.Println(string(value), err)
-	// Output:
-	// ann <nil>
-}
-
 func serveRequest(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

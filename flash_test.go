@@ -26,7 +26,7 @@ func flashRequest(t *testing.T, b *Base) *Base {
 	}
 	next := NewBase(httptest.NewRecorder(), req)
 	if cc := b.codec(); cc != nil {
-		SetCookieCodecForTest(next, cc)
+		next.setCodec(cc)
 	}
 	return next
 }
@@ -300,7 +300,7 @@ func TestFlashesReadAfterAKeyRotation(t *testing.T) {
 	addFlashes(t, post, Flash{Kind: "success", Message: "saved"})
 
 	get := flashRequest(t, post)
-	SetCookieCodecForTest(get, NewCookieCodec(testKey, previous))
+	get.setCodec(NewCookieCodec(testKey, previous))
 	wantFlashes(t, get.Flashes(), []Flash{{Kind: "success", Message: "saved"}})
 }
 
@@ -308,7 +308,7 @@ func TestAddFlashMarksTheCookieSecureOverTLS(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(HeaderXForwardedProto, "https")
 	b := NewBase(httptest.NewRecorder(), req)
-	SetCookieCodecForTest(b, testCodec())
+	b.setCodec(testCodec())
 	addFlashes(t, b, Flash{Kind: "info", Message: "saved"})
 
 	c, ok := flashCookieOf(t, b)

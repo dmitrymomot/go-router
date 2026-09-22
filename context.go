@@ -104,8 +104,8 @@ func (b *Base) opts() *routerOpts {
 }
 
 // NewBase builds a Base outside a router, for a test or for a handler that the
-// router never calls. The route, its parameters and the host stay empty. The
-// Base has no cookie codec; see [SetCookieCodecForTest].
+// router never calls. The route, its parameters and the host stay empty, and
+// the Base has no cookie codec.
 //
 // To test a handler of your own context type, let routertest.NewContext build
 // the whole context. It fills an embedded Base in place, whereas a struct
@@ -159,7 +159,7 @@ func (b *Base) clearRequestSlow() {
 	}
 	b.deferred = nil
 	b.host, b.rawTail = "", ""
-	b.needsCleanup, b.errorHandled = false, false
+	b.needsCleanup = false
 }
 
 // deferredState holds what few requests need, so Base does not carry it.
@@ -219,41 +219,6 @@ func (b *Base) setRoute(rec *routeRecord, names, vals []string) {
 	b.paramVals = vals
 }
 
-// SetRouteForTest gives b a route pattern and its parameters, so a test can
-// call a handler that reads them without a router. names and vals pair up by
-// index. routertest.NewContext does this for a whole context through its
-// WithPattern and WithParams options.
-//
-// SetRouteForTest panics if b is nil.
-func SetRouteForTest(b *Base, pattern string, names, vals []string) {
-	if b == nil {
-		panic("router: SetRouteForTest needs a Base")
-	}
-	var rec *routeRecord
-	if pattern != "" {
-		rec = &routeRecord{pattern: pattern}
-	}
-	b.needsCleanup = true
-	b.setRoute(rec, names, vals)
-}
-
-// SetCookieCodecForTest gives b the codec that [Router.CookieCodec] gives the
-// contexts of a router, so a test can call a handler that signs cookies
-// without a router. It copies the settings of b, so no other Base changes.
-//
-// SetCookieCodecForTest panics if b or cc is nil.
-func SetCookieCodecForTest(b *Base, cc *CookieCodec) {
-	if b == nil {
-		panic("router: SetCookieCodecForTest needs a Base")
-	}
-	if cc == nil {
-		panic("router: SetCookieCodecForTest needs a codec")
-	}
-	o := *b.opts()
-	o.codec = cc
-	b.ropts = &o
-}
-
 func (b *Base) base() *Base { return b }
 
 // Request reports the request that the handler answers.
@@ -269,7 +234,12 @@ func (b *Base) SetRequest(r *http.Request) {
 	if r == nil {
 		panic("router: SetRequest needs a request")
 	}
-	b.mustNotBeAncestorOf(r.Context(), "SetRequest")
+	// The request context in place already passed this check, or came from
+	// net/http, so a copy of the request that keeps it, as RealIP and a mount
+	// make, skips the walk up the chain.
+	if ctx := r.Context(); ctx != b.req.Context() {
+		b.mustNotBeAncestorOf(ctx, "SetRequest")
+	}
 	b.req = r
 	b.queryCache = nil
 	b.host, b.hostKnown = "", false
@@ -382,8 +352,11 @@ func (b *Base) Get(key string) (any, bool) {
 	return v, ok
 }
 
-// RoutePattern reports the pattern that matched, such as "/users/{id}", or ""
-// when no route matched.
+// RoutePattern reports the pattern that matched, such as "/users/{id}". A 405
+// and an automatic OPTIONS answer report the pattern that the path matched. A
+// 404 under a scope with a prefix reports that prefix, such as "/t/{tid}",
+// whose parameters [Base.Param] then reads. Anything else that matched no
+// route reports "".
 func (b *Base) RoutePattern() string {
 	if b.route == nil {
 		return ""

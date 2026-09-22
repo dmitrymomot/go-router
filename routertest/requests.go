@@ -3,11 +3,10 @@ package routertest
 import (
 	"iter"
 	"net/http"
-	"net/url"
 	"slices"
-	"strings"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
 // anyMethod is what Route.Method reports for a route of Router.Any and for a
@@ -58,10 +57,15 @@ func Requests(
 			}
 			var reqOpts []RequestOption
 			if rt.Host != "" {
-				host, _ := fillPattern(rt.Host, true, value)
+				host, _ := routerhook.FillPattern(rt.Host, true, func(name, class string) string {
+					if name == "*" {
+						return "x"
+					}
+					return value(name, class)
+				})
 				reqOpts = append(reqOpts, Host(host))
 			}
-			path, pairs := fillPattern(rt.Pattern, false, value)
+			path, pairs := routerhook.FillPattern(rt.Pattern, false, value)
 			if expanded, err := router.Expand(rt.Pattern, pairs...); err == nil {
 				path = expanded
 			}
@@ -74,117 +78,4 @@ func Requests(
 			}
 		}
 	}
-}
-
-// fillPattern fills every parameter of a path pattern, or of a host pattern
-// when host is set, with value. It follows the brace syntax of the router: a
-// {name}, {name:constraint} or {name...} group, and a bare * that is the
-// parameter "*" of a path or an anonymous label of a host. It reports the
-// filled pattern, with path values escaped, and the name and value pairs that
-// Expand takes. An unbalanced brace is copied as it is.
-func fillPattern(pattern string, host bool, value func(name, class string) string) (string, []string) {
-	sep := byte('/')
-	if host {
-		sep = '.'
-	}
-	var (
-		b     strings.Builder
-		pairs []string
-	)
-	for i, part := range splitOutsideBraces(pattern, sep) {
-		if i > 0 {
-			b.WriteByte(sep)
-		}
-		if part == "*" {
-			if host {
-				b.WriteString("x")
-				continue
-			}
-			v := value(part, "")
-			pairs = append(pairs, part, v)
-			b.WriteString(escapeRest(v))
-			continue
-		}
-		for part != "" {
-			open := strings.IndexByte(part, '{')
-			if open < 0 {
-				b.WriteString(part)
-				break
-			}
-			end := closingBrace(part, open)
-			if end < 0 {
-				b.WriteString(part)
-				break
-			}
-			b.WriteString(part[:open])
-			name, class, found := strings.Cut(part[open+1:end], ":")
-			rest := false
-			if !found {
-				name, rest = strings.CutSuffix(name, "...")
-			}
-			v := value(name, class)
-			pairs = append(pairs, name, v)
-			switch {
-			case host:
-				b.WriteString(v)
-			case rest:
-				b.WriteString(escapeRest(v))
-			default:
-				b.WriteString(url.PathEscape(v))
-			}
-			part = part[end+1:]
-		}
-	}
-	return b.String(), pairs
-}
-
-// splitOutsideBraces cuts s at every sep that no brace group holds.
-func splitOutsideBraces(s string, sep byte) []string {
-	var (
-		parts []string
-		start int
-		depth int
-	)
-	for i := range len(s) {
-		switch s[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-		case sep:
-			if depth == 0 {
-				parts = append(parts, s[start:i])
-				start = i + 1
-			}
-		}
-	}
-	return append(parts, s[start:])
-}
-
-// closingBrace reports the index of the brace that closes the one at open, or
-// -1.
-func closingBrace(s string, open int) int {
-	depth := 0
-	for i := open; i < len(s); i++ {
-		switch s[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return i
-			}
-		}
-	}
-	return -1
-}
-
-// escapeRest path-escapes each piece of a {name...} value and keeps the
-// slashes between them.
-func escapeRest(v string) string {
-	pieces := strings.Split(v, "/")
-	for i, p := range pieces {
-		pieces[i] = url.PathEscape(p)
-	}
-	return strings.Join(pieces, "/")
 }

@@ -241,6 +241,10 @@ func (r *Router[C]) register(reg registration[C]) {
 func (r *Router[C]) install(reg registration[C]) {
 	eng := r.top().eng
 	full := joinPattern(r.scopePrefix(), reg.pattern)
+	segs, names, err := r.parseScoped(reg.pattern)
+	if err != nil {
+		panic(err.Error())
+	}
 	handler := chain(reg.handler, concatMiddleware(r.scopeMiddleware(), reg.mws))
 	// Read here rather than at registration, so a route that Mount replays
 	// takes the Meta scopes above the mount too.
@@ -252,7 +256,7 @@ func (r *Router[C]) install(reg registration[C]) {
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
 		eng.anyHostRoutes = true
-		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
+		if err := eng.tree.insert(reg.method, full, segs, names, nil, handler, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, nil, full, meta)
@@ -271,7 +275,7 @@ func (r *Router[C]) install(reg registration[C]) {
 		case claim && !e.tree.empty():
 			panic("router: the host " + e.pattern + " already holds routes, so RedirectHost cannot own it")
 		}
-		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
+		if err := e.tree.insert(reg.method, full, segs, names, e.names, handler, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
 		if claim {
@@ -292,6 +296,34 @@ func (r *Router[C]) scopePrefix() string {
 		prefix = joinPattern(prefix, s.prefix)
 	}
 	return prefix
+}
+
+// parseScoped parses pattern joined to the prefixes of the scopes around this
+// one. Each piece resolves its classes through the scope that wrote it, so a
+// router mounted here keeps its own classes for its patterns and leaves the
+// prefix of the parent to the classes of the parent.
+func (r *Router[C]) parseScoped(pattern string) ([]segment, []string, error) {
+	// The whole pattern first, for the errors that span pieces: a name used
+	// twice, or a catch-all that is not last.
+	if _, _, err := parsePattern(joinPattern(r.scopePrefix(), pattern), r.class); err != nil {
+		return nil, nil, err
+	}
+	var (
+		segs  []segment
+		names []string
+	)
+	for _, s := range slices.Backward(r.lineage()) {
+		ps, pn, err := parsePattern(s.prefix, s.class)
+		if err != nil {
+			return nil, nil, err
+		}
+		segs, names = append(segs, ps...), append(names, pn...)
+	}
+	ps, pn, err := parsePattern(pattern, r.class)
+	if err != nil {
+		return nil, nil, err
+	}
+	return append(segs, ps...), append(names, pn...), nil
 }
 
 // scopeMeta joins the values of every Meta scope between the root and this
@@ -556,7 +588,8 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 // match receives the decoded value, never an empty one. It runs on every
 // request that reaches the segment, so it must be fast and safe for concurrent
 // use. The MatchString of a regular expression anchored with ^ and $ works.
-// A router that [Router.Mount] grafts keeps the classes it declared.
+// A router that [Router.Mount] grafts keeps the classes it declared for its own
+// patterns, and the prefix it is mounted under keeps the classes of the parent.
 //
 // ParamClass panics on a scope; on a name that does not start with an ASCII
 // letter or holds anything but letters, digits and '_'; on a built-in or
@@ -976,12 +1009,7 @@ func (r *Router[C]) JSONOptions(opts ...json.Options) {
 // CookieCodec panics if cc is nil or was not built by NewCookieCodec, on a
 // mounted router, or after the router started serving.
 func (r *Router[C]) CookieCodec(cc *CookieCodec) {
-	if cc == nil {
-		panic("router: CookieCodec needs a codec")
-	}
-	if len(cc.keys) == 0 {
-		panic("router: CookieCodec needs a codec built by NewCookieCodec")
-	}
+	mustBeBuiltCodec(cc, "router: CookieCodec")
 	r.mustNotBeServing("the cookie codec")
 	r.root.ropts.codec = cc
 }
@@ -1066,15 +1094,15 @@ func (r *Router[C]) compile(eng *engine[C]) {
 
 	var pending []pendingScope[C]
 
-	var walk func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C])
-	walk = func(rt *Router[C], prefix string, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) {
+	var walk func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C])
+	walk = func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) {
 		if open[rt] {
 			panic("router: a router is mounted inside itself")
 		}
 		open[rt] = true
 		defer delete(open, rt)
 
-		p := joinPattern(prefix, rt.prefix)
+		p := prefix.join(rt)
 		m := concatMiddleware(mws, rt.mws)
 
 		rounds := max(len(rt.hosts), 1)
@@ -1105,7 +1133,7 @@ func (r *Router[C]) compile(eng *engine[C]) {
 			default:
 				sets := own.take(rt)
 				if normalizePattern(rt.prefix) != "/" || sets {
-					pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m, depth: depth, fb: own, classes: rt.class})
+					pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m, depth: depth, fb: own})
 				}
 			}
 
@@ -1114,7 +1142,7 @@ func (r *Router[C]) compile(eng *engine[C]) {
 			}
 		}
 	}
-	walk(r, "", nil, nil, 0, scopeFallbacks[C]{})
+	walk(r, scopePattern{}, nil, nil, 0, scopeFallbacks[C]{})
 
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
@@ -1136,9 +1164,8 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		})
 	}
 	for _, ps := range pending {
-		segs, names, _ := parsePattern(ps.prefix, ps.classes) //nolint:errcheck // newChild rejected a bad prefix already.
 		s := &scopeFallback[C]{
-			prefix: ps.prefix, rec: &routeRecord{pattern: ps.prefix}, names: names, pattern: segs,
+			prefix: ps.prefix.text, rec: &routeRecord{pattern: ps.prefix.text}, names: ps.prefix.names, pattern: ps.prefix.segs,
 			hostIdx: -1, depth: ps.depth, errorIdx: -1,
 		}
 		if ps.host != nil {
@@ -1193,12 +1220,29 @@ func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern strin
 func (r *Router[C]) preTerminal(c C) error { return r.eng.route(c, c.base().req, false) }
 
 type pendingScope[C Context] struct {
-	prefix  string
-	host    *hostEntry[C]
-	mws     []Middleware[C]
-	fb      scopeFallbacks[C]
-	classes classLookup
-	depth   int
+	host   *hostEntry[C]
+	mws    []Middleware[C]
+	fb     scopeFallbacks[C]
+	prefix scopePattern
+	depth  int
+}
+
+// scopePattern is the joined prefix of a scope, as text and parsed. Each piece
+// is parsed with the classes of the scope that wrote it; see parseScoped.
+type scopePattern struct {
+	text  string
+	segs  []segment
+	names []string
+}
+
+func (p scopePattern) join[C Context](rt *Router[C]) scopePattern {
+	//nolint:errcheck // newChild rejected a bad prefix already.
+	segs, names, _ := parsePattern(rt.prefix, rt.class)
+	return scopePattern{
+		text:  joinPattern(p.text, rt.prefix),
+		segs:  slices.Concat(p.segs, segs),
+		names: slices.Concat(p.names, names),
+	}
 }
 
 type scopeFallbacks[C Context] struct {
@@ -1495,7 +1539,9 @@ func (r *Router[C]) release(c C) {
 	if r.pool != nil {
 		b := c.base()
 		r.reset(c)
-		b.req, b.res = releasedRequest, nil
+		// The flag is lowered here rather than through the slow clear, so a 404
+		// or a 405 on a pooled router stays on the fast path.
+		b.req, b.res, b.errorHandled = releasedRequest, nil, false
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()
@@ -1510,7 +1556,9 @@ func (r *Router[C]) recycle(c C) {
 	if r.pool != nil {
 		b := c.base()
 		r.reset(c)
-		b.req, b.res = releasedRequest, nil
+		// The flag is lowered here rather than through the slow clear, so a 404
+		// or a 405 on a pooled router stays on the fast path.
+		b.req, b.res, b.errorHandled = releasedRequest, nil, false
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()

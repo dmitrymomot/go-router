@@ -32,13 +32,11 @@ type node[C Context] struct {
 	names       []string
 }
 
+// insert adds h under segs, which the caller parsed from pattern with names as
+// its parameters. pattern names the route in errors and in the table.
 func (n *node[C]) insert(
-	method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string, classes classLookup,
+	method, pattern string, segs []segment, names, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string,
 ) error {
-	segs, names, err := parsePattern(pattern, classes)
-	if err != nil {
-		return err
-	}
 	if len(hostNames) > 0 {
 		for _, hn := range hostNames {
 			if slices.Contains(names, hn) {
