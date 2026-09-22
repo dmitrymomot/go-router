@@ -48,7 +48,7 @@ type ErrorBody struct {
 
 // writeError answers every failure as JSON. The router writes plain text by
 // default, which no API client wants to parse.
-func writeError(c *Context, err error) {
+func writeError(c *Context, err error) error {
 	status := router.StatusOf(err)
 	body := ErrorBody{Error: err.Error()}
 
@@ -60,6 +60,5 @@ func writeError(c *Context, err error) {
 		}
 	}
 
-	//nolint:errcheck // The request is already failing; nowhere left to report.
-	c.JSON(status, body)
+	return c.JSON(status, body)
 }

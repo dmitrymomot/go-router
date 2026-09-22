@@ -63,9 +63,8 @@ func TestMountAnswersTheBarePrefixWithTheIndex(t *testing.T) {
 
 func TestMountSendsAMissToTheErrorHandler(t *testing.T) {
 	r := newRouter()
-	r.ErrorHandler(func(c *appContext, err error) {
-		//nolint:errcheck // The recorder never fails.
-		c.String(router.StatusOf(err), "handled: "+err.Error())
+	r.ErrorHandler(func(c *appContext, err error) error {
+		return c.String(router.StatusOf(err), "handled: "+err.Error())
 	})
 	static.Mount(r, newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"}))
 

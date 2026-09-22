@@ -246,30 +246,31 @@ func HTTPErrorOf(err error) *HTTPError {
 	return &c
 }
 
-// ErrorHandlerFunc writes the answer for a handler that returned an error.
-// [Router.ErrorHandler] installs one, and the router calls it once per failed
-// request.
-type ErrorHandlerFunc[C Context] func(c C, err error)
+// ErrorHandlerFunc writes the answer for a handler that returned an error, and
+// returns the error of that write. [Router.ErrorHandler] installs one, and the
+// router calls it once per failed request. When it returns an error having
+// written nothing, the router answers a bare 500.
+type ErrorHandlerFunc[C Context] func(c C, err error) error
 
 // DefaultErrorHandler writes the status and the message of err as plain text,
 // one line per [FieldError] in its Details. It logs any 5xx and any error that
 // carries a cause, and it keeps the cause out of the response.
 //
 // A response that already committed is logged and not written again.
-func DefaultErrorHandler[C Context](c C, err error) {
-	writeError(c.base(), err, false)
+func DefaultErrorHandler[C Context](c C, err error) error {
+	return writeError(c.base(), err, false)
 }
 
 // ErrorHandler is [DefaultErrorHandler] with a say over the cause. With
 // exposeCause set, the wrapped cause follows the message in the body, which
 // suits a development server and leaks internals anywhere else.
 func ErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
-	return func(c C, err error) { writeError(c.base(), err, exposeCause) }
+	return func(c C, err error) error { return writeError(c.base(), err, exposeCause) }
 }
 
-func writeError(b *Base, err error, exposeCause bool) {
+func writeError(b *Base, err error, exposeCause bool) error {
 	if err == nil {
-		return
+		return nil
 	}
 
 	he, ok := errors.AsType[*HTTPError](err)
@@ -289,12 +290,7 @@ func writeError(b *Base, err error, exposeCause bool) {
 		logFailure(b, err, status)
 	}
 	if !writableFailure(b, err) {
-		return
-	}
-
-	cause := ""
-	if exposeCause && he.Err != nil {
-		cause = he.Err.Error()
+		return nil
 	}
 
 	// Plain text, always. A handler that wants JSON or HTML for its errors
@@ -302,21 +298,55 @@ func writeError(b *Base, err error, exposeCause bool) {
 	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
 	b.res.WriteHeader(status)
 	if b.req.Method == http.MethodHead {
-		return
+		return nil
 	}
-	//nolint:errcheck // The connection is already failing; nothing to report.
-	b.res.WriteString(he.Message)
+	if _, err := b.res.WriteString(he.Message); err != nil {
+		return err
+	}
 	// Field errors say which field failed, which is the useful half of a
 	// binding failure, so they get a line each rather than being dropped.
 	if fields, ok := he.Details.([]FieldError); ok {
 		for _, f := range fields {
-			//nolint:errcheck // Same as above.
-			b.res.WriteString("\n" + f.Error())
+			if _, err := b.res.WriteString("\n" + f.Error()); err != nil {
+				return err
+			}
 		}
 	}
-	if cause != "" {
-		//nolint:errcheck // Same as above.
-		b.res.WriteString("\n\n" + cause)
+	if exposeCause && he.Err != nil {
+		_, err := b.res.WriteString("\n\n" + he.Err.Error())
+		return err
+	}
+	return nil
+}
+
+// runErrorHandler runs h and answers a bare 500 when h fails before it wrote
+// anything: a panic, or an error returned with nothing written.
+func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
+	b := c.base()
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		if rec == http.ErrAbortHandler {
+			panic(rec)
+		}
+		b.Logger().ErrorContext(b.req.Context(), "router: the error handler panicked",
+			slog.Any("panic", rec), slog.Any("error", err))
+		if !b.res.Committed {
+			b.res.WriteHeader(http.StatusInternalServerError)
+		}
+	}()
+	herr := h(c, err)
+	switch {
+	case herr == nil:
+	case b.res.Committed:
+		b.Logger().DebugContext(b.req.Context(), "router: the error handler could not finish its answer",
+			slog.Any("handler_error", herr), slog.Any("error", err))
+	default:
+		b.Logger().ErrorContext(b.req.Context(), "router: the error handler failed",
+			slog.Any("handler_error", herr), slog.Any("error", err))
+		b.res.WriteHeader(http.StatusInternalServerError)
 	}
 }
 

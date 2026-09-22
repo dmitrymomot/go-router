@@ -1086,9 +1086,9 @@ func TestMountWithoutNotFoundLeavesTheRouterInCharge(t *testing.T) {
 	assets := static.Must(static.Config{FS: fstest.MapFS{"index.html": {Data: []byte("<html>")}}})
 	r := newRouter()
 	var handled error
-	r.ErrorHandler(func(c *appContext, err error) {
+	r.ErrorHandler(func(c *appContext, err error) error {
 		handled = err
-		_ = c.String(http.StatusNotFound, "router 404")
+		return c.String(http.StatusNotFound, "router 404")
 	})
 	static.Mount(r, assets)
 

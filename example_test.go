@@ -190,8 +190,8 @@ func ExampleRouter_HostRouter() {
 	api := router.New(func(http.ResponseWriter, *http.Request) *APIContext {
 		return &APIContext{Version: "v1"}
 	})
-	api.ErrorHandler(func(c *APIContext, err error) {
-		_ = c.Stringf(router.StatusOf(err), "%s: no such endpoint", c.Version)
+	api.ErrorHandler(func(c *APIContext, err error) error {
+		return c.Stringf(router.StatusOf(err), "%s: no such endpoint", c.Version)
 	})
 	api.GET("/users/{id}", func(c *APIContext) error {
 		return c.Stringf(http.StatusOK, "%s user %s", c.Version, c.Param("id"))

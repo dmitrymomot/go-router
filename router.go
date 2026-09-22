@@ -1584,22 +1584,7 @@ func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
 }
 
 func (r *Router[C]) handleError(c C, err error) {
-	defer func() {
-		rec := recover()
-		if rec == nil {
-			return
-		}
-		if rec == http.ErrAbortHandler {
-			panic(rec)
-		}
-		b := c.base()
-		b.Logger().ErrorContext(b.req.Context(), "router: the error handler panicked",
-			slog.Any("panic", rec), slog.Any("error", err))
-		if !b.res.Committed {
-			b.res.WriteHeader(http.StatusInternalServerError)
-		}
-	}()
-	r.eng.errorHandlerFor(c.base())(c, err)
+	runErrorHandler(c, err, r.eng.errorHandlerFor(c.base()))
 }
 
 func (e *engine[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {

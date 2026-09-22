@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -565,11 +566,11 @@ func TestConfigurationAfterServingPanics(t *testing.T) {
 func TestHandlerThatFeedsItsContextBackAnswers500(t *testing.T) {
 	var panics []string
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) {
+	r.ErrorHandler(func(c *tctx, err error) error {
 		if pv, ok := errors.AsType[*PanicValue](err); ok {
 			panics = append(panics, fmt.Sprint(pv.Value))
 		}
-		_ = c.String(StatusOf(err), "handled")
+		return c.String(StatusOf(err), "handled")
 	})
 	r.GET("/context", func(c *tctx) error {
 		c.SetContext(context.WithValue(c, wrapKey{}, 1))
@@ -601,9 +602,9 @@ func TestErrorHandlerCatchesEverything(t *testing.T) {
 	var seen []failure
 
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) {
+	r.ErrorHandler(func(c *tctx, err error) error {
 		seen = append(seen, failure{StatusOf(err), err.Error()})
-		_ = c.String(StatusOf(err), "handled")
+		return c.String(StatusOf(err), "handled")
 	})
 	r.GET("/panic", func(*tctx) error { panic("boom") })
 	r.GET("/error", func(*tctx) error { return ErrConflict })
@@ -647,12 +648,49 @@ func TestErrorHandlerCatchesEverything(t *testing.T) {
 
 func TestPanicInTheErrorHandlerAnswers500(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(*tctx, error) { panic("the renderer is broken") })
+	r.ErrorHandler(func(*tctx, error) error { panic("the renderer is broken") })
 	r.GET("/", func(*tctx) error { return ErrConflict })
 
 	rec := do(r, http.MethodGet, "/")
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
+	}
+}
+
+func TestErrorHandlerReturningAnErrorWithoutWritingAnswers500(t *testing.T) {
+	sink := captureLogs(t)
+
+	r := newTestRouter()
+	r.ErrorHandler(func(*tctx, error) error { return errors.New("template") })
+	r.GET("/", func(*tctx) error { return ErrConflict })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if len(sink.records) == 0 || sink.records[0].Message != "router: the error handler failed" ||
+		sink.records[0].Level != slog.LevelError {
+		t.Errorf("records = %v, want the handler failure first, at Error", sink.records)
+	}
+}
+
+func TestErrorHandlerFailingAfterItWroteKeepsItsAnswer(t *testing.T) {
+	sink := captureLogs(t)
+
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, _ error) error {
+		_ = c.String(http.StatusConflict, "conflict")
+		return errors.New("the connection broke")
+	})
+	r.GET("/", func(*tctx) error { return ErrConflict })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusConflict || rec.Body.String() != "conflict" {
+		t.Errorf("answer = %d %q, want 409 %q", rec.Code, rec.Body.String(), "conflict")
+	}
+	if len(sink.records) == 0 || sink.records[0].Message != "router: the error handler could not finish its answer" ||
+		sink.records[0].Level != slog.LevelDebug {
+		t.Errorf("records = %v, want the handler failure first, at Debug", sink.records)
 	}
 }
 
@@ -1428,7 +1466,7 @@ func TestObserveReportsARequestThatThePreStageAnswered(t *testing.T) {
 func TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api 404") })
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "api 404") })
 		g.GET("/users", echoRoute)
 	})
 	r.GET("/health", echoRoute)
@@ -1444,7 +1482,7 @@ func TestASingleScopeFallbackLeavesTheRestOfTheRouterAlone(t *testing.T) {
 func TestAScopeFallbackReachesTheScopesBelowIt(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api 404") })
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "api 404") })
 		g.Route("/v1", func(v *Router[*tctx]) { v.GET("/users", echoRoute) })
 	})
 
@@ -1542,7 +1580,7 @@ func TestAMountedRouterKeepsTheFallbacksOfTheRoot(t *testing.T) {
 	sub.GET("/users", echoRoute)
 
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root: "+err.Error()) })
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "root: "+err.Error()) })
 	r.Mount("/api", sub)
 	r.GET("/boom", func(*tctx) error { return errors.New("kettle") })
 
@@ -1562,7 +1600,7 @@ func TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
 		g.Group(func(h *Router[*tctx]) {
-			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api 404") })
+			h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "api 404") })
 			h.GET("/users", echoRoute)
 		})
 	})
@@ -1582,7 +1620,7 @@ func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
 	r := newTestRouter()
 	r.Host("api.example.com", func(h *Router[*tctx]) {
 		h.Route("/debug", func(g *Router[*tctx]) {
-			g.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "debug") })
+			g.ErrorHandler(func(c *tctx, err error) error { return c.String(http.StatusTeapot, "debug") })
 			g.GET("/dump", boom)
 		})
 		h.GET("/other", boom)
@@ -1647,9 +1685,9 @@ func TestPreDispatchesEachErrorOnce(t *testing.T) {
 	r := newTestRouter()
 	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
 	calls := 0
-	r.ErrorHandler(func(c *tctx, err error) {
+	r.ErrorHandler(func(c *tctx, err error) error {
 		calls++
-		_ = c.NoContent(StatusOf(err))
+		return c.NoContent(StatusOf(err))
 	})
 	r.GET("/fail", func(*tctx) error { return ErrConflict })
 
@@ -1664,7 +1702,7 @@ func TestPreDispatchesEachErrorOnce(t *testing.T) {
 
 func TestErrorScopeIsSelectedByRouting(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root") })
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "root") })
 	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
 		return func(c *tctx) error {
 			if c.Path() == "/debug/pre" {
@@ -1674,7 +1712,7 @@ func TestErrorScopeIsSelectedByRouting(t *testing.T) {
 		}
 	})
 	r.Route("/debug", func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "debug") })
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "debug") })
 		g.GET("/mutate", func(c *tctx) error {
 			req := c.Request().Clone(c.Request().Context())
 			req.URL.Path = "/outside"
@@ -1698,12 +1736,12 @@ func TestScopedFallbackUsesParsedPrefix(t *testing.T) {
 			r := newTestRouter()
 			addPlain := func() {
 				r.Route("/t/{value}", func(g *Router[*tctx]) {
-					g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "plain") })
+					g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "plain") })
 				})
 			}
 			addNumeric := func() {
 				r.Route("/t/{value:[0-9]+}", func(g *Router[*tctx]) {
-					g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "numeric") })
+					g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "numeric") })
 				})
 			}
 			if reverse {
@@ -1725,7 +1763,7 @@ func TestScopedFallbackUsesParsedPrefix(t *testing.T) {
 
 	r := newTestRouter()
 	r.Route("/reports/report-{id:[0-9]+}.csv", func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "report") })
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "report") })
 	})
 	if got := do(r, http.MethodGet, "/reports/report-7.csv/missing").Body.String(); got != "report" {
 		t.Errorf("template scope chose %q", got)
@@ -1747,8 +1785,8 @@ func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
 							return next(c)
 						}
 					})
-					g.ErrorHandler(func(c *tctx, err error) {
-						_ = c.String(StatusOf(err), name+" "+strconv.Itoa(StatusOf(err)))
+					g.ErrorHandler(func(c *tctx, err error) error {
+						return c.String(StatusOf(err), name+" "+strconv.Itoa(StatusOf(err)))
 					})
 				})
 			}
@@ -1780,8 +1818,8 @@ func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
 
 func registerScopedHandlers(r *Router[*tctx], prefix, name string) {
 	r.Route(prefix, func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) {
-			_ = c.String(StatusOf(err), name+" "+strconv.Itoa(StatusOf(err)))
+		g.ErrorHandler(func(c *tctx, err error) error {
+			return c.String(StatusOf(err), name+" "+strconv.Itoa(StatusOf(err)))
 		})
 		g.GET("/method", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
 		g.GET("/error", func(*tctx) error { return errors.New("boom") })
@@ -1858,8 +1896,8 @@ func TestScopeCoverageRejectsInvalidDynamicEscapes(t *testing.T) {
 
 func TestScopedHandlersIgnoreInvalidRawPath(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) {
-		_ = c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
+	r.ErrorHandler(func(c *tctx, err error) error {
+		return c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
 	})
 	registerScopedHandlers(r, "/x/safe", "scope")
 	r.GET("/outside/error", func(*tctx) error { return errors.New("boom") })
@@ -1886,7 +1924,7 @@ func TestAScopeValidatesItsPrefix(t *testing.T) {
 	r := newTestRouter()
 	mustPanicContaining(t, "unbalanced", func() {
 		r.Route("/bad/{", func(g *Router[*tctx]) {
-			g.ErrorHandler(func(c *tctx, err error) { _ = c.NoContent(StatusOf(err)) })
+			g.ErrorHandler(func(c *tctx, err error) error { return c.NoContent(StatusOf(err)) })
 		})
 	})
 }
@@ -2078,7 +2116,7 @@ func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
 // own prefix, so a 404 names the scope that answered it.
 func scopeAnswering(r *Router[*tctx], prefix string) {
 	r.Route(prefix, func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), prefix) })
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), prefix) })
 	})
 }
 
@@ -2164,11 +2202,11 @@ func TestScopeFallbackPrecedenceIsLeftmostMostSpecificSegment(t *testing.T) {
 func TestScopeFallbackPrefersTheDeeperScopeOnAnEqualPrefix(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/a/b", func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "flat") })
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "flat") })
 	})
 	r.Route("/a", func(g *Router[*tctx]) {
 		g.Route("/b", func(h *Router[*tctx]) {
-			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "nested") })
+			h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "nested") })
 		})
 	})
 
@@ -2186,7 +2224,7 @@ func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
 	scopeAnswering(r, "/a")
 	r.Host("api.example.com", func(h *Router[*tctx]) {
 		h.Route("/{p}", func(g *Router[*tctx]) {
-			g.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "host /{p}") })
+			g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "host /{p}") })
 		})
 	})
 
@@ -2206,7 +2244,7 @@ func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
 		set  func(*Router[*tctx])
 	}{
 		{"ErrorHandler", "the error handler", func(g *Router[*tctx]) {
-			g.ErrorHandler(func(c *tctx, err error) {})
+			g.ErrorHandler(func(*tctx, error) error { return nil })
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2222,21 +2260,21 @@ func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
 // can match, so each keeps its own fallbacks.
 func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) {
-		_ = c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
+	r.ErrorHandler(func(c *tctx, err error) error {
+		return c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
 	})
 	r.GET("/outside", func(c *tctx) error { return ErrInternalServerError })
 	r.Route("/api", func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) {
-			_ = c.String(StatusOf(err), "api "+strconv.Itoa(StatusOf(err)))
+		g.ErrorHandler(func(c *tctx, err error) error {
+			return c.String(StatusOf(err), "api "+strconv.Itoa(StatusOf(err)))
 		})
 		g.GET("/inside", func(c *tctx) error { return ErrInternalServerError })
 	})
 	// A nested Group inherits the prefix of its owner, so it may own them too.
 	r.Route("/deep", func(g *Router[*tctx]) {
 		g.Group(func(h *Router[*tctx]) {
-			h.ErrorHandler(func(c *tctx, err error) {
-				_ = c.String(StatusOf(err), "deep "+strconv.Itoa(StatusOf(err)))
+			h.ErrorHandler(func(c *tctx, err error) error {
+				return c.String(StatusOf(err), "deep "+strconv.Itoa(StatusOf(err)))
 			})
 		})
 	})
@@ -2270,14 +2308,14 @@ func TestUseAfterMountIsRefused(t *testing.T) {
 // answer there and leave the rest of the tree to the parent.
 func TestMountKeepsTheFallbacksOfTheMountedRouter(t *testing.T) {
 	api := newTestRouter()
-	api.ErrorHandler(func(c *tctx, err error) {
-		_ = c.String(StatusOf(err), "api "+strconv.Itoa(StatusOf(err)))
+	api.ErrorHandler(func(c *tctx, err error) error {
+		return c.String(StatusOf(err), "api "+strconv.Itoa(StatusOf(err)))
 	})
 	api.GET("/boom", func(*tctx) error { return ErrInternalServerError })
 
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) {
-		_ = c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
+	r.ErrorHandler(func(c *tctx, err error) error {
+		return c.String(StatusOf(err), "root "+strconv.Itoa(StatusOf(err)))
 	})
 	r.Mount("/api", api)
 	r.GET("/outside", func(*tctx) error { return ErrInternalServerError })
@@ -2389,8 +2427,8 @@ func TestMountedHandlerKeepsTheTrailingSlash(t *testing.T) {
 func TestScopeFallbackSeesItsPrefixParams(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/t/{tid}", func(g *Router[*tctx]) {
-		g.ErrorHandler(func(c *tctx, err error) {
-			_ = c.String(StatusOf(err), strconv.Itoa(StatusOf(err))+
+		g.ErrorHandler(func(c *tctx, err error) error {
+			return c.String(StatusOf(err), strconv.Itoa(StatusOf(err))+
 				" tid="+c.Param("tid")+" pattern="+c.RoutePattern())
 		})
 		g.GET("/x", echoRoute)
@@ -2410,8 +2448,8 @@ func TestScopeFallbackKeepsHostParamsToo(t *testing.T) {
 	r := newTestRouter()
 	r.Host("{sub}.example.com", func(h *Router[*tctx]) {
 		h.Route("/t/{tid}", func(g *Router[*tctx]) {
-			g.ErrorHandler(func(c *tctx, err error) {
-				_ = c.String(StatusOf(err), "sub="+c.Param("sub")+" tid="+c.Param("tid"))
+			g.ErrorHandler(func(c *tctx, err error) error {
+				return c.String(StatusOf(err), "sub="+c.Param("sub")+" tid="+c.Param("tid"))
 			})
 			g.GET("/x", echoRoute)
 		})

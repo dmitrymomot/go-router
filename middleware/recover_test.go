@@ -13,11 +13,11 @@ import (
 func recoverRouter(cfg middleware.RecoverConfig, caught **router.PanicValue) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.RecoverWithConfig[*appContext](cfg))
-	r.ErrorHandler(func(c *appContext, err error) {
+	r.ErrorHandler(func(c *appContext, err error) error {
 		if pv, ok := errors.AsType[*router.PanicValue](err); ok {
 			*caught = pv
 		}
-		router.DefaultErrorHandler(c, err)
+		return router.DefaultErrorHandler(c, err)
 	})
 	r.GET("/boom", func(*appContext) error { panic("handler exploded") })
 	return r

@@ -629,7 +629,7 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 			// The status line is already out by the time a flush panics, so the
 			// reply stays a 200 with no body and matches its GET. Only the
 			// error handler sees the panic.
-			r.ErrorHandler(func(_ *appContext, err error) { failed = err })
+			r.ErrorHandler(func(_ *appContext, err error) error { failed = err; return nil })
 			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
 			r.GET("/x", tt.handler)
 
