@@ -481,6 +481,12 @@ func TestRunAllReportsEveryFailure(t *testing.T) {
 	}
 	g := startAll(t, servers...)
 
+	for i := range servers {
+		if res := await(t, call(client(t), g.url(i, "/"))); res.err != nil {
+			t.Fatalf("request to server %d: %v", i, res.err)
+		}
+	}
+
 	err := g.stop(t)
 	for i, want := range boom {
 		if !errors.Is(err, want) {
