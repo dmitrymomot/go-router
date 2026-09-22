@@ -234,6 +234,25 @@ func TestRedirectTrailingSlash(t *testing.T) {
 	}
 }
 
+// The trie matches a dot segment literally, but a browser resolves one in a
+// Location, so a redirect to /x/.. would land on /, another route.
+func TestRedirectTrailingSlashLeavesADotSegmentAlone(t *testing.T) {
+	r := newTestRouter()
+	r.RedirectTrailingSlash(true)
+	r.GET("/{a}/{b}", echoRoute)
+
+	for _, target := range []string{"/x/../", "/x/./", "/x/%2e%2E/", "/x/%2e/"} {
+		// No redirect: the route answers as it does with the option off.
+		if rec := do(r, http.MethodGet, target); rec.Code != http.StatusOK || rec.Header().Get(HeaderLocation) != "" {
+			t.Errorf("GET %s = %d, Location %q; want 200 and no redirect",
+				target, rec.Code, rec.Header().Get(HeaderLocation))
+		}
+	}
+	if rec := do(r, http.MethodGet, "/x/y/"); rec.Header().Get(HeaderLocation) != "/x/y" {
+		t.Errorf("GET /x/y/ Location = %q, want /x/y", rec.Header().Get(HeaderLocation))
+	}
+}
+
 func TestGroupRouteAndMiddlewareOrder(t *testing.T) {
 	var order []string
 	mark := func(name string) Middleware[*tctx] {

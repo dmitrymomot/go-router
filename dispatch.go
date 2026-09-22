@@ -150,7 +150,7 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		}
 	}
 
-	if e.redirectSlash && trimmed != path && e.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
+	if e.redirectSlash && trimmed != path && !hasDotSegmentEscaped(trimmed) && e.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
 		redirectTo(b.res, req, trimmed, escaped)
 		return nil
 	}

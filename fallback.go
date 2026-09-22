@@ -188,5 +188,20 @@ func redirectTo(w http.ResponseWriter, req *http.Request, path string, escaped b
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		status = http.StatusPermanentRedirect
 	}
-	http.Redirect(w, req, u.RequestURI(), status)
+	// Not http.Redirect: it runs path.Clean, which resolves a dot segment the
+	// trie matched literally and so points at another route.
+	w.Header().Set(HeaderLocation, u.RequestURI())
+	w.WriteHeader(status)
+}
+
+// hasDotSegmentEscaped is hasDotSegment for a path that may still hold its
+// escapes: a browser resolves "%2e" and "%2E%2e" as it resolves "." and "..".
+func hasDotSegmentEscaped(path string) bool {
+	for seg := range strings.SplitSeq(path, "/") {
+		switch strings.ToLower(seg) {
+		case ".", "..", "%2e", ".%2e", "%2e.", "%2e%2e":
+			return true
+		}
+	}
+	return false
 }
