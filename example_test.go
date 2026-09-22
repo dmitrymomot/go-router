@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -926,4 +927,25 @@ func ExampleJSONErrorHandler() {
 	// 404 {"error":{"status":404,"message":"no user 9"}}
 	// 404 {"error":{"status":404,"message":"Not Found"}}
 	// 404 Not Found
+}
+
+func ExampleHTTPErrorOf() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	// An error page of your own. The same handler, rendering a fragment,
+	// suits an htmx scope, since htmx 4 swaps a 4xx or a 5xx into its target.
+	r.ErrorHandler(func(c *Context, err error) error {
+		he := router.HTTPErrorOf(err)
+		return c.HTML(he.Status, "<h1>"+html.EscapeString(he.Message)+"</h1>")
+	})
+	r.GET("/users/{id}", func(c *Context) error {
+		return router.ErrNotFound.WithMessage("no user %s", c.Param("id"))
+	})
+	r.GET("/report", func(*Context) error { return errors.New("db: connection refused") })
+
+	fmt.Println(serve(r, http.MethodGet, "/users/9"))
+	fmt.Println(serve(r, http.MethodGet, "/report"))
+	// Output:
+	// 404 <h1>no user 9</h1>
+	// 500 <h1>Internal Server Error</h1>
 }
