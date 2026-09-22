@@ -245,6 +245,9 @@ func (r *Router[C]) install(reg registration[C]) {
 		return
 	}
 	for _, e := range entries {
+		if e.redirect {
+			panic("router: the host " + e.pattern + " belongs to RedirectHost; register its routes on the target host")
+		}
 		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
 			panic(err.Error())
 		}

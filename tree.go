@@ -161,6 +161,11 @@ func namingConflict(existing, want string) error {
 	return fmt.Errorf("the parameter at this position is already named %q, not %q", existing, want)
 }
 
+func (n *node[C]) empty() bool {
+	return len(n.routes) == 0 && len(n.statics) == 0 && len(n.templates) == 0 && len(n.constrained) == 0 &&
+		n.param == nil && n.wildcard == nil
+}
+
 func (n *node[C]) handler(method string) HandlerFunc[C] {
 	for _, mh := range n.routes {
 		if mh.method == method {

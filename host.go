@@ -40,6 +40,9 @@ type hostEntry[C Context] struct {
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
 	errHandler      ErrorHandlerFunc[C]
+	// redirect marks a host that RedirectHost owns: no other route may be
+	// registered for it.
+	redirect bool
 }
 
 type hostSet[C Context] struct {

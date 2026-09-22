@@ -1230,3 +1230,20 @@ func ExampleRouter_Redirect() {
 	// 302 /bonus?agent=a+b
 	// 301 /new?page=2
 }
+
+func ExampleRouter_RedirectHost() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Host("example.com", func(h *router.Router[*Context]) {
+		h.GET("/pricing", func(c *Context) error { return c.String(http.StatusOK, "pricing") })
+	})
+	r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+	r.RedirectHost("{tenant}.example.org", "{tenant}.example.com", http.StatusPermanentRedirect)
+
+	fmt.Println(serveLocation(r, "www.example.com", "/pricing?plan=pro"))
+	fmt.Println(serveLocation(r, "acme.example.org:8080", "/orders"))
+	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/pricing"))
+	// Output:
+	// 301 http://example.com/pricing?plan=pro
+	// 308 http://acme.example.com:8080/orders
+	// 200 pricing
+}
