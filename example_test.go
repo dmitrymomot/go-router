@@ -1207,3 +1207,26 @@ func ExampleMustExpand() {
 	// acme.example.com
 	// /files/docs/read%20me.txt
 }
+
+// serveLocation reports the status and the Location of the answer.
+func serveLocation(h http.Handler, host, target string) string {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	if host != "" {
+		req.Host = host
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return fmt.Sprint(rec.Code, " ", rec.Header().Get(router.HeaderLocation))
+}
+
+func ExampleRouter_Redirect() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Redirect("/bonuses/{agent}", "/bonus?agent={agent}", http.StatusFound)
+	r.Redirect("/old", "/new", http.StatusMovedPermanently)
+
+	fmt.Println(serveLocation(r, "", "/bonuses/a%20b"))
+	fmt.Println(serveLocation(r, "", "/old?page=2"))
+	// Output:
+	// 302 /bonus?agent=a+b
+	// 301 /new?page=2
+}
