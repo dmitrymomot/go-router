@@ -1,9 +1,9 @@
 package router
 
 import (
-	"math"
-	"strconv"
 	"strings"
+
+	"github.com/dmitrymomot/go-router/internal/accept"
 )
 
 // The header names that this package and its middleware read or write. They
@@ -85,53 +85,7 @@ func negotiate(accept string, offers []string) string {
 	return best
 }
 
-func acceptQuality(accept, offer string) float64 {
-	media, _, _ := strings.Cut(offer, ";")
-	typ, sub, ok := strings.Cut(strings.TrimSpace(media), "/")
-	if !ok {
-		return 0
-	}
-	q, rank := 0.0, -1
-	for part := range strings.SplitSeq(accept, ",") {
-		rng, params, _ := strings.Cut(part, ";")
-		rt, rs, ok := strings.Cut(strings.TrimSpace(rng), "/")
-		if !ok {
-			continue
-		}
-		switch r := matchRank(typ, sub, rt, rs); {
-		case r > rank:
-			rank, q = r, quality(params)
-		case r == rank && r >= 0:
-			q = max(q, quality(params))
-		}
-	}
+func acceptQuality(header, offer string) float64 {
+	_, q := accept.Match(header, offer)
 	return q
-}
-
-func matchRank(typ, sub, rt, rs string) int {
-	switch {
-	case rt == "*" && rs == "*":
-		return 0
-	case rs == "*" && strings.EqualFold(rt, typ):
-		return 1
-	case strings.EqualFold(rt, typ) && strings.EqualFold(rs, sub):
-		return 2
-	default:
-		return -1
-	}
-}
-
-func quality(params string) float64 {
-	for p := range strings.SplitSeq(params, ";") {
-		k, v, ok := strings.Cut(p, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
-			continue
-		}
-		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil || math.IsNaN(q) || math.IsInf(q, 0) || q < 0 || q > 1 {
-			return 0
-		}
-		return q
-	}
-	return 1
 }

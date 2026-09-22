@@ -840,6 +840,9 @@ func TestSPAFallbackNegotiatesHTMLAndVariesOnAccept(t *testing.T) {
 		{name: "malformed then HTML", target: "/report.csv", accept: "garbage, text/html", code: http.StatusOK},
 		{name: "type wildcard navigation", target: "/dashboard", accept: "text/*", code: http.StatusOK},
 		{name: "invalid quality", target: "/dashboard", accept: "text/html;q=2", code: http.StatusNotFound},
+		// A malformed q refuses text/html, as Base.Accepts reads it, so the
+		// wider */* does not bring the page back.
+		{name: "malformed quality then wildcard", target: "/dashboard", accept: "text/html;q=abc, */*", code: http.StatusNotFound},
 	}
 
 	for _, tt := range tests {

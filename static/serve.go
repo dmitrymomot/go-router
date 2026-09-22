@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/accept"
 )
 
 var errNoFile = errors.New("static: the asset set holds no such file")
@@ -78,60 +79,17 @@ func (a *Assets) fallback(w http.ResponseWriter, r *http.Request, name string) b
 		return a.isNavigation(r)
 	}
 	router.AddVary(w.Header(), "Accept")
-	accept := strings.Join(r.Header.Values("Accept"), ",")
-	if strings.TrimSpace(accept) == "" {
+	header := strings.Join(r.Header.Values("Accept"), ",")
+	if strings.TrimSpace(header) == "" {
 		return path.Ext(name) == ""
 	}
-	specificity, quality := htmlPreference(accept)
+	rank, q := accept.Match(header, "text/html")
 	if path.Ext(name) == "" {
-		return specificity >= 0 && quality > 0
+		return rank >= 0 && q > 0
 	}
-	return specificity == 2 && quality > 0
-}
-
-func htmlPreference(accept string) (int, float64) {
-	bestSpecificity, bestQuality := -1, 0.0
-	for v := range strings.SplitSeq(accept, ",") {
-		// ParseMediaType allocates a parameter map for every member; the only
-		// parameter that counts here is q, and quality reads it without one.
-		media, params, _ := strings.Cut(v, ";")
-		var specificity int
-		switch strings.ToLower(strings.TrimSpace(media)) {
-		case "text/html":
-			specificity = 2
-		case "text/*":
-			specificity = 1
-		case "*/*":
-			specificity = 0
-		default:
-			continue
-		}
-		quality := acceptQualityOf(params)
-		if quality < 0 {
-			continue
-		}
-		if specificity > bestSpecificity || specificity == bestSpecificity && quality > bestQuality {
-			bestSpecificity, bestQuality = specificity, quality
-		}
-	}
-	return bestSpecificity, bestQuality
-}
-
-// acceptQualityOf reads the q parameter of one Accept member, or -1 when it is
-// present and malformed. Absent means 1, as RFC 9110 has it.
-func acceptQualityOf(params string) float64 {
-	for p := range strings.SplitSeq(params, ";") {
-		k, v, ok := strings.Cut(p, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
-			continue
-		}
-		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil || q < 0 || q > 1 {
-			return -1
-		}
-		return q
-	}
-	return 1
+	// A path with an extension names a file, so only an explicit text/html
+	// asks for the page instead.
+	return rank == 2 && q > 0
 }
 
 func (a *Assets) write(w http.ResponseWriter, r *http.Request, name string, versioned bool) error {
