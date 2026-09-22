@@ -11,8 +11,7 @@ import (
 )
 
 const (
-	apex      = baseDomain + ":8080"
-	signupURL = "http://" + apex + "/signup"
+	apex = baseDomain + ":8080"
 
 	testPassword = "correct horse"
 )
@@ -24,59 +23,44 @@ func newTestRouter(t *testing.T) *router.Router[Ctx] {
 
 func host(slug string) string { return slug + "." + apex }
 
-// csrf issues a token by asking for a page, and gives back the cookie that
-// signs it. The token is the value of that cookie.
-func csrf(t *testing.T, h http.Handler, atHost, target string) *http.Cookie {
+// browser is a fresh browser that starts on at, with no cookie yet.
+func browser(t *testing.T, h http.Handler, at string) *routertest.Client {
+	t.Helper()
+	return routertest.NewClient(t, h, routertest.Host(at))
+}
+
+// postForm reads the form page at path, as a browser would, and posts form
+// back to it with the CSRF token the page issued.
+func postForm(t *testing.T, cl *routertest.Client, path string, form url.Values) *routertest.Response {
 	t.Helper()
 
-	res := routertest.Get(h, target, routertest.Host(atHost))
-	for _, c := range res.Cookies() {
-		if c.Name == "_csrf" {
-			return c
-		}
+	cl.Get(path)
+	token := cl.Cookie("_csrf")
+	if token == nil {
+		t.Fatalf("%s issued no CSRF cookie", path)
 	}
-	t.Fatalf("%s issued no CSRF cookie (status %d)", target, res.StatusCode)
-	return nil
-}
-
-func postTo(t *testing.T, h http.Handler, atHost, target string, form url.Values) *routertest.Response {
-	t.Helper()
-
-	token := csrf(t, h, atHost, target)
 	form.Set("_csrf", token.Value)
-	return routertest.Do(h, http.MethodPost, target,
-		routertest.Host(atHost),
-		routertest.Cookie(token),
-		routertest.FormBody(form))
+	return cl.Do(http.MethodPost, path, routertest.FormBody(form))
 }
 
-func signUp(t *testing.T, h http.Handler, name, email, password string) *routertest.Response {
+// signUp creates a workspace from the apex. The answer sends the browser on to
+// the workspace host.
+func signUp(t *testing.T, cl *routertest.Client, name, email, password string) *routertest.Response {
 	t.Helper()
-	return postTo(t, h, apex, signupURL, url.Values{
+	return postForm(t, cl, "/signup", url.Values{
 		"name":     {name},
 		"email":    {email},
 		"password": {password},
 	})
 }
 
-func logIn(t *testing.T, h http.Handler, slug, email, password string) *routertest.Response {
+func logIn(t *testing.T, cl *routertest.Client, email, password string) *routertest.Response {
 	t.Helper()
-
-	at := host(slug)
-	return postTo(t, h, at, "http://"+at+"/login",
-		url.Values{"email": {email}, "password": {password}})
+	return postForm(t, cl, "/login", url.Values{"email": {email}, "password": {password}})
 }
 
-func enterWith(t *testing.T, h http.Handler, location string) *routertest.Response {
-	t.Helper()
-
-	u, err := url.Parse(location)
-	if err != nil {
-		t.Fatalf("signup redirected to %q: %v", location, err)
-	}
-	return routertest.Get(h, location, routertest.Host(u.Host))
-}
-
+// sessionOf reports the session cookie that res sets, with the attributes the
+// jar of a client drops.
 func sessionOf(t *testing.T, res *routertest.Response) *http.Cookie {
 	t.Helper()
 
@@ -92,7 +76,7 @@ func sessionOf(t *testing.T, res *routertest.Response) *http.Cookie {
 func TestTheApexAnswersOnItself(t *testing.T) {
 	h := newTestRouter(t)
 
-	res := routertest.Get(h, "http://"+apex+"/", routertest.Host(apex))
+	res := browser(t, h, apex).Get("/")
 	res.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(res.String(), "Create a workspace") {
 		t.Errorf("the landing page has no signup link")
@@ -120,7 +104,8 @@ func TestTheApexHasNoDoorOfItsOwn(t *testing.T) {
 func TestSignupHandsTheOwnerToTheWorkspaceHost(t *testing.T) {
 	h := newTestRouter(t)
 
-	made := signUp(t, h, "Acme, Inc.", "ann@example.com", testPassword)
+	cl := browser(t, h, apex)
+	made := signUp(t, cl, "Acme, Inc.", "ann@example.com", testPassword)
 	made.Expect(t).Status(http.StatusSeeOther)
 
 	location := made.Header.Get(router.HeaderLocation)
@@ -134,8 +119,8 @@ func TestSignupHandsTheOwnerToTheWorkspaceHost(t *testing.T) {
 		}
 	}
 
-	entered := enterWith(t, h, location)
-	entered.Expect(t).Status(http.StatusSeeOther).Header(router.HeaderLocation, "/")
+	entered := cl.Follow(made)
+	entered.Expect(t).Redirect(http.StatusSeeOther, "/")
 
 	// No Domain: the session belongs to this workspace host alone.
 	if got := sessionOf(t, entered); got.Domain != "" || !got.HttpOnly {
@@ -145,13 +130,13 @@ func TestSignupHandsTheOwnerToTheWorkspaceHost(t *testing.T) {
 
 func TestATicketWorksOnceAndOnItsOwnHost(t *testing.T) {
 	h := newTestRouter(t)
-	location := signUp(t, h, "Acme", "ann@example.com", testPassword).Header.Get(router.HeaderLocation)
+	made := signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
 
-	enterWith(t, h, location).Expect(t).Header(router.HeaderLocation, "/")
+	browser(t, h, apex).Follow(made).Expect(t).Redirect(http.StatusSeeOther, "/")
 
-	// Spent. A second visit is sent to the door instead.
-	again := enterWith(t, h, location)
-	again.Expect(t).Header(router.HeaderLocation, "/login")
+	// Spent. A second visit, from another browser, is sent to the door instead.
+	again := browser(t, h, apex).Follow(made)
+	again.Expect(t).Redirect(http.StatusSeeOther, "/login")
 	for _, c := range again.Cookies() {
 		if c.Name == sessionCookie && c.MaxAge >= 0 {
 			t.Error("a spent ticket still started a session")
@@ -161,31 +146,30 @@ func TestATicketWorksOnceAndOnItsOwnHost(t *testing.T) {
 
 func TestATicketOfOneWorkspaceIsNoUseAtAnother(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Beta", "bob@example.com", testPassword)
-	location := signUp(t, h, "Acme", "ann@example.com", testPassword).Header.Get(router.HeaderLocation)
+	signUp(t, browser(t, h, apex), "Beta", "bob@example.com", testPassword)
+	made := signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
 
-	u, err := url.Parse(location)
+	u, err := made.Location()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stolen := "http://" + host("beta") + "/enter?" + u.RawQuery
-	res := routertest.Get(h, stolen, routertest.Host(host("beta")))
-	res.Expect(t).Header(router.HeaderLocation, "/login")
+	res := browser(t, h, host("beta")).Get("/enter?" + u.RawQuery)
+	res.Expect(t).Redirect(http.StatusSeeOther, "/login")
 }
 
 func TestTheWorkspaceAnswersOnItsOwnHost(t *testing.T) {
 	h := newTestRouter(t)
-	location := signUp(t, h, "Acme", "ann@example.com", testPassword).Header.Get(router.HeaderLocation)
-	session := sessionOf(t, enterWith(t, h, location))
+	cl := browser(t, h, apex)
+	cl.Follow(signUp(t, cl, "Acme", "ann@example.com", testPassword))
 
 	at := host("acme")
-	owner := routertest.Get(h, "http://"+at+"/", routertest.Host(at), routertest.Cookie(session))
+	owner := cl.Get("http://" + at + "/")
 	owner.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(owner.String(), "ann@example.com") {
 		t.Errorf("the dashboard does not name the signed-in account: %s", owner)
 	}
 
-	guest := routertest.Get(h, "http://"+at+"/", routertest.Host(at))
+	guest := browser(t, h, at).Get("/")
 	guest.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(guest.String(), "as a guest") {
 		t.Error("an anonymous reader is not told they are a guest")
@@ -197,17 +181,17 @@ func TestTheWorkspaceAnswersOnItsOwnHost(t *testing.T) {
 
 func TestLoginBelongsToTheWorkspace(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com", testPassword)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
 
-	at := host("acme")
-	form := routertest.Get(h, "http://"+at+"/login", routertest.Host(at))
+	cl := browser(t, h, host("acme"))
+	form := cl.Get("/login")
 	form.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(form.String(), "Sign in to Acme") {
 		t.Errorf("the login form does not name its workspace: %s", form)
 	}
 
-	res := logIn(t, h, "acme", "ann@example.com", testPassword)
-	res.Expect(t).Status(http.StatusSeeOther).Header(router.HeaderLocation, "/")
+	res := logIn(t, cl, "ann@example.com", testPassword)
+	res.Expect(t).Redirect(http.StatusSeeOther, "/")
 	if got := sessionOf(t, res); got.Domain != "" {
 		t.Errorf("session cookie domain = %q, want none", got.Domain)
 	}
@@ -218,22 +202,22 @@ func TestLoginBelongsToTheWorkspace(t *testing.T) {
 
 func TestAnAccountOfOneWorkspaceCannotOpenAnother(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com", testPassword)
-	signUp(t, h, "Beta", "ann@example.com", "another password")
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
+	signUp(t, browser(t, h, apex), "Beta", "ann@example.com", "another password")
 
 	// The same address holds two accounts, and they are two accounts.
-	logIn(t, h, "beta", "ann@example.com", "another password").
+	logIn(t, browser(t, h, host("beta")), "ann@example.com", "another password").
 		Expect(t).Status(http.StatusSeeOther)
-	logIn(t, h, "beta", "ann@example.com", testPassword).
+	logIn(t, browser(t, h, host("beta")), "ann@example.com", testPassword).
 		Expect(t).Status(http.StatusUnprocessableEntity)
 }
 
 func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com", testPassword)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
 
-	wrong := logIn(t, h, "acme", "ann@example.com", "not the password")
-	unknown := logIn(t, h, "acme", "nobody@example.com", testPassword)
+	wrong := logIn(t, browser(t, h, host("acme")), "ann@example.com", "not the password")
+	unknown := logIn(t, browser(t, h, host("acme")), "nobody@example.com", testPassword)
 
 	// The same answer either way: the form must not say who has an account.
 	for _, res := range []*routertest.Response{wrong, unknown} {
@@ -251,26 +235,25 @@ func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 
 func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com", testPassword)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
 
-	signedIn := logIn(t, h, "acme", "ann@example.com", testPassword)
-	session := sessionOf(t, signedIn)
+	cl := browser(t, h, host("acme"))
+	logIn(t, cl, "ann@example.com", testPassword)
 
 	// Read the dashboard and post its own sign-out form, token and all. A
 	// form that carries no token has to fail here, as it does in a browser.
-	at := host("acme")
-	page := routertest.Get(h, "http://"+at+"/", routertest.Host(at), routertest.Cookie(session))
+	page := cl.Get("/")
 	page.Expect(t).Status(http.StatusOK)
 
-	res := routertest.Do(h, http.MethodPost, "http://"+at+"/signout",
-		routertest.Host(at),
-		routertest.Cookie(csrfCookieOf(t, page)),
-		routertest.Cookie(session),
+	res := cl.Do(http.MethodPost, "/signout",
 		routertest.FormBody(url.Values{"_csrf": {hiddenToken(t, page.String())}}))
 
-	res.Expect(t).Status(http.StatusSeeOther).Header(router.HeaderLocation, "/login")
+	res.Expect(t).Redirect(http.StatusSeeOther, "/login")
 	if got := sessionOf(t, res); got.MaxAge >= 0 {
 		t.Errorf("sign out left the session alive: %+v", got)
+	}
+	if cl.Cookie(sessionCookie) != nil {
+		t.Error("the browser still holds the session after sign out")
 	}
 }
 
@@ -286,18 +269,6 @@ func hiddenToken(t *testing.T, body string) string {
 		t.Fatalf("the _csrf field of the page is empty: %s", body)
 	}
 	return token
-}
-
-func csrfCookieOf(t *testing.T, res *routertest.Response) *http.Cookie {
-	t.Helper()
-
-	for _, c := range res.Cookies() {
-		if c.Name == "_csrf" {
-			return c
-		}
-	}
-	t.Fatal("the page issued no CSRF cookie")
-	return nil
 }
 
 func TestAnUnknownSubdomainIsNotFound(t *testing.T) {
@@ -322,7 +293,7 @@ func TestSignupRefusesANameWithoutLettersAndAReservedOne(t *testing.T) {
 	h := newTestRouter(t)
 
 	for _, name := range []string{"!!!", "WWW"} {
-		res := signUp(t, h, name, "ann@example.com", testPassword)
+		res := signUp(t, browser(t, h, apex), name, "ann@example.com", testPassword)
 		res.Expect(t).Status(http.StatusUnprocessableEntity)
 		if !strings.Contains(res.String(), "Pick another name") {
 			t.Errorf("%q: the form does not say why it refused: %s", name, res)
@@ -332,9 +303,9 @@ func TestSignupRefusesANameWithoutLettersAndAReservedOne(t *testing.T) {
 
 func TestSignupRefusesATakenSubdomain(t *testing.T) {
 	h := newTestRouter(t)
-	signUp(t, h, "Acme", "ann@example.com", testPassword)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
 
-	res := signUp(t, h, "acme", "bob@example.com", testPassword)
+	res := signUp(t, browser(t, h, apex), "acme", "bob@example.com", testPassword)
 	res.Expect(t).Status(http.StatusUnprocessableEntity)
 	if !strings.Contains(res.String(), "taken") {
 		t.Errorf("the form does not say the subdomain is taken: %s", res)
@@ -344,7 +315,7 @@ func TestSignupRefusesATakenSubdomain(t *testing.T) {
 func TestSignupNeedsAPasswordOfEightCharacters(t *testing.T) {
 	h := newTestRouter(t)
 
-	res := signUp(t, h, "Acme", "ann@example.com", "short")
+	res := signUp(t, browser(t, h, apex), "Acme", "ann@example.com", "short")
 	res.Expect(t).Status(http.StatusUnprocessableEntity)
 	if !strings.Contains(res.String(), "at least 8 characters") {
 		t.Errorf("the form does not name the password rule: %s", res)
@@ -354,7 +325,7 @@ func TestSignupNeedsAPasswordOfEightCharacters(t *testing.T) {
 func TestSignupNeedsTheCSRFToken(t *testing.T) {
 	h := newTestRouter(t)
 
-	res := routertest.Do(h, http.MethodPost, signupURL, routertest.Host(apex),
+	res := browser(t, h, apex).Do(http.MethodPost, "/signup",
 		routertest.FormBody(url.Values{
 			"name": {"Acme"}, "email": {"ann@example.com"}, "password": {testPassword},
 		}))
