@@ -234,7 +234,7 @@ c.HX().LocationWith(router.HXLocation{Path: "/next"}) // handle the swap with hx
 `TriggerEventsAfterSwap` and `TriggerEventsAfterSettle` become `TriggerEvents`. Write `HTMXRequest{...}` literals with field names. Tests and cache configs that pin the old `Vary` list expect `Hx-Request, Hx-Request-Type`. Where a client-side navigation is still wanted for a full request, answer `c.HX().Redirect(url)`. A test that needs a full request adds `routertest.Header(router.HeaderHXRequestType, "full")` to `routertest.HTMX()`.
 
 ```sh
-grep -rnE 'HeaderHXPrompt|HeaderHXTriggerName|HeaderHXTriggerAfter|HTMX\(\)\.(Target|Trigger|TriggerName|Prompt)\b|\.TriggerName|\.Prompt\b|TriggerAfterSwap|TriggerAfterSettle|TriggerEventsAfter|Handler:|Hx-Boosted Hx-History-Restore-Request|HTMXRequest\{' --include='*.go' .
+grep -rnE 'HeaderHXPrompt|HeaderHXTriggerName|HeaderHXTriggerAfter|HTMX\(\)\.(Target|Trigger|TriggerName|Prompt)\b|\.TriggerName|\.Prompt\b|TriggerAfterSwap|TriggerAfterSettle|TriggerEventsAfter|Handler:|HeaderHXBoosted|HeaderHXHistoryRestoreRequest|Hx-Boosted|Hx-History-Restore-Request|HTMXRequest\{' --include='*.go' .
 ```
 
 #### The router cookie codec
