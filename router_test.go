@@ -2929,3 +2929,209 @@ func TestAddFlashWithoutACodecAnswers500(t *testing.T) {
 		t.Errorf("a router without a codec set a cookie: %q", got)
 	}
 }
+
+func isSKU(s string) bool {
+	return len(s) == 8 && strings.Trim(s[:3], "ABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" && s[3] == '-' && isDigits(s[4:])
+}
+
+func isLetters(s string) bool { return s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyz") == "" }
+
+func TestParamClass(t *testing.T) {
+	r := newTestRouter()
+	r.ParamClass("sku", isSKU)
+	r.GET("/products/{sku:sku}", func(c *tctx) error { return c.String(http.StatusOK, "sku "+c.Param("sku")) })
+	r.GET("/products/{name}", func(c *tctx) error { return c.String(http.StatusOK, "name "+c.Param("name")) })
+	r.GET("/skus/{sku:sku}", echoRoute)
+
+	for target, want := range map[string]string{
+		"/products/ABC-1234": "sku ABC-1234",
+		"/products/abc":      "name abc",
+	} {
+		if got := do(r, http.MethodGet, target).Body.String(); got != want {
+			t.Errorf("GET %s = %q, want %q", target, got, want)
+		}
+	}
+	for target, want := range map[string]int{
+		"/skus/ABC-1234": http.StatusMethodNotAllowed,
+		"/skus/abc":      http.StatusNotFound,
+	} {
+		if got := do(r, http.MethodPut, target).Code; got != want {
+			t.Errorf("PUT %s = %d, want %d", target, got, want)
+		}
+	}
+}
+
+func TestParamClassPanics(t *testing.T) {
+	ok := func(string) bool { return true }
+	tests := []struct {
+		name string
+		want string
+		fn   func(r *Router[*tctx])
+	}{
+		{"empty name", "needs a name", func(r *Router[*tctx]) { r.ParamClass("", ok) }},
+		{"hyphen", "needs a name", func(r *Router[*tctx]) { r.ParamClass("short-id", ok) }},
+		{"leading digit", "needs a name", func(r *Router[*tctx]) { r.ParamClass("1id", ok) }},
+		{"leading underscore", "needs a name", func(r *Router[*tctx]) { r.ParamClass("_id", ok) }},
+		{"nil match", "needs a match function", func(r *Router[*tctx]) { r.ParamClass("code", nil) }},
+		{"built in", "built-in class uuid", func(r *Router[*tctx]) { r.ParamClass("uuid", ok) }},
+		{"duplicate", "twice", func(r *Router[*tctx]) {
+			r.ParamClass("code", ok)
+			r.ParamClass("code", ok)
+		}},
+		{"scope", "root router", func(r *Router[*tctx]) {
+			r.Group(func(g *Router[*tctx]) { g.ParamClass("code", ok) })
+		}},
+		{"serving", "after the router started serving", func(r *Router[*tctx]) {
+			do(r, http.MethodGet, "/")
+			r.ParamClass("code", ok)
+		}},
+		{"mounted", "on a mounted router", func(r *Router[*tctx]) {
+			sub := newTestRouter()
+			r.Mount("/s", sub)
+			sub.ParamClass("code", ok)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mustPanicContaining(t, tc.want, func() { tc.fn(newTestRouter()) })
+		})
+	}
+}
+
+func TestParamClassNeverSeesAnEmptyValue(t *testing.T) {
+	r := newTestRouter()
+	r.ParamClass("c", func(s string) bool {
+		if s == "" {
+			t.Error("the class saw an empty value")
+		}
+		return true
+	})
+	r.GET("/f-{id:c}.csv", echoRoute)
+	r.GET("/x/{id:c}/y", echoRoute)
+	r.Route("/s/{id:c}", func(s *Router[*tctx]) {
+		s.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "scope") })
+		s.GET("/present", echoRoute)
+	})
+
+	for _, target := range []string{"/f-.csv", "/x//y", "/s//missing"} {
+		if got := do(r, http.MethodGet, target).Code; got != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", target, got)
+		}
+	}
+}
+
+func TestParamClassReachesScopeFallback(t *testing.T) {
+	r := newTestRouter()
+	r.ParamClass("code", isDigits)
+	r.Route("/agents/{agent:code}", func(s *Router[*tctx]) {
+		s.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "scope "+c.Param("agent")) })
+		s.GET("/present", echoRoute)
+	})
+
+	if got := do(r, http.MethodGet, "/agents/42/missing").Body.String(); got != "scope 42" {
+		t.Errorf("a miss under an admitted agent = %q, want the scope handler", got)
+	}
+	if got := do(r, http.MethodGet, "/agents/nope/missing").Body.String(); strings.HasPrefix(got, "scope") {
+		t.Errorf("a miss under a refused agent = %q, want the root handler", got)
+	}
+}
+
+func TestMountedRouterKeepsItsOwnClasses(t *testing.T) {
+	sub := newTestRouter()
+	sub.ParamClass("code", isDigits)
+	sub.GET("/{c:code}", echoRoute)
+
+	parent := newTestRouter()
+	parent.ParamClass("code", isLetters)
+	parent.GET("/p/{c:code}", echoRoute)
+	parent.Mount("/s", sub)
+
+	for target, want := range map[string]int{
+		"/s/123": http.StatusOK,
+		"/s/abc": http.StatusNotFound,
+		"/p/abc": http.StatusOK,
+		"/p/123": http.StatusNotFound,
+	} {
+		if got := do(parent, http.MethodGet, target).Code; got != want {
+			t.Errorf("GET %s = %d, want %d", target, got, want)
+		}
+	}
+
+	t.Run("the mount prefix takes a class of the parent", func(t *testing.T) {
+		sub := newTestRouter()
+		sub.GET("/x", echoRoute)
+		parent := newTestRouter()
+		parent.ParamClass("tenant", isLetters)
+		parent.Mount("/t/{t:tenant}", sub)
+
+		if got := do(parent, http.MethodGet, "/t/acme/x").Body.String(); got != "/t/{t:tenant}/x t=acme" {
+			t.Errorf("GET /t/acme/x = %q", got)
+		}
+		if got := do(parent, http.MethodGet, "/t/42/x").Code; got != http.StatusNotFound {
+			t.Errorf("GET /t/42/x = %d, want 404", got)
+		}
+	})
+}
+
+// Two declarations of one name are two classes, so a key made of the name
+// alone would put their routes in one node and run one class for both.
+func TestSameNamedClassesDoNotShareANode(t *testing.T) {
+	parent := newTestRouter()
+	parent.ParamClass("code", isLetters)
+	parent.GET("/x/{c:code}", func(c *tctx) error { return c.String(http.StatusOK, "parent") })
+
+	sub := newTestRouter()
+	sub.ParamClass("code", isDigits)
+	sub.POST("/x/{c:code}", func(c *tctx) error { return c.String(http.StatusOK, "sub") })
+	parent.Mount("/", sub)
+
+	if rec := do(parent, http.MethodPost, "/x/123"); rec.Code != http.StatusOK || rec.Body.String() != "sub" {
+		t.Errorf("POST /x/123 = %d %q, want 200 sub", rec.Code, rec.Body)
+	}
+	rec := do(parent, http.MethodGet, "/x/123")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /x/123 = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get(HeaderAllow); got != "OPTIONS, POST" {
+		t.Errorf("GET /x/123 Allow = %q, want OPTIONS, POST", got)
+	}
+	if rec := do(parent, http.MethodGet, "/x/abc"); rec.Code != http.StatusOK || rec.Body.String() != "parent" {
+		t.Errorf("GET /x/abc = %d %q, want 200 parent", rec.Code, rec.Body)
+	}
+}
+
+func TestMountRefusesAHostWhoseClassesDiffer(t *testing.T) {
+	parent := newTestRouter()
+	parent.ParamClass("code", isLetters)
+	parent.Host("{t:code}.example.com", func(h *Router[*tctx]) { h.GET("/a", echoHost) })
+
+	sub := newTestRouter()
+	sub.ParamClass("code", isDigits)
+	sub.Host("{t:code}.example.com", func(h *Router[*tctx]) { h.GET("/b", echoHost) })
+
+	mustPanicContaining(t, "resolves a parameter class differently", func() { parent.Mount("/", sub) })
+}
+
+// A key built from a pointer would order two hosts of equal specificity by
+// heap address, so the scope a request reached could change from run to run.
+func TestHostOrderIsStableAcrossClassDeclarations(t *testing.T) {
+	build := func() *Router[*tctx] {
+		parent := newTestRouter()
+		parent.ParamClass("code", isLetters)
+		sub := newTestRouter()
+		sub.ParamClass("code", isLetters)
+		parent.Host("{a:code}.example.com", func(h *Router[*tctx]) {
+			h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "parent") })
+		})
+		sub.Host("{b:code}.example.com", func(h *Router[*tctx]) {
+			h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "sub") })
+		})
+		parent.Mount("/", sub)
+		return parent
+	}
+	for i := range 20 {
+		if got := doHost(build(), http.MethodGet, "x.example.com", "/").Body.String(); got != "parent" {
+			t.Fatalf("build %d reached %q, want the host whose class was declared first", i, got)
+		}
+	}
+}

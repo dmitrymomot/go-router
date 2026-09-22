@@ -72,6 +72,10 @@ func joinPattern(prefix, pattern string) string {
 // scope prefix or the host pattern already names, a route that collides with
 // one registered earlier, and a name a scope has already used. A nil here does
 // not promise that Handle will accept the pattern in every scope.
+//
+// It knows the built-in classes int, slug and uuid. Any other word that
+// [Router.ParamClass] could declare passes, and Handle checks that the router
+// declares it.
 func ValidatePattern(pattern string) error {
 	_, _, err := parsePattern(pattern, anyClass)
 	return err
