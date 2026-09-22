@@ -13,8 +13,8 @@ import (
 // that [Run] takes as separate arguments.
 type Server struct {
 	Handler http.Handler
-	Options []Option
 	Config  Config
+	Options []Option
 }
 
 // RunAll runs every server until ctx ends, or until any one of them stops, and
