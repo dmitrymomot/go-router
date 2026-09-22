@@ -293,6 +293,24 @@ func TestRateLimitCountsAnIPv6NetworkAsOneClient(t *testing.T) {
 	}
 }
 
+func TestRateLimitCountsEachIPv4ClientBehindNAT64Apart(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.RateLimit[*appContext](middleware.NewRateLimitMemoryStore(0.001, 1, 0)))
+	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	for _, addr := range []string{
+		"[64:ff9b::c000:201]:1", "[64:ff9b::c000:202]:1",
+		"[64:ff9b:1::c000:201]:1", "[64:ff9b:1::c000:202]:1",
+		"[64:ff9b:1:ab::c000:201]:1",
+	} {
+		if rec := rateLimitGet(r, addr); rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", addr, rec.Code)
+		}
+	}
+	if rec := rateLimitGet(r, "[64:ff9b::c000:201]:2"); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("a repeat of 192.0.2.1 through NAT64: status = %d, want 429", rec.Code)
+	}
+}
+
 func TestRateLimitFullStoreAdmitsANewClient(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.RateLimit[*appContext](middleware.NewRateLimitMemoryStoreWithConfig(
