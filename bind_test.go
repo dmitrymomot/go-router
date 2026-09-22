@@ -1642,6 +1642,9 @@ func TestFormRequired(t *testing.T) {
 			if fe, ok := errors.AsType[FieldError](got); !ok || fe != tt.wantFields[0] {
 				t.Errorf("errors.AsType[FieldError] = %#v, %v, want %#v", fe, ok, tt.wantFields[0])
 			}
+			if fields := FieldErrorsOf(got); !reflect.DeepEqual(fields, tt.wantFields) {
+				t.Errorf("FieldErrorsOf = %#v, want exactly %#v", fields, tt.wantFields)
+			}
 		})
 	}
 }

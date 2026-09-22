@@ -178,9 +178,13 @@ func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {
 	for i, f := range fields {
 		errs[i] = f
 	}
-	return ErrBadRequest.WithMessage("invalid request").
-		WithDetails(fields).
-		WithError(errors.Join(errs...))
+	return badFields(fields, errors.Join(errs...))
+}
+
+// badFields is the 400 of a value that did not decode, one [FieldError] per
+// field that failed.
+func badFields(fields []FieldError, cause error) *HTTPError {
+	return ErrBadRequest.WithMessage("invalid request").WithDetails(fields).WithError(cause)
 }
 
 type countingBody struct {
@@ -438,9 +442,7 @@ func (b *Base) FormRequired(name string) (string, error) {
 		return v, nil
 	}
 	fe := FieldError{Field: name, Message: "is required"}
-	return "", ErrBadRequest.WithMessage("invalid request").
-		WithDetails([]FieldError{fe}).
-		WithError(fe)
+	return "", badFields([]FieldError{fe}, fe)
 }
 
 // FormValues reports the parsed form of the body. The router parses it once
