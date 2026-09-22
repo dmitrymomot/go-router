@@ -28,6 +28,7 @@ Ordered by risk, the silent ones first.
 11. **The `Context` interface gains three methods, and `SetRequest` refuses a context derived from the Base.** `Context` gains `SetContext(ctx)`, `SetBodyLimit(n)` and `RouteMeta() []any`, in the order `SetRequest, SetContext, SetBodyLimit, Response, …, RoutePattern, RouteMeta, RouteHost`. A context type that embeds `Base` gets them for free, but one that declares its own member of that name with another signature no longer satisfies `Context`. `SetRequest` panics when the request's context is the Base or derives from it, as in `c.SetRequest(c.Request().WithContext(context.WithValue(c, k, v)))`; that code used to end in a fatal stack overflow on the first `Value`, `Done`, `Err` or `Deadline` lookup that missed.
 12. **routertest: the Assert methods are gone.** `(*Response).AssertStatus`, `AssertBody` and `AssertHeader` are removed in favor of `Expect`. `Expect(t).Body` and `Header` report a miss with `Errorf` and let the test go on, where `AssertBody` and `AssertHeader` stopped it with `Fatalf`. Without `WithRequest` or `WithTarget`, `NewContext` builds its request on `tb.Context()` instead of `context.Background()`, so a handler that outlives the test sees a canceled context, and a fake `testing.TB` whose embedded TB is nil must implement `Context()`. `Serve`, `Do` and `Get` now fill `Response.Request`, which was nil.
 13. **serve: two new Config fields and an earlier TLS check.** `Config` gains `DrainDelay` and `OnDrain`, so a positional `Config{...}` literal no longer compiles. `Run` reports a TLS config with no certificate (no `Certificates`, `GetCertificate` or `GetConfigForClient`) before it listens, after `OnServer`, so `OnListen` no longer runs in that case, and the error changes from net/http's `open : no such file or directory` to `serve: the TLS config has no certificate; ...`. Two messages no longer name Run: `serve: Run needs a handler` becomes `serve: the server needs a handler`, and `serve: Run needs Config.Addr or Config.Listener` becomes `serve: the server needs Config.Addr or Config.Listener`.
+14. **`SetRouteForTest` is gone.** Package router no longer exports a function that only a test calls. Build the context with `routertest.NewContext(t, newCtx, routertest.WithPattern(pattern), routertest.WithParams(params))`, which fills the route and its parameters the same way.
 
 ### Added
 
@@ -62,7 +63,6 @@ Cookies and flashes:
 - `Router.CookieCodec(cc)`, one codec for signed cookies and flashes, and `ErrNoCookieCodec`.
 - `NewCookieCodec(key, previous...)` signs with `key` and also verifies with each previous key, for key rotation. A `CookieCodec` may now be copied; a copy shares the keys. The wire format is unchanged, so v0.1 cookies still verify with the same key.
 - `Base.NewCookie(name, value, maxAge)`, a cookie with safe defaults whose `Secure` follows `Scheme()`, and `Base.ClearCookie(name)`.
-- `CookieCodecOf(h)` and `SetCookieCodecForTest(b, cc)` let test tooling reach the codec of a router.
 
 Responses:
 
@@ -110,6 +110,7 @@ serve:
 
 - htmx 2 only: `HeaderHXPrompt`, `HeaderHXTriggerName`, `HeaderHXTriggerAfterSwap`, `HeaderHXTriggerAfterSettle`, the `HTMXRequest` fields `Prompt`, `Trigger` and `TriggerName`, the `HXResponse` methods `TriggerAfterSwap`, `TriggerAfterSettle`, `TriggerEventsAfterSwap` and `TriggerEventsAfterSettle`, and `HXLocation.Handler`. `HeaderHXTrigger` stays as a response header.
 - routertest: `(*Response).AssertStatus`, `AssertBody` and `AssertHeader`.
+- `SetRouteForTest`. `routertest.NewContext` with `WithPattern` and `WithParams` replaces it.
 
 ### Known limits
 
@@ -265,7 +266,7 @@ if err := c.AddFlash(router.Flash{Kind: "success", Message: "saved"}); err != ni
 flashes := c.Flashes()
 ```
 
-A handler that treats every `SignedCookie` error as signed out checks `errors.Is(err, router.ErrNoCookieCodec)` first. In tests, pass `routertest.WithCookieCodec(cc)` to `NewContext`, or call `router.SetCookieCodecForTest(b, cc)`. Set the codec on the parent of a mounted router; a router given to `MountRouter` or `HostRouter` calls `sub.CookieCodec(cc)` itself. A function value of `NewCookieCodec` becomes `func(k []byte) *router.CookieCodec { return router.NewCookieCodec(k) }`. A test that expected a `Max-Age=0` `_flash` line after an add and a read in one request now expects no `_flash` line.
+A handler that treats every `SignedCookie` error as signed out checks `errors.Is(err, router.ErrNoCookieCodec)` first. In tests, pass `routertest.WithCookieCodec(cc)` to `NewContext`. Set the codec on the parent of a mounted router; a router given to `MountRouter` or `HostRouter` calls `sub.CookieCodec(cc)` itself. A function value of `NewCookieCodec` becomes `func(k []byte) *router.CookieCodec { return router.NewCookieCodec(k) }`. A test that expected a `Max-Age=0` `_flash` line after an add and a read in one request now expects no `_flash` line.
 
 ```sh
 grep -rnE '\.AddFlash\(|\.Flashes\(|SignedCookie\(|NewCookieCodec' --include='*.go' .
