@@ -103,6 +103,41 @@ func TestSetScalarLeavesAPointerNilForAnEmptyValue(t *testing.T) {
 	}
 }
 
+func TestSetScalarLeavesAPointerNilOnAParseFailure(t *testing.T) {
+	var dst struct {
+		Page  *int
+		Deep  **int
+		Since *time.Time
+	}
+	rv := reflect.ValueOf(&dst).Elem()
+
+	if err := setScalar(rv.Field(0), "abc", ""); err == nil {
+		t.Error("setScalar(*int, abc) reported no error")
+	}
+	if dst.Page != nil {
+		t.Errorf("Page = %d, want nil after a parse failure", *dst.Page)
+	}
+	if err := setScalar(rv.Field(1), "abc", ""); err == nil {
+		t.Error("setScalar(**int, abc) reported no error")
+	}
+	if dst.Deep != nil {
+		t.Errorf("Deep = %v, want nil after a parse failure", dst.Deep)
+	}
+	if err := setScalar(rv.Field(2), "not a date", time.DateOnly); err == nil {
+		t.Error("setScalar(*time.Time, not a date) reported no error")
+	}
+	if dst.Since != nil {
+		t.Errorf("Since = %v, want nil after a parse failure", dst.Since)
+	}
+
+	if p, err := ParseValue[*int]("abc"); err == nil || p != nil {
+		t.Errorf("ParseValue[*int](abc) = %v, %v, want nil and an error", p, err)
+	}
+	if p, err := ParseValue[*int]("7"); err != nil || p == nil || *p != 7 {
+		t.Errorf("ParseValue[*int](7) = %v, %v, want a pointer to 7", p, err)
+	}
+}
+
 func TestSetScalarFillsAByteSlice(t *testing.T) {
 	var dst struct {
 		Data  []byte

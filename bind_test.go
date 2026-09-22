@@ -260,6 +260,34 @@ func TestBindQueryLeavesAnOptionalFieldNilForAnEmptyValue(t *testing.T) {
 	}
 }
 
+func TestBindQueryLeavesAFailedPointerNil(t *testing.T) {
+	type filter struct {
+		Page *int `query:"page"`
+	}
+	var got filter
+	var gotAs *int
+	r := newTestRouter()
+	r.GET("/search", func(c *tctx) error {
+		var err error
+		got, err = c.BindQuery[filter]()
+		if err == nil {
+			t.Error("BindQuery reported no error for page=abc")
+		}
+		if gotAs, err = c.QueryAs[*int]("page"); err == nil {
+			t.Error("QueryAs reported no error for page=abc")
+		}
+		return nil
+	})
+
+	do(r, http.MethodGet, "/search?page=abc")
+	if got.Page != nil {
+		t.Errorf("BindQuery Page = %d, want nil", *got.Page)
+	}
+	if gotAs != nil {
+		t.Errorf("QueryAs = %d, want nil", *gotAs)
+	}
+}
+
 func TestParamAsAndQueryAs(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/users/{id}", func(c *tctx) error {
