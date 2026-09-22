@@ -26,4 +26,12 @@ var (
 	// CookieCodec reports the *router.CookieCodec of h when h is a router, or
 	// nil when it is not or has none.
 	CookieCodec func(h http.Handler) any
+
+	// FillPattern fills every parameter of a route pattern, or of a host
+	// pattern when host is set, with what value reports for its name and its
+	// constraint, such as "int", or "" for none. An anonymous * label of a
+	// host reaches value as the name "*". It checks nothing: path values are
+	// escaped, host values go in as they are, and pairs lists the names and
+	// values in the order Expand takes them.
+	FillPattern func(pattern string, host bool, value func(name, constraint string) string) (filled string, pairs []string)
 )

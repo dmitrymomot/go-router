@@ -2,6 +2,8 @@ package router
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
@@ -19,6 +21,7 @@ func init() {
 		codec, _ := cc.(*CookieCodec)
 		mustBeBuiltCodec(codec, caller)
 	}
+	routerhook.FillPattern = fillPattern
 	routerhook.CookieCodec = func(h http.Handler) any {
 		if cc := cookieCodecOf(h); cc != nil {
 			return cc
@@ -65,4 +68,30 @@ func cookieCodecOf(h http.Handler) *CookieCodec {
 		return r.cookieCodec()
 	}
 	return nil
+}
+
+// fillPattern writes pattern with each parameter set to what value reports,
+// through the same parts that Expand writes, and checks nothing.
+func fillPattern(pattern string, host bool, value func(name, constraint string) string) (string, []string) {
+	var (
+		b     strings.Builder
+		pairs []string
+	)
+	for _, p := range parseURLTemplate(pattern) {
+		if p.name == "" {
+			b.WriteString(p.lit)
+			continue
+		}
+		v := value(p.name, p.constraint)
+		pairs = append(pairs, p.name, v)
+		switch {
+		case host:
+			b.WriteString(v)
+		case p.rest:
+			b.WriteString(escapeRest(v))
+		default:
+			b.WriteString(url.PathEscape(v))
+		}
+	}
+	return b.String(), pairs
 }

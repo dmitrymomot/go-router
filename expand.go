@@ -89,7 +89,9 @@ func templateFor(pattern string) (*urlTemplate, error) {
 type urlPart struct {
 	lit  string
 	name string
-	rest bool
+	// constraint is the text after the colon, such as "int" or "[0-9]+".
+	constraint string
+	rest       bool
 }
 
 // urlTemplate is a pattern cut into the parts that Expand writes. A path
@@ -435,8 +437,9 @@ func quoteList(names []string) string {
 	return strings.Join(out, ", ")
 }
 
-// parseURLTemplate cuts a pattern the router accepted into literal text and
-// parameters. It trusts the pattern, so it does not report an error.
+// parseURLTemplate cuts a pattern into literal text and parameters. It does not
+// report an error: an unbalanced brace and what follows it stay literal text,
+// which only a pattern the router refused can hold.
 func parseURLTemplate(pattern string) []urlPart {
 	var (
 		parts []urlPart
@@ -445,13 +448,17 @@ func parseURLTemplate(pattern string) []urlPart {
 	for i := 0; i < len(pattern); {
 		switch pattern[i] {
 		case '{':
-			end, _ := closingBrace(pattern, i)
+			end, ok := closingBrace(pattern, i)
+			if !ok {
+				i = len(pattern)
+				continue
+			}
 			if lit < i {
 				parts = append(parts, urlPart{lit: pattern[lit:i]})
 			}
-			name, _, _ := strings.Cut(pattern[i+1:end], ":")
+			name, constraint, _ := strings.Cut(pattern[i+1:end], ":")
 			name, rest := strings.CutSuffix(name, "...")
-			parts = append(parts, urlPart{name: name, rest: rest})
+			parts = append(parts, urlPart{name: name, constraint: constraint, rest: rest})
 			i, lit = end+1, end+1
 
 		case '*':
