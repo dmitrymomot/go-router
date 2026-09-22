@@ -365,6 +365,7 @@ func TestRequestHelpersRejectNilInputs(t *testing.T) {
 		{name: "request option", call: func() { routertest.Request(http.MethodGet, "/", nil) }},
 		{name: "body reader", call: func() { routertest.Body("text/plain", nil) }},
 		{name: "cookie", call: func() { routertest.Cookie(nil) }},
+		{name: "recorder", call: func() { routertest.Recorded(nil) }},
 		{name: "cookie codec", call: func() { routertest.WithCookieCodec(nil) }},
 		{name: "Serve handler", call: func() { routertest.Serve(nil, routertest.Request(http.MethodGet, "/")) }},
 		{name: "Serve request", call: func() { routertest.Serve(http.NotFoundHandler(), nil) }},
@@ -378,6 +379,52 @@ func TestRequestHelpersRejectNilInputs(t *testing.T) {
 			}()
 			tt.call()
 		})
+	}
+}
+
+func TestRecordedReadsTheRecorder(t *testing.T) {
+	c, rec := routertest.NewContext(t, newContext)
+	if err := c.Redirect(http.StatusSeeOther, "/x"); err != nil {
+		t.Fatalf("Redirect: %v", err)
+	}
+	res := routertest.Recorded(rec)
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get(router.HeaderLocation) != "/x" {
+		t.Errorf("status = %d, Location = %q; want 303 to /x", res.StatusCode, res.Header.Get(router.HeaderLocation))
+	}
+	if res.Request != nil {
+		t.Errorf("Request = %v, want nil for a recorder", res.Request)
+	}
+	if res.Recorder != rec {
+		t.Error("Recorder is not the recorder given")
+	}
+
+	c, rec = routertest.NewContext(t, newContext)
+	if err := c.JSON(http.StatusOK, user{Name: "ann", Age: 30}); err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	res = routertest.Recorded(rec)
+	if got, err := res.JSON[user](); err != nil || got != (user{Name: "ann", Age: 30}) {
+		t.Errorf("JSON = %+v, %v", got, err)
+	}
+	again, err := io.ReadAll(res.Response.Body)
+	if err != nil || string(again) != res.String() || res.String() == "" {
+		t.Errorf("body read again = %q, %v; want %q", again, err, res.String())
+	}
+}
+
+func TestServeKeepsTheRequest(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(router.HeaderLocation, "next")
+		w.WriteHeader(http.StatusSeeOther)
+	})
+	req := routertest.Request(http.MethodGet, "/a/b")
+	res := routertest.Serve(h, req)
+	if res.Request != req {
+		t.Fatal("the response does not carry the request Serve sent")
+	}
+	loc, err := res.Location()
+	if err != nil || loc.Path != "/a/next" {
+		t.Errorf("Location = %v, %v; want /a/next", loc, err)
 	}
 }
 

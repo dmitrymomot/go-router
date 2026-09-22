@@ -262,6 +262,8 @@ func paramSlices(params map[string]string) (names, vals []string) {
 
 // Response is what a handler answered. Body holds the whole body, already
 // read, and the embedded [http.Response] can be read again from the start.
+// [Serve] fills the Request of the embedded http.Response with the request it
+// sent, so Location resolves a relative redirect; [Recorded] leaves it nil.
 type Response struct {
 	*http.Response
 	Body     []byte
@@ -280,11 +282,25 @@ func Serve(h http.Handler, req *http.Request) *Response {
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+	res := Recorded(rec)
+	res.Request = req
+	res.codec = router.CookieCodecOf(h)
+	return res
+}
+
+// Recorded reports what rec holds as a Response, so the answer of a handler
+// called through [NewContext] can be checked with [Response.Expect].
+//
+// Recorded panics if rec is nil.
+func Recorded(rec *httptest.ResponseRecorder) *Response {
+	if rec == nil {
+		panic("routertest: Recorded needs a recorder")
+	}
 	res := rec.Result()
 	body, _ := io.ReadAll(res.Body)
 	_ = res.Body.Close()
 	res.Body = io.NopCloser(bytes.NewReader(body))
-	return &Response{Response: res, Body: body, Recorder: rec, codec: router.CookieCodecOf(h)}
+	return &Response{Response: res, Body: body, Recorder: rec}
 }
 
 // Do builds a request and sends it to h. See [Request] and [Serve].
