@@ -321,8 +321,8 @@ func (b *Base) parseForm() error {
 	return b.setFormError(ErrBadRequest.WithMessage("malformed form body").WithError(err))
 }
 
-// net/http removes these from the request it holds, but the binder parses into
-// a middleware copy, so nothing else would.
+// net/http removes these from the request it holds, but the binder may parse
+// into a copy that Decompress or a SetRequest made, so nothing else would.
 func removeSpilledParts(req *http.Request) {
 	form := req.MultipartForm
 	if form == nil || len(form.File) == 0 {

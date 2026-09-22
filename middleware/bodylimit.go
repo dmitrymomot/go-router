@@ -1,24 +1,29 @@
 package middleware
 
-import (
-	"net/http"
-
-	"github.com/dmitrymomot/go-router"
-)
+import "github.com/dmitrymomot/go-router"
 
 // BodyLimitConfig configures [BodyLimitWithConfig]. A Limit of zero or less
-// takes [router.DefaultMaxBodyBytes].
+// takes [router.DefaultMaxBodyBytes], which then replaces the cap of the
+// router as any other Limit does.
 type BodyLimitConfig struct {
 	Skip  func(c router.Context) bool
 	Limit int64
 }
 
-// BodyLimit caps the request body at limit bytes for the routes it covers,
-// which is what a single upload route needs above the setting of the router.
+// BodyLimit caps the request body at limit bytes for the routes it covers. It
+// replaces the cap of [router.Router.MaxBodyBytes] there, above or below it,
+// for the Bind methods and the form readers alike, so set the default with
+// MaxBodyBytes and raise it on the one upload route that needs more.
 //
 // A Content-Length over the limit is refused before the handler runs, and a
 // body that understates its length is cut off as it is read. Both report
-// [router.ErrPayloadTooLarge].
+// [router.ErrPayloadTooLarge], and the connection is closed after the answer.
+// Of two BodyLimits on one route, the smaller wins.
+//
+// Whatever reads the body before BodyLimit runs, such as CSRF with FromForm or
+// an outer ParseForm, reads it under the cap in force then. For a body that
+// [Decompress] expands, the limit also counts the expanded bytes that Bind
+// reads.
 func BodyLimit[C router.Context](limit int64) router.Middleware[C] {
 	return BodyLimitWithConfig[C](BodyLimitConfig{Limit: limit})
 }
@@ -36,18 +41,12 @@ func BodyLimitWithConfig[C router.Context](cfg BodyLimitConfig) router.Middlewar
 				return next(c)
 			}
 
-			req := c.Request()
-			if req.ContentLength > limit {
+			if c.Request().ContentLength > limit {
 				return router.ErrPayloadTooLarge.WithMessage(
 					"the request body is limited to %d bytes", limit)
 			}
 
-			if req.Body != nil && req.Body != http.NoBody {
-				capped := *req
-				capped.Body = http.MaxBytesReader(c.Response(), req.Body, limit)
-				c.SetRequest(&capped)
-			}
-
+			c.SetBodyLimit(limit)
 			return tooLarge(next(c), "the request body is limited to %d bytes", limit)
 		}
 	}
