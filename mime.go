@@ -32,6 +32,7 @@ const (
 	HeaderReferrerPolicy                  = "Referrer-Policy"
 	HeaderRetryAfter                      = "Retry-After"
 	HeaderSecFetchSite                    = "Sec-Fetch-Site"
+	HeaderSetCookie                       = "Set-Cookie"
 	HeaderStrictTransportSecurity         = "Strict-Transport-Security"
 	HeaderUserAgent                       = "User-Agent"
 	HeaderVary                            = "Vary"
