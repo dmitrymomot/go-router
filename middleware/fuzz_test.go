@@ -82,3 +82,16 @@ func FuzzForwardedProto(f *testing.F) {
 		}
 	})
 }
+
+func FuzzIdempotencyFingerprintEncoding(f *testing.F) {
+	f.Add("amount", "5", "amount", "5")
+	f.Add("ab", "c", "a", "bc")
+	f.Add("", "x", "x", "")
+	f.Fuzz(func(t *testing.T, a1, a2, b1, b2 string) {
+		a := appendIdempotencyFields(nil, a1, a2)
+		b := appendIdempotencyFields(nil, b1, b2)
+		if string(a) == string(b) && (a1 != b1 || a2 != b2) {
+			t.Errorf("[%q %q] and [%q %q] encode alike", a1, a2, b1, b2)
+		}
+	})
+}
