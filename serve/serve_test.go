@@ -350,19 +350,50 @@ func TestRunReportsATLSConfigWithoutACertificate(t *testing.T) {
 	}
 	defer ln.Close() //nolint:errcheck // The test closes it twice on purpose.
 
+	listened := false
 	err = serve.Run(context.Background(), ok(), serve.Config{
 		Listener:  ln,
 		Logger:    slog.New(slog.DiscardHandler),
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
+		OnListen:  func(net.Addr) { listened = true },
 	})
 	if err == nil {
 		t.Fatal("Run served TLS without a certificate")
 	}
-	if errors.Is(err, http.ErrServerClosed) {
-		t.Fatalf("err = %v, want the failure of the TLS setup", err)
+	if !strings.HasPrefix(err.Error(), "serve: ") {
+		t.Errorf("err = %v, want the check of Run rather than the failure of ServeTLS", err)
+	}
+	if listened {
+		t.Error("OnListen ran for a TLS config without a certificate")
 	}
 	if err := ln.Close(); err == nil {
 		t.Error("Run left the listener open after the TLS setup failed")
+	}
+}
+
+func TestOnServerCanSupplyTheCertificate(t *testing.T) {
+	certPEM, keyPEM := selfSigned(t)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("read the certificate: %v", err)
+	}
+
+	s := start(t, ok(), serve.Config{
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
+		OnServer: func(srv *http.Server) error {
+			srv.TLSConfig.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				return &cert, nil
+			}
+			return nil
+		},
+	})
+
+	res := await(t, call(tlsClient(t, certPEM, false), s.url("https", "/")))
+	if res.err != nil {
+		t.Fatalf("request: %v", res.err)
+	}
+	if res.status != http.StatusOK || res.body != "ok" {
+		t.Fatalf("answer = %d %q, want 200 %q", res.status, res.body, "ok")
 	}
 }
 
@@ -1028,6 +1059,12 @@ func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
 		},
 		"nil option": func(ln net.Listener) error {
 			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{Listener: ln}, nil)
+		},
+		"TLS config without a certificate": func(ln net.Listener) error {
+			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{
+				Listener:  ln,
+				TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
+			})
 		},
 	}
 	for name, run := range tests {

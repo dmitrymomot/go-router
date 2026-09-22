@@ -115,8 +115,9 @@ func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 // ones it already carries.
 //
 // Run reports an error for a nil context, a nil handler, a Config that names
-// neither an address nor a listener, a nil or failing option, a listener it
-// cannot open, and a drain that runs out of time.
+// neither an address nor a listener, a nil or failing option, a TLS config
+// with no certificate, a listener it cannot open, and a drain that runs out of
+// time. It checks the certificate after OnServer and before it listens.
 func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error {
 	// Run closes a caller-supplied listener on the serving path, so it owns it
 	// from here on and has to close it on every path. It used to return early
@@ -197,9 +198,21 @@ func (in *instance) build() error {
 	}
 
 	if in.cfg.OnServer != nil {
-		return in.cfg.OnServer(in.srv)
+		if err := in.cfg.OnServer(in.srv); err != nil {
+			return err
+		}
+	}
+	if in.srv.TLSConfig != nil && !hasCertificate(in.srv.TLSConfig) {
+		return errors.New("serve: the TLS config has no certificate; add one through Config.TLSConfig, an option or OnServer")
 	}
 	return nil
+}
+
+// hasCertificate follows the rule of [http.Server.ServeTLS], which Run calls
+// with no certificate files: the config has to carry a certificate of its own.
+// Keep it in step with configHasCert in net/http.
+func hasCertificate(c *tls.Config) bool {
+	return len(c.Certificates) > 0 || c.GetCertificate != nil || c.GetConfigForClient != nil
 }
 
 func (in *instance) open(ctx context.Context) error {
