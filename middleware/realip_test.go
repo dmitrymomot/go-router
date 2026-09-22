@@ -762,11 +762,9 @@ func TestClientAddr(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.remote, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			req.RemoteAddr = tt.remote
 			c, _ := routertest.NewContext(t, func(http.ResponseWriter, *http.Request) *appContext {
 				return &appContext{}
-			}, routertest.WithRequest(req))
+			}, routertest.WithTarget(http.MethodGet, "/", routertest.RemoteAddr(tt.remote)))
 
 			got, ok := middleware.ClientAddr(c)
 			if got != tt.want || ok != tt.ok {
@@ -824,11 +822,9 @@ func BenchmarkRealIP(b *testing.B) {
 }
 
 func BenchmarkClientAddr(b *testing.B) {
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "[::ffff:203.0.113.7]:1234"
 	c, _ := routertest.NewContext(b, func(http.ResponseWriter, *http.Request) *appContext {
 		return &appContext{}
-	}, routertest.WithRequest(req))
+	}, routertest.WithTarget(http.MethodGet, "/", routertest.RemoteAddr("[::ffff:203.0.113.7]:1234")))
 
 	b.ReportAllocs()
 	for b.Loop() {
