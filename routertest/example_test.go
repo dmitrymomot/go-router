@@ -300,3 +300,20 @@ func ExampleResponse_ErrorBody() {
 	// 422 Unprocessable Entity
 	// email is required
 }
+
+// FieldErrors checks which fields an answer of router.JSONErrorHandler names.
+func ExampleExpect_FieldErrors() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
+	r := router.New(newContext)
+	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.POST("/signup", func(c *appContext) error {
+		_, err := c.Bind[signup]()
+		return err
+	})
+
+	routertest.Do(r, http.MethodPost, "/signup", routertest.JSONBody(signup{Name: "ann"})).Expect(tb).
+		Status(http.StatusUnprocessableEntity).
+		FieldErrors("email")
+}
