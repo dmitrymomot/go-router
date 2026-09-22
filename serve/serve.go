@@ -129,61 +129,98 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	if ctx == nil {
 		return errors.New("serve: Run needs a context")
 	}
+	in, err := prepare(h, cfg, opts)
+	if err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := in.build(); err != nil {
+		return err
+	}
+	if err := in.open(ctx); err != nil {
+		return err
+	}
+	if cfg.OnListen != nil {
+		cfg.OnListen(in.ln.Addr())
+	}
+	return in.serve(ctx)
+}
+
+// instance is one server on its way from a Config to serving, in four steps:
+// prepare, build, open and serve.
+type instance struct {
+	h     http.Handler
+	srv   *http.Server
+	ln    net.Listener
+	certs []tls.Certificate
+	cfg   Config
+}
+
+func prepare(h http.Handler, cfg Config, opts []Option) (*instance, error) {
 	if h == nil {
-		return errors.New("serve: Run needs a handler")
+		return nil, errors.New("serve: Run needs a handler")
 	}
 	if cfg.Listener == nil && cfg.Addr == "" {
-		return errors.New("serve: Run needs Config.Addr or Config.Listener")
+		return nil, errors.New("serve: Run needs Config.Addr or Config.Listener")
 	}
 
 	var o options
 	for i, opt := range opts {
 		if opt == nil {
-			return fmt.Errorf("serve: option %d is nil", i)
+			return nil, fmt.Errorf("serve: option %d is nil", i)
 		}
 		if err := opt(&o); err != nil {
-			return err
+			return nil, err
 		}
 	}
+	return &instance{h: h, cfg: cfg, certs: o.certs}, nil
+}
 
-	if ctx.Err() != nil {
-		return nil
-	}
-
-	logger := cfg.Logger
+func (in *instance) build() error {
+	logger := in.cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           h,
-		TLSConfig:         tlsConfig(cfg, o.certs),
-		ReadHeaderTimeout: headerTimeout(cfg.ReadHeaderTimeout),
-		ReadTimeout:       cfg.ReadTimeout,
-		WriteTimeout:      cfg.WriteTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
+	in.srv = &http.Server{
+		Addr:              in.cfg.Addr,
+		Handler:           in.h,
+		TLSConfig:         tlsConfig(in.cfg, in.certs),
+		ReadHeaderTimeout: headerTimeout(in.cfg.ReadHeaderTimeout),
+		ReadTimeout:       in.cfg.ReadTimeout,
+		WriteTimeout:      in.cfg.WriteTimeout,
+		IdleTimeout:       in.cfg.IdleTimeout,
 
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
-	if cfg.OnServer != nil {
-		if err := cfg.OnServer(srv); err != nil {
-			return err
-		}
+	if in.cfg.OnServer != nil {
+		return in.cfg.OnServer(in.srv)
 	}
+	return nil
+}
 
-	ln, err := listen(ctx, cfg)
+func (in *instance) open(ctx context.Context) error {
+	ln, err := listen(ctx, in.cfg)
 	if err != nil {
 		return err
 	}
-	if cfg.Listener == nil {
-		defer ln.Close() //nolint:errcheck // The listener is going away either way.
-	}
+	in.ln = ln
+	return nil
+}
 
-	if cfg.OnListen != nil {
-		cfg.OnListen(ln.Addr())
+// closeOwn closes the listener that open opened. A listener of the Config is
+// left to whoever owns it.
+func (in *instance) closeOwn() {
+	if in.ln != nil && in.cfg.Listener == nil {
+		in.ln.Close() //nolint:errcheck // The listener is going away either way.
 	}
+}
+
+func (in *instance) serve(ctx context.Context) error {
+	defer in.closeOwn()
 
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
@@ -196,13 +233,13 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 		case <-stopped:
 			return
 		}
-		drainErr = drain(ctx, srv, cfg.ShutdownTimeout)
+		drainErr = drain(ctx, in.srv, in.cfg.ShutdownTimeout)
 	}()
 
-	err = serveOn(srv, ln)
+	err := serveOn(in.srv, in.ln)
 	var closeErr error
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		if closeErr = srv.Close(); closeErr != nil {
+		if closeErr = in.srv.Close(); closeErr != nil {
 			closeErr = fmt.Errorf("serve: close connections after serving failed: %w", closeErr)
 		}
 	}
