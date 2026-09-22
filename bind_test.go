@@ -1363,3 +1363,66 @@ func TestParseValueReadsOnAndOff(t *testing.T) {
 		t.Error("ParseValue[bool] accepted yes")
 	}
 }
+
+// net/http fails a form parse on a malformed query string, which would turn a
+// good body into a 400.
+func TestFormReadersIgnoreAMalformedQuery(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/users", func(c *tctx) error {
+		in, err := c.BindForm[struct {
+			Name string `form:"name"`
+		}]()
+		if err != nil {
+			return err
+		}
+		if _, err := c.FormValues(); err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%s/%s", in.Name, c.Request().FormValue("name"))
+	})
+	r.POST("/upload", func(c *tctx) error {
+		name := c.FormValue("name")
+		form, err := c.MultipartForm()
+		if err != nil {
+			return err
+		}
+		_, fh, err := c.FormFile("doc")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%s/%s/%d", name, fh.Filename, len(form.File))
+	})
+
+	rec := post(r, "/users?q=%zz&a;b", MIMEApplicationForm, "name=bo")
+	if rec.Code != http.StatusOK || rec.Body.String() != "bo/bo" {
+		t.Errorf("URL-encoded = %d %q, want 200 %q", rec.Code, rec.Body.String(), "bo/bo")
+	}
+
+	body, ct := multipartBody(t, url.Values{"name": {"bo"}}, upload{field: "doc", name: "a.txt", content: "hi"})
+	rec = post(r, "/upload?q=%zz", ct, body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "bo/a.txt/1" {
+		t.Errorf("multipart = %d %q, want 200 %q", rec.Code, rec.Body.String(), "bo/a.txt/1")
+	}
+}
+
+func TestFormReadersKeepAFormAnEarlierReaderBuilt(t *testing.T) {
+	r := newTestRouter()
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			_ = c.Request().ParseForm()
+			return next(c)
+		}
+	})
+	r.POST("/upload", func(c *tctx) error {
+		if _, _, err := c.FormFile("doc"); err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, c.Request().Form.Get("q"))
+	})
+
+	body, ct := multipartBody(t, nil, upload{field: "doc", name: "a.txt", content: "hi"})
+	rec := post(r, "/upload?q=1", ct, body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "1" {
+		t.Errorf("Form after FormFile = %d %q, want 200 %q", rec.Code, rec.Body.String(), "1")
+	}
+}

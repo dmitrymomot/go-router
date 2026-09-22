@@ -245,6 +245,14 @@ func (b *Base) parseForm() error {
 		return nil
 	}
 	b.req.Body = b.limitedBody()
+	// net/http fills Form from the query as well, and fails the whole parse on
+	// a malformed query. A Form already in place makes it skip the query. One
+	// the router put there itself goes again afterwards, so net/http builds
+	// the full Form when asked; one an earlier reader built stays.
+	preset := b.req.Form == nil
+	if preset {
+		b.req.Form = make(url.Values)
+	}
 
 	var err error
 	if multipart {
@@ -257,6 +265,9 @@ func (b *Base) parseForm() error {
 		}
 	} else {
 		err = b.req.ParseForm()
+	}
+	if preset {
+		b.req.Form = nil
 	}
 	if err == nil {
 		return nil
