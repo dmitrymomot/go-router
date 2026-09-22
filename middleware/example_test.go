@@ -205,6 +205,30 @@ func ExampleGzip() {
 	// long: "gzip" under 2000: true
 }
 
+func ExampleParseForm() {
+	r := newAPI()
+	r.MaxBodyBytes(32)
+	r.Use(middleware.ParseForm[*Context])
+	calls := 0
+	r.POST("/toggle", func(c *Context) error {
+		calls++
+		// Without ParseForm, an oversized form would read as empty here and
+		// switch the setting off.
+		return c.Stringf(http.StatusOK, "on=%t", c.FormValue("on") == "on")
+	})
+
+	for _, body := range []string{"on=on", "on=on&note=" + strings.Repeat("x", 64)} {
+		res := routertest.Do(r, http.MethodPost, "/toggle",
+			routertest.Body(router.MIMEApplicationForm, strings.NewReader(body)))
+		fmt.Println(res.StatusCode, res.String())
+	}
+	fmt.Println("handler calls:", calls)
+	// Output:
+	// 200 on=true
+	// 413 Request Entity Too Large
+	// handler calls: 1
+}
+
 func ExampleBodyLimit() {
 	r := newAPI()
 	// The default for every route, and more for the one that takes uploads.

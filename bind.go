@@ -431,7 +431,8 @@ func ParseValueDefault[T any](s string, def T) T {
 // FormValue reads form field name from the body, or "" when the field is
 // absent or the body does not parse. Unlike [http.Request.FormValue] it reads
 // the body alone and never the query. Use [Base.FormValues] to see the parse
-// error, and [Base.FormRequired] for a field that must be there.
+// error, and [Base.FormRequired] for a field that must be there. The ParseForm
+// middleware refuses a body that does not parse before the handler runs.
 func (b *Base) FormValue(name string) string {
 	//nolint:errcheck // The caller asked for a value, not for the parse error.
 	b.parseForm()
