@@ -162,6 +162,56 @@ func TestResolveStatus(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorOf(t *testing.T) {
+	plain := errors.New("db: connection refused")
+	coder := &codedError{http.StatusPaymentRequired}
+	bare := &HTTPError{}
+	teapot := &HTTPError{Status: http.StatusTeapot}
+
+	tests := []struct {
+		name        string
+		err         error
+		wantStatus  int
+		wantMessage string
+		wantCause   error
+	}{
+		{"a sentinel", ErrNotFound, http.StatusNotFound, "Not Found", nil},
+		{"wrapped by fmt", fmt.Errorf("load: %w", ErrGone), http.StatusGone, "Gone", nil},
+		{"no status and no message", bare, http.StatusInternalServerError, "Internal Server Error", nil},
+		{"a status and no message", teapot, http.StatusTeapot, "I'm a teapot", nil},
+		{"a StatusCoder", coder, http.StatusPaymentRequired, "Payment Required", coder},
+		{"a plain error", plain, http.StatusInternalServerError, "Internal Server Error", plain},
+		{"the client went away", context.Canceled, 499, "", context.Canceled},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			he := HTTPErrorOf(tc.err)
+			if he.Status != tc.wantStatus {
+				t.Errorf("Status = %d, want %d", he.Status, tc.wantStatus)
+			}
+			if he.Message != tc.wantMessage {
+				t.Errorf("Message = %q, want %q", he.Message, tc.wantMessage)
+			}
+			if tc.wantCause != nil && !errors.Is(he.Err, tc.wantCause) {
+				t.Errorf("Err = %v, want %v", he.Err, tc.wantCause)
+			}
+		})
+	}
+
+	if HTTPErrorOf(nil) != nil {
+		t.Error("HTTPErrorOf(nil) is not nil")
+	}
+	if got := HTTPErrorOf(fmt.Errorf("load: %w", ErrGone)); got != ErrGone {
+		t.Error("a wrapped sentinel came back as a copy, want the sentinel itself")
+	}
+	if bare.Status != 0 || bare.Message != "" || teapot.Message != "" {
+		t.Error("HTTPErrorOf changed the caller's error")
+	}
+	if allocs := testing.AllocsPerRun(100, func() { _ = HTTPErrorOf(ErrNotFound) }); allocs != 0 {
+		t.Errorf("HTTPErrorOf(ErrNotFound) allocates %v times, want 0", allocs)
+	}
+}
+
 func TestFieldErrorCarriesTheField(t *testing.T) {
 	email := FieldError{Field: "email", Message: "is not an address"}
 	age := FieldError{Field: "age", Message: "is not a number"}

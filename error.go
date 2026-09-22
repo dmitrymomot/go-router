@@ -213,6 +213,39 @@ func ResolveStatus(res *Response, err error) int {
 	return StatusOf(err)
 }
 
+// HTTPErrorOf reports the [HTTPError] the client is answered with: the one
+// inside err, or one with the status of [StatusOf], its standard text, and err
+// as the cause. A nil err gives nil.
+//
+// Status is never 0. An empty Message takes the standard text of the status,
+// which is itself empty for a status net/http does not name, such as 499.
+//
+// The result may be err's own HTTPError or a package sentinel, so change it
+// only through a With method.
+func HTTPErrorOf(err error) *HTTPError {
+	if err == nil {
+		return nil
+	}
+	he, ok := errors.AsType[*HTTPError](err)
+	if !ok {
+		status := StatusOf(err)
+		return &HTTPError{Status: status, Message: http.StatusText(status), Err: err}
+	}
+	if he.Status != 0 && he.Message != "" {
+		return he
+	}
+	// The fields are exported, so a caller can build one with no status or no
+	// message. Fix a copy rather than the caller's error.
+	c := *he
+	if c.Status == 0 {
+		c.Status = http.StatusInternalServerError
+	}
+	if c.Message == "" {
+		c.Message = http.StatusText(c.Status)
+	}
+	return &c
+}
+
 // ErrorHandlerFunc writes the answer for a handler that returned an error.
 // [Router.ErrorHandler] installs one, and the router calls it once per failed
 // request.
