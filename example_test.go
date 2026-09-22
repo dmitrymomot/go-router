@@ -598,6 +598,29 @@ func ExampleHTMXRequest_SourceID() {
 	// delete-7
 }
 
+func ExampleNewCookieCodec_rotation() {
+	oldKey := []byte("32-bytes-of-key-material-for-hmac")
+	newKey := []byte("32-more-bytes-of-fresh-key-material")
+	signedBefore := router.NewCookieCodec(oldKey).Encode("session", []byte("ann"))
+
+	// Sign with newKey, and keep reading what oldKey signed until it runs out.
+	codec := router.NewCookieCodec(newKey, oldKey)
+	value, err := codec.Decode("session", signedBefore)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(string(value))
+
+	// A value signed now carries newKey, so a codec that has only oldKey
+	// refuses it.
+	_, err = router.NewCookieCodec(oldKey).Decode("session", codec.Encode("session", []byte("ann")))
+	fmt.Println(err)
+	// Output:
+	// ann
+	// router: the signed cookie does not verify
+}
+
 func ExampleBase_AddFlash() {
 	// The key signs the cookie. NewCookieCodec panics under 32 bytes, so read
 	// it from the environment rather than writing one here.

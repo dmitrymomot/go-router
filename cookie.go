@@ -42,28 +42,58 @@ var cookieEnc = base64.RawURLEncoding
 // and cannot change it. The value is signed and not encrypted: the client
 // reads it.
 //
+// It signs with its current key and verifies with it and then with each
+// previous key, so a key rotates without signing anyone out.
+//
 // MaxAge is how long a value stays valid; zero or less takes
 // [DefaultCookieMaxAge]. A codec is safe for concurrent use.
 type CookieCodec struct {
 	MaxAge time.Duration
-	key    []byte
+	// keys[0] signs, and every key verifies, in order. Pointers, because a
+	// sync.Pool must not be copied.
+	keys []*codecKey
+}
+
+type codecKey struct {
+	key []byte
 	// hmac.New builds and keys two hashes per call, and a flash is signed or
 	// verified at least twice per request.
 	macs sync.Pool
 }
 
-// NewCookieCodec builds a codec that signs with key, which it copies. Keep the
-// key out of the source and out of the repository.
+func newCodecKey(key []byte) *codecKey {
+	k := &codecKey{key: bytes.Clone(key)}
+	k.macs.New = func() any { return hmac.New(sha256.New, k.key) }
+	return k
+}
+
+// NewCookieCodec builds a codec that signs with key and also accepts a value
+// signed with any of previous, tried in order. It copies every key. Keep the
+// keys out of the source and out of the repository.
 //
-// NewCookieCodec panics on a key shorter than [MinCookieKeyLen] bytes.
-func NewCookieCodec(key []byte) *CookieCodec {
+// To rotate, build NewCookieCodec(newKey, oldKey). Drop oldKey once every
+// value it signed has run out: wait for the longest lifetime you sign with,
+// whether the MaxAge or Expires of a cookie or the MaxAge of the codec.
+//
+// NewCookieCodec panics on any key shorter than [MinCookieKeyLen] bytes.
+func NewCookieCodec(key []byte, previous ...[]byte) *CookieCodec {
 	if len(key) < MinCookieKeyLen {
 		panic("router: NewCookieCodec needs a key of at least " +
 			strconv.Itoa(MinCookieKeyLen) + " bytes, and got " + strconv.Itoa(len(key)))
 	}
-	cc := &CookieCodec{MaxAge: DefaultCookieMaxAge, key: bytes.Clone(key)}
-	cc.macs.New = func() any { return hmac.New(sha256.New, cc.key) }
-	return cc
+	for i, k := range previous {
+		if len(k) < MinCookieKeyLen {
+			panic("router: NewCookieCodec needs every previous key to be at least " +
+				strconv.Itoa(MinCookieKeyLen) + " bytes, and previous[" + strconv.Itoa(i) +
+				"] has " + strconv.Itoa(len(k)))
+		}
+	}
+	keys := make([]*codecKey, 0, 1+len(previous))
+	keys = append(keys, newCodecKey(key))
+	for _, k := range previous {
+		keys = append(keys, newCodecKey(k))
+	}
+	return &CookieCodec{MaxAge: DefaultCookieMaxAge, keys: keys}
 }
 
 func (cc *CookieCodec) maxAge() time.Duration {
@@ -80,7 +110,7 @@ func (cc *CookieCodec) Encode(name string, value []byte) string {
 }
 
 func (cc *CookieCodec) encode(name string, value []byte, expiry int64) string {
-	sig := cc.sign(name, expiry, value)
+	sig := cc.keys[0].sign(name, expiry, value)
 	buf := make([]byte, 0, cookieEnc.EncodedLen(len(value))+cookieEnc.EncodedLen(len(sig))+22)
 	buf = cookieEnc.AppendEncode(buf, value)
 	buf = append(buf, cookieSep)
@@ -91,8 +121,8 @@ func (cc *CookieCodec) encode(name string, value []byte, expiry int64) string {
 }
 
 // Decode verifies signed for a cookie called name and reports the value. It
-// reports [ErrCookieInvalid] when the string is malformed or does not verify,
-// and [ErrCookieExpired] when it has run out.
+// reports [ErrCookieInvalid] when the string is malformed or no key verifies
+// it, and [ErrCookieExpired] when it has run out.
 func (cc *CookieCodec) Decode(name string, signed string) ([]byte, error) {
 	encValue, rest, ok := strings.Cut(signed, string(cookieSep))
 	if !ok {
@@ -114,28 +144,31 @@ func (cc *CookieCodec) Decode(name string, signed string) ([]byte, error) {
 	if err != nil {
 		return nil, ErrCookieInvalid
 	}
-	if subtle.ConstantTimeCompare(sig, cc.sign(name, expiry, value)) != 1 {
-		return nil, ErrCookieInvalid
+	for _, k := range cc.keys {
+		if subtle.ConstantTimeCompare(sig, k.sign(name, expiry, value)) != 1 {
+			continue
+		}
+		if !time.Now().Before(time.Unix(expiry, 0)) {
+			return nil, ErrCookieExpired
+		}
+		return value, nil
 	}
-	if !time.Now().Before(time.Unix(expiry, 0)) {
-		return nil, ErrCookieExpired
-	}
-	return value, nil
+	return nil, ErrCookieInvalid
 }
 
 // The name length comes first, so a shorter name with a longer value cannot
 // sign the same bytes and move a value between two cookies.
 //
 //nolint:errcheck // hash.Hash.Write never returns an error.
-func (cc *CookieCodec) sign(name string, expiry int64, value []byte) []byte {
+func (k *codecKey) sign(name string, expiry int64, value []byte) []byte {
 	var header [16]byte
 	binary.BigEndian.PutUint64(header[:8], uint64(len(name)))
 	binary.BigEndian.PutUint64(header[8:], uint64(expiry))
 
-	mac := cc.macs.Get().(hash.Hash)
+	mac := k.macs.Get().(hash.Hash)
 	defer func() {
 		mac.Reset()
-		cc.macs.Put(mac)
+		k.macs.Put(mac)
 	}()
 	mac.Write(header[:])
 	mac.Write([]byte(name))

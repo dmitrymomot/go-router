@@ -90,6 +90,102 @@ func TestNewCookieCodecCopiesTheKey(t *testing.T) {
 	}
 }
 
+func TestNewCookieCodecRotatesKeys(t *testing.T) {
+	k1 := bytes.Repeat([]byte("1"), MinCookieKeyLen)
+	k2 := bytes.Repeat([]byte("2"), MinCookieKeyLen)
+	old := NewCookieCodec(k1)
+	rotated := NewCookieCodec(k2, k1)
+
+	got, err := rotated.Decode("uid", old.Encode("uid", []byte("alice")))
+	if err != nil {
+		t.Fatalf("a value the previous key signed: %v", err)
+	}
+	if string(got) != "alice" {
+		t.Errorf("Decode = %q, want %q", got, "alice")
+	}
+	if _, err := old.Decode("uid", rotated.Encode("uid", []byte("alice"))); !errors.Is(err, ErrCookieInvalid) {
+		t.Errorf("the rotated codec signed with the previous key: %v", err)
+	}
+}
+
+func TestNewCookieCodecTriesEveryPreviousKey(t *testing.T) {
+	k0 := bytes.Repeat([]byte("0"), MinCookieKeyLen)
+	k1 := bytes.Repeat([]byte("1"), MinCookieKeyLen)
+	k2 := bytes.Repeat([]byte("2"), MinCookieKeyLen)
+	cc := NewCookieCodec(k2, k1, k0)
+
+	got, err := cc.Decode("uid", NewCookieCodec(k0).Encode("uid", []byte("alice")))
+	if err != nil {
+		t.Fatalf("a value the last previous key signed: %v", err)
+	}
+	if string(got) != "alice" {
+		t.Errorf("Decode = %q, want %q", got, "alice")
+	}
+
+	unlisted := NewCookieCodec(bytes.Repeat([]byte("x"), MinCookieKeyLen))
+	if _, err := cc.Decode("uid", unlisted.Encode("uid", []byte("alice"))); !errors.Is(err, ErrCookieInvalid) {
+		t.Errorf("a value an unlisted key signed: %v, want %v", err, ErrCookieInvalid)
+	}
+}
+
+func TestNewCookieCodecPanicsOnAShortPreviousKey(t *testing.T) {
+	short := bytes.Repeat([]byte("s"), MinCookieKeyLen-1)
+	tests := []struct {
+		name     string
+		previous [][]byte
+		want     string
+	}{
+		{"no first previous key", [][]byte{nil}, "previous[0] has 0"},
+		{"an empty first previous key", [][]byte{{}}, "previous[0] has 0"},
+		{"a short first previous key", [][]byte{short}, "previous[0] has 31"},
+		{"no second previous key", [][]byte{testKey, nil}, "previous[1] has 0"},
+		{"an empty second previous key", [][]byte{testKey, {}}, "previous[1] has 0"},
+		{"a short second previous key", [][]byte{testKey, short}, "previous[1] has 31"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("NewCookieCodec took a previous key that is too short")
+				}
+				if msg, _ := r.(string); !strings.Contains(msg, tc.want) {
+					t.Errorf("panic = %v, want it to name %q", r, tc.want)
+				}
+			}()
+			NewCookieCodec(testKey, tc.previous...)
+		})
+	}
+}
+
+func TestNewCookieCodecCopiesEveryKey(t *testing.T) {
+	previous := bytes.Repeat([]byte("p"), MinCookieKeyLen)
+	signed := NewCookieCodec(previous).Encode("uid", []byte("7"))
+	cc := NewCookieCodec(testKey, previous)
+
+	clear(previous)
+
+	if _, err := cc.Decode("uid", signed); err != nil {
+		t.Errorf("the codec read the caller previous key after the caller zeroed it: %v", err)
+	}
+}
+
+func TestDecodeWithAnOldKeyStillChecksTheExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		previous := bytes.Repeat([]byte("p"), MinCookieKeyLen)
+		old := NewCookieCodec(previous)
+		old.MaxAge = time.Minute
+		signed := old.Encode("uid", []byte("alice"))
+		cc := NewCookieCodec(testKey, previous)
+
+		time.Sleep(time.Minute)
+
+		if _, err := cc.Decode("uid", signed); !errors.Is(err, ErrCookieExpired) {
+			t.Errorf("Decode = %v, want %v", err, ErrCookieExpired)
+		}
+	})
+}
+
 func TestNewCookieCodecTakesTheDefaultLifetime(t *testing.T) {
 	if got := testCodec().MaxAge; got != DefaultCookieMaxAge {
 		t.Errorf("MaxAge = %v, want %v", got, DefaultCookieMaxAge)
@@ -209,7 +305,7 @@ func TestDecodeRejectsAnotherKey(t *testing.T) {
 func TestSignBindsTheLengthOfTheName(t *testing.T) {
 	cc := testCodec()
 
-	if bytes.Equal(cc.sign("ab", 0, []byte("cd")), cc.sign("a", 0, []byte("bcd"))) {
+	if bytes.Equal(cc.keys[0].sign("ab", 0, []byte("cd")), cc.keys[0].sign("a", 0, []byte("bcd"))) {
 		t.Error("the signature reads a name and a value as one string of bytes")
 	}
 }

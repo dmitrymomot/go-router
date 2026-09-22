@@ -48,7 +48,9 @@ func FuzzCookieCodecRoundTripAndMutation(f *testing.F) {
 	f.Add("flash", []byte(`[{"kind":"info","message":"saved"}]`))
 	f.Add("", []byte(nil))
 
-	cc := NewCookieCodec(bytes.Repeat([]byte("k"), MinCookieKeyLen))
+	old := bytes.Repeat([]byte("k"), MinCookieKeyLen)
+	cc := NewCookieCodec(old)
+	rotated := NewCookieCodec(bytes.Repeat([]byte("n"), MinCookieKeyLen), old)
 	f.Fuzz(func(t *testing.T, name string, value []byte) {
 		if len(name) > 1<<10 || len(value) > 16<<10 {
 			t.Skip()
@@ -60,6 +62,13 @@ func FuzzCookieCodecRoundTripAndMutation(f *testing.F) {
 		}
 		if !bytes.Equal(got, value) {
 			t.Fatalf("Decode(Encode()) = %q, want %q", got, value)
+		}
+		got, err = rotated.Decode(name, signed)
+		if err != nil {
+			t.Fatalf("a rotated codec refused the previous key: %v", err)
+		}
+		if !bytes.Equal(got, value) {
+			t.Fatalf("a rotated codec decoded %q, want %q", got, value)
 		}
 
 		firstDot := strings.IndexByte(signed, cookieSep)
@@ -74,6 +83,9 @@ func FuzzCookieCodecRoundTripAndMutation(f *testing.F) {
 		}
 		if _, err := cc.Decode(name, string(mutated)); err == nil {
 			t.Fatalf("Decode accepted a mutated expiry: %q", mutated)
+		}
+		if _, err := rotated.Decode(name, string(mutated)); err == nil {
+			t.Fatalf("a rotated codec accepted a mutated expiry: %q", mutated)
 		}
 	})
 }
