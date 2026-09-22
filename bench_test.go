@@ -75,6 +75,27 @@ func BenchmarkNotFound(b *testing.B) {
 	benchServe(b, r, w, "/nothing/here")
 }
 
+// benchScopedRouter puts the routes and the error handler in a scope, which
+// is where the error handler is picked per route and per 404.
+func benchScopedRouter() (*Router[*tctx], *nopWriter) {
+	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+	r.Route("/api", func(api *Router[*tctx]) {
+		api.ErrorHandler(func(c *tctx, err error) error { return c.NoContent(StatusOf(err)) })
+		api.GET("/users/{id}", func(*tctx) error { return ErrConflict })
+	})
+	return r, &nopWriter{h: make(http.Header)}
+}
+
+func BenchmarkScopedNotFound(b *testing.B) {
+	r, w := benchScopedRouter()
+	benchServe(b, r, w, "/api/nothing")
+}
+
+func BenchmarkScopedRouteError(b *testing.B) {
+	r, w := benchScopedRouter()
+	benchServe(b, r, w, "/api/users/42")
+}
+
 func benchMethodRouter(pattern string, methods ...string) (*Router[*tctx], *nopWriter) {
 	ok := func(c *tctx) error { return c.NoContent(http.StatusOK) }
 	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
