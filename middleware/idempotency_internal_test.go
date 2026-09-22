@@ -223,3 +223,58 @@ func TestIdempotencyMemoryStoreRefusesWhenEveryEntryRuns(t *testing.T) {
 		t.Error("a full store turned away a key it holds")
 	}
 }
+
+func TestIdempotencyStoreKeyKeepsEveryPairApart(t *testing.T) {
+	pairs := [][2]string{
+		{"", "3:abcX"},
+		{"abc", "X"},
+		{"ab", "cX"},
+		{"a", "bcX"},
+		{"1:a", "b"},
+		{"1", ":ab"},
+	}
+	seen := map[string][2]string{}
+	for _, p := range pairs {
+		k := idempotencyStoreKey(p[0], p[1])
+		if other, ok := seen[k]; ok {
+			t.Errorf("scope %q key %q and scope %q key %q share the store key %q", p[0], p[1], other[0], other[1], k)
+		}
+		seen[k] = p
+	}
+}
+
+func TestIdempotencyHeaderDeltaKeepsWhatTheHandlerAdded(t *testing.T) {
+	before := http.Header{
+		"X-Request-Id": {"r1"},
+		"Vary":         {"Accept-Encoding"},
+		"Set-Cookie":   {"_csrf=t"},
+	}
+	after := http.Header{
+		"X-Request-Id": {"r1"},
+		"Vary":         {"Accept-Encoding", "Cookie"},
+		"Set-Cookie":   {"_csrf=t", "receipt=r1"},
+		"X-Charge":     {"ch_1"},
+	}
+	got := idempotencyHeaderDelta(before, after)
+	want := http.Header{
+		"Vary":       {"Accept-Encoding", "Cookie"},
+		"Set-Cookie": {"receipt=r1"},
+		"X-Charge":   {"ch_1"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("delta = %v, want %v", got, want)
+	}
+	for k, vs := range want {
+		if !slices.Equal(got[k], vs) {
+			t.Errorf("delta[%s] = %q, want %q", k, got[k], vs)
+		}
+	}
+
+	after["X-Charge"][0] = "changed"
+	if got.Get("X-Charge") != "ch_1" {
+		t.Error("the delta shares its values with the header it came from")
+	}
+	if got := idempotencyHeaderDelta(before, before); len(got) != 0 {
+		t.Errorf("delta of an unchanged header = %v, want none", got)
+	}
+}
