@@ -31,7 +31,8 @@ type LoggerConfig struct {
 // Logger answers an error through [router.HandleError] before it logs, so the
 // status and the size are the ones the client got. That commits the answer, so
 // put Logger outside a middleware that replaces an error after next, such as
-// [Timeout], and put [Recover] inside Logger to get a line for a panic.
+// [Timeout], or [BodyLimit] and [Decompress], which reword a body over the
+// limit. Put [Recover] inside Logger to get a line for a panic.
 //
 // It builds nothing when the logger discards the level, so a quiet level costs
 // almost nothing.
