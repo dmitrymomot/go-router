@@ -713,7 +713,9 @@ func ExampleRouter_CookieCodec_flash() {
 
 	created := serveRequest(r, httptest.NewRequest(http.MethodPost, "/users", nil))
 	req := httptest.NewRequest(http.MethodGet, "/users", nil)
-	req.Header.Set("Cookie", created.Header().Get("Set-Cookie"))
+	for _, c := range created.Result().Cookies() {
+		req.AddCookie(c) // AddCookie sends only name=value, as a browser does.
+	}
 
 	fmt.Println(created.Code, created.Header().Get("Location"))
 	fmt.Println(serveRequest(r, req).Body)
