@@ -1539,7 +1539,9 @@ func (r *Router[C]) release(c C) {
 	if r.pool != nil {
 		b := c.base()
 		r.reset(c)
-		b.req, b.res = releasedRequest, nil
+		// The flag is lowered here rather than through the slow clear, so a 404
+		// or a 405 on a pooled router stays on the fast path.
+		b.req, b.res, b.errorHandled = releasedRequest, nil, false
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()
@@ -1554,7 +1556,9 @@ func (r *Router[C]) recycle(c C) {
 	if r.pool != nil {
 		b := c.base()
 		r.reset(c)
-		b.req, b.res = releasedRequest, nil
+		// The flag is lowered here rather than through the slow clear, so a 404
+		// or a 405 on a pooled router stays on the fast path.
+		b.req, b.res, b.errorHandled = releasedRequest, nil, false
 		b.resStorage.ResponseWriter = nil
 		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()

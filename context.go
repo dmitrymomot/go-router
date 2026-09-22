@@ -159,7 +159,7 @@ func (b *Base) clearRequestSlow() {
 	}
 	b.deferred = nil
 	b.host, b.rawTail = "", ""
-	b.needsCleanup, b.errorHandled = false, false
+	b.needsCleanup = false
 }
 
 // deferredState holds what few requests need, so Base does not carry it.
@@ -234,7 +234,12 @@ func (b *Base) SetRequest(r *http.Request) {
 	if r == nil {
 		panic("router: SetRequest needs a request")
 	}
-	b.mustNotBeAncestorOf(r.Context(), "SetRequest")
+	// The request context in place already passed this check, or came from
+	// net/http, so a copy of the request that keeps it, as RealIP and a mount
+	// make, skips the walk up the chain.
+	if ctx := r.Context(); ctx != b.req.Context() {
+		b.mustNotBeAncestorOf(ctx, "SetRequest")
+	}
 	b.req = r
 	b.queryCache = nil
 	b.host, b.hostKnown = "", false
