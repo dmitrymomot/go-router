@@ -1,19 +1,24 @@
 package router
 
 import (
+	"encoding/json/v2"
 	"net/url"
 	"strings"
 
 	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
-// The hooks give package routertest what a context built outside a router
-// lacks, without a public API that only a test would call.
+// The hooks give the packages of this module what the public API of a Base
+// does not expose: routertest sets the route of a context built outside a
+// router, and sse reads the JSON options of the router.
 func init() {
 	routerhook.SetRoute = func(b any, pattern string, names, vals []string) {
 		b.(*Base).setTestRoute(pattern, names, vals)
 	}
 	routerhook.FillPattern = fillPattern
+	routerhook.JSONOptions = func(b any, opts []json.Options) []json.Options {
+		return b.(*Base).jsonOptions(opts)
+	}
 }
 
 // setTestRoute gives b a route pattern and its parameters, as routing a

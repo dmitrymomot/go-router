@@ -14,6 +14,7 @@ import (
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/routertest"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 // showUser is the handler the examples below drive.
@@ -255,7 +256,7 @@ func ExampleEvents() {
 		names <- "ann"
 		names <- "bob"
 		close(names)
-		return router.ServeSSE(c, names, router.SSEText[string]("user"))
+		return sse.Serve(c, names, sse.Text[string]("user"))
 	})
 
 	for _, e := range routertest.Events(routertest.Get(r, "/stream")) {

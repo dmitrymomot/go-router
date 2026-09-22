@@ -7,6 +7,7 @@ import (
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 // roomRouter builds the signed-in half as a router of its own. Everything it
@@ -69,8 +70,8 @@ func events(c Ctx) error {
 	c.Room.broadcast(notice(c.User, "joined the chat"))
 	defer c.Room.broadcast(notice(c.User, "left the chat"))
 
-	return router.ServeSSE(c, ch, sendTo(c.User),
-		router.SSEHeartbeat(20*time.Second),
-		router.SSERetry(2*time.Second),
+	return sse.Serve(c, ch, sendTo(c.User),
+		sse.Heartbeat(20*time.Second),
+		sse.Retry(2*time.Second),
 	)
 }

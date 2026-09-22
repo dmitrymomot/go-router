@@ -15,6 +15,7 @@ import (
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/routertest"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 var gzipLongBody = strings.Repeat("<p>the quick brown fox</p>", 100)
@@ -43,11 +44,11 @@ func gzipRouter(cfg middleware.GzipConfig) *router.Router[*appContext] {
 		return err
 	})
 	r.GET("/events", func(c *appContext) error {
-		s, err := c.SSE(http.StatusOK)
+		s, err := sse.Open(c, http.StatusOK)
 		if err != nil {
 			return err
 		}
-		return s.Send(router.Event{ID: "1", Name: "tick", Data: "one"})
+		return s.Send(sse.Event{ID: "1", Name: "tick", Data: "one"})
 	})
 	return r
 }
@@ -178,12 +179,12 @@ func TestGzipDeliversEachEventAsItIsSent(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
 	r.GET("/events", func(c *appContext) error {
-		s, err := c.SSE(http.StatusOK)
+		s, err := sse.Open(c, http.StatusOK)
 		if err != nil {
 			return err
 		}
 		for _, data := range sent {
-			if err := s.Send(router.Event{Name: "tick", Data: data}); err != nil {
+			if err := s.Send(sse.Event{Name: "tick", Data: data}); err != nil {
 				return err
 			}
 			if got := w.Body.String(); !strings.Contains(got, "data: "+data) {

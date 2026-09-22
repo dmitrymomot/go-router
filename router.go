@@ -520,8 +520,8 @@ func (r *Router[C]) Logger(l *slog.Logger) {
 	r.root.ropts.logger = l
 }
 
-// JSONOptions sets the options that [Base.JSON] and [Base.BindJSON] apply. The
-// options of a single call win over these.
+// JSONOptions sets the options that [Base.JSON], [Base.BindJSON] and the
+// SendJSON of package sse apply. The options of a single call win over these.
 //
 // JSONOptions panics on a scope, on a mounted router, or after the router started
 // serving.

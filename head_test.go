@@ -14,11 +14,11 @@ import (
 )
 
 // HEAD is decided in its own place on every response path: Blob, String,
-// Stream, RenderStream, the three error representations, the problem document,
-// the SSE stream and the file server each test the method themselves, and so do
-// the gzip middleware and the asset server in their own packages. The nil
-// gzip.Writer crash came from exactly that spread. This is the one rule they all
-// answer to:
+// Stream, RenderStream, the three error representations, the problem document
+// and the file server each test the method themselves, and so do the event
+// stream of package sse, the gzip middleware and the asset server in their own
+// packages. The nil gzip.Writer crash came from exactly that spread. This is
+// the one rule they all answer to:
 //
 //	A HEAD reply carries the status and the headers its GET would carry, and
 //	no body.
@@ -154,19 +154,6 @@ func headCases() []headCase {
 			},
 			header: map[string]string{HeaderAccept: MIMETextPlain},
 			check:  wantResponseHeader(HeaderContentType, MIMETextPlainCharsetUTF8),
-		},
-		{
-			name: "an SSE stream",
-			setup: func(_ *testing.T, r *Router[*tctx]) {
-				r.GET("/x", func(c *tctx) error {
-					s, err := c.SSE(http.StatusOK)
-					if err != nil {
-						return err
-					}
-					return s.Send(Event{Data: body})
-				})
-			},
-			check: wantResponseHeader(HeaderContentType, MIMETextEventStream),
 		},
 		{
 			name:   "no route",

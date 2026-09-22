@@ -1,8 +1,9 @@
-package router
+package sse
 
 import (
 	"bufio"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -12,25 +13,46 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/dmitrymomot/go-router"
 )
 
-func sseReq() *http.Request { return httptest.NewRequest(http.MethodGet, "/events", nil) }
+type tctx struct{ router.Base }
 
-func sseServe(h HandlerFunc[*tctx], req *http.Request) *httptest.ResponseRecorder {
+func newRouter() *router.Router[*tctx] {
+	return router.New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+}
+
+func do(h http.Handler, method, target string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	sseServeTo(h, req, rec)
+	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
 	return rec
 }
 
-func sseServeTo(h HandlerFunc[*tctx], req *http.Request, w http.ResponseWriter) {
-	r := newTestRouter()
+func comp(s string) router.ComponentFunc {
+	return func(_ context.Context, w io.Writer) error {
+		_, err := io.WriteString(w, s)
+		return err
+	}
+}
+
+func newReq() *http.Request { return httptest.NewRequest(http.MethodGet, "/events", nil) }
+
+func serve(h router.HandlerFunc[*tctx], req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	serveTo(h, req, rec)
+	return rec
+}
+
+func serveTo(h router.HandlerFunc[*tctx], req *http.Request, w http.ResponseWriter) {
+	r := newRouter()
 	r.GET("/events", h)
 	r.ServeHTTP(w, req)
 }
 
-func sseOpen(fn func(s *SSEWriter) error, opts ...SSEOption) HandlerFunc[*tctx] {
+func open(fn func(s *Writer) error, opts ...Option) router.HandlerFunc[*tctx] {
 	return func(c *tctx) error {
-		s, err := c.SSE(http.StatusOK, opts...)
+		s, err := Open(c, http.StatusOK, opts...)
 		if err != nil {
 			return err
 		}
@@ -38,23 +60,23 @@ func sseOpen(fn func(s *SSEWriter) error, opts ...SSEOption) HandlerFunc[*tctx] 
 	}
 }
 
-func TestSSEHeaders(t *testing.T) {
-	rec := sseServe(sseOpen(func(*SSEWriter) error { return nil }), sseReq())
+func TestHeaders(t *testing.T) {
+	rec := serve(open(func(*Writer) error { return nil }), newReq())
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	for name, want := range map[string]string{
-		HeaderContentType:     MIMETextEventStream,
-		HeaderCacheControl:    "no-cache",
-		HeaderXAccelBuffering: "no",
-		HeaderConnection:      "keep-alive",
+		router.HeaderContentType:  router.MIMETextEventStream,
+		router.HeaderCacheControl: "no-cache",
+		HeaderXAccelBuffering:     "no",
+		router.HeaderConnection:   "keep-alive",
 	} {
 		if got := rec.Header().Get(name); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
-	if got := rec.Header().Get(HeaderContentLength); got != "" {
+	if got := rec.Header().Get(router.HeaderContentLength); got != "" {
 		t.Errorf("Content-Length = %q, want none", got)
 	}
 	if !rec.Flushed {
@@ -62,32 +84,32 @@ func TestSSEHeaders(t *testing.T) {
 	}
 }
 
-func TestSSEKeepsTheHandlerContentType(t *testing.T) {
-	rec := sseServe(func(c *tctx) error {
-		c.SetHeader(HeaderContentType, "text/event-stream; charset=utf-8")
-		_, err := c.SSE(http.StatusOK)
+func TestKeepsTheHandlerContentType(t *testing.T) {
+	rec := serve(func(c *tctx) error {
+		c.SetHeader(router.HeaderContentType, "text/event-stream; charset=utf-8")
+		_, err := Open(c, http.StatusOK)
 		return err
-	}, sseReq())
+	}, newReq())
 
-	if got := rec.Header().Get(HeaderContentType); got != "text/event-stream; charset=utf-8" {
+	if got := rec.Header().Get(router.HeaderContentType); got != "text/event-stream; charset=utf-8" {
 		t.Errorf("Content-Type = %q", got)
 	}
 }
 
-func TestSSENoConnectionHeaderOnHTTP2(t *testing.T) {
-	req := sseReq()
+func TestNoConnectionHeaderOnHTTP2(t *testing.T) {
+	req := newReq()
 	req.Proto, req.ProtoMajor, req.ProtoMinor = "HTTP/2.0", 2, 0
 
-	rec := sseServe(sseOpen(func(*SSEWriter) error { return nil }), req)
-	if got := rec.Header().Get(HeaderConnection); got != "" {
+	rec := serve(open(func(*Writer) error { return nil }), req)
+	if got := rec.Header().Get(router.HeaderConnection); got != "" {
 		t.Errorf("Connection = %q, want none", got)
 	}
 }
 
-func TestSSESendWritesEveryField(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestSendWritesEveryField(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		return s.Send(Event{ID: "7", Name: "tick", Data: "hello", Retry: 2 * time.Second})
-	}), sseReq())
+	}), newReq())
 
 	want := "id: 7\nevent: tick\nretry: 2000\ndata: hello\n\n"
 	if got := rec.Body.String(); got != want {
@@ -95,15 +117,15 @@ func TestSSESendWritesEveryField(t *testing.T) {
 	}
 }
 
-func TestSSESendData(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error { return s.SendData("hello") }), sseReq())
+func TestSendData(t *testing.T) {
+	rec := serve(open(func(s *Writer) error { return s.SendData("hello") }), newReq())
 
 	if got, want := rec.Body.String(), "data: hello\n\n"; got != want {
 		t.Errorf("frame = %q, want %q", got, want)
 	}
 }
 
-func TestSSEDataLines(t *testing.T) {
+func TestDataLines(t *testing.T) {
 	tests := []struct {
 		name string
 		data string
@@ -122,9 +144,9 @@ func TestSSEDataLines(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rec := sseServe(sseOpen(func(s *SSEWriter) error {
+			rec := serve(open(func(s *Writer) error {
 				return s.Send(Event{Data: tt.data})
-			}), sseReq())
+			}), newReq())
 
 			if got := rec.Body.String(); got != tt.want {
 				t.Errorf("frame = %q, want %q", got, tt.want)
@@ -133,34 +155,34 @@ func TestSSEDataLines(t *testing.T) {
 	}
 }
 
-func TestSSEComment(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error { return s.Comment("ping") }), sseReq())
+func TestComment(t *testing.T) {
+	rec := serve(open(func(s *Writer) error { return s.Comment("ping") }), newReq())
 
 	if got, want := rec.Body.String(), ": ping\n\n"; got != want {
 		t.Errorf("frame = %q, want %q", got, want)
 	}
 }
 
-func TestSSECommentLines(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error { return s.Comment("one\ntwo") }), sseReq())
+func TestCommentLines(t *testing.T) {
+	rec := serve(open(func(s *Writer) error { return s.Comment("one\ntwo") }), newReq())
 
 	if got, want := rec.Body.String(), ": one\n: two\n\n"; got != want {
 		t.Errorf("frame = %q, want %q", got, want)
 	}
 }
 
-func TestSSESendJSON(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestSendJSON(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		return s.SendJSON("user", map[string]string{"id": "7"})
-	}), sseReq())
+	}), newReq())
 
 	if got, want := rec.Body.String(), "event: user\ndata: {\"id\":\"7\"}\n\n"; got != want {
 		t.Errorf("frame = %q, want %q", got, want)
 	}
 }
 
-func TestSSESendJSONErrorWritesNothing(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestSendJSONErrorWritesNothing(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		if err := s.SendData("first"); err != nil {
 			return err
 		}
@@ -168,31 +190,31 @@ func TestSSESendJSONErrorWritesNothing(t *testing.T) {
 		if err == nil {
 			t.Error("SendJSON reported no error for a channel")
 		}
-		if got := StatusOf(err); got != http.StatusInternalServerError {
+		if got := router.StatusOf(err); got != http.StatusInternalServerError {
 			t.Errorf("status of the error = %d, want 500", got)
 		}
 		return nil
-	}), sseReq())
+	}), newReq())
 
 	if got, want := rec.Body.String(), "data: first\n\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
-func TestSSESendComponent(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestSendComponent(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		return s.SendComponent("row", comp("<li>one</li>"))
-	}), sseReq())
+	}), newReq())
 
 	if got, want := rec.Body.String(), "event: row\ndata: <li>one</li>\n\n"; got != want {
 		t.Errorf("frame = %q, want %q", got, want)
 	}
 }
 
-func TestSSESendComponentSplitWrites(t *testing.T) {
+func TestSendComponentSplitWrites(t *testing.T) {
 	parts := []string{"<ul>\r", "\n<li>one</li>\n", "</ul>"}
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
-		return s.SendComponent("list", ComponentFunc(func(_ context.Context, w io.Writer) error {
+	rec := serve(open(func(s *Writer) error {
+		return s.SendComponent("list", router.ComponentFunc(func(_ context.Context, w io.Writer) error {
 			for _, p := range parts {
 				if _, err := w.Write([]byte(p)); err != nil {
 					return err
@@ -200,7 +222,7 @@ func TestSSESendComponentSplitWrites(t *testing.T) {
 			}
 			return nil
 		}))
-	}), sseReq())
+	}), newReq())
 
 	want := "event: list\ndata: <ul>\ndata: <li>one</li>\ndata: </ul>\n\n"
 	if got := rec.Body.String(); got != want {
@@ -208,11 +230,11 @@ func TestSSESendComponentSplitWrites(t *testing.T) {
 	}
 }
 
-func TestSSESendComponentPassesTheContext(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/u/{id}/events", sseOpen(func(s *SSEWriter) error {
-		return s.SendComponent("row", ComponentFunc(func(ctx context.Context, w io.Writer) error {
-			b, ok := FromContext(ctx)
+func TestSendComponentPassesTheContext(t *testing.T) {
+	r := newRouter()
+	r.GET("/u/{id}/events", open(func(s *Writer) error {
+		return s.SendComponent("row", router.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+			b, ok := router.FromContext(ctx)
 			if !ok {
 				return io.ErrUnexpectedEOF
 			}
@@ -226,18 +248,18 @@ func TestSSESendComponentPassesTheContext(t *testing.T) {
 	}
 }
 
-func TestSSESendComponentErrorWritesNothing(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestSendComponentErrorWritesNothing(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		if err := s.SendData("first"); err != nil {
 			return err
 		}
-		return s.SendComponent("row", ComponentFunc(func(_ context.Context, w io.Writer) error {
+		return s.SendComponent("row", router.ComponentFunc(func(_ context.Context, w io.Writer) error {
 			if _, err := io.WriteString(w, "<li>partial"); err != nil {
 				return err
 			}
 			return io.ErrUnexpectedEOF
 		}))
-	}), sseReq())
+	}), newReq())
 
 	if strings.Contains(rec.Body.String(), "partial") {
 		t.Errorf("the body leaked the partial frame: %q", rec.Body.String())
@@ -247,36 +269,36 @@ func TestSSESendComponentErrorWritesNothing(t *testing.T) {
 	}
 }
 
-func TestSSESendComponentKeepsAnHTTPError(t *testing.T) {
+func TestSendComponentKeepsAnHTTPError(t *testing.T) {
 	var got error
-	sseServe(sseOpen(func(s *SSEWriter) error {
-		got = s.SendComponent("row", ComponentFunc(func(context.Context, io.Writer) error {
-			return ErrNotFound
+	serve(open(func(s *Writer) error {
+		got = s.SendComponent("row", router.ComponentFunc(func(context.Context, io.Writer) error {
+			return router.ErrNotFound
 		}))
 		return nil
-	}), sseReq())
+	}), newReq())
 
-	if !errors.Is(got, ErrNotFound) {
+	if !errors.Is(got, router.ErrNotFound) {
 		t.Errorf("error = %v, want the 404 of the component", got)
 	}
 }
 
-func TestSSEFieldWithALineBreak(t *testing.T) {
+func TestFieldWithALineBreak(t *testing.T) {
 	for _, e := range []Event{
 		{ID: "7\nevent: forged", Data: "x"},
 		{Name: "tick\ndata: forged", Data: "x"},
 		{ID: "7\rx", Data: "x"},
 	} {
-		rec := sseServe(sseOpen(func(s *SSEWriter) error {
+		rec := serve(open(func(s *Writer) error {
 			err := s.Send(e)
 			if err == nil {
 				t.Errorf("Send(%+v) reported no error", e)
 			}
-			if got := StatusOf(err); got != http.StatusInternalServerError {
+			if got := router.StatusOf(err); got != http.StatusInternalServerError {
 				t.Errorf("status of the error = %d, want 500", got)
 			}
 			return nil
-		}), sseReq())
+		}), newReq())
 
 		if rec.Body.Len() != 0 {
 			t.Errorf("body = %q, want empty", rec.Body.String())
@@ -284,19 +306,19 @@ func TestSSEFieldWithALineBreak(t *testing.T) {
 	}
 }
 
-func TestSSEEventIDWithNull(t *testing.T) {
+func TestEventIDWithNull(t *testing.T) {
 	for _, id := range []string{"\x00", "7\x00x"} {
 		t.Run(fmt.Sprintf("%q", id), func(t *testing.T) {
-			rec := sseServe(sseOpen(func(s *SSEWriter) error {
+			rec := serve(open(func(s *Writer) error {
 				err := s.Send(Event{ID: id, Data: "x"})
 				if err == nil {
 					t.Errorf("Send took ID %q", id)
 				}
-				if got := StatusOf(err); got != http.StatusInternalServerError {
+				if got := router.StatusOf(err); got != http.StatusInternalServerError {
 					t.Errorf("status of the error = %d, want 500", got)
 				}
 				return s.SendData("still open")
-			}), sseReq())
+			}), newReq())
 
 			if got, want := rec.Body.String(), "data: still open\n\n"; got != want {
 				t.Errorf("body = %q, want %q", got, want)
@@ -305,17 +327,17 @@ func TestSSEEventIDWithNull(t *testing.T) {
 	}
 }
 
-func TestSSESendAfterAFailure(t *testing.T) {
+func TestSendAfterAFailure(t *testing.T) {
 	want := errors.New("connection reset")
 	var first, second error
 
-	sseServeTo(sseOpen(func(s *SSEWriter) error {
+	serveTo(open(func(s *Writer) error {
 		first, second = s.Send(Event{Data: "one"}), s.Send(Event{Data: "two"})
 		if !s.Closed() {
 			t.Error("the writer reports the stream as open after a failed send")
 		}
 		return nil
-	}), sseReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
+	}), newReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
 
 	if !errors.Is(first, want) {
 		t.Errorf("first send = %v, want %v", first, want)
@@ -325,27 +347,27 @@ func TestSSESendAfterAFailure(t *testing.T) {
 	}
 }
 
-func TestSSEHEAD(t *testing.T) {
+func TestHEAD(t *testing.T) {
 	var (
-		open             bool
+		isOpen           bool
 		sendErr, commErr error
 		reached          bool
 	)
 
-	r := newTestRouter()
-	r.GET("/events", sseOpen(func(s *SSEWriter) error {
-		open = !s.Closed()
+	r := newRouter()
+	r.GET("/events", open(func(s *Writer) error {
+		isOpen = !s.Closed()
 		sendErr = s.Send(Event{Data: "hello"})
 		commErr = s.Comment("ping")
 		reached = true
 		return nil
-	}, SSERetry(time.Second)))
+	}, Retry(time.Second)))
 
 	rec := do(r, http.MethodHead, "/events")
 	if !reached {
 		t.Fatal("the handler did not reach its end, so a send failed hard")
 	}
-	if open {
+	if isOpen {
 		t.Error("the writer reports the stream as open for a HEAD request")
 	}
 	if sendErr != nil {
@@ -357,7 +379,7 @@ func TestSSEHEAD(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
-	if got := rec.Header().Get(HeaderContentType); got != MIMETextEventStream {
+	if got := rec.Header().Get(router.HeaderContentType); got != router.MIMETextEventStream {
 		t.Errorf("Content-Type = %q", got)
 	}
 	if rec.Body.Len() != 0 {
@@ -365,23 +387,23 @@ func TestSSEHEAD(t *testing.T) {
 	}
 }
 
-func TestSSEUnflushableWriter(t *testing.T) {
+func TestUnflushableWriter(t *testing.T) {
 	rec := httptest.NewRecorder()
-	sseServeTo(sseOpen(func(*SSEWriter) error {
-		t.Error("SSE returned a writer for a response writer that cannot flush")
+	serveTo(open(func(*Writer) error {
+		t.Error("Open returned a writer for a response writer that cannot flush")
 		return nil
-	}), sseReq(), noFlush{ResponseWriter: rec})
+	}), newReq(), noFlush{ResponseWriter: rec})
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 
-func TestSSEFlushThroughAWrapper(t *testing.T) {
+func TestFlushThroughAWrapper(t *testing.T) {
 	rec := httptest.NewRecorder()
-	sseServeTo(sseOpen(func(s *SSEWriter) error {
+	serveTo(open(func(s *Writer) error {
 		return s.SendData("hello")
-	}), sseReq(), unwrapWriter{ResponseWriter: rec})
+	}), newReq(), unwrapWriter{ResponseWriter: rec})
 
 	if got, want := rec.Body.String(), "data: hello\n\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
@@ -391,20 +413,20 @@ func TestSSEFlushThroughAWrapper(t *testing.T) {
 	}
 }
 
-func TestSSERetryOption(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestRetryOption(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		return s.SendData("hello")
-	}, SSERetry(3*time.Second)), sseReq())
+	}, Retry(3*time.Second)), newReq())
 
 	if got, want := rec.Body.String(), "retry: 3000\n\ndata: hello\n\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
-func TestSSERetryBelowAMillisecond(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestRetryBelowAMillisecond(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		return s.SendData("hello")
-	}, SSERetry(time.Microsecond)), sseReq())
+	}, Retry(time.Microsecond)), newReq())
 
 	if got, want := rec.Body.String(), "data: hello\n\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
@@ -412,22 +434,19 @@ func TestSSERetryBelowAMillisecond(t *testing.T) {
 }
 
 func TestLastEventID(t *testing.T) {
-	req := sseReq()
+	req := newReq()
 	req.Header.Set(HeaderLastEventID, "42")
 
-	rec := sseServe(func(c *tctx) error {
-		s, err := c.SSE(http.StatusOK)
+	rec := serve(func(c *tctx) error {
+		s, err := Open(c, http.StatusOK)
 		if err != nil {
 			return err
 		}
-		if got := c.LastEventID(); got != "42" {
-			t.Errorf("Base.LastEventID = %q, want %q", got, "42")
-		}
 		if got := s.LastEventID(); got != "42" {
-			t.Errorf("SSEWriter.LastEventID = %q, want %q", got, "42")
+			t.Errorf("Writer.LastEventID = %q, want %q", got, "42")
 		}
 		if got := s.Request(); got != c.Request() {
-			t.Error("SSEWriter.Request returned another request")
+			t.Error("Writer.Request returned another request")
 		}
 		return nil
 	}, req)
@@ -438,12 +457,12 @@ func TestLastEventID(t *testing.T) {
 }
 
 func TestLastEventIDIsEmptyOnAFirstConnection(t *testing.T) {
-	sseServe(func(c *tctx) error {
-		if got := c.LastEventID(); got != "" {
+	serve(open(func(s *Writer) error {
+		if got := s.LastEventID(); got != "" {
 			t.Errorf("LastEventID = %q, want empty", got)
 		}
-		return c.NoContent(http.StatusOK)
-	}, sseReq())
+		return nil
+	}), newReq())
 }
 
 type failWriter struct {
@@ -472,10 +491,10 @@ func closedChan[T any](vs ...T) <-chan T {
 	return ch
 }
 
-func TestServeSSEDrainsTheChannel(t *testing.T) {
-	rec := sseServe(func(c *tctx) error {
-		return ServeSSE(c, closedChan("one", "two"), SSEText[string]("msg"))
-	}, sseReq())
+func TestServeDrainsTheChannel(t *testing.T) {
+	rec := serve(func(c *tctx) error {
+		return Serve(c, closedChan("one", "two"), Text[string]("msg"))
+	}, newReq())
 
 	want := "event: msg\ndata: one\n\nevent: msg\ndata: two\n\n"
 	if got := rec.Body.String(); got != want {
@@ -486,30 +505,30 @@ func TestServeSSEDrainsTheChannel(t *testing.T) {
 	}
 }
 
-func TestServeSSEReportsNoErrorAtTheEnd(t *testing.T) {
+func TestServeReportsNoErrorAtTheEnd(t *testing.T) {
 	var got error
-	sseServe(func(c *tctx) error {
-		got = ServeSSE(c, closedChan[string](), SSEText[string]("msg"))
+	serve(func(c *tctx) error {
+		got = Serve(c, closedChan[string](), Text[string]("msg"))
 		return got
-	}, sseReq())
+	}, newReq())
 
 	if got != nil {
-		t.Errorf("ServeSSE = %v, want nil", got)
+		t.Errorf("Serve = %v, want nil", got)
 	}
 }
 
-func TestServeSSEStopsWhenTheClientGoesAway(t *testing.T) {
+func TestServeStopsWhenTheClientGoesAway(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	var got error
-	rec := sseServe(func(c *tctx) error {
-		got = ServeSSE(c, make(chan string), SSEText[string]("msg"))
+	rec := serve(func(c *tctx) error {
+		got = Serve(c, make(chan string), Text[string]("msg"))
 		return got
-	}, sseReq().WithContext(ctx))
+	}, newReq().WithContext(ctx))
 
 	if got != nil {
-		t.Errorf("ServeSSE = %v, want nil", got)
+		t.Errorf("Serve = %v, want nil", got)
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("body = %q, want empty", rec.Body.String())
@@ -519,7 +538,7 @@ func TestServeSSEStopsWhenTheClientGoesAway(t *testing.T) {
 	}
 }
 
-func TestServeSSEHeartbeat(t *testing.T) {
+func TestServeHeartbeat(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ch := make(chan string)
 		done := make(chan struct{})
@@ -527,9 +546,9 @@ func TestServeSSEHeartbeat(t *testing.T) {
 
 		go func() {
 			defer close(done)
-			sseServeTo(func(c *tctx) error {
-				return ServeSSE(c, ch, SSEText[string]("msg"), SSEHeartbeat(time.Second))
-			}, sseReq(), rec)
+			serveTo(func(c *tctx) error {
+				return Serve(c, ch, Text[string]("msg"), Heartbeat(time.Second))
+			}, newReq(), rec)
 		}()
 
 		time.Sleep(3500 * time.Millisecond)
@@ -543,7 +562,7 @@ func TestServeSSEHeartbeat(t *testing.T) {
 	})
 }
 
-func TestServeSSENoHeartbeatByDefault(t *testing.T) {
+func TestServeNoHeartbeatByDefault(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ch := make(chan string)
 		done := make(chan struct{})
@@ -551,9 +570,9 @@ func TestServeSSENoHeartbeatByDefault(t *testing.T) {
 
 		go func() {
 			defer close(done)
-			sseServeTo(func(c *tctx) error {
-				return ServeSSE(c, ch, SSEText[string]("msg"))
-			}, sseReq(), rec)
+			serveTo(func(c *tctx) error {
+				return Serve(c, ch, Text[string]("msg"))
+			}, newReq(), rec)
 		}()
 
 		time.Sleep(time.Minute)
@@ -567,11 +586,11 @@ func TestServeSSENoHeartbeatByDefault(t *testing.T) {
 	})
 }
 
-func TestServeSSECloseOption(t *testing.T) {
-	rec := sseServe(func(c *tctx) error {
-		return ServeSSE(c, closedChan("one"), SSEText[string]("msg"),
-			SSEClose(Event{Name: "close", Data: "done"}))
-	}, sseReq())
+func TestServeCloseOption(t *testing.T) {
+	rec := serve(func(c *tctx) error {
+		return Serve(c, closedChan("one"), Text[string]("msg"),
+			Close(Event{Name: "close", Data: "done"}))
+	}, newReq())
 
 	want := "event: msg\ndata: one\n\nevent: close\ndata: done\n\n"
 	if got := rec.Body.String(); got != want {
@@ -579,31 +598,31 @@ func TestServeSSECloseOption(t *testing.T) {
 	}
 }
 
-func TestServeSSECloseOptionSkippedOnDisconnect(t *testing.T) {
+func TestServeCloseOptionSkippedOnDisconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	rec := sseServe(func(c *tctx) error {
-		return ServeSSE(c, make(chan string), SSEText[string]("msg"),
-			SSEClose(Event{Name: "close"}))
-	}, sseReq().WithContext(ctx))
+	rec := serve(func(c *tctx) error {
+		return Serve(c, make(chan string), Text[string]("msg"),
+			Close(Event{Name: "close"}))
+	}, newReq().WithContext(ctx))
 
 	if rec.Body.Len() != 0 {
 		t.Errorf("body = %q, want empty", rec.Body.String())
 	}
 }
 
-func TestServeSSESenderError(t *testing.T) {
+func TestServeSenderError(t *testing.T) {
 	want := errors.New("render failed")
 	var got error
 
-	rec := sseServe(func(c *tctx) error {
-		got = ServeSSE(c, closedChan("one"), func(*SSEWriter, string) error { return want })
+	rec := serve(func(c *tctx) error {
+		got = Serve(c, closedChan("one"), func(*Writer, string) error { return want })
 		return got
-	}, sseReq())
+	}, newReq())
 
 	if !errors.Is(got, want) {
-		t.Errorf("ServeSSE = %v, want %v", got, want)
+		t.Errorf("Serve = %v, want %v", got, want)
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("body = %q, want empty", rec.Body.String())
@@ -613,22 +632,22 @@ func TestServeSSESenderError(t *testing.T) {
 	}
 }
 
-func TestServeSSEWithoutASender(t *testing.T) {
-	rec := sseServe(func(c *tctx) error {
-		return ServeSSE(c, closedChan("one"), nil)
-	}, sseReq())
+func TestServeWithoutASender(t *testing.T) {
+	rec := serve(func(c *tctx) error {
+		return Serve(c, closedChan("one"), nil)
+	}, newReq())
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 
-func TestServeSSEHEAD(t *testing.T) {
+func TestServeHEAD(t *testing.T) {
 	ch := make(chan string, 1)
 	ch <- "one"
 
-	r := newTestRouter()
-	r.GET("/events", func(c *tctx) error { return ServeSSE(c, ch, SSEText[string]("msg")) })
+	r := newRouter()
+	r.GET("/events", func(c *tctx) error { return Serve(c, ch, Text[string]("msg")) })
 
 	rec := do(r, http.MethodHead, "/events")
 	if rec.Body.Len() != 0 {
@@ -639,11 +658,11 @@ func TestServeSSEHEAD(t *testing.T) {
 	}
 }
 
-func TestSSESenders(t *testing.T) {
+func TestSenders(t *testing.T) {
 	t.Run("JSON", func(t *testing.T) {
-		rec := sseServe(func(c *tctx) error {
-			return ServeSSE(c, closedChan(map[string]int{"n": 1}), SSEJSON[map[string]int]("count"))
-		}, sseReq())
+		rec := serve(func(c *tctx) error {
+			return Serve(c, closedChan(map[string]int{"n": 1}), JSON[map[string]int]("count"))
+		}, newReq())
 
 		if got, want := rec.Body.String(), "event: count\ndata: {\"n\":1}\n\n"; got != want {
 			t.Errorf("body = %q, want %q", got, want)
@@ -651,9 +670,9 @@ func TestSSESenders(t *testing.T) {
 	})
 
 	t.Run("text of a Stringer", func(t *testing.T) {
-		rec := sseServe(func(c *tctx) error {
-			return ServeSSE(c, closedChan(stamp{n: 4}), SSEText[stamp](""))
-		}, sseReq())
+		rec := serve(func(c *tctx) error {
+			return Serve(c, closedChan(stamp{n: 4}), Text[stamp](""))
+		}, newReq())
 
 		if got, want := rec.Body.String(), "data: n=4\n\n"; got != want {
 			t.Errorf("body = %q, want %q", got, want)
@@ -661,9 +680,9 @@ func TestSSESenders(t *testing.T) {
 	})
 
 	t.Run("component", func(t *testing.T) {
-		rec := sseServe(func(c *tctx) error {
-			return ServeSSE(c, closedChan("one"), SSEComponent("row", card))
-		}, sseReq())
+		rec := serve(func(c *tctx) error {
+			return Serve(c, closedChan("one"), Component("row", card))
+		}, newReq())
 
 		if got, want := rec.Body.String(), "event: row\ndata: <li>one</li>\n\n"; got != want {
 			t.Errorf("body = %q, want %q", got, want)
@@ -671,9 +690,9 @@ func TestSSESenders(t *testing.T) {
 	})
 
 	t.Run("events", func(t *testing.T) {
-		rec := sseServe(func(c *tctx) error {
-			return ServeSSE(c, closedChan(Event{ID: "1", Name: "tick", Data: "one"}), SSEEvents())
-		}, sseReq())
+		rec := serve(func(c *tctx) error {
+			return Serve(c, closedChan(Event{ID: "1", Name: "tick", Data: "one"}), Events())
+		}, newReq())
 
 		if got, want := rec.Body.String(), "id: 1\nevent: tick\ndata: one\n\n"; got != want {
 			t.Errorf("body = %q, want %q", got, want)
@@ -681,13 +700,13 @@ func TestSSESenders(t *testing.T) {
 	})
 }
 
-func TestSSEStreamServe(t *testing.T) {
-	stream := NewSSEStream(SSEComponent("row", card), SSERetry(time.Second))
+func TestStreamServe(t *testing.T) {
+	stream := NewStream(Component("row", card), Retry(time.Second))
 
 	for _, item := range []string{"one", "two"} {
-		rec := sseServe(func(c *tctx) error {
+		rec := serve(func(c *tctx) error {
 			return stream.Serve(c, closedChan(item))
-		}, sseReq())
+		}, newReq())
 
 		want := "retry: 1000\n\nevent: row\ndata: <li>" + item + "</li>\n\n"
 		if got := rec.Body.String(); got != want {
@@ -696,65 +715,65 @@ func TestSSEStreamServe(t *testing.T) {
 	}
 }
 
-func TestNewSSEStreamWithoutASender(t *testing.T) {
+func TestNewStreamWithoutASender(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("NewSSEStream took a nil sender")
+			t.Error("NewStream took a nil sender")
 		}
 	}()
-	NewSSEStream[string](nil)
+	NewStream[string](nil)
 }
 
-func TestSSERejectsANilOptionBeforeCommitting(t *testing.T) {
+func TestRejectsANilOptionBeforeCommitting(t *testing.T) {
 	rec := httptest.NewRecorder()
-	b := NewBase(rec, sseReq())
+	b := router.NewBase(rec, newReq())
 
-	_, err := b.SSE(http.StatusOK, nil)
-	if cause := errors.Unwrap(err); cause == nil || cause.Error() != nilSSEOptionError {
-		t.Errorf("SSE cause = %v, want %q", cause, nilSSEOptionError)
+	_, err := Open(b, http.StatusOK, nil)
+	if cause := errors.Unwrap(err); cause == nil || cause.Error() != nilOptionError {
+		t.Errorf("Open cause = %v, want %q", cause, nilOptionError)
 	}
 	if b.Response().Committed {
-		t.Error("SSE committed the response before rejecting the option")
+		t.Error("Open committed the response before rejecting the option")
 	}
 }
 
-func TestServeSSERejectsANilOption(t *testing.T) {
+func TestServeRejectsANilOption(t *testing.T) {
 	var got error
-	sseServe(func(c *tctx) error {
-		got = ServeSSE(c, closedChan("one"), SSEText[string]("msg"), nil)
+	serve(func(c *tctx) error {
+		got = Serve(c, closedChan("one"), Text[string]("msg"), nil)
 		return got
-	}, sseReq())
+	}, newReq())
 
-	if cause := errors.Unwrap(got); cause == nil || cause.Error() != nilSSEOptionError {
-		t.Errorf("ServeSSE cause = %v, want %q", cause, nilSSEOptionError)
+	if cause := errors.Unwrap(got); cause == nil || cause.Error() != nilOptionError {
+		t.Errorf("Serve cause = %v, want %q", cause, nilOptionError)
 	}
 }
 
-func TestNewSSEStreamRejectsANilOption(t *testing.T) {
+func TestNewStreamRejectsANilOption(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("NewSSEStream took a nil option")
+			t.Error("NewStream took a nil option")
 		}
 	}()
-	NewSSEStream(SSEText[string]("msg"), nil)
+	NewStream(Text[string]("msg"), nil)
 }
 
-func TestSSEComponentNeedsAView(t *testing.T) {
+func TestComponentNeedsAView(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("SSEComponent took a nil view")
+			t.Error("Component took a nil view")
 		}
 	}()
-	_ = SSEComponent[string, Component]("row", nil)
+	_ = Component[string, router.Component]("row", nil)
 }
 
-func TestSSEOverAServer(t *testing.T) {
+func TestOverAServer(t *testing.T) {
 	ch := make(chan string)
 	handlerErr := make(chan error, 1)
 
-	r := newTestRouter()
+	r := newRouter()
 	r.GET("/events", func(c *tctx) error {
-		err := ServeSSE(c, ch, SSEText[string]("msg"), SSERetry(2*time.Second))
+		err := Serve(c, ch, Text[string]("msg"), Retry(2*time.Second))
 		handlerErr <- err
 		return err
 	})
@@ -772,8 +791,8 @@ func TestSSEOverAServer(t *testing.T) {
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	if got := res.Header.Get(HeaderContentType); got != MIMETextEventStream {
-		t.Errorf("Content-Type = %q, want %q", got, MIMETextEventStream)
+	if got := res.Header.Get(router.HeaderContentType); got != router.MIMETextEventStream {
+		t.Errorf("Content-Type = %q, want %q", got, router.MIMETextEventStream)
 	}
 
 	br := bufio.NewReader(res.Body)
@@ -828,58 +847,58 @@ type deadlineWriter struct {
 
 func (w deadlineWriter) SetWriteDeadline(time.Time) error { return w.err }
 
-func TestSSEFlushError(t *testing.T) {
+func TestFlushError(t *testing.T) {
 	want := errors.New("stream reset")
 	var opened, sent error
 
-	sseServeTo(func(c *tctx) error {
-		s, err := c.SSE(http.StatusOK)
+	serveTo(func(c *tctx) error {
+		s, err := Open(c, http.StatusOK)
 		opened = err
 		if err != nil {
 			return nil
 		}
 		sent = s.Send(Event{Data: "one"})
 		return nil
-	}, sseReq(), flushErrWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
+	}, newReq(), flushErrWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
 
 	if !errors.Is(opened, want) {
-		t.Errorf("SSE = %v, want %v", opened, want)
+		t.Errorf("Open = %v, want %v", opened, want)
 	}
 	if sent != nil {
 		t.Errorf("Send = %v, want no send at all", sent)
 	}
 }
 
-func TestSSEWriteDeadlineError(t *testing.T) {
+func TestWriteDeadlineError(t *testing.T) {
 	rec := httptest.NewRecorder()
-	sseServeTo(sseOpen(func(*SSEWriter) error {
-		t.Error("SSE returned a writer although the deadline stayed")
+	serveTo(open(func(*Writer) error {
+		t.Error("Open returned a writer although the deadline stayed")
 		return nil
-	}), sseReq(), deadlineWriter{ResponseRecorder: rec, err: errors.New("no")})
+	}), newReq(), deadlineWriter{ResponseRecorder: rec, err: errors.New("no")})
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 
-func TestSSERetryWriteError(t *testing.T) {
+func TestRetryWriteError(t *testing.T) {
 	want := errors.New("connection reset")
 	var opened error
 
-	sseServeTo(func(c *tctx) error {
-		_, opened = c.SSE(http.StatusOK, SSERetry(time.Second))
+	serveTo(func(c *tctx) error {
+		_, opened = Open(c, http.StatusOK, Retry(time.Second))
 		return nil
-	}, sseReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
+	}, newReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
 
 	if !errors.Is(opened, want) {
-		t.Errorf("SSE = %v, want %v", opened, want)
+		t.Errorf("Open = %v, want %v", opened, want)
 	}
 }
 
-func TestSSEEverySendReportsTheFailure(t *testing.T) {
+func TestEverySendReportsTheFailure(t *testing.T) {
 	want := errors.New("connection reset")
 
-	sseServeTo(sseOpen(func(s *SSEWriter) error {
+	serveTo(open(func(s *Writer) error {
 		if err := s.Send(Event{Data: "one"}); !errors.Is(err, want) {
 			t.Errorf("Send = %v, want %v", err, want)
 		}
@@ -893,17 +912,17 @@ func TestSSEEverySendReportsTheFailure(t *testing.T) {
 			t.Errorf("Comment = %v, want %v", err, want)
 		}
 		return nil
-	}), sseReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
+	}), newReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
 }
 
-func TestSSEEverySendIsANoOpForHEAD(t *testing.T) {
+func TestEverySendIsANoOpForHEAD(t *testing.T) {
 	var (
 		errs    map[string]error
 		reached bool
 	)
 
-	r := newTestRouter()
-	r.GET("/events", sseOpen(func(s *SSEWriter) error {
+	r := newRouter()
+	r.GET("/events", open(func(s *Writer) error {
 		errs = map[string]error{
 			"Send":          s.Send(Event{Data: "one"}),
 			"SendData":      s.SendData("one"),
@@ -929,28 +948,28 @@ func TestSSEEverySendIsANoOpForHEAD(t *testing.T) {
 	}
 }
 
-func TestServeSSEUnflushableWriter(t *testing.T) {
+func TestServeUnflushableWriter(t *testing.T) {
 	rec := httptest.NewRecorder()
-	sseServeTo(func(c *tctx) error {
-		return ServeSSE(c, closedChan("one"), SSEText[string]("msg"))
-	}, sseReq(), noFlush{ResponseWriter: rec})
+	serveTo(func(c *tctx) error {
+		return Serve(c, closedChan("one"), Text[string]("msg"))
+	}, newReq(), noFlush{ResponseWriter: rec})
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 
-func TestServeSSEHeartbeatError(t *testing.T) {
+func TestServeHeartbeatError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		want := errors.New("connection reset")
 		got := make(chan error, 1)
 
 		go func() {
-			sseServeTo(func(c *tctx) error {
-				err := ServeSSE(c, make(chan string), SSEText[string]("msg"), SSEHeartbeat(time.Second))
+			serveTo(func(c *tctx) error {
+				err := Serve(c, make(chan string), Text[string]("msg"), Heartbeat(time.Second))
 				got <- err
 				return err
-			}, sseReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
+			}, newReq(), failWriter{ResponseRecorder: httptest.NewRecorder(), err: want})
 		}()
 
 		time.Sleep(2 * time.Second)
@@ -959,7 +978,7 @@ func TestServeSSEHeartbeatError(t *testing.T) {
 		select {
 		case err := <-got:
 			if !errors.Is(err, want) {
-				t.Errorf("ServeSSE = %v, want %v", err, want)
+				t.Errorf("Serve = %v, want %v", err, want)
 			}
 		default:
 			t.Error("the stream stayed open after the heartbeat failed")
@@ -971,29 +990,29 @@ type engineComponent interface {
 	Render(ctx context.Context, w io.Writer) error
 }
 
-func card(s string) ComponentFunc { return comp("<li>" + s + "</li>") }
+func card(s string) router.ComponentFunc { return comp("<li>" + s + "</li>") }
 
 func engineCard(s string) engineComponent { return comp("<li>" + s + "</li>") }
 
-func TestSSEComponentOfATemplateEngine(t *testing.T) {
-	rec := sseServe(func(c *tctx) error {
-		return ServeSSE(c, closedChan("one"), SSEComponent("row", engineCard))
-	}, sseReq())
+func TestComponentOfATemplateEngine(t *testing.T) {
+	rec := serve(func(c *tctx) error {
+		return Serve(c, closedChan("one"), Component("row", engineCard))
+	}, newReq())
 
 	if got, want := rec.Body.String(), "event: row\ndata: <li>one</li>\n\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
-func TestSSERejectedEventKeepsTheStreamOpen(t *testing.T) {
-	rec := sseServe(sseOpen(func(s *SSEWriter) error {
+func TestRejectedEventKeepsTheStreamOpen(t *testing.T) {
+	rec := serve(open(func(s *Writer) error {
 		if err := s.Send(Event{ID: "7\nevent: forged", Data: "x"}); err == nil {
 			t.Error("Send took an ID with a line break")
 		}
 		if err := s.SendJSON("bad", make(chan int)); err == nil {
 			t.Error("SendJSON took a value that cannot be encoded")
 		}
-		if err := s.SendComponent("row", ComponentFunc(func(context.Context, io.Writer) error {
+		if err := s.SendComponent("row", router.ComponentFunc(func(context.Context, io.Writer) error {
 			return io.ErrUnexpectedEOF
 		})); err == nil {
 			t.Error("SendComponent took a component that fails")
@@ -1002,18 +1021,18 @@ func TestSSERejectedEventKeepsTheStreamOpen(t *testing.T) {
 			t.Error("the writer closed a stream that nothing failed to reach")
 		}
 		return s.SendData("still open")
-	}), sseReq())
+	}), newReq())
 
 	if got, want := rec.Body.String(), "data: still open\n\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
-func TestSSEDropsALargeFrameBuffer(t *testing.T) {
+func TestDropsALargeFrameBuffer(t *testing.T) {
 	var big, after int
 
-	sseServe(sseOpen(func(s *SSEWriter) error {
-		if err := s.SendData(strings.Repeat("x", maxPooledRenderBuf+1024)); err != nil {
+	serve(open(func(s *Writer) error {
+		if err := s.SendData(strings.Repeat("x", maxFrameBuf+1024)); err != nil {
 			return err
 		}
 		big = s.buf.Cap()
@@ -1022,27 +1041,74 @@ func TestSSEDropsALargeFrameBuffer(t *testing.T) {
 		}
 		after = s.buf.Cap()
 		return nil
-	}), sseReq())
+	}), newReq())
 
-	if big <= maxPooledRenderBuf {
-		t.Fatalf("the buffer of the large frame held %d bytes, want more than %d", big, maxPooledRenderBuf)
+	if big <= maxFrameBuf {
+		t.Fatalf("the buffer of the large frame held %d bytes, want more than %d", big, maxFrameBuf)
 	}
-	if after > maxPooledRenderBuf {
+	if after > maxFrameBuf {
 		t.Errorf("the buffer still holds %d bytes after a small frame, want it dropped", after)
 	}
 }
 
-func TestNewSSEStreamCopiesTheOptions(t *testing.T) {
-	opts := []SSEOption{SSERetry(time.Second)}
-	stream := NewSSEStream(SSEText[string]("msg"), opts...)
-	opts[0] = SSERetry(9 * time.Second)
+func TestNewStreamCopiesTheOptions(t *testing.T) {
+	opts := []Option{Retry(time.Second)}
+	stream := NewStream(Text[string]("msg"), opts...)
+	opts[0] = Retry(9 * time.Second)
 
-	rec := sseServe(func(c *tctx) error {
+	rec := serve(func(c *tctx) error {
 		return stream.Serve(c, closedChan("one"))
-	}, sseReq())
+	}, newReq())
 
 	want := "retry: 1000\n\nevent: msg\ndata: one\n\n"
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestSendJSONTakesTheRouterOptions(t *testing.T) {
+	type pair struct {
+		A int `json:"a"`
+		B int `json:"b"`
+	}
+
+	r := newRouter()
+	r.JSONOptions(json.OmitZeroStructFields(true))
+	r.GET("/events", open(func(s *Writer) error {
+		if err := s.SendJSON("router", pair{A: 1}); err != nil {
+			return err
+		}
+		return s.SendJSON("call", pair{A: 1}, json.OmitZeroStructFields(false))
+	}))
+
+	want := "event: router\ndata: {\"a\":1}\n\nevent: call\ndata: {\"a\":1,\"b\":0}\n\n"
+	if got := do(r, http.MethodGet, "/events").Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// loopNoFlush unwraps to itself, as a buggy wrapper might, and cannot flush.
+type loopNoFlush struct{ http.ResponseWriter }
+
+func (w *loopNoFlush) Unwrap() http.ResponseWriter { return w }
+
+func TestCanFlushStopsOnACyclicUnwrap(t *testing.T) {
+	w := &loopNoFlush{ResponseWriter: httptest.NewRecorder()}
+
+	done := make(chan bool, 1)
+	go func() { done <- canFlush(w) }()
+
+	select {
+	case got := <-done:
+		if got {
+			t.Error("canFlush = true for a writer that cannot flush")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canFlush did not return for a cyclic Unwrap")
+	}
+
+	_, err := Open(router.NewBase(w, newReq()), http.StatusOK)
+	if got := router.StatusOf(err); got != http.StatusInternalServerError {
+		t.Errorf("status of the error = %d, want 500", got)
 	}
 }

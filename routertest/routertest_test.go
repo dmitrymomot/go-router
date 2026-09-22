@@ -23,6 +23,7 @@ import (
 	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/routertest"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 type appContext struct {
@@ -256,20 +257,20 @@ func eventRouter() *router.Router[*appContext] {
 		return new(appContext)
 	})
 	r.GET("/events", func(c *appContext) error {
-		s, err := c.SSE(http.StatusOK, router.SSERetry(2*time.Second))
+		s, err := sse.Open(c, http.StatusOK, sse.Retry(2*time.Second))
 		if err != nil {
 			return err
 		}
-		if err := s.Send(router.Event{ID: "1", Name: "tick", Data: "one"}); err != nil {
+		if err := s.Send(sse.Event{ID: "1", Name: "tick", Data: "one"}); err != nil {
 			return err
 		}
 		if err := s.Comment("ping"); err != nil {
 			return err
 		}
-		if err := s.Send(router.Event{Data: "two\nlines"}); err != nil {
+		if err := s.Send(sse.Event{Data: "two\nlines"}); err != nil {
 			return err
 		}
-		return s.Send(router.Event{ID: "3", Name: "tick", Data: "three"})
+		return s.Send(sse.Event{ID: "3", Name: "tick", Data: "three"})
 	})
 	return r
 }

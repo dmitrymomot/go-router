@@ -11,6 +11,7 @@ import (
 	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 func hxGet(h http.Handler, target string, headers map[string]string) *httptest.ResponseRecorder {
@@ -276,11 +277,11 @@ func TestHTMXRedirectKeepsTheStreamFlushable(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.HTMXRedirect[*appContext])
 	r.GET("/events", func(c *appContext) error {
-		s, err := c.SSE(http.StatusOK)
+		s, err := sse.Open(c, http.StatusOK)
 		if err != nil {
 			return err
 		}
-		return s.Send(router.Event{Name: "tick", Data: "one"})
+		return s.Send(sse.Event{Name: "tick", Data: "one"})
 	})
 
 	rec := hxGet(r, "/events", map[string]string{htmx.HeaderRequest: "true"})
