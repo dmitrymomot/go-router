@@ -125,9 +125,9 @@ func TestRequestAndResponseAccessors(t *testing.T) {
 	}
 }
 
-func TestSetRouteForTestPublishesRouteState(t *testing.T) {
+func TestSetTestRoutePublishesRouteState(t *testing.T) {
 	b := newBase("/users/7")
-	SetRouteForTest(b, "/users/{id}", []string{"id"}, []string{"7"})
+	b.setTestRoute("/users/{id}", []string{"id"}, []string{"7"})
 	if got := b.RoutePattern(); got != "/users/{id}" {
 		t.Errorf("RoutePattern() = %q", got)
 	}
@@ -135,14 +135,14 @@ func TestSetRouteForTestPublishesRouteState(t *testing.T) {
 		t.Errorf("Param(id) = %q", got)
 	}
 	if !b.needsCleanup {
-		t.Error("SetRouteForTest did not mark the context for cleanup")
+		t.Error("setTestRoute did not mark the context for cleanup")
 	}
 }
 
 func TestRouteMetaIsNilWithoutARouter(t *testing.T) {
-	for name, b := range map[string]*Base{"NewBase": newBase("/"), "SetRouteForTest": newBase("/users/7")} {
-		if name == "SetRouteForTest" {
-			SetRouteForTest(b, "/users/{id}", []string{"id"}, []string{"7"})
+	for name, b := range map[string]*Base{"NewBase": newBase("/"), "setTestRoute": newBase("/users/7")} {
+		if name == "setTestRoute" {
+			b.setTestRoute("/users/{id}", []string{"id"}, []string{"7"})
 		}
 		if got := b.RouteMeta(); got != nil {
 			t.Errorf("%s: RouteMeta() = %v, want nil", name, got)
@@ -153,10 +153,10 @@ func TestRouteMetaIsNilWithoutARouter(t *testing.T) {
 	}
 }
 
-func TestSetRouteForTestWithNoPatternLeavesNoRoute(t *testing.T) {
+func TestSetTestRouteWithNoPatternLeavesNoRoute(t *testing.T) {
 	b := newBase("/users/7")
-	SetRouteForTest(b, "/users/{id}", nil, nil)
-	SetRouteForTest(b, "", []string{"id"}, []string{"7"})
+	b.setTestRoute("/users/{id}", nil, nil)
+	b.setTestRoute("", []string{"id"}, []string{"7"})
 	if got := b.RoutePattern(); got != "" {
 		t.Errorf("RoutePattern() = %q, want none", got)
 	}
@@ -177,7 +177,6 @@ func TestContextConstructionRejectsNilInputs(t *testing.T) {
 			var ctx context.Context
 			newBase("/").SetContext(ctx)
 		}},
-		{name: "route base", call: func() { SetRouteForTest(nil, "/", nil, nil) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

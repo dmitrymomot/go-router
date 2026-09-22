@@ -104,8 +104,8 @@ func (b *Base) opts() *routerOpts {
 }
 
 // NewBase builds a Base outside a router, for a test or for a handler that the
-// router never calls. The route, its parameters and the host stay empty. The
-// Base has no cookie codec; see [SetCookieCodecForTest].
+// router never calls. The route, its parameters and the host stay empty, and
+// the Base has no cookie codec.
 //
 // To test a handler of your own context type, let routertest.NewContext build
 // the whole context. It fills an embedded Base in place, whereas a struct
@@ -217,34 +217,6 @@ func (b *Base) setRoute(rec *routeRecord, names, vals []string) {
 	b.route = rec
 	b.paramNames = names
 	b.paramVals = vals
-}
-
-// SetRouteForTest gives b a route pattern and its parameters, so a test can
-// call a handler that reads them without a router. names and vals pair up by
-// index. routertest.NewContext does this for a whole context through its
-// WithPattern and WithParams options.
-//
-// SetRouteForTest panics if b is nil.
-func SetRouteForTest(b *Base, pattern string, names, vals []string) {
-	if b == nil {
-		panic("router: SetRouteForTest needs a Base")
-	}
-	b.setTestRoute(pattern, names, vals)
-}
-
-// SetCookieCodecForTest gives b the codec that [Router.CookieCodec] gives the
-// contexts of a router, so a test can call a handler that signs cookies
-// without a router. It copies the settings of b, so no other Base changes.
-//
-// SetCookieCodecForTest panics if b or cc is nil.
-func SetCookieCodecForTest(b *Base, cc *CookieCodec) {
-	if b == nil {
-		panic("router: SetCookieCodecForTest needs a Base")
-	}
-	if cc == nil {
-		panic("router: SetCookieCodecForTest needs a codec")
-	}
-	b.setCodec(cc)
 }
 
 func (b *Base) base() *Base { return b }

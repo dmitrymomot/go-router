@@ -27,7 +27,7 @@ func cookieBase(cookies ...*http.Cookie) *Base {
 
 func signedBase(cc *CookieCodec, cookies ...*http.Cookie) *Base {
 	b := cookieBase(cookies...)
-	SetCookieCodecForTest(b, cc)
+	b.setCodec(cc)
 	return b
 }
 
@@ -722,15 +722,14 @@ func TestSignedCookieWithoutACodecFails(t *testing.T) {
 	}
 }
 
-func TestSetCookieCodecForTestPanicsOnNil(t *testing.T) {
+func TestMustBeBuiltCodecRefusesAnUnusableCodec(t *testing.T) {
 	tests := []struct {
 		name string
-		b    *Base
 		cc   *CookieCodec
 		want string
 	}{
-		{"no Base", nil, testCodec(), "needs a Base"},
-		{"no codec", cookieBase(), nil, "needs a codec"},
+		{"no codec", nil, "caller needs a codec"},
+		{"a codec with no key", &CookieCodec{MaxAge: time.Hour}, "caller needs a codec built by NewCookieCodec"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -740,17 +739,17 @@ func TestSetCookieCodecForTestPanicsOnNil(t *testing.T) {
 					t.Errorf("panic = %q, want one that holds %q", msg, tc.want)
 				}
 			}()
-			SetCookieCodecForTest(tc.b, tc.cc)
+			mustBeBuiltCodec(tc.cc, "caller")
 		})
 	}
 }
 
-func TestSetCookieCodecForTestLeavesOtherBasesAlone(t *testing.T) {
+func TestSetCodecLeavesOtherBasesAlone(t *testing.T) {
 	first := cookieBase()
-	SetCookieCodecForTest(first, testCodec())
+	first.setCodec(testCodec())
 	second := cookieBase()
 	other := NewCookieCodec(bytes.Repeat([]byte("o"), MinCookieKeyLen))
-	SetCookieCodecForTest(second, other)
+	second.setCodec(other)
 
 	if err := cookieBase().SetSignedCookie(&http.Cookie{Name: "uid"}); !errors.Is(err, ErrNoCookieCodec) {
 		t.Errorf("a fresh Base took the codec of another: %v", err)
@@ -759,7 +758,7 @@ func TestSetCookieCodecForTestLeavesOtherBasesAlone(t *testing.T) {
 		t.Error("two Bases share one codec after each got its own")
 	}
 	if defaultRouterOpts.codec != nil {
-		t.Error("SetCookieCodecForTest wrote the shared default options")
+		t.Error("setCodec wrote the shared default options")
 	}
 }
 
@@ -782,8 +781,8 @@ func TestCookieCodecOf(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := CookieCodecOf(tc.h); got != tc.want {
-				t.Errorf("CookieCodecOf = %p, want %p", got, tc.want)
+			if got := cookieCodecOf(tc.h); got != tc.want {
+				t.Errorf("cookieCodecOf = %p, want %p", got, tc.want)
 			}
 		})
 	}
