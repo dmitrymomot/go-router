@@ -3135,3 +3135,67 @@ func TestHostOrderIsStableAcrossClassDeclarations(t *testing.T) {
 		}
 	}
 }
+
+// A middleware of a scope with a prefix runs for a path under it that has no
+// route, so it can answer that path itself.
+func TestScopeMiddlewareAnswersAPathWithNoRoute(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/auth", func(g *Router[*tctx]) {
+		g.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+			return func(c *tctx) error {
+				if c.Path() == "/auth/restore-link" {
+					return c.Redirect(http.StatusSeeOther, "/auth/login")
+				}
+				return next(c)
+			}
+		})
+		g.GET("/login", echoRoute)
+	})
+
+	rec := do(r, http.MethodGet, "/auth/restore-link")
+	if rec.Code != http.StatusSeeOther || rec.Header().Get(HeaderLocation) != "/auth/login" {
+		t.Errorf("GET /auth/restore-link = %d to %q, want 303 to /auth/login", rec.Code, rec.Header().Get(HeaderLocation))
+	}
+	if rec := do(r, http.MethodGet, "/auth/typo"); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /auth/typo = %d, want 404", rec.Code)
+	}
+}
+
+func TestGroupMiddlewareSkipsTheFallback(t *testing.T) {
+	r := newTestRouter()
+	r.Group(func(g *Router[*tctx]) {
+		g.Use(setHeader("X-Group", "group"))
+		g.GET("/a", echoRoute)
+		g.Route("/api", func(api *Router[*tctx]) {
+			api.GET("/users", echoRoute)
+		})
+	})
+	r.With(setHeader("X-With", "with")).GET("/b", echoRoute)
+
+	tests := []struct {
+		name, method, path string
+		code               int
+		group, with        string
+	}{
+		{"a route of the group", http.MethodGet, "/a", http.StatusOK, "group", ""},
+		{"a 404 outside any prefix", http.MethodGet, "/typo", http.StatusNotFound, "", ""},
+		{"a 405 on a route of the group", http.MethodPost, "/a", http.StatusMethodNotAllowed, "", ""},
+		{"a 405 on a route of With", http.MethodPost, "/b", http.StatusMethodNotAllowed, "", ""},
+		{"a 404 under a Route inside the group", http.MethodGet, "/api/typo", http.StatusNotFound, "group", ""},
+		{"a 405 under a Route inside the group", http.MethodPost, "/api/users", http.StatusMethodNotAllowed, "group", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(r, tc.method, tc.path)
+			if rec.Code != tc.code {
+				t.Errorf("status = %d, want %d", rec.Code, tc.code)
+			}
+			if got := rec.Header().Get("X-Group"); got != tc.group {
+				t.Errorf("X-Group = %q, want %q", got, tc.group)
+			}
+			if got := rec.Header().Get("X-With"); got != tc.with {
+				t.Errorf("X-With = %q, want %q", got, tc.with)
+			}
+		})
+	}
+}

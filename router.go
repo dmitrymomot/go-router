@@ -382,6 +382,13 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 // registers after the call, outermost first, and it does not reach a route
 // registered before it.
 //
+// The middleware of the root, of a host scope and of a scope with a prefix also
+// wraps the 404, the 405 and the automatic OPTIONS answer for the paths under
+// it, with the host and prefix parameters bound, so it can answer a path that
+// has no route. A [Router.Group] or [Router.With] scope adds no such answer of
+// its own: its middleware reaches a 404 only through a scope with a prefix
+// opened inside it.
+//
 // Use panics on a nil middleware, on a scope that already holds routes, or
 // after the router started serving.
 func (r *Router[C]) Use(mws ...Middleware[C]) {
@@ -451,7 +458,8 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 }
 
 // Group opens a scope with no prefix, for middleware that covers some routes
-// and not others. fn registers into the scope, which Group also returns.
+// and not others. fn registers into the scope, which Group also returns. Its
+// middleware does not wrap the 404 and 405 answers; see [Router.Use].
 func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
@@ -464,7 +472,8 @@ func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 }
 
 // Route opens a scope under prefix. The patterns that fn registers are
-// relative to it, and the scope carries the middleware of its parent.
+// relative to it, and the scope carries the middleware of its parent. Its
+// middleware also wraps the 404 and 405 answers under prefix; see [Router.Use].
 func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
@@ -586,6 +595,11 @@ func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 // as "{tenant}.example.com", which [Base.Param] then reads. A host parameter
 // takes the constraints of [Router.Handle], as in "{tenant:slug}.example.com".
 // A route outside any host scope answers for every host.
+//
+// The middleware of the scope also wraps the 404 and 405 answers for its hosts.
+// When several Host or Hosts calls open one pattern, the middleware of the
+// first scope wraps those answers, and each route keeps the middleware of the
+// scope that registered it.
 //
 // Hosts panics on an empty patterns or on a pattern it cannot parse.
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
@@ -954,6 +968,8 @@ func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Du
 }
 
 // Routes reports the table as it stands. Registration stays open afterwards.
+// It lists routes alone: the 404, 405 and OPTIONS answers that a scope's
+// middleware wraps are not in it.
 func (r *Router[C]) Routes() []Route { return r.top().collectRoutes() }
 
 // freeze closes the graph for registration on the first request.

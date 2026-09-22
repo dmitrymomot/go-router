@@ -987,3 +987,88 @@ func TestJSONErrorHandlerOnAHostAnswersItsMisses(t *testing.T) {
 		t.Errorf("another host answered %d with %q, want a plain-text 404", rec.Code, got)
 	}
 }
+
+func TestHostMiddlewareWrapsTheHostFallbacks(t *testing.T) {
+	tenant := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			c.Response().Header().Set("X-Tenant", c.Param("tenant"))
+			return next(c)
+		}
+	}
+	r := newTestRouter()
+	r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
+		h.Use(tenant)
+		h.GET("/x", echoHost)
+	})
+	r.GET("/y", echoHost)
+
+	tests := []struct {
+		name, host, method, path string
+		code                     int
+		tenant                   string
+	}{
+		{"a 404", "acme.example.com", http.MethodGet, "/nope", http.StatusNotFound, "acme"},
+		{"a 405", "acme.example.com", http.MethodPost, "/x", http.StatusMethodNotAllowed, "acme"},
+		{"an automatic OPTIONS", "acme.example.com", http.MethodOptions, "/x", http.StatusNoContent, "acme"},
+		{"a 404 on another host", "other.test", http.MethodGet, "/nope", http.StatusNotFound, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doHost(r, tc.method, tc.host, tc.path)
+			if rec.Code != tc.code {
+				t.Errorf("status = %d, want %d", rec.Code, tc.code)
+			}
+			if got := rec.Header().Get("X-Tenant"); got != tc.tenant {
+				t.Errorf("X-Tenant = %q, want %q", got, tc.tenant)
+			}
+		})
+	}
+}
+
+func TestHostMiddlewareCanAnswerAPathWithNoRoute(t *testing.T) {
+	r := newTestRouter()
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+			return func(c *tctx) error {
+				if c.Path() == "/legacy" {
+					return c.String(http.StatusOK, "answered by the host middleware")
+				}
+				return next(c)
+			}
+		})
+		h.GET("/", echoHost)
+	})
+
+	rec := doHost(r, http.MethodGet, "example.com", "/legacy")
+	if rec.Code != http.StatusOK || rec.Body.String() != "answered by the host middleware" {
+		t.Errorf("GET /legacy = %d %q, want the answer of the host middleware", rec.Code, rec.Body)
+	}
+}
+
+func TestTheFirstHostScopeWrapsTheFallbacksOfItsPattern(t *testing.T) {
+	r := newTestRouter()
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.Use(setHeader("X-Scope", "first"))
+		h.GET("/a", echoHost)
+	})
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.Use(setHeader("X-Scope", "second"))
+		h.GET("/b", echoHost)
+	})
+
+	tests := []struct {
+		name, method, path, want string
+	}{
+		{"a 404", http.MethodGet, "/nope", "first"},
+		{"a 405 on a route of the second scope", http.MethodPost, "/b", "first"},
+		{"a route of the first scope", http.MethodGet, "/a", "first"},
+		{"a route of the second scope", http.MethodGet, "/b", "second"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := doHost(r, tc.method, "example.com", tc.path).Header().Get("X-Scope"); got != tc.want {
+				t.Errorf("X-Scope = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
