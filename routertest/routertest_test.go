@@ -866,3 +866,147 @@ func TestWithCookieCodecGivesTheContextTheCodec(t *testing.T) {
 		t.Errorf("SetSignedCookie without the option = %v, want %v", err, router.ErrNoCookieCodec)
 	}
 }
+
+func flashingRouter(r *router.Router[*appContext]) *router.Router[*appContext] {
+	r.CookieCodec(router.NewCookieCodec(cookieKey))
+	r.POST("/users", func(c *appContext) error {
+		for _, f := range []router.Flash{{Kind: "success", Message: "user created"}, {Kind: "info", Message: "check your inbox"}} {
+			if err := c.AddFlash(f); err != nil {
+				return err
+			}
+		}
+		return c.Redirect(http.StatusSeeOther, "/users")
+	})
+	r.GET("/users", func(c *appContext) error {
+		return c.Stringf(http.StatusOK, "%v", c.Flashes())
+	})
+	return r
+}
+
+func TestFlashesReadsWhatTheHandlerFlashed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    *router.Router[*appContext]
+	}{
+		{"New", router.New(newContext)},
+		{"NewPooled", router.NewPooled(func() *appContext { return new(appContext) }, func(c *appContext) { c.DB = "" })},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := routertest.Do(flashingRouter(tc.r), http.MethodPost, "/users")
+
+			got := routertest.Flashes(res)
+			want := []router.Flash{{Kind: "success", Message: "user created"}, {Kind: "info", Message: "check your inbox"}}
+			if !slices.Equal(got, want) {
+				t.Errorf("Flashes = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestFlashesReportsNothing(t *testing.T) {
+	cc := router.NewCookieCodec(cookieKey)
+	other := router.NewCookieCodec([]byte(strings.Repeat("o", router.MinCookieKeyLen)))
+	tests := []struct {
+		name string
+		res  func(r *router.Router[*appContext]) *routertest.Response
+	}{
+		{"the cookie is not set", func(r *router.Router[*appContext]) *routertest.Response {
+			return routertest.Get(r, "/users")
+		}},
+		{"the cookie is cleared", func(r *router.Router[*appContext]) *routertest.Response {
+			return routertest.Get(r, "/users", routertest.FlashCookie(cc, router.Flash{Kind: "info", Message: "seen"}))
+		}},
+		{"the cookie is signed with another codec", func(r *router.Router[*appContext]) *routertest.Response {
+			return routertest.Get(r, "/planted", routertest.FlashCookie(other, router.Flash{Kind: "info", Message: "planted"}))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := flashingRouter(router.New(newContext))
+			r.GET("/planted", func(c *appContext) error {
+				ck, err := c.Request().Cookie(router.FlashCookieName)
+				if err != nil {
+					return err
+				}
+				c.SetCookie(c.NewCookie(router.FlashCookieName, ck.Value, time.Minute))
+				return c.NoContent(http.StatusNoContent)
+			})
+
+			if got := routertest.Flashes(tc.res(r)); got != nil {
+				t.Errorf("Flashes = %+v, want nothing", got)
+			}
+		})
+	}
+}
+
+func TestFlashesPanicsWithoutACodec(t *testing.T) {
+	res := routertest.Get(router.New(newContext), "/")
+	defer func() {
+		msg, _ := recover().(string)
+		if !strings.Contains(msg, "CookieCodec") {
+			t.Errorf("panic = %q, want one that names CookieCodec", msg)
+		}
+	}()
+	routertest.Flashes(res)
+}
+
+func TestFlashCookieSeedsThePage(t *testing.T) {
+	r := flashingRouter(router.New(newContext))
+
+	res := routertest.Get(r, "/users", routertest.FlashCookie(router.NewCookieCodec(cookieKey), router.Flash{Kind: "error", Message: "try again"}))
+
+	if got, want := res.String(), "[{error try again}]"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	var cleared bool
+	for _, c := range res.Cookies() {
+		cleared = cleared || (c.Name == router.FlashCookieName && c.MaxAge < 0)
+	}
+	if !cleared {
+		t.Errorf("the page did not clear the flash cookie: %q", res.Header.Values("Set-Cookie"))
+	}
+}
+
+func TestFlashCookiePanics(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		call func()
+	}{
+		{"a nil codec", "FlashCookie needs a codec", func() { routertest.FlashCookie(nil) }},
+		{"messages that do not fit", "do not fit", func() {
+			routertest.FlashCookie(router.NewCookieCodec(cookieKey), router.Flash{Kind: "info", Message: strings.Repeat("x", router.MaxCookieSize)})
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				msg, _ := recover().(string)
+				if !strings.Contains(msg, tc.want) {
+					t.Errorf("panic = %q, want one that contains %q", msg, tc.want)
+				}
+			}()
+			tc.call()
+		})
+	}
+}
+
+func TestFlashCookieWithoutMessagesAddsNoCookie(t *testing.T) {
+	req := routertest.Request(http.MethodGet, "/", routertest.FlashCookie(router.NewCookieCodec(cookieKey)))
+
+	if got := req.Header.Get("Cookie"); got != "" {
+		t.Errorf("the request carries Cookie %q, want none", got)
+	}
+}
+
+func TestFlashesRoundTripThroughFlashCookie(t *testing.T) {
+	cc := router.NewCookieCodec(cookieKey)
+	r := flashingRouter(router.New(newContext))
+
+	created := routertest.Do(r, http.MethodPost, "/users")
+	page := routertest.Get(r, "/users", routertest.FlashCookie(cc, routertest.Flashes(created)...))
+
+	if got, want := page.String(), "[{success user created} {info check your inbox}]"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}

@@ -71,6 +71,39 @@ func ExampleSignedCookie() {
 	// ann true
 }
 
+// Flashes reads the messages a handler left for the page after its redirect.
+func ExampleFlashes() {
+	r := router.New(newContext)
+	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
+	r.POST("/users", func(c *appContext) error {
+		if err := c.AddFlash(router.Flash{Kind: "success", Message: "user created"}); err != nil {
+			return err
+		}
+		return c.Redirect(http.StatusSeeOther, "/users")
+	})
+
+	res := routertest.Do(r, http.MethodPost, "/users")
+	fmt.Println(res.StatusCode, routertest.Flashes(res))
+	// Output:
+	// 303 [{success user created}]
+}
+
+// FlashCookie sends the messages a redirect would have left, for a test of the
+// page that shows them.
+func ExampleFlashCookie() {
+	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
+	r := router.New(newContext)
+	r.CookieCodec(codec)
+	r.GET("/users", func(c *appContext) error {
+		return c.Stringf(http.StatusOK, "%v", c.Flashes())
+	})
+
+	res := routertest.Get(r, "/users", routertest.FlashCookie(codec, router.Flash{Kind: "success", Message: "user created"}))
+	fmt.Println(res)
+	// Output:
+	// [{success user created}]
+}
+
 // WithCookieCodec gives a context built without a router the codec that
 // router.Router.CookieCodec would.
 func ExampleWithCookieCodec() {
