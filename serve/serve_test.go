@@ -401,17 +401,21 @@ func TestRunReturnsNilWhenTheContextIsAlreadyDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	listened := false
+	listened, drained := false, false
 	err := serve.Run(ctx, ok(), serve.Config{
 		Addr:     "127.0.0.1:0",
 		Logger:   slog.New(slog.DiscardHandler),
 		OnListen: func(net.Addr) { listened = true },
+		OnDrain:  func() { drained = true },
 	})
 	if err != nil {
 		t.Fatalf("err = %v, want nil for a context that is already done", err)
 	}
 	if listened {
 		t.Error("Run bound an address for a context that is already done")
+	}
+	if drained {
+		t.Error("OnDrain ran for a server that never served")
 	}
 }
 
@@ -1060,6 +1064,9 @@ func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
 		"nil option": func(ln net.Listener) error {
 			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{Listener: ln}, nil)
 		},
+		"negative drain delay": func(ln net.Listener) error {
+			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{Listener: ln, DrainDelay: -1})
+		},
 		"TLS config without a certificate": func(ln net.Listener) error {
 			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{
 				Listener:  ln,
@@ -1081,5 +1088,116 @@ func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
 				t.Error("the listener is still accepting after Run returned")
 			}
 		})
+	}
+}
+
+func TestDrainDelayWaitsBeforeTheDrain(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	var drainedAt time.Time
+	s := start(t, ok(), serve.Config{
+		DrainDelay: delay,
+		OnDrain:    func() { drainedAt = time.Now() },
+	})
+
+	if err := s.stop(t); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if drainedAt.IsZero() {
+		t.Fatal("OnDrain never ran")
+	}
+	if waited := time.Since(drainedAt); waited < delay {
+		t.Fatalf("Run returned %s after OnDrain, want at least the delay of %s", waited, delay)
+	}
+}
+
+func TestTheServerAnswersDuringTheDelay(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	boom := errors.New("listener failed")
+	fail := make(chan struct{})
+	draining := make(chan struct{})
+	s := start(t, ok(), serve.Config{
+		Listener:   &failAfterAcceptListener{Listener: ln, fail: fail, err: boom},
+		DrainDelay: time.Minute,
+		OnDrain:    func() { close(draining) },
+	})
+
+	s.cancel()
+	select {
+	case <-draining:
+	case <-time.After(wait):
+		t.Fatal("OnDrain never ran")
+	}
+
+	res := await(t, call(client(t), s.url("http", "/")))
+	if res.err != nil {
+		t.Fatalf("request during the delay: %v", res.err)
+	}
+	if res.status != http.StatusOK || res.body != "ok" {
+		t.Fatalf("answer = %d %q, want 200 %q", res.status, res.body, "ok")
+	}
+
+	close(fail)
+	select {
+	case err := <-s.errc:
+		s.stopped = true
+		if err != boom {
+			t.Fatalf("Run = %v, want the listener failure %v and no drain error", err, boom)
+		}
+	case <-time.After(wait):
+		t.Fatal("Run sat out the delay after serving failed")
+	}
+}
+
+func TestOnDrainRunsOnceWithoutADelay(t *testing.T) {
+	var calls atomic.Int32
+	s := start(t, ok(), serve.Config{OnDrain: func() { calls.Add(1) }})
+
+	if err := s.stop(t); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("OnDrain ran %d times, want once", n)
+	}
+}
+
+func TestOnDrainDoesNotRunWhenServingFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serveErr := errors.New("accept failed")
+	var calls atomic.Int32
+	err = serve.Run(context.Background(), ok(), serve.Config{
+		Listener: acceptErrorListener{Listener: ln, err: serveErr},
+		Logger:   slog.New(slog.DiscardHandler),
+		OnDrain:  func() { calls.Add(1) },
+	})
+	if !errors.Is(err, serveErr) {
+		t.Fatalf("err = %v, want the serving failure", err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("OnDrain ran %d times for a server whose serving failed", n)
+	}
+}
+
+func TestRunRejectsANegativeDrainDelay(t *testing.T) {
+	listened, built := false, false
+	err := serve.Run(context.Background(), ok(), serve.Config{
+		Addr:       "127.0.0.1:0",
+		DrainDelay: -1,
+		OnListen:   func(net.Addr) { listened = true },
+		OnServer: func(*http.Server) error {
+			built = true
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "DrainDelay") {
+		t.Fatalf("err = %v, want an error that names DrainDelay", err)
+	}
+	if built || listened {
+		t.Error("Run went on past a negative DrainDelay")
 	}
 }
