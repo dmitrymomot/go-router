@@ -35,7 +35,7 @@ func (r *Router[C]) Redirect(pattern, target string, status int) {
 		panic(err.Error())
 	}
 	full := joinPattern(r.scopePrefix(), pattern)
-	_, names, err := parsePattern(full, r.class)
+	segs, names, err := parsePattern(full, r.class)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -45,7 +45,7 @@ func (r *Router[C]) Redirect(pattern, target string, status int) {
 			panic(fmt.Sprintf("router: the redirect target %q names the parameter %q, which the route %q does not have", target, name, full))
 		}
 	}
-	if !tmpl.hasQuery && normalizePattern(target) == normalizePattern(full) {
+	if !tmpl.hasQuery && sameShape(tmpl.segs, segs) {
 		panic(fmt.Sprintf("router: the redirect of %q points at itself", full))
 	}
 
@@ -64,6 +64,26 @@ func (r *Router[C]) Redirect(pattern, target string, status int) {
 		}
 		return b.Redirect(status, loc)
 	}, nil)
+}
+
+// sameShape reports whether a and b build the same path from the same values.
+// A constraint only narrows which values reach the route, so it does not count.
+func sameShape(a, b []segment) bool {
+	return slices.EqualFunc(a, b, func(x, y segment) bool {
+		if x.kind == segConstraint {
+			x.kind = segParam
+		}
+		if y.kind == segConstraint {
+			y.kind = segParam
+		}
+		if x.kind != y.kind {
+			return false
+		}
+		if x.kind == segTemplate {
+			return slices.EqualFunc(x.parts, y.parts, func(p, q segPart) bool { return p.lit == q.lit && p.name == q.name })
+		}
+		return x.value == y.value
+	})
 }
 
 // sharedHostNames lists the host parameters that every pattern of the nearest

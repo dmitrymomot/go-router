@@ -230,6 +230,12 @@ func TestRedirectPanicsOnABadCall(t *testing.T) {
 		{"a malformed target", func(r *Router[*tctx]) { r.Redirect("/x/{id}", "/x/{", http.StatusFound) }, "unbalanced"},
 		{"a malformed route", func(r *Router[*tctx]) { r.Redirect("/x/{", "/y", http.StatusFound) }, "unbalanced"},
 		{"a target equal to the route", func(r *Router[*tctx]) { r.Redirect("/a", "/a/", http.StatusFound) }, "points at itself"},
+		{"a target equal to the route but for a constraint", func(r *Router[*tctx]) {
+			r.Redirect("/a/{id:int}", "/a/{id}", http.StatusFound)
+		}, "points at itself"},
+		{"a target equal to the route but for a constraint in a segment", func(r *Router[*tctx]) {
+			r.Redirect("/a/v{n:int}.json", "/a/v{n}.json", http.StatusFound)
+		}, "points at itself"},
 		{"a target equal to the route under a prefix", func(r *Router[*tctx]) {
 			r.Route("/p", func(g *Router[*tctx]) { g.Redirect("/a", "/p/a", http.StatusFound) })
 		}, "points at itself"},
