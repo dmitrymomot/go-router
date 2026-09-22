@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmitrymomot/go-router/serve"
@@ -49,4 +51,60 @@ func fetchOnce(addr net.Addr, stop func()) {
 
 	body, _ := io.ReadAll(res.Body)
 	fmt.Println(res.StatusCode, string(body))
+}
+
+func ExampleConfig_drainDelay() {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	var ready atomic.Bool
+	ready.Store(true)
+	draining := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
+		//nolint:errcheck // The example has no better place to report it.
+		fmt.Fprint(w, "ready")
+	})
+
+	err := serve.Run(ctx, mux, serve.Config{
+		Addr: "127.0.0.1:0",
+		// A real program waits a few seconds, longer than the period at which
+		// the load balancer polls /readyz.
+		DrainDelay: 500 * time.Millisecond,
+		Logger:     slog.New(slog.DiscardHandler),
+		OnDrain: func() {
+			ready.Store(false)
+			close(draining)
+		},
+		OnListen: func(addr net.Addr) {
+			go func() {
+				fmt.Println(get("http://" + addr.String() + "/readyz"))
+				stop()
+				<-draining
+				fmt.Println(get("http://" + addr.String() + "/readyz"))
+			}()
+		},
+	})
+	fmt.Println("Run returned:", err)
+	// Output:
+	// 200 ready
+	// 503 draining
+	// Run returned: <nil>
+}
+
+// get fetches url and gives back its status and body on one line.
+func get(url string) string {
+	res, err := http.Get(url)
+	if err != nil {
+		return err.Error()
+	}
+	defer res.Body.Close() //nolint:errcheck // Nothing left to report it to.
+
+	body, _ := io.ReadAll(res.Body)
+	return fmt.Sprint(res.StatusCode, " ", strings.TrimSpace(string(body)))
 }
