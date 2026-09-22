@@ -34,8 +34,8 @@ var (
 	ErrCookieExpired = errors.New("router: the signed cookie expired")
 )
 
-// ErrNoCookieCodec reports a signed cookie on a router with no codec. It
-// carries no status, so the error handler answers 500.
+// ErrNoCookieCodec reports a signed cookie or a flash on a router with no
+// codec. It carries no status, so the error handler answers 500.
 var ErrNoCookieCodec = errors.New("router: no codec signs cookies; set one with Router.CookieCodec")
 
 const cookieSep = '.'

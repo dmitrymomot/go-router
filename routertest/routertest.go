@@ -316,8 +316,34 @@ func (r *Response) JSON[T any](opts ...json.Options) (T, error) {
 // SignedCookie panics when r did not come from Serve, Do or Get on a
 // *router.Router with a CookieCodec.
 func SignedCookie(r *Response, name string) (string, bool) {
+	b := carry(r, "SignedCookie", name)
+	if b == nil {
+		return "", false
+	}
+	v, err := b.SignedCookie(name)
+	return v, err == nil
+}
+
+// Flashes reports the messages of the flash cookie that r sets, verified with
+// the codec of the router that answered, as [SignedCookie] does. It reports
+// nil when r sets none, clears it, or sets one that does not verify. A handler
+// under [NewContext] reads its own with its Flashes method.
+//
+// Flashes panics when r did not come from Serve, Do or Get on a
+// *router.Router with a CookieCodec.
+func Flashes(r *Response) []router.Flash {
+	b := carry(r, "Flashes", router.FlashCookieName)
+	if b == nil {
+		return nil
+	}
+	return b.Flashes()
+}
+
+// carry builds a Base with the codec of r whose request holds the last cookie
+// called name that r sets, or reports nil when r sets none or clears it.
+func carry(r *Response, caller, name string) *router.Base {
 	if r.codec == nil {
-		panic("routertest: SignedCookie needs a response that Serve got from a router with a CookieCodec")
+		panic("routertest: " + caller + " needs a response that Serve got from a router with a CookieCodec")
 	}
 	var last *http.Cookie
 	for _, c := range r.Cookies() {
@@ -326,14 +352,44 @@ func SignedCookie(r *Response, name string) (string, bool) {
 		}
 	}
 	if last == nil || last.MaxAge < 0 || last.Value == "" {
-		return "", false
+		return nil
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: name, Value: last.Value})
 	b := router.NewBase(httptest.NewRecorder(), req)
 	router.SetCookieCodecForTest(b, r.codec)
-	v, err := b.SignedCookie(name)
-	return v, err == nil
+	return b
+}
+
+// FlashCookie sends flashes in a flash cookie that cc signs, as a redirect
+// would have left it, for a test of the page that shows them. Without flashes
+// it sends no cookie.
+//
+// FlashCookie panics if cc is nil or if the messages do not fit in one
+// cookie.
+func FlashCookie(cc *router.CookieCodec, flashes ...router.Flash) RequestOption {
+	if cc == nil {
+		panic("routertest: FlashCookie needs a codec")
+	}
+	rec := httptest.NewRecorder()
+	b := router.NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	router.SetCookieCodecForTest(b, cc)
+	for _, f := range flashes {
+		if err := b.AddFlash(f); err != nil {
+			panic("routertest: FlashCookie: " + err.Error())
+		}
+	}
+	var value string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == router.FlashCookieName {
+			value = c.Value
+		}
+	}
+	return func(r *http.Request) {
+		if value != "" {
+			r.AddCookie(&http.Cookie{Name: router.FlashCookieName, Value: value})
+		}
+	}
 }
 
 // AssertStatus fails the test unless the status is want. The message carries

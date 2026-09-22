@@ -30,11 +30,21 @@ type Flash struct {
 	Message string `json:"message"`
 }
 
-// AddFlash appends f to the flash cookie, which cc signs. The cookie is the one
-// [Base.NewCookie] builds: HttpOnly, SameSite=Lax, and Secure over HTTPS.
+// AddFlash appends f to the flash cookie, which the codec of
+// [Router.CookieCodec] signs. The cookie is the one [Base.NewCookie] builds:
+// HttpOnly, SameSite=Lax, and Secure over HTTPS.
 //
-// It reports [ErrFlashTooLarge] when the messages no longer fit.
-func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
+// The message travels with whatever this response is: a redirect, an
+// HX-Redirect or a page. [Base.Flashes] in the same request reads it back, so
+// an htmx partial can show it in place.
+//
+// It reports [ErrNoCookieCodec] when the router has no codec, and
+// [ErrFlashTooLarge] when the messages no longer fit.
+func (b *Base) AddFlash(f Flash) error {
+	cc := b.codec()
+	if cc == nil {
+		return ErrNoCookieCodec
+	}
 	flashes := b.flashes(cc)
 	flashes = append(flashes, f)
 
@@ -54,15 +64,33 @@ func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 	return nil
 }
 
-// Flashes reports the messages and clears the cookie, so each message is shown
-// once. A second call in the same request reports nothing.
-func (b *Base) Flashes(cc *CookieCodec) []Flash {
+// Flashes reports the messages the request carried, then those this response
+// added, and clears them, so each is shown once. A second call in the same
+// request reports nothing. Add first, then read: a layout that calls Flashes
+// sees what the handler added before it.
+//
+// Only a cookie the request carried is cleared on the client, so a message
+// added and read in one request never leaves the server. Clearing is a
+// header, so call Flashes before the response is committed.
+// [Base.Render] buffers, so a template it runs may call Flashes; one that
+// [Base.RenderStream] runs may not.
+//
+// It reports nothing on a router with no codec.
+func (b *Base) Flashes() []Flash {
+	cc := b.codec()
+	if cc == nil {
+		return nil
+	}
 	raw, ok := b.flashCookie(cc)
 	if !ok || raw == "" {
 		return nil
 	}
 	b.Vary(HeaderCookie)
-	b.writeFlashCookie(b.NewCookie(FlashCookieName, "", -1))
+	if _, err := b.req.Cookie(FlashCookieName); err == nil {
+		b.writeFlashCookie(b.NewCookie(FlashCookieName, "", -1))
+	} else {
+		b.dropFlashCookie()
+	}
 	return decodeFlashes(cc, raw)
 }
 
@@ -91,7 +119,7 @@ func decodeFlashes(cc *CookieCodec, raw string) []Flash {
 func (b *Base) flashCookie(cc *CookieCodec) (string, bool) {
 	lines := b.res.Header()[headerSetCookie]
 	for _, line := range slices.Backward(lines) {
-		if c, err := http.ParseSetCookie(line); err == nil && c.Name == FlashCookieName {
+		if c, ok := parseFlashLine(line); ok {
 			return c.Value, true
 		}
 	}
@@ -115,10 +143,33 @@ func (b *Base) writeFlashCookie(c *http.Cookie) {
 	header := b.res.Header()
 	lines := header[headerSetCookie]
 	for i, l := range lines {
-		if got, err := http.ParseSetCookie(l); err == nil && got.Name == FlashCookieName {
+		if _, ok := parseFlashLine(l); ok {
 			lines[i] = line
 			return
 		}
 	}
 	header[headerSetCookie] = append(lines, line)
+}
+
+// dropFlashCookie takes back the flash cookie this response set, for a
+// request that carried none and so has nothing to clear on the client.
+func (b *Base) dropFlashCookie() {
+	header := b.res.Header()
+	lines := slices.DeleteFunc(header[headerSetCookie], func(l string) bool {
+		_, ok := parseFlashLine(l)
+		return ok
+	})
+	if len(lines) == 0 {
+		delete(header, headerSetCookie)
+		return
+	}
+	header[headerSetCookie] = lines
+}
+
+func parseFlashLine(line string) (*http.Cookie, bool) {
+	c, err := http.ParseSetCookie(line)
+	if err != nil || c.Name != FlashCookieName {
+		return nil, false
+	}
+	return c, true
 }

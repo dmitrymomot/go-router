@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+func flashBase(cookies ...*http.Cookie) *Base {
+	return signedBase(testCodec(), cookies...)
+}
+
 func flashRequest(t *testing.T, b *Base) *Base {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -20,7 +24,11 @@ func flashRequest(t *testing.T, b *Base) *Base {
 		}
 		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
 	}
-	return NewBase(httptest.NewRecorder(), req)
+	next := NewBase(httptest.NewRecorder(), req)
+	if cc := b.codec(); cc != nil {
+		SetCookieCodecForTest(next, cc)
+	}
+	return next
 }
 
 func flashCookieOf(t *testing.T, b *Base) (*http.Cookie, bool) {
@@ -33,10 +41,10 @@ func flashCookieOf(t *testing.T, b *Base) (*http.Cookie, bool) {
 	return nil, false
 }
 
-func addFlashes(t *testing.T, b *Base, cc *CookieCodec, flashes ...Flash) {
+func addFlashes(t *testing.T, b *Base, flashes ...Flash) {
 	t.Helper()
 	for _, f := range flashes {
-		if err := b.AddFlash(cc, f); err != nil {
+		if err := b.AddFlash(f); err != nil {
 			t.Fatalf("AddFlash(%+v): %v", f, err)
 		}
 	}
@@ -55,24 +63,22 @@ func wantFlashes(t *testing.T, got, want []Flash) {
 }
 
 func TestFlashesCrossARedirect(t *testing.T) {
-	cc := testCodec()
-	post := cookieBase()
-	addFlashes(t, post, cc, Flash{Kind: "success", Message: "saved"})
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "success", Message: "saved"})
 
 	get := flashRequest(t, post)
-	wantFlashes(t, get.Flashes(cc), []Flash{{Kind: "success", Message: "saved"}})
+	wantFlashes(t, get.Flashes(), []Flash{{Kind: "success", Message: "saved"}})
 }
 
 func TestAddFlashKeepsTheOrderOfTheCalls(t *testing.T) {
-	cc := testCodec()
-	b := cookieBase()
-	addFlashes(t, b, cc,
+	b := flashBase()
+	addFlashes(t, b,
 		Flash{Kind: "error", Message: "the name is taken"},
 		Flash{Kind: "error", Message: "the password is short"},
 		Flash{Kind: "info", Message: "try again"},
 	)
 
-	wantFlashes(t, flashRequest(t, b).Flashes(cc), []Flash{
+	wantFlashes(t, flashRequest(t, b).Flashes(), []Flash{
 		{Kind: "error", Message: "the name is taken"},
 		{Kind: "error", Message: "the password is short"},
 		{Kind: "info", Message: "try again"},
@@ -80,9 +86,8 @@ func TestAddFlashKeepsTheOrderOfTheCalls(t *testing.T) {
 }
 
 func TestAddFlashWritesOneCookie(t *testing.T) {
-	cc := testCodec()
-	b := cookieBase()
-	addFlashes(t, b, cc,
+	b := flashBase()
+	addFlashes(t, b,
 		Flash{Kind: "info", Message: "one"},
 		Flash{Kind: "info", Message: "two"},
 		Flash{Kind: "info", Message: "three"},
@@ -94,26 +99,24 @@ func TestAddFlashWritesOneCookie(t *testing.T) {
 }
 
 func TestAddFlashAppendsToTheCookieOfTheRequest(t *testing.T) {
-	cc := testCodec()
-	first := cookieBase()
-	addFlashes(t, first, cc, Flash{Kind: "info", Message: "one"})
+	first := flashBase()
+	addFlashes(t, first, Flash{Kind: "info", Message: "one"})
 
 	second := flashRequest(t, first)
-	addFlashes(t, second, cc, Flash{Kind: "info", Message: "two"})
+	addFlashes(t, second, Flash{Kind: "info", Message: "two"})
 
-	wantFlashes(t, flashRequest(t, second).Flashes(cc), []Flash{
+	wantFlashes(t, flashRequest(t, second).Flashes(), []Flash{
 		{Kind: "info", Message: "one"},
 		{Kind: "info", Message: "two"},
 	})
 }
 
 func TestFlashesClearsTheCookie(t *testing.T) {
-	cc := testCodec()
-	post := cookieBase()
-	addFlashes(t, post, cc, Flash{Kind: "success", Message: "saved"})
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "success", Message: "saved"})
 
 	get := flashRequest(t, post)
-	get.Flashes(cc)
+	get.Flashes()
 
 	c, ok := flashCookieOf(t, get)
 	if !ok {
@@ -131,14 +134,13 @@ func TestFlashesClearsTheCookie(t *testing.T) {
 }
 
 func TestFlashesIsSafeToCallTwice(t *testing.T) {
-	cc := testCodec()
-	post := cookieBase()
-	addFlashes(t, post, cc, Flash{Kind: "success", Message: "saved"})
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "success", Message: "saved"})
 
 	get := flashRequest(t, post)
-	wantFlashes(t, get.Flashes(cc), []Flash{{Kind: "success", Message: "saved"}})
+	wantFlashes(t, get.Flashes(), []Flash{{Kind: "success", Message: "saved"}})
 
-	if got := get.Flashes(cc); got != nil {
+	if got := get.Flashes(); got != nil {
 		t.Errorf("the second call returned %+v, want nothing", got)
 	}
 	if got := len(get.Response().Header()["Set-Cookie"]); got != 1 {
@@ -147,21 +149,20 @@ func TestFlashesIsSafeToCallTwice(t *testing.T) {
 }
 
 func TestAddFlashAfterFlashesStartsAgain(t *testing.T) {
-	cc := testCodec()
-	post := cookieBase()
-	addFlashes(t, post, cc, Flash{Kind: "info", Message: "old"})
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "info", Message: "old"})
 
 	get := flashRequest(t, post)
-	wantFlashes(t, get.Flashes(cc), []Flash{{Kind: "info", Message: "old"}})
-	addFlashes(t, get, cc, Flash{Kind: "info", Message: "new"})
+	wantFlashes(t, get.Flashes(), []Flash{{Kind: "info", Message: "old"}})
+	addFlashes(t, get, Flash{Kind: "info", Message: "new"})
 
-	wantFlashes(t, flashRequest(t, get).Flashes(cc), []Flash{{Kind: "info", Message: "new"}})
+	wantFlashes(t, flashRequest(t, get).Flashes(), []Flash{{Kind: "info", Message: "new"}})
 }
 
 func TestFlashesReturnsNothingWithoutACookie(t *testing.T) {
-	b := cookieBase()
+	b := flashBase()
 
-	if got := b.Flashes(testCodec()); got != nil {
+	if got := b.Flashes(); got != nil {
 		t.Errorf("Flashes returned %+v, want nothing", got)
 	}
 	if lines := b.Response().Header()["Set-Cookie"]; len(lines) != 0 {
@@ -184,9 +185,9 @@ func TestFlashesDropsACookieItCannotTrust(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			b := cookieBase(&http.Cookie{Name: FlashCookieName, Value: tc.value})
+			b := flashBase(&http.Cookie{Name: FlashCookieName, Value: tc.value})
 
-			if got := b.Flashes(cc); got != nil {
+			if got := b.Flashes(); got != nil {
 				t.Errorf("Flashes returned %+v, want nothing", got)
 			}
 			if _, ok := flashCookieOf(t, b); !ok {
@@ -197,38 +198,36 @@ func TestFlashesDropsACookieItCannotTrust(t *testing.T) {
 }
 
 func TestFlashesTakesTheCookieThatVerifies(t *testing.T) {
-	cc := testCodec()
-	post := cookieBase()
-	addFlashes(t, post, cc, Flash{Kind: "success", Message: "saved"})
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "success", Message: "saved"})
 	signed, ok := flashCookieOf(t, post)
 	if !ok {
 		t.Fatal("AddFlash wrote no cookie")
 	}
 
-	get := cookieBase(
+	get := flashBase(
 		&http.Cookie{Name: FlashCookieName, Value: "planted-by-a-neighbour"},
 		&http.Cookie{Name: FlashCookieName, Value: signed.Value},
 	)
 
-	wantFlashes(t, get.Flashes(cc), []Flash{{Kind: "success", Message: "saved"}})
+	wantFlashes(t, get.Flashes(), []Flash{{Kind: "success", Message: "saved"}})
 }
 
 func TestAddFlashTakesTheCookieThatVerifies(t *testing.T) {
-	cc := testCodec()
-	first := cookieBase()
-	addFlashes(t, first, cc, Flash{Kind: "info", Message: "one"})
+	first := flashBase()
+	addFlashes(t, first, Flash{Kind: "info", Message: "one"})
 	signed, ok := flashCookieOf(t, first)
 	if !ok {
 		t.Fatal("AddFlash wrote no cookie")
 	}
 
-	second := cookieBase(
+	second := flashBase(
 		&http.Cookie{Name: FlashCookieName, Value: "planted-by-a-neighbour"},
 		&http.Cookie{Name: FlashCookieName, Value: signed.Value},
 	)
-	addFlashes(t, second, cc, Flash{Kind: "info", Message: "two"})
+	addFlashes(t, second, Flash{Kind: "info", Message: "two"})
 
-	wantFlashes(t, flashRequest(t, second).Flashes(cc), []Flash{
+	wantFlashes(t, flashRequest(t, second).Flashes(), []Flash{
 		{Kind: "info", Message: "one"},
 		{Kind: "info", Message: "two"},
 	})
@@ -236,26 +235,24 @@ func TestAddFlashTakesTheCookieThatVerifies(t *testing.T) {
 
 func TestFlashesDropsAnExpiredCookie(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		cc := testCodec()
-		post := cookieBase()
-		addFlashes(t, post, cc, Flash{Kind: "info", Message: "saved"})
+		post := flashBase()
+		addFlashes(t, post, Flash{Kind: "info", Message: "saved"})
 		get := flashRequest(t, post)
 
 		time.Sleep(FlashMaxAge + time.Second)
 
-		if got := get.Flashes(cc); got != nil {
+		if got := get.Flashes(); got != nil {
 			t.Errorf("Flashes returned %+v, want nothing", got)
 		}
 	})
 }
 
 func TestFlashesVariesOnTheCookie(t *testing.T) {
-	cc := testCodec()
-	post := cookieBase()
-	addFlashes(t, post, cc, Flash{Kind: "info", Message: "saved"})
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "info", Message: "saved"})
 
 	get := flashRequest(t, post)
-	get.Flashes(cc)
+	get.Flashes()
 
 	if got := get.Response().Header().Get(HeaderVary); got != HeaderCookie {
 		t.Errorf("Vary = %q, want %q, or a shared cache hands one user the messages of another", got, HeaderCookie)
@@ -263,8 +260,8 @@ func TestFlashesVariesOnTheCookie(t *testing.T) {
 }
 
 func TestAddFlashWritesACookieAScriptCannotRead(t *testing.T) {
-	b := cookieBase()
-	addFlashes(t, b, testCodec(), Flash{Kind: "info", Message: "saved"})
+	b := flashBase()
+	addFlashes(t, b, Flash{Kind: "info", Message: "saved"})
 
 	c, ok := flashCookieOf(t, b)
 	if !ok {
@@ -285,8 +282,8 @@ func TestAddFlashWritesACookieAScriptCannotRead(t *testing.T) {
 }
 
 func TestAddFlashKeepsTheCookieForFlashMaxAge(t *testing.T) {
-	b := cookieBase()
-	addFlashes(t, b, testCodec(), Flash{Kind: "info", Message: "saved"})
+	b := flashBase()
+	addFlashes(t, b, Flash{Kind: "info", Message: "saved"})
 
 	c, ok := flashCookieOf(t, b)
 	if !ok {
@@ -299,18 +296,20 @@ func TestAddFlashKeepsTheCookieForFlashMaxAge(t *testing.T) {
 
 func TestFlashesReadAfterAKeyRotation(t *testing.T) {
 	previous := bytes.Repeat([]byte("p"), MinCookieKeyLen)
-	post := cookieBase()
-	addFlashes(t, post, NewCookieCodec(previous), Flash{Kind: "success", Message: "saved"})
+	post := signedBase(NewCookieCodec(previous))
+	addFlashes(t, post, Flash{Kind: "success", Message: "saved"})
 
 	get := flashRequest(t, post)
-	wantFlashes(t, get.Flashes(NewCookieCodec(testKey, previous)), []Flash{{Kind: "success", Message: "saved"}})
+	SetCookieCodecForTest(get, NewCookieCodec(testKey, previous))
+	wantFlashes(t, get.Flashes(), []Flash{{Kind: "success", Message: "saved"}})
 }
 
 func TestAddFlashMarksTheCookieSecureOverTLS(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(HeaderXForwardedProto, "https")
 	b := NewBase(httptest.NewRecorder(), req)
-	addFlashes(t, b, testCodec(), Flash{Kind: "info", Message: "saved"})
+	SetCookieCodecForTest(b, testCodec())
+	addFlashes(t, b, Flash{Kind: "info", Message: "saved"})
 
 	c, ok := flashCookieOf(t, b)
 	if !ok {
@@ -322,12 +321,11 @@ func TestAddFlashMarksTheCookieSecureOverTLS(t *testing.T) {
 }
 
 func TestAddFlashRefusesMoreThanACookieHolds(t *testing.T) {
-	cc := testCodec()
-	b := cookieBase()
-	addFlashes(t, b, cc, Flash{Kind: "info", Message: "saved"})
+	b := flashBase()
+	addFlashes(t, b, Flash{Kind: "info", Message: "saved"})
 	before, _ := flashCookieOf(t, b)
 
-	err := b.AddFlash(cc, Flash{Kind: "error", Message: strings.Repeat("x", MaxCookieSize)})
+	err := b.AddFlash(Flash{Kind: "error", Message: strings.Repeat("x", MaxCookieSize)})
 	if !errors.Is(err, ErrFlashTooLarge) {
 		t.Fatalf("AddFlash = %v, want %v", err, ErrFlashTooLarge)
 	}
@@ -339,22 +337,21 @@ func TestAddFlashRefusesMoreThanACookieHolds(t *testing.T) {
 	if after.Value != before.Value {
 		t.Error("the refused message changed the cookie that the response already carried")
 	}
-	wantFlashes(t, flashRequest(t, b).Flashes(cc), []Flash{{Kind: "info", Message: "saved"}})
+	wantFlashes(t, flashRequest(t, b).Flashes(), []Flash{{Kind: "info", Message: "saved"}})
 }
 
 func TestAddFlashReportsAMessageThatIsNotUTF8(t *testing.T) {
-	if err := cookieBase().AddFlash(testCodec(), Flash{Kind: "info", Message: "\xff"}); err == nil {
+	if err := flashBase().AddFlash(Flash{Kind: "info", Message: "\xff"}); err == nil {
 		t.Error("AddFlash took a message that is not UTF-8")
 	}
 }
 
 func TestAddFlashMeasuresTheWholeCookie(t *testing.T) {
-	cc := testCodec()
-	b := cookieBase()
+	b := flashBase()
 
 	refused := false
 	for i := range 200 {
-		err := b.AddFlash(cc, Flash{Kind: "info", Message: strings.Repeat("m", 32)})
+		err := b.AddFlash(Flash{Kind: "info", Message: strings.Repeat("m", 32)})
 		if err == nil {
 			continue
 		}
@@ -378,4 +375,92 @@ func TestAddFlashMeasuresTheWholeCookie(t *testing.T) {
 	if got := len(c.String()); got > MaxCookieSize {
 		t.Errorf("the cookie is %d bytes, want at most %d", got, MaxCookieSize)
 	}
+}
+
+func TestAddFlashWithoutACodecFails(t *testing.T) {
+	b := cookieBase()
+
+	if err := b.AddFlash(Flash{Kind: "info", Message: "saved"}); !errors.Is(err, ErrNoCookieCodec) {
+		t.Errorf("AddFlash = %v, want %v", err, ErrNoCookieCodec)
+	}
+	if lines := b.Response().Header()["Set-Cookie"]; len(lines) != 0 {
+		t.Errorf("AddFlash without a codec wrote %v", lines)
+	}
+	if got := b.Response().Header().Get(HeaderVary); got != "" {
+		t.Errorf("AddFlash without a codec set Vary %q", got)
+	}
+}
+
+func TestFlashesWithoutACodecLeavesTheCookie(t *testing.T) {
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "success", Message: "saved"})
+	signed, ok := flashCookieOf(t, post)
+	if !ok {
+		t.Fatal("AddFlash wrote no cookie")
+	}
+
+	get := cookieBase(&http.Cookie{Name: FlashCookieName, Value: signed.Value})
+	if got := get.Flashes(); got != nil {
+		t.Errorf("Flashes without a codec returned %+v, want nothing", got)
+	}
+	if h := get.Response().Header(); len(h) != 0 {
+		t.Errorf("Flashes without a codec wrote the headers %v", h)
+	}
+}
+
+func TestFlashesReadInTheSameRequestNeverLeaveTheServer(t *testing.T) {
+	b := flashBase()
+	addFlashes(t, b, Flash{Kind: "success", Message: "saved"})
+
+	wantFlashes(t, b.Flashes(), []Flash{{Kind: "success", Message: "saved"}})
+
+	h := b.Response().Header()
+	if lines, ok := h["Set-Cookie"]; ok {
+		t.Errorf("the response carries Set-Cookie %q, want no Set-Cookie key at all", lines)
+	}
+	if got := h.Get(HeaderVary); got != HeaderCookie {
+		t.Errorf("Vary = %q, want %q", got, HeaderCookie)
+	}
+}
+
+func TestFlashesKeepTheOtherCookiesOfTheResponse(t *testing.T) {
+	b := flashBase()
+	b.SetCookie(b.NewCookie("session", "abc", time.Hour))
+	addFlashes(t, b, Flash{Kind: "success", Message: "saved"})
+	b.Flashes()
+
+	cookies := setCookies(t, b)
+	if len(cookies) != 1 || cookies[0].Name != "session" || cookies[0].Value != "abc" {
+		t.Errorf("the response sets %+v, want only the session cookie", cookies)
+	}
+}
+
+func TestFlashesClearTheCookieTheRequestCarried(t *testing.T) {
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "info", Message: "old"})
+
+	get := flashRequest(t, post)
+	addFlashes(t, get, Flash{Kind: "info", Message: "new"})
+	wantFlashes(t, get.Flashes(), []Flash{
+		{Kind: "info", Message: "old"},
+		{Kind: "info", Message: "new"},
+	})
+
+	cookies := setCookies(t, get)
+	if len(cookies) != 1 {
+		t.Fatalf("the response sets %d cookies, want the one that clears the flash", len(cookies))
+	}
+	c := cookies[0]
+	if c.Name != FlashCookieName || c.MaxAge >= 0 || c.Value != "" || c.Path != "/" {
+		t.Errorf("the response sets %+v, want an expired, empty %s cookie on /", c, FlashCookieName)
+	}
+}
+
+func TestAddFlashAfterASameRequestReadStartsAgain(t *testing.T) {
+	b := flashBase()
+	addFlashes(t, b, Flash{Kind: "info", Message: "a"})
+	b.Flashes()
+	addFlashes(t, b, Flash{Kind: "info", Message: "b"})
+
+	wantFlashes(t, flashRequest(t, b).Flashes(), []Flash{{Kind: "info", Message: "b"}})
 }
