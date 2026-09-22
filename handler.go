@@ -71,3 +71,16 @@ func (b *Base) publishParams() {
 		b.req.SetPathValue(name, b.paramVals[i])
 	}
 }
+
+func concatMiddleware[C Context](a, b []Middleware[C]) []Middleware[C] {
+	switch {
+	case len(a) == 0:
+		return b
+	case len(b) == 0:
+		return a
+	default:
+		out := make([]Middleware[C], 0, len(a)+len(b))
+		out = append(out, a...)
+		return append(out, b...)
+	}
+}

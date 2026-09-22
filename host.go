@@ -3,6 +3,7 @@ package router
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -523,4 +524,127 @@ func asciiLower(s string) string {
 		}
 	}
 	return s
+}
+
+// Host opens a scope that answers only for pattern. See [Router.Hosts].
+func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
+	return r.Hosts([]string{pattern}, fn)
+}
+
+// Hosts opens a scope that answers for any of patterns. A pattern is an exact
+// host, a leading wildcard such as "*.example.com", or a host parameter such
+// as "{tenant}.example.com", which [Base.Param] then reads. A host parameter
+// takes the constraints of [Router.Handle], as in "{tenant:slug}.example.com".
+// A route outside any host scope answers for every host.
+//
+// The middleware of the scope also wraps the 404 and 405 answers for its hosts.
+// When several Host or Hosts calls open one pattern, the middleware of the
+// first scope wraps those answers, and each route keeps the middleware of the
+// scope that registered it.
+//
+// Hosts panics on an empty patterns or on a pattern it cannot parse.
+func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
+	if len(patterns) == 0 {
+		panic("router: Hosts needs at least one pattern")
+	}
+	specs := make([]hostSpec, 0, len(patterns))
+	for _, p := range patterns {
+		spec, err := parseHostPattern(p, r.class)
+		if err != nil {
+			panic(err.Error())
+		}
+		// Two spellings of one host resolve to one entry, so the second copy of
+		// every route landed in a trie that already held it and the insert
+		// blamed the route rather than the duplicate host.
+		if i := slices.IndexFunc(specs, func(o hostSpec) bool { return o.pattern == spec.pattern }); i >= 0 {
+			panic("router: Hosts got " + patterns[i] + " and " + p + ", which name the same host " + spec.pattern)
+		}
+		specs = append(specs, spec)
+	}
+	if r.root.started.Load() {
+		panic("router: cannot register a host scope after the router started serving")
+	}
+	if r.inHost || len(r.hosts) > 0 {
+		panic("router: a host scope cannot sit inside another host scope")
+	}
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild("", nil)
+		c.hosts = specs
+		for _, spec := range specs {
+			if _, err := r.root.eng.hostEntry(spec); err != nil {
+				panic(err.Error())
+			}
+		}
+		if fn != nil {
+			fn(c)
+		}
+		c.settingChanged()
+	})
+	return c
+}
+
+// HostRouter gives pattern to a router with a context type of its own. sub
+// answers every request for that host, and it keeps its own middleware, error
+// handler and context. The [Router.Meta] values of this router do not reach
+// its routes.
+//
+// HostRouter panics if sub is nil.
+func (r *Router[C]) HostRouter[D Context](pattern string, sub *Router[D]) {
+	if sub == nil {
+		panic("router: HostRouter needs a router")
+	}
+	r.HostHandler(pattern, sub)
+}
+
+// HostHandler gives pattern to a standard library handler.
+//
+// HostHandler panics if h is nil.
+func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
+	if h == nil {
+		panic("router: HostHandler needs a handler")
+	}
+	r.Host(pattern, func(g *Router[C]) { g.MountHandler("/", h) })
+}
+
+func (e *engine[C]) mustHostEntry(spec hostSpec) *hostEntry[C] {
+	he, err := e.hostEntry(spec)
+	if err != nil {
+		panic(err.Error())
+	}
+	return he
+}
+
+func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
+	if eng.hostSet == nil {
+		eng.hostSet = new(hostSet[C])
+	}
+	hs := eng.hostSet
+	for _, e := range hs.all {
+		if e.pattern == spec.pattern {
+			if !sameHostShape(&e.hostSpec, &spec) {
+				return nil, fmt.Errorf("router: host pattern %q resolves a parameter class differently in a mounted router; "+
+					"declare the class once, on the parent", spec.pattern)
+			}
+			return e, nil
+		}
+		if sameHostShape(&e.hostSpec, &spec) {
+			return nil, fmt.Errorf("router: host pattern %q has the same match shape as %q but uses different parameter names", spec.pattern, e.pattern)
+		}
+	}
+
+	e := &hostEntry[C]{hostSpec: spec, tree: new(node[C]), idx: int32(len(hs.all))}
+	hs.all = append(hs.all, e)
+	switch {
+	case spec.any:
+		hs.any = e
+	case spec.exact():
+		if hs.exact == nil {
+			hs.exact = make(map[string]*hostEntry[C], 4)
+		}
+		hs.exact[spec.pattern] = e
+	default:
+		hs.pats = append(hs.pats, e)
+	}
+	return e, nil
 }
