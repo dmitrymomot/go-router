@@ -105,8 +105,8 @@ func Idempotency[C router.Context](store IdempotencyStore[C]) router.Middleware[
 //     done or still running.
 //   - A repeat while the first request runs waits up to Wait for its answer,
 //     then gets 409.
-//   - Under Required, an unsafe request without a key gets 400. So does a key
-//     longer than [MaxIdempotencyKeyLength] bytes.
+//   - Under Required, an unsafe request without a key gets 400.
+//   - A key longer than [MaxIdempotencyKeyLength] bytes gets 400.
 //
 // The causes of these answers are [ErrIdempotencyKeyReused],
 // [ErrIdempotencyInProgress] and [ErrIdempotencyKeyRequired]. GET, HEAD,
