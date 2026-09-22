@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
 // RequestOption changes the request that [Request] builds.
@@ -240,11 +241,10 @@ func WithTarget(method, target string, opts ...RequestOption) ContextOption {
 // WithCookieCodec gives the context the codec that [router.Router.CookieCodec]
 // would, so a handler can sign and read cookies.
 //
-// WithCookieCodec panics if cc is nil.
+// WithCookieCodec panics if cc is nil or was not built by
+// [router.NewCookieCodec].
 func WithCookieCodec(cc *router.CookieCodec) ContextOption {
-	if cc == nil {
-		panic("routertest: WithCookieCodec needs a codec")
-	}
+	routerhook.CheckCookieCodec(cc, "routertest: WithCookieCodec")
 	return func(s *contextSpec) { s.codec = cc }
 }
 
@@ -287,9 +287,9 @@ func NewContext[C router.Context](
 	}
 	*b = *router.NewBase(res, req)
 	names, vals := paramSlices(spec.params)
-	router.SetRouteForTest(b, spec.pattern, names, vals)
+	routerhook.SetRoute(b, spec.pattern, names, vals)
 	if spec.codec != nil {
-		router.SetCookieCodecForTest(b, spec.codec)
+		routerhook.SetCookieCodec(b, spec.codec)
 	}
 	if spec.pattern != "" {
 		req.Pattern = spec.pattern
@@ -333,7 +333,7 @@ func Serve(h http.Handler, req *http.Request) *Response {
 	h.ServeHTTP(rec, req)
 	res := Recorded(rec)
 	res.Request = req
-	res.codec = router.CookieCodecOf(h)
+	res.codec, _ = routerhook.CookieCodec(h).(*router.CookieCodec)
 	return res
 }
 
@@ -456,7 +456,7 @@ func carry(r *Response, caller, name string) *router.Base {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: name, Value: last.Value})
 	b := router.NewBase(httptest.NewRecorder(), req)
-	router.SetCookieCodecForTest(b, r.codec)
+	routerhook.SetCookieCodec(b, r.codec)
 	return b
 }
 
@@ -464,15 +464,13 @@ func carry(r *Response, caller, name string) *router.Base {
 // would have left it, for a test of the page that shows them. Without flashes
 // it sends no cookie.
 //
-// FlashCookie panics if cc is nil or if the messages do not fit in one
-// cookie.
+// FlashCookie panics if cc is nil or was not built by [router.NewCookieCodec],
+// or if the messages do not fit in one cookie.
 func FlashCookie(cc *router.CookieCodec, flashes ...router.Flash) RequestOption {
-	if cc == nil {
-		panic("routertest: FlashCookie needs a codec")
-	}
+	routerhook.CheckCookieCodec(cc, "routertest: FlashCookie")
 	rec := httptest.NewRecorder()
 	b := router.NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	router.SetCookieCodecForTest(b, cc)
+	routerhook.SetCookieCodec(b, cc)
 	for _, f := range flashes {
 		if err := b.AddFlash(f); err != nil {
 			panic("routertest: FlashCookie: " + err.Error())

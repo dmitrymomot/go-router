@@ -976,12 +976,7 @@ func (r *Router[C]) JSONOptions(opts ...json.Options) {
 // CookieCodec panics if cc is nil or was not built by NewCookieCodec, on a
 // mounted router, or after the router started serving.
 func (r *Router[C]) CookieCodec(cc *CookieCodec) {
-	if cc == nil {
-		panic("router: CookieCodec needs a codec")
-	}
-	if len(cc.keys) == 0 {
-		panic("router: CookieCodec needs a codec built by NewCookieCodec")
-	}
+	mustBeBuiltCodec(cc, "router: CookieCodec")
 	r.mustNotBeServing("the cookie codec")
 	r.root.ropts.codec = cc
 }

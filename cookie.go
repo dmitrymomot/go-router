@@ -304,9 +304,4 @@ func (b *Base) codec() *CookieCodec { return b.opts().codec }
 // CookieCodecOf reports the codec that h signs cookies with when h is a
 // [Router], or nil when it is not or has none. A router wrapped in middleware
 // is not a Router. It exists for test tooling such as routertest.
-func CookieCodecOf(h http.Handler) *CookieCodec {
-	if r, ok := h.(interface{ cookieCodec() *CookieCodec }); ok {
-		return r.cookieCodec()
-	}
-	return nil
-}
+func CookieCodecOf(h http.Handler) *CookieCodec { return cookieCodecOf(h) }

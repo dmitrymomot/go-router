@@ -229,12 +229,7 @@ func SetRouteForTest(b *Base, pattern string, names, vals []string) {
 	if b == nil {
 		panic("router: SetRouteForTest needs a Base")
 	}
-	var rec *routeRecord
-	if pattern != "" {
-		rec = &routeRecord{pattern: pattern}
-	}
-	b.needsCleanup = true
-	b.setRoute(rec, names, vals)
+	b.setTestRoute(pattern, names, vals)
 }
 
 // SetCookieCodecForTest gives b the codec that [Router.CookieCodec] gives the
@@ -249,9 +244,7 @@ func SetCookieCodecForTest(b *Base, cc *CookieCodec) {
 	if cc == nil {
 		panic("router: SetCookieCodecForTest needs a codec")
 	}
-	o := *b.opts()
-	o.codec = cc
-	b.ropts = &o
+	b.setCodec(cc)
 }
 
 func (b *Base) base() *Base { return b }
