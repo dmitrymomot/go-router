@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
@@ -52,7 +53,7 @@ func main() {
 		return c.JSON(http.StatusOK, u)
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := serve.Run(ctx, r, serve.Config{Addr: ":8080"}); err != nil {
@@ -66,7 +67,7 @@ func main() {
 Each line links to the example that proves it.
 
 - [Routes with parameters](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-package), including [a parameter inside a segment](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.GET-PartialSegment) such as `/reports/rep-{date}.csv`, and [a class such as `{id:uuid}`](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.GET-ParamClass) that turns a malformed id away with a 404.
-- [Groups](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Route) and [mounts](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Mount), and [a mounted router with a context type of its own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.MountRouter).
+- [Groups](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Route) and [mounts](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Mount), and [a mounted router with a context type of its own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.MountHandler).
 - [Routing on the host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Host), wildcards and host parameters included. The middleware of a host or of a scope with a prefix also runs for its 404 and 405 answers.
 - [Links built from the route patterns](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Expand), path, query or [host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-MustExpand), escaped and checked to route back.
 - [Redirect routes](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Redirect) that keep their values and the query, and [a canonical host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.RedirectHost) such as www to the apex.
@@ -75,9 +76,9 @@ Each line links to the example that proves it.
 - [Errors that carry their own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPError.WithMessage), and one handler that writes them: [JSON on an API host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-JSONErrorHandler), or [an error page of your own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPErrorOf).
 - [Middleware that logs or measures the status the error handler wrote](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HandleError).
 - [Rendering](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Render), [buffered or streamed](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderStream).
-- [Server-sent events](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-ServeSSE) that send JSON, text or rendered HTML.
-- htmx 4: [a fragment or the whole page](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderPartial) from one handler, and [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.HX): retarget, reswap, trigger, redirect.
-- [Cookies with safe defaults](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.NewCookie), and [signed cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.CookieCodec) with one codec for the whole router and [key rotation](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-NewCookieCodec-Rotation), and [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Flashes) that survive a redirect or show in an htmx partial.
+- [Server-sent events](https://pkg.go.dev/github.com/dmitrymomot/go-router/sse#example-Serve) that send JSON, text or rendered HTML, in package `sse`.
+- htmx 4, in package `htmx`: [a fragment or the whole page](https://pkg.go.dev/github.com/dmitrymomot/go-router/htmx#example-RenderPartial) from one handler, and [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router/htmx#example-NewResponse): retarget, reswap, trigger, redirect.
+- [Cookies with safe defaults](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.NewCookie), and, in package `cookie`, [signed cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec) with a codec your context holds, [key rotation](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-NewCodec-Rotation), and [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec.Flashes) that survive a redirect or show in an htmx partial.
 - [Middlewares](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware): [CSRF](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CSRF), [rate limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RateLimit), [real IP](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RealIPWithConfig), [key auth](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-KeyAuth), [CORS](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CORSWithConfig), [a body limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-BodyLimit), [form parsing before the handler](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-ParseForm), [a timing floor against account enumeration](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-MinDuration), [idempotent submits](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-Idempotency), and the rest.
 - [Fingerprinted static assets](https://pkg.go.dev/github.com/dmitrymomot/go-router/static#example-package) from an `embed.FS`.
 - [A server that drains on Ctrl-C](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-Run), [leaves rotation before it drains](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-Config-DrainDelay), and [a private server that outlives the public one](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-RunAll).

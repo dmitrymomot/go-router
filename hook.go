@@ -1,33 +1,27 @@
 package router
 
 import (
-	"net/http"
+	"encoding/json/v2"
 	"net/url"
 	"strings"
 
 	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
-// The hooks give package routertest what a context built outside a router
-// lacks, without a public API that only a test would call.
+// The hooks give the packages of this module what the public API of a Base
+// does not expose: routertest sets the route of a context built outside a
+// router and removes its spilled multipart parts, sse reads the JSON options
+// of the router, and middleware caps a body on the writer net/http created.
 func init() {
 	routerhook.SetRoute = func(b any, pattern string, names, vals []string) {
 		b.(*Base).setTestRoute(pattern, names, vals)
 	}
-	routerhook.SetCookieCodec = func(b, cc any) {
-		b.(*Base).setCodec(cc.(*CookieCodec))
-	}
-	routerhook.CheckCookieCodec = func(cc any, caller string) {
-		codec, _ := cc.(*CookieCodec)
-		mustBeBuiltCodec(codec, caller)
-	}
 	routerhook.FillPattern = fillPattern
-	routerhook.CookieCodec = func(h http.Handler) any {
-		if cc := cookieCodecOf(h); cc != nil {
-			return cc
-		}
-		return nil
+	routerhook.JSONOptions = func(b any, opts []json.Options) []json.Options {
+		return b.(*Base).jsonOptions(opts)
 	}
+	routerhook.InnermostWriter = innermostWriter
+	routerhook.RemoveSpilledParts = func(b any) { b.(*Base).removeSpilledParts() }
 }
 
 // setTestRoute gives b a route pattern and its parameters, as routing a
@@ -42,34 +36,6 @@ func (b *Base) setTestRoute(pattern string, names, vals []string) {
 	b.setRoute(rec, names, vals)
 }
 
-// setCodec gives b the codec that Router.CookieCodec gives the contexts of a
-// router. It copies the settings of b, so no other Base changes.
-func (b *Base) setCodec(cc *CookieCodec) {
-	o := *b.opts()
-	o.codec = cc
-	b.ropts = &o
-}
-
-// mustBeBuiltCodec panics on a nil codec and on one that NewCookieCodec did
-// not build, which has no key to sign with. caller starts the message.
-func mustBeBuiltCodec(cc *CookieCodec, caller string) {
-	if cc == nil {
-		panic(caller + " needs a codec")
-	}
-	if len(cc.keys) == 0 {
-		panic(caller + " needs a codec built by NewCookieCodec")
-	}
-}
-
-// cookieCodecOf reports the codec that h signs cookies with when h is a
-// Router, or nil when it is not or has none.
-func cookieCodecOf(h http.Handler) *CookieCodec {
-	if r, ok := h.(interface{ cookieCodec() *CookieCodec }); ok {
-		return r.cookieCodec()
-	}
-	return nil
-}
-
 // fillPattern writes pattern with each parameter set to what value reports,
 // through the same parts that Expand writes, and checks nothing.
 func fillPattern(pattern string, host bool, value func(name, constraint string) string) (string, []string) {
@@ -77,6 +43,14 @@ func fillPattern(pattern string, host bool, value func(name, constraint string) 
 		b     strings.Builder
 		pairs []string
 	)
+	// Only a host starts with a wildcard label, and it has no name, so value
+	// sees it as "*".
+	if rest, ok := strings.CutPrefix(pattern, "*"); ok && host {
+		v := value("*", "")
+		pairs = append(pairs, "*", v)
+		b.WriteString(v)
+		pattern = rest
+	}
 	for _, p := range parseURLTemplate(pattern) {
 		if p.name == "" {
 			b.WriteString(p.lit)

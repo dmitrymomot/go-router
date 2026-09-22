@@ -43,9 +43,10 @@ func SecureCompare(a, b string) bool {
 // Challenge is the WWW-Authenticate value of a 401, and an empty one sends
 // "Bearer". OnError answers the failure itself, and ContinueOnIgnoredError
 // lets the request through when OnError reports nil, which suits an optional
-// sign-in.
+// sign-in. The challenge goes on a 401 that OnError returns as an error, and an
+// OnError that writes a 401 itself sets its own.
 type KeyAuthConfig[C router.Context] struct {
-	Skip                   func(c router.Context) bool
+	Skip                   func(c C) bool
 	Sources                []TokenSource
 	Validator              func(c C, key string) (bool, error)
 	OnError                func(c C, err error) error
@@ -115,15 +116,12 @@ func KeyAuthWithConfig[C router.Context](cfg KeyAuthConfig[C]) router.Middleware
 			}
 
 			if cfg.OnError == nil {
-				keyAuthChallenge(c.Response(), cfg.Challenge)
-				return failure
+				return keyAuthChallenge(c.Response(), cfg.Challenge, failure)
 			}
-			disableChallenge := keyAuthChallenge(c.Response(), cfg.Challenge)
 			if err := cfg.OnError(c, failure); err != nil {
-				return err
+				return keyAuthChallenge(c.Response(), cfg.Challenge, err)
 			}
 			if cfg.ContinueOnIgnoredError {
-				disableChallenge()
 				return next(c)
 			}
 			return nil
@@ -131,23 +129,19 @@ func KeyAuthWithConfig[C router.Context](cfg KeyAuthConfig[C]) router.Middleware
 	}
 }
 
-func keyAuthChallenge(res *router.Response, challenge string) func() {
-	active := challenge != ""
-	if active {
-		res.Before(func() {
-			if active && res.Status == http.StatusUnauthorized &&
-				res.Header().Get(router.HeaderWWWAuthenticate) == "" {
-				res.Header().Set(router.HeaderWWWAuthenticate, challenge)
-			}
-		})
+// keyAuthChallenge sets the challenge on a 401 that has none and reports err.
+func keyAuthChallenge(res *router.Response, challenge string, err error) error {
+	if router.StatusOf(err) == http.StatusUnauthorized && !res.Committed &&
+		res.Header().Get(router.HeaderWWWAuthenticate) == "" {
+		res.Header().Set(router.HeaderWWWAuthenticate, challenge)
 	}
-	return func() { active = false }
+	return err
 }
 
 // BasicAuthConfig configures [BasicAuthWithConfig]. Validator is required, and
 // an empty Realm takes [DefaultRealm].
 type BasicAuthConfig[C router.Context] struct {
-	Skip      func(c router.Context) bool
+	Skip      func(c C) bool
 	Validator func(c C, user, pass string) (bool, error)
 	Realm     string
 }

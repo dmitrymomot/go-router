@@ -274,12 +274,15 @@ func TestRunAllClosesEveryCallerListenerOnEveryPath(t *testing.T) {
 				)
 			},
 		},
-		"nil option in server 1": {
+		"TLS config without a certificate in server 1": {
 			handed: []int{0, 1},
 			run: func(ln0, ln1 net.Listener) error {
 				return serve.RunAll(context.Background(),
 					serve.Server{Handler: ok(), Config: serve.Config{Listener: ln0}},
-					serve.Server{Handler: ok(), Config: serve.Config{Listener: ln1}, Options: []serve.Option{nil}},
+					serve.Server{Handler: ok(), Config: serve.Config{
+						Listener:  ln1,
+						TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
+					}},
 				)
 			},
 		},
@@ -325,17 +328,13 @@ func TestRunAllReturnsNilWhenTheContextIsAlreadyDone(t *testing.T) {
 		Addr:     "127.0.0.1:0",
 		OnListen: func(net.Addr) { ran.Store(true) },
 		OnDrain:  func() { ran.Store(true) },
-		OnServer: func(*http.Server) error {
-			ran.Store(true)
-			return nil
-		},
 	}
 	err := serve.RunAll(ctx, serve.Server{Handler: ok(), Config: cfg}, serve.Server{Handler: ok(), Config: cfg})
 	if err != nil {
 		t.Fatalf("err = %v, want nil for a context that is already done", err)
 	}
 	if ran.Load() {
-		t.Error("a hook ran for a context that is already done")
+		t.Error("a server listened or drained for a context that is already done")
 	}
 }
 
@@ -525,5 +524,35 @@ func TestRunAllClosesItsListenersWhenOnListenPanics(t *testing.T) {
 			conn.Close() //nolint:errcheck // The test fails either way.
 			t.Errorf("server %d is still accepting after OnListen panicked", i)
 		}
+	}
+}
+
+func TestRunAllChecksTheServersForAContextAlreadyDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var built, listened atomic.Bool
+	err := serve.RunAll(ctx,
+		serve.Server{Handler: ok(), Config: serve.Config{
+			Addr:     "127.0.0.1:0",
+			OnListen: func(net.Addr) { listened.Store(true) },
+			OnServer: func(*http.Server) error {
+				built.Store(true)
+				return nil
+			},
+		}},
+		serve.Server{Handler: ok(), Config: serve.Config{
+			Addr:      "127.0.0.1:0",
+			TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
+		}},
+	)
+	if err == nil || !strings.HasPrefix(err.Error(), "serve: server 1: ") {
+		t.Fatalf("err = %v, want the TLS check of server 1", err)
+	}
+	if !built.Load() {
+		t.Error("OnServer did not run for a context that is already done")
+	}
+	if listened.Load() {
+		t.Error("RunAll bound an address for a context that is already done")
 	}
 }

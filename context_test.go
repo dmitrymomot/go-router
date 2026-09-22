@@ -15,15 +15,6 @@ func newBase(target string) *Base {
 	return NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
 }
 
-func TestIsTLSReadsTheConnection(t *testing.T) {
-	if b := newBase("/"); b.IsTLS() {
-		t.Error("IsTLS reported TLS on a plain request")
-	}
-	if b := newBase("https://example.com/"); !b.IsTLS() {
-		t.Error("IsTLS reported no TLS on a TLS request")
-	}
-}
-
 func TestSchemeValidatesTheForwardedProto(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -106,9 +97,6 @@ func TestRequestAndResponseAccessors(t *testing.T) {
 	if b.URL() != req.URL {
 		t.Error("URL() did not return the request URL")
 	}
-	if got := b.Header().Get("X-Test"); got != "value" {
-		t.Errorf("Header().Get(X-Test) = %q, want value", got)
-	}
 	if got := b.Cookie("session"); got != "abc" {
 		t.Fatalf("Cookie(session) = %q, want abc", got)
 	}
@@ -190,41 +178,17 @@ func TestContextConstructionRejectsNilInputs(t *testing.T) {
 	}
 }
 
-func TestQueryOKTellsAbsentFromEmpty(t *testing.T) {
-	b := newBase("/search?q=go&empty=&multi=a&multi=b")
-
-	tests := []struct {
-		name  string
-		param string
-		want  string
-		found bool
-	}{
-		{"a value", "q", "go", true},
-		{"an empty value", "empty", "", true},
-		{"the first of several", "multi", "a", true},
-		{"a parameter the query has not", "page", "", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := b.QueryOK(tc.param)
-			if got != tc.want || ok != tc.found {
-				t.Errorf("QueryOK(%q) = %q/%v, want %q/%v", tc.param, got, ok, tc.want, tc.found)
-			}
-		})
-	}
-}
-
 func TestQueryHelpersReadTheSameParse(t *testing.T) {
 	b := newBase("/search?q=go&empty=")
 
 	if got := b.Query("q"); got != "go" {
 		t.Errorf("Query(%q) = %q", "q", got)
 	}
-	if got := b.QueryDefault("empty", "all"); got != "all" {
-		t.Errorf("QueryDefault of an empty value = %q, want the default", got)
+	if got := b.QueryAsDefault("empty", "all"); got != "all" {
+		t.Errorf("QueryAsDefault of an empty value = %q, want the default", got)
 	}
-	if got := b.QueryDefault("q", "all"); got != "go" {
-		t.Errorf("QueryDefault(%q) = %q", "q", got)
+	if got := b.QueryAsDefault("q", "all"); got != "go" {
+		t.Errorf("QueryAsDefault(%q) = %q", "q", got)
 	}
 
 	b.QueryValues().Set("q", "rust")
@@ -251,7 +215,7 @@ func TestSetRequestDropsTheCachedHost(t *testing.T) {
 	if got := b.Host(); got != "old.example.com" {
 		t.Fatalf("Host() = %q", got)
 	}
-	b.hostPattern, b.hostIdx = "{tenant}.example.com", 3
+	b.hostPattern, b.errIdx = "{tenant}.example.com", 3
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "new.example.net"
@@ -259,7 +223,7 @@ func TestSetRequestDropsTheCachedHost(t *testing.T) {
 	if got := b.Host(); got != "new.example.net" {
 		t.Errorf("Host() after SetRequest = %q, want new.example.net", got)
 	}
-	if b.RouteHost() != "{tenant}.example.com" || b.hostIdx != 3 {
+	if b.RouteHost() != "{tenant}.example.com" || b.errIdx != 3 {
 		t.Error("SetRequest changed the already-matched route host identity")
 	}
 }
@@ -537,14 +501,11 @@ func TestNewSettingsAfterServingPanic(t *testing.T) {
 	}
 }
 
-func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
+func TestDeferredStateDoesNotClobberItself(t *testing.T) {
 	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if got := b.formError(); got != nil {
-		t.Errorf("formError() = %v, want nil before either is set", got)
-	}
-	if got := b.hxError(); got != nil {
-		t.Errorf("hxError() = %v, want nil before either is set", got)
+		t.Errorf("formError() = %v, want nil before it is set", got)
 	}
 	if b.deferred != nil {
 		t.Error("deferred is allocated before any failure")
@@ -554,23 +515,47 @@ func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
 	if got := b.setFormError(form); !errors.Is(got, form) {
 		t.Errorf("setFormError returned %v, want the failure it recorded", got)
 	}
-	b.setHXError(ErrInternalServerError.WithMessage("hx"))
+	b.deferrals().bodyLimit = 5
 
 	if got := b.formError(); !errors.Is(got, form) {
 		t.Errorf("formError() = %v, want the form failure", got)
 	}
-	if got := b.hxError(); got == nil || got.Error() != ErrInternalServerError.WithMessage("hx").Error() {
-		t.Errorf("hxError() = %v, want the htmx failure", got)
-	}
-
-	b.setHXError(ErrInternalServerError.WithMessage("second"))
-	if got := b.hxError(); got.Error() != ErrInternalServerError.WithMessage("hx").Error() {
-		t.Errorf("hxError() = %v, want the first failure kept", got)
+	if got := b.deferred.bodyLimit; got != 5 {
+		t.Errorf("bodyLimit = %d, want 5", got)
 	}
 
 	b.init(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
-	if b.deferred != nil || b.formError() != nil || b.hxError() != nil {
+	if b.deferred != nil || b.formError() != nil {
 		t.Error("init left a deferred failure behind, which a pooled context would carry on")
+	}
+}
+
+func TestVary(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		c.Vary("Hx-Request", "")
+		c.Vary("hx-request")
+		c.Vary(HeaderAccept)
+		return c.NoContent(http.StatusOK)
+	})
+
+	got := do(r, http.MethodGet, "/").Header().Values(HeaderVary)
+	want := []string{"Hx-Request", HeaderAccept}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Vary = %v, want %v", got, want)
+	}
+}
+
+func TestVarySeesAListThatOneHeaderHolds(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		c.SetHeader(HeaderVary, "Accept, HX-Request")
+		c.Vary("Hx-Request")
+		return c.NoContent(http.StatusOK)
+	})
+
+	if got := do(r, http.MethodGet, "/").Header().Values(HeaderVary); len(got) != 1 {
+		t.Errorf("Vary = %v, want the one header that the handler set", got)
 	}
 }
 

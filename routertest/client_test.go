@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
@@ -75,7 +76,7 @@ func clientHandler() http.Handler {
 	mux.HandleFunc("/go", redirect)
 	mux.HandleFunc("/a/go", redirect)
 	mux.HandleFunc("GET /hx", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(router.HeaderHXRedirect, "/me")
+		w.Header().Set(htmx.HeaderRedirect, "/me")
 	})
 	method := func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, r.Method+" "+r.URL.RequestURI()+" "+r.Host+" "+router.SchemeOf(r))
@@ -272,25 +273,26 @@ func TestClientFollowCarriesTheCookiesOfTheTarget(t *testing.T) {
 	proxied.Follow(proxied.Get("/go?to=/")).Expect(t).Body("sec=1")
 }
 
-func TestClientFollowPanicsWithoutALocation(t *testing.T) {
-	cl := routertest.NewClient(t, clientHandler())
-	defer func() {
-		msg, _ := recover().(string)
-		if !strings.Contains(msg, "200") {
-			t.Errorf("panic = %q, want one that names the status", msg)
-		}
-	}()
-	cl.Follow(cl.Get("/me"))
+func TestClientFollowFailsWithoutALocation(t *testing.T) {
+	tb := new(recordingTB)
+	cl := routertest.NewClient(tb, clientHandler())
+	if got := cl.Follow(cl.Get("/me")); got != nil {
+		t.Errorf("Follow = %v, want nil after a failure", got)
+	}
+	if len(tb.fatals) != 1 || !strings.Contains(tb.msg, "200") || !strings.Contains(tb.msg, "GET /me") {
+		t.Errorf("fatals = %q, want one that names the status and the request", tb.fatals)
+	}
 }
 
-func TestClientFollowPanicsOnALocationItCannotRead(t *testing.T) {
-	cl := routertest.NewClient(t, clientHandler())
-	defer func() {
-		if msg, _ := recover().(string); !strings.Contains(msg, "cannot read") {
-			t.Errorf("panic = %q", msg)
-		}
-	}()
-	cl.Follow(cl.Get("/go?to=http://%5B::1"))
+func TestClientFollowFailsOnALocationItCannotRead(t *testing.T) {
+	tb := new(recordingTB)
+	cl := routertest.NewClient(tb, clientHandler())
+	if got := cl.Follow(cl.Get("/go?to=http://%5B::1")); got != nil {
+		t.Errorf("Follow = %v, want nil after a failure", got)
+	}
+	if len(tb.fatals) != 1 || !strings.Contains(tb.msg, "cannot read") {
+		t.Errorf("fatals = %q, want one that says the Location cannot be read", tb.fatals)
+	}
 }
 
 func TestClientFollowOnARecordedResponse(t *testing.T) {

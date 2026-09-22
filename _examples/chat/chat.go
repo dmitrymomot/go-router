@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 // roomRouter builds the signed-in half as a router of its own. Everything it
@@ -49,7 +51,7 @@ func postMessage(c Ctx) error {
 
 	text := cleanText(in.Text)
 	if text == "" {
-		return c.HX().NoSwap()
+		return htmx.NewResponse(c).NoSwap()
 	}
 	c.Room.broadcast(message{
 		Kind:   kindMessage,
@@ -58,7 +60,7 @@ func postMessage(c Ctx) error {
 		At:     time.Now(),
 	})
 
-	return c.HX().Trigger("message-sent").NoSwap()
+	return htmx.NewResponse(c).Trigger("message-sent").NoSwap()
 }
 
 func events(c Ctx) error {
@@ -68,8 +70,8 @@ func events(c Ctx) error {
 	c.Room.broadcast(notice(c.User, "joined the chat"))
 	defer c.Room.broadcast(notice(c.User, "left the chat"))
 
-	return router.ServeSSE(c, ch, sendTo(c.User),
-		router.SSEHeartbeat(20*time.Second),
-		router.SSERetry(2*time.Second),
+	return sse.Serve(c, ch, sendTo(c.User),
+		sse.Heartbeat(20*time.Second),
+		sse.Retry(2*time.Second),
 	)
 }

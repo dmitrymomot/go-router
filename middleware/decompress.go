@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"cmp"
 	"compress/gzip"
 	"errors"
 	"io"
@@ -10,16 +11,14 @@ import (
 	"sync"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
-// DefaultMaxDecompressedSize is how many bytes [Decompress] expands a body to
-// before it stops. It bounds a small body that expands to a huge one.
-const DefaultMaxDecompressedSize int64 = 100 << 20
-
-// DecompressConfig configures [DecompressWithConfig]. A MaxDecompressedSize of
-// zero takes [DefaultMaxDecompressedSize].
-type DecompressConfig struct {
-	Skip                func(c router.Context) bool
+// DecompressConfig configures [DecompressWithConfig]. MaxDecompressedSize is
+// how many bytes a body expands to before the expansion stops, and zero takes
+// [router.DefaultMaxBodyBytes].
+type DecompressConfig[C router.Context] struct {
+	Skip                func(c C) bool
 	MaxDecompressedSize int64
 }
 
@@ -31,22 +30,24 @@ const emptyGzipStream = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x0
 // the handler and the binders read plain bytes. A body in any other encoding,
 // and one in none, passes through.
 //
-// The expansion stops at [DefaultMaxDecompressedSize], which is what keeps a
+// The expansion stops at [router.DefaultMaxBodyBytes], which is what keeps a
 // small body that expands to a huge one from filling the memory. A body that
 // is not gzip reports [router.ErrBadRequest], and one over the limit reports
-// [router.ErrPayloadTooLarge].
+// [router.ErrPayloadTooLarge] and closes the connection after the answer.
 //
 // See Order in the package doc for where it goes.
 func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return DecompressWithConfig[C](DecompressConfig{})(next)
+	return DecompressWithConfig(DecompressConfig[C]{})(next)
 }
 
 // DecompressWithConfig is [Decompress] with a configuration.
-func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middleware[C] {
-	limit := cfg.MaxDecompressedSize
-	if limit == 0 {
-		limit = DefaultMaxDecompressedSize
+//
+// DecompressWithConfig panics on a negative MaxDecompressedSize.
+func DecompressWithConfig[C router.Context](cfg DecompressConfig[C]) router.Middleware[C] {
+	if cfg.MaxDecompressedSize < 0 {
+		panic("middleware: DecompressWithConfig needs a MaxDecompressedSize of zero or more")
 	}
+	limit := cmp.Or(cfg.MaxDecompressedSize, router.DefaultMaxBodyBytes)
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
@@ -82,11 +83,7 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig) router.Middlew
 			}()
 
 			expanded := *req
-			var rc io.ReadCloser = body
-			if limit > 0 {
-				rc = http.MaxBytesReader(c.Response(), rc, limit)
-			}
-			expanded.Body = rc
+			expanded.Body = http.MaxBytesReader(routerhook.InnermostWriter(c.Response()), body, limit)
 			expanded.ContentLength = -1
 			expanded.Header = req.Header.Clone()
 			expanded.Header.Del(router.HeaderContentEncoding)

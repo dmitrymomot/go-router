@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/routertest"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 // showUser is the handler the examples below drive.
 func showUser(c *appContext) error {
-	return c.Stringf(http.StatusOK, "user %s", c.Param("id"))
+	return c.String(http.StatusOK, fmt.Sprintf("user %s", c.Param("id")))
 }
 
 func Example() {
@@ -28,7 +30,7 @@ func Example() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusCreated, "created %s", in.Name)
+		return c.String(http.StatusCreated, fmt.Sprintf("created %s", in.Name))
 	})
 
 	got := routertest.Get(r, "/users/7")
@@ -83,7 +85,7 @@ type tenantKey struct{}
 func ExampleContext() {
 	r := router.New(newContext)
 	r.GET("/whoami", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "tenant %v", c.Value(tenantKey{}))
+		return c.String(http.StatusOK, fmt.Sprintf("tenant %v", c.Value(tenantKey{})))
 	})
 
 	ctx := context.WithValue(context.Background(), tenantKey{}, "acme")
@@ -133,7 +135,7 @@ func ExampleClient() {
 		return c.Redirect(http.StatusSeeOther, "/me")
 	})
 	r.GET("/me", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "hello %s", c.Cookie("session"))
+		return c.String(http.StatusOK, fmt.Sprintf("hello %s", c.Cookie("session")))
 	})
 
 	cl := routertest.NewClient(tb, r, routertest.Host("app.example.com"))
@@ -168,6 +170,9 @@ func ExampleClient_Follow() {
 // Requests sends one request to each route, here to prove that every route
 // but the health check asks for a key.
 func ExampleRequests() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
 	r := router.New(newContext)
 	r.Host("api.example.com", func(api *router.Router[*appContext]) {
 		api.GET("/v1/health", func(c *appContext) error { return c.NoContent(http.StatusNoContent) })
@@ -186,75 +191,62 @@ func ExampleRequests() {
 	})
 
 	routes := slices.DeleteFunc(r.Routes(), func(rt router.Route) bool { return rt.Pattern == "/v1/health" })
-	for rt, req := range routertest.Requests(routes, nil) {
-		fmt.Println(rt.Method, rt.Pattern, "->", routertest.Serve(r, req).StatusCode)
+	for _, req := range routertest.Requests(tb, routes, nil) {
+		routertest.Serve(r, req).Expect(tb).Status(http.StatusUnauthorized)
 	}
-	// Output:
-	// DELETE /v1/users/{id:int} -> 401
-	// GET /v1/users/{id:int} -> 401
 }
 
-// SignedCookie reads a signed cookie back through the codec of the router
-// that set it.
+// SignedCookie reads a signed cookie back through the codec that set it.
 func ExampleSignedCookie() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+	codec := cookie.NewCodec([]byte("32-bytes-of-key-material-for-hmac"))
 	r := router.New(newContext)
-	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
 	r.POST("/signin", func(c *appContext) error {
-		if err := c.SetSignedCookie(c.NewCookie("session", "ann", time.Hour)); err != nil {
+		if err := codec.Set(c, c.NewCookie("session", "ann", time.Hour)); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
 
-	fmt.Println(routertest.SignedCookie(routertest.Do(r, http.MethodPost, "/signin"), "session"))
-	// Output:
-	// ann true
+	res := routertest.Do(r, http.MethodPost, "/signin")
+	if name, ok := routertest.SignedCookie(tb, res, codec, "session"); !ok || name != "ann" {
+		tb.Errorf("SignedCookie = %q, %v, want ann, true", name, ok)
+	}
 }
 
 // Flashes reads the messages a handler left for the page after its redirect.
 func ExampleFlashes() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+	codec := cookie.NewCodec([]byte("32-bytes-of-key-material-for-hmac"))
 	r := router.New(newContext)
-	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
 	r.POST("/users", func(c *appContext) error {
-		if err := c.AddFlash(router.Flash{Kind: "success", Message: "user created"}); err != nil {
+		if err := codec.AddFlash(c, cookie.Flash{Kind: "success", Message: "user created"}); err != nil {
 			return err
 		}
 		return c.Redirect(http.StatusSeeOther, "/users")
 	})
 
 	res := routertest.Do(r, http.MethodPost, "/users")
-	fmt.Println(res.StatusCode, routertest.Flashes(res))
-	// Output:
-	// 303 [{success user created}]
+	if got := routertest.Flashes(tb, res, codec); len(got) != 1 || got[0].Message != "user created" {
+		tb.Errorf("Flashes = %+v, want the one message", got)
+	}
 }
 
 // FlashCookie sends the messages a redirect would have left, for a test of the
 // page that shows them.
 func ExampleFlashCookie() {
-	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
-	r := router.New(newContext)
-	r.CookieCodec(codec)
-	r.GET("/users", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "%v", c.Flashes())
-	})
-
-	res := routertest.Get(r, "/users", routertest.FlashCookie(codec, router.Flash{Kind: "success", Message: "user created"}))
-	fmt.Println(res)
-	// Output:
-	// [{success user created}]
-}
-
-// WithCookieCodec gives a context built without a router the codec that
-// router.Router.CookieCodec would.
-func ExampleWithCookieCodec() {
 	// tb is the *testing.T of the test that runs this.
 	var tb testing.TB
-	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
+	codec := cookie.NewCodec([]byte("32-bytes-of-key-material-for-hmac"))
+	r := router.New(newContext)
+	r.GET("/users", func(c *appContext) error {
+		return c.String(http.StatusOK, fmt.Sprintf("%v", codec.Flashes(c)))
+	})
 
-	c, _ := routertest.NewContext(tb, newContext, routertest.WithCookieCodec(codec))
-	if err := c.SetSignedCookie(c.NewCookie("session", "ann", time.Hour)); err != nil {
-		tb.Fatal(err)
-	}
+	routertest.Get(r, "/users", routertest.FlashCookie(tb, codec, cookie.Flash{Kind: "success", Message: "user created"})).
+		Expect(tb).Body("[{success user created}]")
 }
 
 func ExampleEvents() {
@@ -264,7 +256,7 @@ func ExampleEvents() {
 		names <- "ann"
 		names <- "bob"
 		close(names)
-		return router.ServeSSE(c, names, router.SSEText[string]("user"))
+		return sse.Serve(c, names, sse.Text[string]("user"))
 	})
 
 	for _, e := range routertest.Events(routertest.Get(r, "/stream")) {
@@ -280,7 +272,7 @@ func ExampleEvents() {
 func ExampleResponse_ErrorBody() {
 	r := router.New(newContext)
 	r.Logger(slog.New(slog.DiscardHandler))
-	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.ErrorHandler(router.JSONErrorHandler[*appContext](false))
 	r.POST("/signup", func(c *appContext) error {
 		_, err := c.Bind[signup]()
 		return err
@@ -307,7 +299,7 @@ func ExampleExpect_FieldErrors() {
 	var tb testing.TB
 
 	r := router.New(newContext)
-	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.ErrorHandler(router.JSONErrorHandler[*appContext](false))
 	r.POST("/signup", func(c *appContext) error {
 		_, err := c.Bind[signup]()
 		return err

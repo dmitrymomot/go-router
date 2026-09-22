@@ -68,35 +68,11 @@ func captureLogs(t *testing.T) *recordSink {
 	return sink
 }
 
-func TestBeforeHookSeesTheStatusThatGoesOut(t *testing.T) {
-	w := &statusWriter{ResponseWriter: httptest.NewRecorder()}
-	res := &Response{ResponseWriter: w}
-
-	var seen []int
-	res.Before(func() {
-		seen = append(seen, res.Status)
-		res.Header().Set("X-Status", fmt.Sprint(res.Status))
-	})
-	res.WriteHeader(http.StatusTeapot)
-
-	if len(seen) != 1 || seen[0] != http.StatusTeapot {
-		t.Errorf("the hook saw %v, want [418]; a hook that reads the status runs after it is set", seen)
-	}
-	if got := res.Header().Get("X-Status"); got != "418" {
-		t.Errorf("X-Status = %q, want %q", got, "418")
-	}
-	if len(w.codes) != 1 || w.codes[0] != http.StatusTeapot {
-		t.Errorf("the writer saw %v, want [418]", w.codes)
-	}
-}
-
 func TestWriteHeaderDropsASecondStatusAndLogsIt(t *testing.T) {
 	sink := captureLogs(t)
 
 	w := &statusWriter{ResponseWriter: httptest.NewRecorder()}
 	res := &Response{ResponseWriter: w}
-	hooks := 0
-	res.Before(func() { hooks++ })
 
 	res.WriteHeader(http.StatusOK)
 	res.WriteHeader(http.StatusInternalServerError)
@@ -106,9 +82,6 @@ func TestWriteHeaderDropsASecondStatusAndLogsIt(t *testing.T) {
 	}
 	if len(w.codes) != 1 {
 		t.Errorf("the writer saw %v, want one status", w.codes)
-	}
-	if hooks != 1 {
-		t.Errorf("the hooks ran %d times, want 1", hooks)
 	}
 	if len(sink.records) != 1 {
 		t.Fatalf("logged %d records, want 1 that names the dropped status", len(sink.records))
@@ -128,23 +101,19 @@ func TestWriteHeaderKeepsAnInformationalStatusOutOfTheAnswer(t *testing.T) {
 	type answer struct {
 		status    int
 		committed bool
-		hooks     int
 	}
 	got := make(chan answer, 1)
 
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
 		res := c.Response()
-		hooks := 0
-		res.Before(func() { hooks++ })
-
 		res.Header().Set("Link", "</app.css>; rel=preload")
 		res.WriteHeader(http.StatusEarlyHints)
 		if res.Committed || res.Status != 0 {
 			return ErrInternalServerError.WithMessage("103 committed the response")
 		}
 		err := c.String(http.StatusOK, "page")
-		got <- answer{res.Status, res.Committed, hooks}
+		got <- answer{res.Status, res.Committed}
 		return err
 	})
 
@@ -187,15 +156,13 @@ func TestWriteHeaderKeepsAnInformationalStatusOutOfTheAnswer(t *testing.T) {
 	if a.status != http.StatusOK || !a.committed {
 		t.Errorf("Status/Committed = %d/%v, want 200/true", a.status, a.committed)
 	}
-	if a.hooks != 1 {
-		t.Errorf("the hooks ran %d times, want 1; a 103 runs none of them", a.hooks)
-	}
 }
 
 func TestHijackTakesOverTheConnection(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
-		hj, ok := c.ResponseWriter().(http.Hijacker)
+		var w http.ResponseWriter = c.Response()
+		hj, ok := w.(http.Hijacker)
 		if !ok {
 			return ErrInternalServerError.WithMessage("the response writer is no http.Hijacker")
 		}
@@ -303,16 +270,11 @@ func TestUnwrapResponseReadsTheStatusAndTheSize(t *testing.T) {
 func TestWriteHeaderCommitsASwitchingProtocols(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
-	hooks := 0
-	res.Before(func() { hooks++ })
 
 	res.WriteHeader(http.StatusSwitchingProtocols)
 
 	if res.Status != http.StatusSwitchingProtocols || !res.Committed {
 		t.Errorf("Status/Committed = %d/%v, want 101/true", res.Status, res.Committed)
-	}
-	if hooks != 1 {
-		t.Errorf("the hooks ran %d times, want 1", hooks)
 	}
 	if rec.Code != http.StatusSwitchingProtocols {
 		t.Errorf("the client saw %d, want 101", rec.Code)
@@ -322,7 +284,7 @@ func TestWriteHeaderCommitsASwitchingProtocols(t *testing.T) {
 func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
 	r := newTestRouter()
 	got := 0
-	r.Observe(func(_ Context, status int, _ int64, _ time.Duration, _ error) { got = status })
+	r.Observe(func(_ *tctx, status int, _ int64, _ time.Duration, _ error) { got = status })
 	r.GET("/ws", func(c *tctx) error {
 		c.Response().WriteHeader(http.StatusSwitchingProtocols)
 		return nil
@@ -338,14 +300,12 @@ func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
 func TestFlushCommitsTheResponse(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
-	ran := false
-	res.Before(func() { ran = true })
 
 	res.Flush()
 
-	if res.Status != http.StatusOK || !res.Committed || !ran {
-		t.Errorf("after Flush: Status = %d, Committed = %v, hook ran = %v; want 200, true, true",
-			res.Status, res.Committed, ran)
+	if res.Status != http.StatusOK || !res.Committed || rec.Code != http.StatusOK {
+		t.Errorf("after Flush: Status = %d, Committed = %v, client saw %d; want 200, true, 200",
+			res.Status, res.Committed, rec.Code)
 	}
 }
 
@@ -380,15 +340,6 @@ func TestReadFromReachesTheWriterUnderneath(t *testing.T) {
 	}
 }
 
-func TestResponseBeforeRejectsNil(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic")
-		}
-	}()
-	new(Response).Before(nil)
-}
-
 // After a hijack the caller owns the wire, so the router must not write on it
 // again or report a status the connection never carried.
 func TestHijackCommitsTheResponse(t *testing.T) {
@@ -397,7 +348,7 @@ func TestHijackCommitsTheResponse(t *testing.T) {
 		observed = make(chan int, 1)
 	)
 	r := newTestRouter()
-	r.Observe(func(_ Context, code int, _ int64, _ time.Duration, _ error) { observed <- code })
+	r.Observe(func(_ *tctx, code int, _ int64, _ time.Duration, _ error) { observed <- code })
 	r.GET("/hj", func(c *tctx) error {
 		conn, bw, err := c.Response().Hijack()
 		if err != nil {
@@ -449,7 +400,6 @@ func TestHijackCommitsTheResponse(t *testing.T) {
 func TestCaptureRecordsTheAnswerAndPassesItOn(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
-	res.Before(func() { res.Header().Set("X-Hook", "ran") })
 
 	stop := res.Capture(64)
 	res.Header().Set(HeaderContentType, MIMETextPlain)
@@ -468,8 +418,8 @@ func TestCaptureRecordsTheAnswerAndPassesItOn(t *testing.T) {
 	if got.Status != http.StatusOK || string(got.Body) != "abc" || got.Truncated {
 		t.Errorf("recorded %d %q truncated=%v, want 200 %q false", got.Status, got.Body, got.Truncated, "abc")
 	}
-	if got.Header.Get("X-Hook") != "ran" || got.Header.Get(HeaderContentType) != MIMETextPlain {
-		t.Errorf("recorded header = %v, want the hook's and the handler's", got.Header)
+	if got.Header.Get(HeaderContentType) != MIMETextPlain {
+		t.Errorf("recorded header = %v, want the handler's", got.Header)
 	}
 	if got.Header.Get("X-Late") != "" {
 		t.Error("the recorded header changed after the status went out")
@@ -589,7 +539,7 @@ func TestCaptureKeepsA413ClosingTheConnection(t *testing.T) {
 	r.MaxBodyBytes(16)
 	r.POST("/b", func(c *tctx) error {
 		c.Response().Capture(64)
-		_, err := c.Bind[map[string]any]()
+		_, err := c.BindJSON[map[string]any]()
 		return err
 	})
 
@@ -680,7 +630,7 @@ func (w *redirectToOK) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w *redirectToOK) WriteHeader(code int) {
 	if loc := w.Header().Get(HeaderLocation); loc != "" {
 		w.Header().Del(HeaderLocation)
-		w.Header().Set(HeaderHXRedirect, loc)
+		w.Header().Set("Hx-Redirect", loc)
 		code = http.StatusOK
 	}
 	w.ResponseWriter.WriteHeader(code)
@@ -711,7 +661,7 @@ func TestCaptureSeesWhatAnInnerWriterMakesOfTheAnswer(t *testing.T) {
 	if rec.Code != http.StatusOK || got.Status != http.StatusOK {
 		t.Fatalf("client got %d, recorded %d; want 200 for both", rec.Code, got.Status)
 	}
-	if got.Header.Get(HeaderHXRedirect) != "/next" || got.Header.Get(HeaderLocation) != "" {
+	if got.Header.Get("Hx-Redirect") != "/next" || got.Header.Get(HeaderLocation) != "" {
 		t.Errorf("recorded header = %v, want HX-Redirect and no Location", got.Header)
 	}
 }
@@ -832,4 +782,27 @@ func TestCaptureRejectsANegativeLimit(t *testing.T) {
 		}
 	}()
 	new(Response).Capture(-1)
+}
+
+type failingFlusher struct {
+	http.ResponseWriter
+	err error
+}
+
+func (w *failingFlusher) FlushError() error { return w.err }
+
+func TestFlushErrorReportsTheWriterError(t *testing.T) {
+	gone := errors.New("client gone")
+	res := &Response{ResponseWriter: &failingFlusher{ResponseWriter: httptest.NewRecorder(), err: gone}}
+
+	if err := res.FlushError(); !errors.Is(err, gone) {
+		t.Errorf("FlushError = %v, want %v", err, gone)
+	}
+	if res.Status != http.StatusOK || !res.Committed {
+		t.Errorf("Status = %d, Committed = %v, want 200 and true", res.Status, res.Committed)
+	}
+	// http.NewResponseController finds FlushError on Response itself.
+	if err := http.NewResponseController(res).Flush(); !errors.Is(err, gone) {
+		t.Errorf("ResponseController.Flush = %v, want %v", err, gone)
+	}
 }

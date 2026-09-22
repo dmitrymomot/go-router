@@ -16,30 +16,22 @@ local := "github.com/dmitrymomot/go-router"
 help:
     @just --list
 
-# Run all tests with race detection and coverage
-test path='./...':
-    set -eu; \
-    go test -count=1 {{ path }}; \
-    go test -race -cover -count=1 {{ path }}; \
-    for dir in benchmarks _examples/*/; do \
-        [ -d "$dir" ] || continue; \
-        ( \
-            cd "$dir"; \
-            go test -count=1 ./...; \
-            go test -race -cover -count=1 ./... \
-        ); \
-    done
-
-# Report total coverage
-cover:
+# go test also runs the seed corpus of every fuzz target, so no fuzz step is
+# needed.
+#
+# Run every test once, with the race detector, and hold coverage at 95%
+test:
     set -eu; \
     profile="$(mktemp "${TMPDIR:-/tmp}/go-router-coverage.XXXXXX")"; \
     trap 'rm -f "$profile"' 0; \
-    go test -count=1 -coverprofile="$profile" ./...; \
-    report="$(go tool cover -func="$profile")"; \
-    total="$(printf '%s\n' "$report" | awk '/^total:/ { gsub(/%/, "", $3); print $3 }')"; \
+    go test -race -count=1 -coverprofile="$profile" ./...; \
+    total="$(go tool cover -func="$profile" | awk '/^total:/ { gsub(/%/, "", $3); print $3 }')"; \
     printf 'total coverage: %s%%\n' "$total"; \
-    awk -v total="$total" 'BEGIN { exit !(total + 0 >= 95) }'
+    awk -v total="$total" 'BEGIN { exit !(total + 0 >= 95) }'; \
+    for dir in benchmarks _examples/*/; do \
+        [ -d "$dir" ] || continue; \
+        (cd "$dir" && go test -race -count=1 ./...); \
+    done
 
 # Run the benchmarks of this module
 bench path='./...':
@@ -115,8 +107,7 @@ lint: fmt-check
             return 1
         fi
     }
-    fail_if_output "gofumpt would rewrite" go run {{ gofumpt }} -l .
-    fail_if_output "goimports would rewrite" go run {{ goimports }} -l -local {{ local }} .
+    # fmt-check, which runs first, covers gofmt, gofumpt and goimports.
     fail_if_output "go fix has modernizations to apply" go fix -diff ./...
     # The benchmarks are their own module, so the walk above never reaches them.
     (
@@ -177,13 +168,6 @@ vuln:
 actionlint:
     go run {{ actionlint }}
 
-fuzz-smoke:
-    set -eu; \
-    for dir in . benchmarks _examples/*/; do \
-        [ -d "$dir" ] || continue; \
-        (cd "$dir" && go test -count=1 -run '^Fuzz' ./...); \
-    done
-
 cross:
     set -eu; \
     for dir in . benchmarks _examples/*/; do \
@@ -191,8 +175,9 @@ cross:
         (cd "$dir" && env GOOS=linux GOARCH=386 CGO_ENABLED=0 go test -exec=true -count=1 ./...); \
     done
 
+# Clear the cache of golangci-lint, whose stale entries can crash it
 clean-cache:
-    go clean -cache
+    go run {{ golangci }} cache clean
 
 # Everything: format, lint, analyze, golangci-lint, test
-check: clean-cache fmt-check lint analyze golangci test cover vuln actionlint fuzz-smoke cross
+check: fmt-check lint analyze golangci test vuln actionlint cross

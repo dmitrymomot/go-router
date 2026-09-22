@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -41,8 +40,12 @@ const DefaultReadHeaderTimeout = 10 * time.Second
 // before the drain starts. It then drains within ShutdownTimeout. OnDrain runs
 // on its own goroutine while the handlers still answer: the flag it flips has
 // to be atomic, and an OnDrain that blocks pushes back both the delay and the
-// drain. A server whose serving fails closes at once, with no OnDrain and no
-// delay. A negative DrainDelay is an error.
+// drain. A server whose serving fails before ctx ends closes at once, with no
+// OnDrain and no delay. A negative DrainDelay is an error.
+//
+// Any certificate in Certificates turns the server into an HTTPS one, over TLS
+// 1.3 and h2. With a TLSConfig of your own, the certificates join the ones it
+// carries. Load one with [tls.LoadX509KeyPair] or [tls.X509KeyPair].
 //
 // Keep-alives stay on during the delay, because closing idle connections while
 // the balancer still sends would fail its requests. To turn them off anyway,
@@ -53,6 +56,7 @@ type Config struct {
 	Network           string
 	Listener          net.Listener
 	TLSConfig         *tls.Config
+	Certificates      []tls.Certificate
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
@@ -65,96 +69,33 @@ type Config struct {
 	OnServer          func(*http.Server) error
 }
 
-// Option adds a TLS certificate to the server. See [CertFiles], [CertPEM] and
-// [CertFS].
-type Option func(*options) error
-
-type options struct {
-	certs []tls.Certificate
-}
-
-// CertFiles loads a certificate and its key from disk.
-func CertFiles(certPath, keyPath string) Option {
-	return func(o *options) error {
-		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-		if err != nil {
-			return fmt.Errorf("serve: load the certificate %q and the key %q: %w", certPath, keyPath, err)
-		}
-		o.certs = append(o.certs, cert)
-		return nil
-	}
-}
-
-// CertPEM takes a certificate and its key as PEM bytes, which suits a secret
-// that arrives through the environment.
-func CertPEM(cert, key []byte) Option {
-	return func(o *options) error {
-		c, err := tls.X509KeyPair(cert, key)
-		if err != nil {
-			return fmt.Errorf("serve: read the PEM certificate and key: %w", err)
-		}
-		o.certs = append(o.certs, c)
-		return nil
-	}
-}
-
-// CertFS loads a certificate and its key from fsys, such as an embed.FS.
-func CertFS(fsys fs.FS, certPath, keyPath string) Option {
-	return func(o *options) error {
-		if fsys == nil {
-			return errors.New("serve: CertFS needs a file system")
-		}
-		cert, err := fs.ReadFile(fsys, certPath)
-		if err != nil {
-			return fmt.Errorf("serve: read the certificate %q: %w", certPath, err)
-		}
-		key, err := fs.ReadFile(fsys, keyPath)
-		if err != nil {
-			return fmt.Errorf("serve: read the key %q: %w", keyPath, err)
-		}
-		c, err := tls.X509KeyPair(cert, key)
-		if err != nil {
-			return fmt.Errorf("serve: read the certificate %q and the key %q: %w", certPath, keyPath, err)
-		}
-		o.certs = append(o.certs, c)
-		return nil
-	}
-}
-
 // Run serves h until ctx ends, waits Config.DrainDelay, then drains the
 // requests in flight and reports once the server has stopped. A cancelled ctx
 // is the ordinary way to stop, so Run reports nil for it.
 //
-// Any certificate among opts turns the server into an HTTPS one, over TLS 1.3
-// and h2. A Config.TLSConfig of your own wins, and the certificates join the
-// ones it already carries.
-//
 // Run reports an error for a nil context, a nil handler, a Config that names
-// neither an address nor a listener, a negative DrainDelay, a nil or failing
-// option, a TLS config with no certificate, a listener it cannot open, and a
-// drain that runs out of time. It checks the certificate after OnServer and
-// before it listens.
-func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error {
+// neither an address nor a listener, a negative DrainDelay, a TLS config with
+// no certificate, a listener it cannot open, and a drain that runs out of
+// time. It checks the certificate after OnServer and before it listens, even
+// for a ctx that has already ended.
+func Run(ctx context.Context, h http.Handler, cfg Config) error {
 	// Run closes a caller-supplied listener on the serving path, so it owns it
-	// from here on and has to close it on every path. It used to return early
-	// -- a nil handler, a bad option, a context already cancelled -- with the
-	// listener still accepting, and the caller had no way to tell whether it
-	// had been taken over or not.
+	// from here on and has to close it on every path, early returns included.
 	if cfg.Listener != nil {
 		defer cfg.Listener.Close() //nolint:errcheck // Reported by whoever opened it.
 	}
 	if ctx == nil {
 		return errors.New("serve: Run needs a context")
 	}
-	in, err := prepare(h, cfg, opts)
+	in, err := prepare(h, cfg)
 	if err != nil {
+		return err
+	}
+	if err := in.build(); err != nil {
 		return err
 	}
 	if ctx.Err() != nil {
 		return nil
-	}
-	if err := in.build(); err != nil {
-		return err
 	}
 	if err := in.open(ctx); err != nil {
 		return err
@@ -170,14 +111,13 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 // [RunAll] take each server through the same steps: prepare, build, open and
 // serve.
 type instance struct {
-	h     http.Handler
-	srv   *http.Server
-	ln    net.Listener
-	certs []tls.Certificate
-	cfg   Config
+	h   http.Handler
+	srv *http.Server
+	ln  net.Listener
+	cfg Config
 }
 
-func prepare(h http.Handler, cfg Config, opts []Option) (*instance, error) {
+func prepare(h http.Handler, cfg Config) (*instance, error) {
 	if h == nil {
 		return nil, errors.New("serve: the server needs a handler")
 	}
@@ -187,17 +127,7 @@ func prepare(h http.Handler, cfg Config, opts []Option) (*instance, error) {
 	if cfg.DrainDelay < 0 {
 		return nil, errors.New("serve: Config.DrainDelay is negative")
 	}
-
-	var o options
-	for i, opt := range opts {
-		if opt == nil {
-			return nil, fmt.Errorf("serve: option %d is nil", i)
-		}
-		if err := opt(&o); err != nil {
-			return nil, err
-		}
-	}
-	return &instance{h: h, cfg: cfg, certs: o.certs}, nil
+	return &instance{h: h, cfg: cfg}, nil
 }
 
 func (in *instance) build() error {
@@ -209,7 +139,7 @@ func (in *instance) build() error {
 	in.srv = &http.Server{
 		Addr:              in.cfg.Addr,
 		Handler:           in.h,
-		TLSConfig:         tlsConfig(in.cfg, in.certs),
+		TLSConfig:         tlsConfig(in.cfg),
 		ReadHeaderTimeout: headerTimeout(in.cfg.ReadHeaderTimeout),
 		ReadTimeout:       in.cfg.ReadTimeout,
 		WriteTimeout:      in.cfg.WriteTimeout,
@@ -224,7 +154,7 @@ func (in *instance) build() error {
 		}
 	}
 	if in.srv.TLSConfig != nil && !hasCertificate(in.srv.TLSConfig) {
-		return errors.New("serve: the TLS config has no certificate; add one through Config.TLSConfig, an option or OnServer")
+		return errors.New("serve: the TLS config has no certificate; add one through Config.Certificates, Config.TLSConfig or OnServer")
 	}
 	return nil
 }
@@ -264,6 +194,13 @@ func (in *instance) serve(ctx context.Context) error {
 		case <-ctx.Done():
 		case <-stopped:
 			return
+		}
+		// Both cases may be ready at once, and select picks one at random. A
+		// server whose serving failed is closed already and must not drain.
+		select {
+		case <-stopped:
+			return
+		default:
 		}
 		drainErr = in.drain(ctx, stopped)
 	}()
@@ -378,7 +315,8 @@ func headerTimeout(d time.Duration) time.Duration {
 	}
 }
 
-func tlsConfig(cfg Config, certs []tls.Certificate) *tls.Config {
+func tlsConfig(cfg Config) *tls.Config {
+	certs := cfg.Certificates
 	if cfg.TLSConfig == nil {
 		if len(certs) == 0 {
 			return nil

@@ -29,6 +29,8 @@ import (
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
@@ -64,12 +66,12 @@ func RemoteAddr(addr string) RequestOption {
 
 // HTMX marks the request as one htmx 4 made to swap one element: it sets
 // HX-Request and HX-Request-Type: partial. Add
-// Header(router.HeaderHXRequestType, "full") for a boosted link or a history
+// Header(htmx.HeaderRequestType, "full") for a boosted link or a history
 // restore.
 func HTMX() RequestOption {
 	return func(r *http.Request) {
-		r.Header.Set(router.HeaderHXRequest, "true")
-		r.Header.Set(router.HeaderHXRequestType, "partial")
+		r.Header.Set(htmx.HeaderRequest, "true")
+		r.Header.Set(htmx.HeaderRequestType, "partial")
 	}
 }
 
@@ -198,7 +200,6 @@ func Request(method, target string, opts ...RequestOption) *http.Request {
 type contextSpec struct {
 	newReq  func(context.Context) *http.Request
 	params  map[string]string
-	codec   *router.CookieCodec
 	pattern string
 }
 
@@ -238,16 +239,6 @@ func WithTarget(method, target string, opts ...RequestOption) ContextOption {
 	}
 }
 
-// WithCookieCodec gives the context the codec that [router.Router.CookieCodec]
-// would, so a handler can sign and read cookies.
-//
-// WithCookieCodec panics if cc is nil or was not built by
-// [router.NewCookieCodec].
-func WithCookieCodec(cc *router.CookieCodec) ContextOption {
-	routerhook.CheckCookieCodec(cc, "routertest: WithCookieCodec")
-	return func(s *contextSpec) { s.codec = cc }
-}
-
 // NewContext builds one application context and the recorder it writes to, so
 // a handler can be called on its own without a router.
 //
@@ -256,7 +247,8 @@ func WithCookieCodec(cc *router.CookieCodec) ContextOption {
 // value, or fill an embedded pointer with [router.NewBase].
 //
 // Without [WithRequest] the request carries tb.Context(), which ends when the
-// test does.
+// test does. The files that a multipart body spilled to disk are removed when
+// the test ends, as a router removes them when a request is done.
 func NewContext[C router.Context](
 	tb testing.TB,
 	newCtx func(http.ResponseWriter, *http.Request) C,
@@ -286,11 +278,9 @@ func NewContext[C router.Context](
 		return c, rec
 	}
 	*b = *router.NewBase(res, req)
+	tb.Cleanup(func() { routerhook.RemoveSpilledParts(b) })
 	names, vals := paramSlices(spec.params)
 	routerhook.SetRoute(b, spec.pattern, names, vals)
-	if spec.codec != nil {
-		routerhook.SetCookieCodec(b, spec.codec)
-	}
 	if spec.pattern != "" {
 		req.Pattern = spec.pattern
 	}
@@ -317,7 +307,6 @@ type Response struct {
 	*http.Response
 	Body     []byte
 	Recorder *httptest.ResponseRecorder
-	codec    *router.CookieCodec
 }
 
 // Serve sends req to h and reports the answer.
@@ -333,7 +322,6 @@ func Serve(h http.Handler, req *http.Request) *Response {
 	h.ServeHTTP(rec, req)
 	res := Recorded(rec)
 	res.Request = req
-	res.codec, _ = routerhook.CookieCodec(h).(*router.CookieCodec)
 	return res
 }
 
@@ -381,6 +369,7 @@ func (r *Response) ErrorBody() (router.ErrorBody, error) {
 		Error struct {
 			Details jsontext.Value `json:"details"`
 			Message string         `json:"message"`
+			Cause   string         `json:"cause"`
 			Status  int            `json:"status"`
 		} `json:"error"`
 	}
@@ -390,7 +379,7 @@ func (r *Response) ErrorBody() (router.ErrorBody, error) {
 	if env.Error.Status == 0 {
 		return router.ErrorBody{}, fmt.Errorf("routertest: the body %q carries no error envelope", r.Body)
 	}
-	body := router.ErrorBody{Status: env.Error.Status, Message: env.Error.Message}
+	body := router.ErrorBody{Status: env.Error.Status, Message: env.Error.Message, Cause: env.Error.Cause}
 	details := env.Error.Details
 	if len(details) == 0 || details.Kind() == 'n' {
 		return body, nil
@@ -405,44 +394,42 @@ func (r *Response) ErrorBody() (router.ErrorBody, error) {
 }
 
 // SignedCookie reports the value of the last cookie called name that r sets,
-// verified with the codec of the router that answered. It reports false when r
-// sets none, clears it, or sets one that does not verify or has run out.
+// verified with cc. It reports false when r sets none, clears it, or sets one
+// that does not verify or has run out.
 //
-// The codec is the one of the router given to [Serve]. A response that a
-// sub-router of [router.Router.HostRouter] or [router.Router.MountRouter]
-// signed with a codec of its own has to be served by that sub-router.
-//
-// SignedCookie panics when r did not come from Serve, Do or Get on a
-// *router.Router with a CookieCodec.
-func SignedCookie(r *Response, name string) (string, bool) {
-	b := carry(r, "SignedCookie", name)
+// SignedCookie fails the test if cc is nil.
+func SignedCookie(tb testing.TB, r *Response, cc *cookie.Codec, name string) (string, bool) {
+	tb.Helper()
+	b := carry(tb, r, cc, "SignedCookie", name)
 	if b == nil {
 		return "", false
 	}
-	v, err := b.SignedCookie(name)
+	v, err := cc.Get(b, name)
 	return v, err == nil
 }
 
 // Flashes reports the messages of the flash cookie that r sets, verified with
-// the codec of the router that answered, as [SignedCookie] does. It reports
-// nil when r sets none, clears it, or sets one that does not verify. A handler
-// under [NewContext] reads its own with its Flashes method.
+// cc, as [SignedCookie] does. It reports nil when r sets none, clears it, or
+// sets one that does not verify. A handler under [NewContext] reads its own
+// with [cookie.Codec.Flashes].
 //
-// Flashes panics when r did not come from Serve, Do or Get on a
-// *router.Router with a CookieCodec.
-func Flashes(r *Response) []router.Flash {
-	b := carry(r, "Flashes", router.FlashCookieName)
+// Flashes fails the test if cc is nil.
+func Flashes(tb testing.TB, r *Response, cc *cookie.Codec) []cookie.Flash {
+	tb.Helper()
+	b := carry(tb, r, cc, "Flashes", cookie.FlashName)
 	if b == nil {
 		return nil
 	}
-	return b.Flashes()
+	return cc.Flashes(b)
 }
 
-// carry builds a Base with the codec of r whose request holds the last cookie
-// called name that r sets, or reports nil when r sets none or clears it.
-func carry(r *Response, caller, name string) *router.Base {
-	if r.codec == nil {
-		panic("routertest: " + caller + " needs a response that Serve got from a router with a CookieCodec")
+// carry builds a Base whose request holds the last cookie called name that r
+// sets, or reports nil when r sets none or clears it.
+func carry(tb testing.TB, r *Response, cc *cookie.Codec, caller, name string) *router.Base {
+	tb.Helper()
+	if cc == nil {
+		tb.Fatalf("routertest: %s needs a codec", caller)
+		return nil
 	}
 	var last *http.Cookie
 	for _, c := range r.Cookies() {
@@ -455,36 +442,38 @@ func carry(r *Response, caller, name string) *router.Base {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: name, Value: last.Value})
-	b := router.NewBase(httptest.NewRecorder(), req)
-	routerhook.SetCookieCodec(b, r.codec)
-	return b
+	return router.NewBase(httptest.NewRecorder(), req)
 }
 
 // FlashCookie sends flashes in a flash cookie that cc signs, as a redirect
 // would have left it, for a test of the page that shows them. Without flashes
 // it sends no cookie.
 //
-// FlashCookie panics if cc is nil or was not built by [router.NewCookieCodec],
-// or if the messages do not fit in one cookie.
-func FlashCookie(cc *router.CookieCodec, flashes ...router.Flash) RequestOption {
-	routerhook.CheckCookieCodec(cc, "routertest: FlashCookie")
+// FlashCookie fails the test if cc is nil or if the messages do not fit in one
+// cookie.
+func FlashCookie(tb testing.TB, cc *cookie.Codec, flashes ...cookie.Flash) RequestOption {
+	tb.Helper()
+	if cc == nil {
+		tb.Fatalf("routertest: FlashCookie needs a codec")
+		return func(*http.Request) {}
+	}
 	rec := httptest.NewRecorder()
 	b := router.NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	routerhook.SetCookieCodec(b, cc)
 	for _, f := range flashes {
-		if err := b.AddFlash(f); err != nil {
-			panic("routertest: FlashCookie: " + err.Error())
+		if err := cc.AddFlash(b, f); err != nil {
+			tb.Fatalf("routertest: FlashCookie: %v", err)
+			return func(*http.Request) {}
 		}
 	}
 	var value string
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == router.FlashCookieName {
+		if c.Name == cookie.FlashName {
 			value = c.Value
 		}
 	}
 	return func(r *http.Request) {
 		if value != "" {
-			r.AddCookie(&http.Cookie{Name: router.FlashCookieName, Value: value})
+			r.AddCookie(&http.Cookie{Name: cookie.FlashName, Value: value})
 		}
 	}
 }
@@ -560,27 +549,12 @@ func Events(r *Response) []Event {
 	return events
 }
 
-// AssertEvents fails the test unless the body holds exactly the events want,
-// in order.
-func AssertEvents(tb testing.TB, r *Response, want ...Event) {
-	tb.Helper()
-	got := Events(r)
-	if len(got) != len(want) {
-		tb.Fatalf("%d events, want %d; body: %s", len(got), len(want), r.Body)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			tb.Fatalf("event %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}
-
 const updateFlagName = "routertest.update"
 
 const plainUpdateFlagName = "update"
 
 var updateGolden = flag.Bool(updateFlagName, false,
-	"rewrite the golden files that routertest.AssertGolden reads")
+	"rewrite the golden files that routertest.Expect.Golden reads")
 
 func goldenUpdate() bool {
 	if *updateGolden {
@@ -597,55 +571,22 @@ func closeGoldenRoot(tb testing.TB, root *os.Root) {
 	}
 }
 
-// AssertGolden compares got with the file testdata/name, and fails the test on
-// any difference. Run the test with -routertest.update, or with an -update
-// flag of your own, to write the file instead.
-//
-// name is a slash path inside testdata, and it cannot leave that directory.
-func AssertGolden(tb testing.TB, name string, got []byte) {
+// writeGolden writes body to testdata/rel, making the directories it needs
+// without leaving testdata.
+func writeGolden(tb testing.TB, rel string, body []byte) error {
 	tb.Helper()
-
-	rel, err := goldenName(name)
-	if err != nil {
-		tb.Fatalf("routertest: invalid golden file name %q: %v", name, err)
-		return
-	}
-	file := filepath.Join("testdata", rel)
-	if goldenUpdate() {
-		if err := os.MkdirAll("testdata", 0o755); err != nil {
-			tb.Fatalf("routertest: make the golden directory: %v", err)
-			return
-		}
-		root, err := os.OpenRoot("testdata")
-		if err != nil {
-			tb.Fatalf("routertest: open the golden directory: %v", err)
-			return
-		}
-		defer closeGoldenRoot(tb, root)
-		if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
-			tb.Fatalf("routertest: make the golden directory: %v", err)
-			return
-		}
-		if err := root.WriteFile(rel, got, 0o644); err != nil {
-			tb.Fatalf("routertest: write %s: %v", file, err)
-		}
-		return
+	if err := os.MkdirAll("testdata", 0o755); err != nil {
+		return err
 	}
 	root, err := os.OpenRoot("testdata")
 	if err != nil {
-		tb.Fatalf("routertest: open the golden directory: %v", err)
-		return
+		return err
 	}
 	defer closeGoldenRoot(tb, root)
-	want, err := root.ReadFile(rel)
-	if err != nil {
-		tb.Fatalf("routertest: read %s: %v; run the test with -%s to write it", file, err, updateFlagName)
-		return
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return err
 	}
-	if !bytes.Equal(got, want) {
-		tb.Fatalf("%s differs; run the test with -%s to accept the change\ngot:\n%s\nwant:\n%s",
-			file, updateFlagName, got, want)
-	}
+	return root.WriteFile(rel, body, 0o644)
 }
 
 func goldenName(name string) (string, error) {

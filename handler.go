@@ -16,9 +16,6 @@ type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 
 func chain[C Context](h HandlerFunc[C], mws []Middleware[C]) HandlerFunc[C] {
 	for _, mw := range slices.Backward(mws) {
-		if mw == nil {
-			panic("router: middleware must not be nil")
-		}
 		if h = mw(h); h == nil {
 			panic("router: middleware returned a nil handler")
 		}
@@ -69,5 +66,18 @@ func (b *Base) publishParams() {
 			return
 		}
 		b.req.SetPathValue(name, b.paramVals[i])
+	}
+}
+
+func concatMiddleware[C Context](a, b []Middleware[C]) []Middleware[C] {
+	switch {
+	case len(a) == 0:
+		return b
+	case len(b) == 0:
+		return a
+	default:
+		out := make([]Middleware[C], 0, len(a)+len(b))
+		out = append(out, a...)
+		return append(out, b...)
 	}
 }

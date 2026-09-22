@@ -55,10 +55,10 @@ func TestRadixSplitting(t *testing.T) {
 		},
 		{
 			name:     "a catch-all needs a separator in front of it",
-			patterns: []string{"/assets/*", "/assetsfoo"},
+			patterns: []string{"/assets/{rest...}", "/assetsfoo"},
 			requests: map[string]string{
-				"/assets/a/b.css": "/assets/*",
-				"/assets":         "/assets/*",
+				"/assets/a/b.css": "/assets/{rest...}",
+				"/assets":         "/assets/{rest...}",
 				"/assetsfoo":      "/assetsfoo",
 				"/assetsbar":      "",
 			},
@@ -168,21 +168,21 @@ func TestNodeHandlerPrefersTheExactMethod(t *testing.T) {
 				h := func(*tctx) error { answered = m; return nil }
 				n.routes = append(n.routes, methodHandler[*tctx]{method: m, handler: h})
 				if m == anyMethod {
-					n.catchAll = h
+					n.catchAll = len(n.routes)
 				}
 			}
 
-			h := n.handler(tc.request)
+			mh := n.lookup(tc.request)
 			if tc.want == "" {
-				if h != nil {
+				if mh != nil {
 					t.Fatal("a handler answered, want none")
 				}
 				return
 			}
-			if h == nil {
+			if mh == nil {
 				t.Fatalf("no handler answered, want the one of %q", tc.want)
 			}
-			if err := h(nil); err != nil {
+			if err := mh.handler(nil); err != nil {
 				t.Fatalf("handler = %v", err)
 			}
 			if answered != tc.want {

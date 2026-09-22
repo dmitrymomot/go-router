@@ -16,7 +16,7 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-func timeoutRouter(cfg middleware.TimeoutConfig) *router.Router[*appContext] {
+func timeoutRouter(cfg middleware.TimeoutConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.TimeoutWithConfig[*appContext](cfg))
 	r.GET("/slow", func(c *appContext) error {
@@ -29,7 +29,7 @@ func timeoutRouter(cfg middleware.TimeoutConfig) *router.Router[*appContext] {
 
 func TestTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		r := timeoutRouter(middleware.TimeoutConfig{Duration: 20 * time.Millisecond})
+		r := timeoutRouter(middleware.TimeoutConfig[*appContext]{Duration: 20 * time.Millisecond})
 
 		if rec := get(r, "/slow"); rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503", rec.Code)
@@ -42,7 +42,7 @@ func TestTimeout(t *testing.T) {
 
 func TestTimeoutCustomStatus(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		r := timeoutRouter(middleware.TimeoutConfig{
+		r := timeoutRouter(middleware.TimeoutConfig[*appContext]{
 			Duration: 20 * time.Millisecond,
 			Status:   http.StatusGatewayTimeout,
 			Message:  "took too long",
@@ -60,7 +60,7 @@ func TestTimeoutCustomStatus(t *testing.T) {
 
 func TestTimeoutSkip(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		r := timeoutRouter(middleware.TimeoutConfig{
+		r := timeoutRouter(middleware.TimeoutConfig[*appContext]{
 			Duration: 20 * time.Millisecond,
 			Skip:     skipPath("/fast"),
 		})
@@ -79,7 +79,7 @@ func TestTimeoutSkip(t *testing.T) {
 
 func TestTimeoutPassesTheDeadlineToTheHandler(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: time.Minute}))
+	r.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: time.Minute}))
 	r.GET("/", func(c *appContext) error {
 		if _, ok := c.Request().Context().Deadline(); !ok {
 			return router.ErrInternalServerError.WithMessage("no deadline")
@@ -118,7 +118,7 @@ func TestTimeoutKeepsTheRequestOfTheHandlerWithTheContextFromBefore(t *testing.T
 			return err
 		}
 	})
-	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: time.Minute}))
+	r.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: time.Minute}))
 	r.GET("/", func(c *appContext) error {
 		req := c.Request().Clone(c.Request().Context())
 		req.Header.Set("X-Handler", "1")
@@ -139,21 +139,45 @@ func TestTimeoutKeepsTheRequestOfTheHandlerWithTheContextFromBefore(t *testing.T
 	}
 }
 
-func TestTimeoutWithConfigNeedsADuration(t *testing.T) {
-	for _, d := range []time.Duration{0, -time.Second} {
-		mustPanicContaining(t, "Duration", func() {
-			middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: d})
+func TestTimeoutWithConfigRejectsANegativeDuration(t *testing.T) {
+	mustPanicContaining(t, "Duration", func() {
+		middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: -time.Second})
+	})
+}
+
+func TestTimeoutWithConfigRejectsAStatusThatIsNotAnError(t *testing.T) {
+	for _, status := range []int{-1, 200, 302, 399, 600} {
+		mustPanicContaining(t, "Status", func() {
+			middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Status: status})
 		})
+	}
+	for _, status := range []int{0, 400, 504, 599} {
+		middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Status: status})
+	}
+}
+
+func TestTimeoutWithConfigZeroDurationTakesTheDefault(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{}))
+	r.GET("/", func(c *appContext) error {
+		d, ok := c.Deadline()
+		if !ok || time.Until(d) > middleware.DefaultTimeout || time.Until(d) < middleware.DefaultTimeout-time.Second {
+			return router.ErrInternalServerError.WithMessage("deadline %v, %t", d, ok)
+		}
+		return c.NoContent(http.StatusOK)
+	})
+	if rec := get(r, "/"); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200: %s", rec.Code, rec.Body)
 	}
 }
 
 func TestTimeoutOnTimeoutReplacesTheAnswer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var caught error
-		r := timeoutRouter(middleware.TimeoutConfig{
+		r := timeoutRouter(middleware.TimeoutConfig[*appContext]{
 			Duration: 20 * time.Millisecond,
 			Status:   http.StatusGatewayTimeout,
-			OnTimeout: func(c router.Context, err error) error {
+			OnTimeout: func(c *appContext, err error) error {
 				caught = err
 				return router.ErrServiceUnavailable.WithMessage("the report is not ready")
 			},
@@ -178,9 +202,9 @@ func TestTimeoutOnTimeoutSeesTheErrorOfTheHandler(t *testing.T) {
 		var caught error
 
 		r := newRouter()
-		r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{
+		r.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{
 			Duration: 20 * time.Millisecond,
-			OnTimeout: func(c router.Context, err error) error {
+			OnTimeout: func(c *appContext, err error) error {
 				caught = err
 				return router.ErrGatewayTimeout
 			},
@@ -203,7 +227,7 @@ func timeoutFailingRouter() (*router.Router[*appContext], *bytes.Buffer) {
 	var buf bytes.Buffer
 	r := newRouter()
 	r.Logger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: 30 * time.Second}))
+	r.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: 30 * time.Second}))
 	r.GET("/boom", func(*appContext) error { return errors.New("the database is on fire") })
 	return r, &buf
 }
@@ -223,7 +247,7 @@ func TestTimeoutHandsTheErrorHandlerALiveContext(t *testing.T) {
 	var seen error
 	r := newRouter()
 	r.ErrorHandler(func(c *appContext, _ error) error { seen = c.Err(); return nil })
-	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: 30 * time.Second}))
+	r.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: 30 * time.Second}))
 	r.GET("/boom", func(*appContext) error { return errors.New("the database is on fire") })
 
 	get(r, "/boom")

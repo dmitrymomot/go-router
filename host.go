@@ -3,6 +3,7 @@ package router
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,12 +35,17 @@ type hostEntry[C Context] struct {
 	hostSpec
 	tree            *node[C]
 	mws             []Middleware[C]
-	haveMWs         bool
 	idx             int32
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
-	errHandler      ErrorHandlerFunc[C]
+	// errIdx is the error handler of the host's 404 and 405 answers outside
+	// every prefix. scope is the host scope at the root that decides it and
+	// wraps them: the one with a handler, else the first. handler is the host
+	// scope, at any prefix, that set an error handler for the host.
+	errIdx  int32
+	scope   *Router[C]
+	handler *Router[C]
 	// redirect marks a host that RedirectHost owns: no other route may be
 	// registered for it.
 	redirect *hostClaim
@@ -161,7 +167,9 @@ func parseHostPattern(pattern string, classes classLookup) (hostSpec, error) {
 		if err != nil {
 			return hostSpec{}, err
 		}
-		if l.rest && i != 0 {
+		// Expand can fill only a leading wildcard, so one elsewhere names a host
+		// no link can reach.
+		if (l.rest || text == "*") && i != 0 {
 			return hostSpec{}, fmt.Errorf("router: %q must be the first label in %q", text, pattern)
 		}
 		for _, n := range names {
@@ -523,4 +531,112 @@ func asciiLower(s string) string {
 		}
 	}
 	return s
+}
+
+// Host opens a scope that answers only for pattern. See [Router.Hosts].
+func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
+	return r.Hosts([]string{pattern}, fn)
+}
+
+// Hosts opens a scope that answers for any of patterns. A pattern is an exact
+// host, a leading wildcard such as "*.example.com", or a host parameter such
+// as "{tenant}.example.com", which [Base.Param] then reads. A host parameter
+// takes the constraints of [Router.Handle], as in "{tenant:slug}.example.com".
+// A route outside any host scope answers for every host.
+//
+// The middleware of the scope also wraps the 404 and 405 answers for its hosts.
+// When several Host or Hosts calls open one pattern, the scope at the root
+// prefix that sets an error handler owns those answers with its middleware,
+// else the first one at the root prefix does, and each route keeps the
+// middleware of the scope that registered it. A scope opened under a prefix
+// answers only the paths under that prefix. Only one scope of a pattern may
+// set an error handler.
+//
+// Hosts panics on an empty patterns or on a pattern it cannot parse.
+func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
+	if len(patterns) == 0 {
+		panic("router: Hosts needs at least one pattern")
+	}
+	specs := make([]hostSpec, 0, len(patterns))
+	for _, p := range patterns {
+		spec, err := parseHostPattern(p, r.class)
+		if err != nil {
+			panic(err.Error())
+		}
+		// Two spellings of one host resolve to one entry, so the second copy of
+		// every route landed in a trie that already held it and the insert
+		// blamed the route rather than the duplicate host.
+		if i := slices.IndexFunc(specs, func(o hostSpec) bool { return o.pattern == spec.pattern }); i >= 0 {
+			panic("router: Hosts got " + patterns[i] + " and " + p + ", which name the same host " + spec.pattern)
+		}
+		specs = append(specs, spec)
+	}
+	if r.inHost || len(r.hosts) > 0 {
+		panic("router: a host scope cannot sit inside another host scope")
+	}
+	var c *Router[C]
+	r.inOneScope(func() {
+		c = r.newChild("", nil, nil)
+		unlock := r.guard("register a host scope")
+		c.hosts = specs
+		for _, spec := range specs {
+			if _, err := r.root.eng.hostEntry(spec); err != nil {
+				unlock()
+				panic(err.Error())
+			}
+		}
+		unlock()
+		if fn != nil {
+			fn(c)
+		}
+		c.settingChanged()
+	})
+	return c
+}
+
+// HostHandler gives pattern to a standard library handler, which answers every
+// request for that host. A [Router] with a context type of its own goes here
+// too: it keeps its own context, middleware and error handler, and the
+// [Router.Meta] values of this router do not reach its routes.
+//
+// HostHandler panics if h is nil or a nil *Router.
+func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
+	if isNilHandler(h) {
+		panic("router: HostHandler needs a handler")
+	}
+	r.Host(pattern, func(g *Router[C]) { g.MountHandler("/", h) })
+}
+
+func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
+	if eng.hostSet == nil {
+		eng.hostSet = new(hostSet[C])
+	}
+	hs := eng.hostSet
+	for _, e := range hs.all {
+		if e.pattern == spec.pattern {
+			if !sameHostShape(&e.hostSpec, &spec) {
+				return nil, fmt.Errorf("router: host pattern %q resolves a parameter class differently in a mounted router; "+
+					"declare the class once, on the parent", spec.pattern)
+			}
+			return e, nil
+		}
+		if sameHostShape(&e.hostSpec, &spec) {
+			return nil, fmt.Errorf("router: host pattern %q has the same match shape as %q but uses different parameter names", spec.pattern, e.pattern)
+		}
+	}
+
+	e := &hostEntry[C]{hostSpec: spec, tree: new(node[C]), idx: int32(len(hs.all))}
+	hs.all = append(hs.all, e)
+	switch {
+	case spec.any:
+		hs.any = e
+	case spec.exact():
+		if hs.exact == nil {
+			hs.exact = make(map[string]*hostEntry[C], 4)
+		}
+		hs.exact[spec.pattern] = e
+	default:
+		hs.pats = append(hs.pats, e)
+	}
+	return e, nil
 }

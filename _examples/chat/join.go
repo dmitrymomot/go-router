@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
@@ -42,27 +43,27 @@ func join(c Ctx) error {
 		}
 		// htmx swaps the form alone. A browser without JavaScript posted
 		// the whole page away, so it gets the whole page back.
-		return c.RenderPartial(http.StatusOK, tmpl("join", form), tmpl("index", form))
+		return htmx.RenderPartial(c, http.StatusOK, tmpl("join", form), tmpl("index", form))
 	}
 
 	writeUser(c, name)
 
-	return c.HX().Redirect("/room")
+	return htmx.NewResponse(c).Redirect("/room")
 }
 
 func leave(c Ctx) error {
 	clearUser(c)
-	return c.HX().Redirect("/")
+	return htmx.NewResponse(c).Redirect("/")
 }
 
 func requireUser(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
 	return func(c Ctx) error {
 		name, ok := readUser(c)
 		if !ok {
-			if strings.Contains(c.Header().Get(router.HeaderAccept), router.MIMETextEventStream) {
+			if strings.Contains(c.Request().Header.Get(router.HeaderAccept), router.MIMETextEventStream) {
 				return router.ErrUnauthorized
 			}
-			return c.HX().Redirect("/")
+			return htmx.NewResponse(c).Redirect("/")
 		}
 		c.User = name
 		return next(c)

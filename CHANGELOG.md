@@ -2,6 +2,57 @@
 
 All notable changes to this module are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before v1, a minor release may break the API; each break is listed below with the way to migrate.
 
+## [0.3.0] - 2026-09-22
+
+v0.3.0 is a rework after a full audit: it closes several security holes, moves the add-ons out of the root package, and gives the API one shape per concept. Most breaks fail to compile. The first nine change behavior silently, so read them before you bump the version.
+
+### Breaking changes
+
+Ordered by risk, the silent ones first.
+
+1. **Bind fills only the fields that carry the tag of its source.** `BindForm`, `BindQuery`, `BindPath` and `BindHeader` used to fall back to the `json` tag and to the Go field name, so a form field `isadmin=on` set an untagged `IsAdmin`. Each now binds only fields tagged `form`, `query`, `param` or `header`, matched by name (`header` by its canonical name). `Bind` reads the body when the request has one (a length or a chunked stream; a Content-Type alone is not a body), then the path, the query and the headers, each by its tag; a URL value wins over a body value for a field tagged for both. `BindJSON` keeps the json/v2 rules, except that a field tagged `query`, `param`, `header` or `form` and not `json` never takes a JSON member, in `Bind` and in `BindJSON`. Migrate: tag every field you bind from a form, the query, the path or a header.
+2. **`XAs` refuses an absent or empty value.** `QueryAs`, `FormAs` and `ParseValue` answered the zero value and nil for an absent or empty value of a non-string type; they now report 400 (`missing query parameter "page"`), and `ParseValue` reports an error. `FormAs[string]` replaces `FormRequired`. Migrate: use `QueryAsDefault`, `FormAsDefault` or `ParamAsDefault` for an optional value.
+3. **A route's errors go to the error handler of the scopes that registered it.** The handler used to be picked by the request path. Now a matched route goes to the nearest scope in its own lineage with a handler, a `Group` included, then its host scope, then the router. A 404 or 405 goes to the handler that the routes of the most specific prefix scope covering the path get; a Host scope under a prefix counts as a prefix scope on its host, and a host-wide 404 goes to the host scope at the root prefix. A router mounted at `/` no longer answers the parent's errors and 404s, a parent route under a mount prefix keeps the parent's handler, and a `Group` handler covers its own routes only. Any scope may now set a handler; a second handler for one host pattern panics.
+4. **CSRF names its cookie `__Host-csrf` over HTTPS and checks the token's form.** Over HTTP it stays `_csrf`, and `CookieName` overrides both. A cookie that is not 43 base64url characters counts as absent, so a planted value gets a new token. Each client gets a new token once after the upgrade. `Sec-Fetch-Site: same-site` goes on to the token check only for a `__Host-` cookie over HTTPS; any other same-site request still gets 403.
+5. **Idempotency keys belong to one client and fingerprint the whole request.** The default `Client` is `ClientIP`, the default fingerprint hashes method, path, query, media type and the raw body (a JSON body included), and the memory store holds 65536 keys. A non-form body over `MaxBody` gets 413 (`ErrIdempotencyBodyTooLarge`), so the fingerprint always covers the whole body. `IdempotencyFormFingerprint` is gone.
+6. **RateLimit keys an IPv6 client by its /64, and a full store evicts.** A client behind the NAT64 prefix `64:ff9b::/96` is keyed by its IPv4 address. A full memory store evicts the entry that expires first instead of answering 429 to every new client.
+7. **A `static` directory set refuses dotfiles.** A path segment that starts with a dot is a 404 unless `Config.Dotfiles` is set. `New` refuses `Dir` with `Build` or `MaxAge`, and `Fallback` without `SPA`.
+8. **Form bodies are read for every method.** The router parses a URL-encoded body itself, so a QUERY or DELETE form binds, where net/http read one only for POST, PUT and PATCH.
+9. **RequestID ignores an inbound id that is not 1-128 characters of `[A-Za-z0-9._-]`** and generates one instead.
+10. **Signed cookies and flashes moved to package `cookie`, and the router holds no codec.** `Router.CookieCodec`, `ErrNoCookieCodec`, `CookieCodec`, `NewCookieCodec`, `Flash` and the `Base` methods `SetSignedCookie`, `SignedCookie`, `AddFlash` and `Flashes` are gone. Keep a `*cookie.Codec` from `cookie.NewCodec` in your context struct and call `cc.Set(c, ck)`, `cc.Get(c, name)`, `cc.AddFlash(c, f)` and `cc.Flashes(c)`. `Set` returns `cookie.ErrTooLarge` over 4096 bytes. `Encode` takes an explicit expiry, and the codec has no `MaxAge`. `Base.Cookie`, `NewCookie`, `SetCookie` and `ClearCookie` stay.
+11. **htmx moved to package `htmx`.** `c.HX()` is `htmx.NewResponse(c)`, `c.HTMX()` is `htmx.RequestOf(c.Request())`, `c.WantsPartial()` is `htmx.WantsPartial(c)`, `c.RenderPartial(...)` is `htmx.RenderPartial(c, ...)`, `router.HTMXPartial` is `htmx.Partial`, and the constants drop their prefix (`htmx.HeaderRequest`, `htmx.SwapInnerHTML`). `IsHTMX` and `IsBoosted` are gone. The chain-end methods `Render`, `RenderStream`, `HTML`, `String`, `JSON` and `NoContent` are gone: check `Err()`, then answer through the context. A header value with a control or non-ASCII byte now fails the chain, and `Redirect("")` and `Location("")` fail.
+12. **Server-sent events moved to package `sse`.** `c.SSE(...)` is `sse.Open(c, ...)`, `router.ServeSSE` is `sse.Serve`, and every name drops its `SSE` prefix (`sse.Writer`, `sse.Heartbeat`, `sse.JSON`, `sse.NewStream`). `Base.LastEventID` is `Writer.LastEventID`.
+13. **Fewer accessors on Base.** Gone: `QueryOK`, `QueryDefault`, `QueryAsOK`, `ParamOK`, `FormDefault`, `FormRequired`, `ParseValueDefault` (use `cmp.Or` or `XAsDefault`), `Header` (use `Request().Header`), `ResponseWriter` (use `Response()`), `IsTLS` (use `Scheme()`), `Stringf` and `JSONPretty`. `FormAsDefault` is new. `File`, `AttachmentFile` and `InlineFile` take an `fs.FS` first, and the OS-path `File` and `FileFS` are gone; wrap a directory in `os.OpenRoot(dir)` and pass its `FS()`. Every Bind method takes a struct or a pointer to one, and any other type answers 500.
+14. **Errors take one shape per concept.** `NewHTTPError(status, message)` takes one message, `""` for the status text. `PanicError(v, stackSize)` replaces `PanicErrorSize`; a negative size keeps no stack. `TextErrorHandler(expose)` and `JSONErrorHandler(expose)` replace `DefaultErrorHandler` and `ErrorHandler(exposeCause)`; `ErrorBody` gains `Cause`. `PanicValue.Error()` no longer carries the stack, which the failure log adds as a `stack` attribute. `Router.Redirect(pattern, status, target)` and `RedirectHost(pattern, status, target)` take the status before the target.
+15. **The router surface is smaller.** `Route` needs a prefix; use `Group` for none. `MountRouter` and `HostRouter` are gone: `MountHandler` and `HostHandler` take any `*Router`. A bare `*` segment and `{*}` no longer parse; `{name...}` is the only catch-all. `Observe` takes the router's context type and refuses nil. `InlineParamBudget` and `Route.Params` are gone. `Use` panics on a mounted router, and `MaxBodyBytes`, `MaxMultipartMemory`, `Logger`, `JSONOptions`, `HandleOPTIONS`, `RedirectTrailingSlash` and `Observe` panic on a scope. A host wildcard is accepted only in the first label.
+16. **`Response.Before` is gone.** Only three middlewares used it, and every response paid for it. Set a header before you write, or wrap `Response.ResponseWriter` to act on the first write. KeyAuth now sets `WWW-Authenticate` where it refuses a request, so a 401 that an `OnError` writes itself has to set its own challenge. MinDuration holds the first write through a writer wrapper, and a hijack now waits for the floor too. `Base` shrinks from 296 to 272 bytes, so an unpooled request allocates 288 bytes where it allocated 320.
+17. **middleware: one shape for every config.** Every `XConfig` is generic (`GzipConfig[C]`) and every callback takes `C`, `Skip` included. `CSRFConfig.TokenSources` is `Sources`. `RateLimitConfig.KeyFunc` and `IdempotencyConfig.Scope` are `Client func(c C) string`, which can no longer refuse a request. `NewMemoryStore` is `NewRateLimitMemoryStore`, `DefaultMemoryStoreMaxEntries` is `DefaultRateLimitMaxEntries`, and the stores lose their type parameter. `ClientIP`, `ClientAddr`, `CSRFTokenFrom` and `RequestIDFrom` take a `router.Context`. Zero means the default everywhere, and a negative or out-of-range value panics at the constructor: a negative `MaxDecompressedSize` no longer lifts the cap, whose default is now `router.DefaultMaxBodyBytes`. `RecoverConfig.DisableStack` is gone; use a negative `StackSize`.
+18. **serve takes certificates in Config.** `Option`, `CertFiles`, `CertPEM`, `CertFS` and `Server.Options` are gone; set `Config.Certificates` from `tls.LoadX509KeyPair` or `tls.X509KeyPair`. `Run` and `RunAll` build the server before they return nil for a context already done, so `OnServer` runs and a TLS config without a certificate is reported.
+19. **routertest reports through the test.** `AssertEvents` and `AssertGolden` are `Expect.Events` and `Expect.Golden`. `Requests(tb, routes, fill)` takes a tb and fails the test when `Expand` refuses a value. `SignedCookie(tb, res, cc, name)`, `Flashes(tb, res, cc)` and `FlashCookie(tb, cc, flashes...)` take the codec, and `WithCookieCodec` is gone. `Client.Follow` fails the test when the answer does not redirect. `AssertHEADMatchesGET` is gone.
+
+### Fixed
+
+- A typed nil `*HTTPError` no longer panics in `Unwrap`, `StatusOf` or `HTTPErrorOf`, and `HTTPError.Is` matches only a direct `*HTTPError` target.
+- An exposing error handler no longer sends the panic stack to the client.
+- `Response.FlushError` reports a failed flush to `http.NewResponseController`, which `Flush` dropped. A 1xx, 204 or 304 goes out with no body and no Content-Length instead of a logged 500.
+- A 404 under a template prefix such as `/r/{env}-{name}/{id}` binds every parameter.
+- The trailing-slash redirect no longer runs `path.Clean`, which sent `/x/../` to `/`, another route; a path with a dot segment gets no redirect.
+- Every setter takes the lock that orders setup against the first request.
+- Gzip drops `Accept-Ranges`, gives a compressed answer its own ETag (`"abc"` becomes `"abc-gzip"`, and a 304 carries the tag the client holds), strips the suffix from `If-None-Match` and `If-Match` before the handler, and honors `Cache-Control: no-transform`; a 413 from Decompress closes the connection.
+- A router mounted twice into one parent keeps each mount's error handler, and registering many `With` or `Meta` routes stays linear.
+- `RedirectTrailingSlash` leaves a catch-all route alone, so a mounted `http.FileServer` no longer loops on a directory.
+- A typed nil `*HTTPError` in a joined error no longer hides a real one after it.
+- `AttachmentFile` and `InlineFile` set `Content-Disposition` only for a file that will be sent.
+- Spilled multipart files are removed when the router finishes the request, not when its context ends; `routertest.NewContext` removes them when the test ends.
+- A cyclic `Unwrap` no longer hangs the SSE flush check.
+- `static` and the router read `Accept` with one parser, so a malformed `q` refuses the range in both.
+
+### Changed
+
+- htmx, SSE, cookies and flashes live in the packages `htmx`, `sse` and `cookie`; the root package imports none of them.
+- `router.go` is split by concern into `scope.go`, `mount.go`, `compile.go`, `fallback.go`, `dispatch.go` and `routes.go`.
+- `just test` runs each module once under `-race` and holds coverage at 95%; `cover` and `fuzz-smoke` are gone.
+
 ## [0.2.0] - 2026-09-22
 
 v0.2.0 breaks the API in several places. Read [Upgrading from v0.1](#upgrading-from-v01) before you bump the version: most breaks fail to compile, but the first two change behavior silently.
@@ -445,5 +496,6 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
+[0.3.0]: https://github.com/dmitrymomot/go-router/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dmitrymomot/go-router/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0

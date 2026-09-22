@@ -14,18 +14,24 @@ import (
 // CSRFTokenKey is where [CSRF] stores the token on the context.
 const CSRFTokenKey = "csrf_token"
 
-// The cookie and the form field that [CSRF] uses when the configuration names
-// none.
+// The cookies and the form field that [CSRF] uses when the configuration names
+// none. The cookie over HTTPS carries the __Host- prefix, so the browser keeps
+// it to this host alone and a sibling subdomain cannot set it.
 const (
-	DefaultCSRFCookieName = "_csrf"
-	DefaultCSRFFormField  = "_csrf"
+	DefaultCSRFCookieName     = "_csrf"
+	DefaultCSRFHostCookieName = "__Host-csrf"
+	DefaultCSRFFormField      = "_csrf"
 )
 
 // DefaultCSRFCookieMaxAge is how long the CSRF cookie lives when
-// CSRFConfig.CookieMaxAge is zero or less.
+// CSRFConfig.CookieMaxAge is zero.
 const DefaultCSRFCookieMaxAge = 24 * time.Hour
 
 const csrfTokenBytes = 32
+
+// csrfTokenLength is the length of the tokens [CSRF] issues. A cookie of any
+// other shape was not issued here.
+var csrfTokenLength = base64.RawURLEncoding.EncodedLen(csrfTokenBytes)
 
 var (
 	errCrossSite        = router.ErrForbidden.WithMessage("cross-site request")
@@ -39,18 +45,24 @@ var defaultCSRFSources = []TokenSource{
 
 // CSRFConfig configures [CSRFWithConfig].
 //
-// TokenSources say where the token of an unsafe request may come from, and an
-// empty list reads the X-CSRF-Token header and the "_csrf" form field. The
-// Cookie fields shape the cookie that carries the token; CookieHTTPOnly has to
-// stay false for a script to read it, and a template that renders the token
-// into the form does not need it.
+// Sources say where the token of an unsafe request may come from, and an empty
+// list reads the X-CSRF-Token header and the "_csrf" form field.
 //
-// TrustedOrigins names the origins that may post cross-site, each with a
-// scheme and a host. AllowSecFetchSite replaces the Sec-Fetch-Site check
+// The Cookie fields shape the cookie that carries the token. An empty
+// CookieName takes [DefaultCSRFHostCookieName] over HTTPS and
+// [DefaultCSRFCookieName] over HTTP; the __Host- cookie always goes out with
+// Secure, the path "/" and no domain, so CookiePath and CookieDomain need a
+// CookieName of their own. CookieMaxAge is how long the cookie lives, and zero
+// takes [DefaultCSRFCookieMaxAge]. CookieHTTPOnly has to stay false for a
+// script to read the cookie, and a template that renders the token into the
+// form does not need it.
+//
+// TrustedOrigins names the origins that may post from another site, each with
+// a scheme and a host. AllowSecFetchSite replaces the Sec-Fetch-Site check
 // entirely.
-type CSRFConfig struct {
-	Skip              func(c router.Context) bool
-	TokenSources      []TokenSource
+type CSRFConfig[C router.Context] struct {
+	Skip              func(c C) bool
+	Sources           []TokenSource
 	CookieName        string
 	CookiePath        string
 	CookieDomain      string
@@ -59,51 +71,60 @@ type CSRFConfig struct {
 	CookieHTTPOnly    bool
 	CookieSameSite    http.SameSite
 	TrustedOrigins    []string
-	AllowSecFetchSite func(c router.Context) (bool, error)
+	AllowSecFetchSite func(c C) (bool, error)
 }
 
 // CSRF issues a token, puts it in a cookie and on the context, and refuses an
-// unsafe request that does not send it back. GET, HEAD, OPTIONS and TRACE pass
-// through and still get a token.
+// unsafe request that does not send it back. GET, HEAD, OPTIONS, TRACE and
+// QUERY pass through and still get a token. A cookie that does not hold a
+// token of the shape CSRF issues counts as absent, and a new token replaces
+// it.
 //
 // A request that Sec-Fetch-Site marks as same-origin passes without a token,
 // which is what lets a browser that sends the header carry an ordinary form.
 // One that marks it cross-site is refused outright unless its origin is
-// trusted. A request with no such header needs the token.
+// trusted. A same-site request needs the token, and only the cookie
+// [DefaultCSRFHostCookieName], which CSRF uses over HTTPS when the
+// configuration names no cookie, may carry it: a sibling subdomain can plant
+// any other cookie for the parent domain, so over plain HTTP, or with a
+// CookieName without the __Host- prefix, a same-site request is refused. A
+// request with no such header needs the token.
 //
 // [CSRFTokenFrom] reads the token for a template.
 //
 // See Order in the package doc for where it goes.
 func CSRF[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return CSRFWithConfig[C](CSRFConfig{})(next)
+	return CSRFWithConfig(CSRFConfig[C]{})(next)
 }
 
 // CSRFWithConfig is [CSRF] with a configuration.
 //
-// CSRFWithConfig panics on a nil token source, on more than
-// [MaxTokenSources] of them, and on a trusted origin it cannot parse.
-func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
-	if len(cfg.TokenSources) == 0 {
-		cfg.TokenSources = defaultCSRFSources
+// CSRFWithConfig panics on a nil token source, on more than [MaxTokenSources]
+// of them, on a trusted origin it cannot parse, on a negative CookieMaxAge,
+// and on a CookiePath or CookieDomain without a CookieName.
+func CSRFWithConfig[C router.Context](cfg CSRFConfig[C]) router.Middleware[C] {
+	if len(cfg.Sources) == 0 {
+		cfg.Sources = defaultCSRFSources
 	}
-	cfg.TokenSources = slices.Clone(cfg.TokenSources)
-	checkTokenSources("CSRFConfig", cfg.TokenSources)
-	if cfg.CookieName == "" {
-		cfg.CookieName = DefaultCSRFCookieName
+	cfg.Sources = slices.Clone(cfg.Sources)
+	checkTokenSources("CSRFConfig", cfg.Sources)
+	if cfg.CookieMaxAge < 0 {
+		panic("middleware: CSRFWithConfig needs a CookieMaxAge of zero or more")
+	}
+	if cfg.CookieName == "" && (cfg.CookieDomain != "" || cfg.CookiePath != "" && cfg.CookiePath != "/") {
+		panic("middleware: CSRFConfig sets a CookiePath or a CookieDomain without a CookieName; " +
+			"the default cookie over HTTPS is " + DefaultCSRFHostCookieName + ", which takes neither")
 	}
 	if cfg.CookiePath == "" {
 		cfg.CookiePath = "/"
 	}
-	if cfg.CookieMaxAge <= 0 {
+	if cfg.CookieMaxAge == 0 {
 		cfg.CookieMaxAge = DefaultCSRFCookieMaxAge
 	}
-	alwaysSecure := cfg.CookieSecure
-	if cfg.CookieSameSite == http.SameSiteNoneMode {
-		alwaysSecure = true
-	}
-	trusted := checkTrustedOrigins(cfg.TrustedOrigins)
+	alwaysSecure := cfg.CookieSecure || cfg.CookieSameSite == http.SameSiteNoneMode
+	trusted, _ := checkOrigins("CSRFConfig.TrustedOrigins", cfg.TrustedOrigins, false, "")
 	if cfg.AllowSecFetchSite == nil {
-		cfg.AllowSecFetchSite = secFetchSite(trusted)
+		cfg.AllowSecFetchSite = secFetchSite[C](trusted, cfg.CookieName)
 	}
 	maxAge := int(cfg.CookieMaxAge.Seconds())
 
@@ -115,23 +136,25 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 
 			router.AddVary(c.Response().Header(), router.HeaderCookie)
 
-			token := csrfCookieToken(c.Request(), cfg.CookieName)
+			https := router.SchemeOf(c.Request()) == "https"
+			name := csrfCookieName(cfg.CookieName, https)
+			token := csrfCookieToken(c.Request(), name)
 			if token == "" {
 				token = newCSRFToken()
 				http.SetCookie(c.Response(), &http.Cookie{
-					Name:     cfg.CookieName,
+					Name:     name,
 					Value:    token,
 					Path:     cfg.CookiePath,
 					Domain:   cfg.CookieDomain,
 					MaxAge:   maxAge,
-					Secure:   alwaysSecure || router.SchemeOf(c.Request()) == "https",
+					Secure:   alwaysSecure || https,
 					HttpOnly: cfg.CookieHTTPOnly,
 					SameSite: cfg.CookieSameSite,
 				})
 			}
 			c.Set(CSRFTokenKey, token)
 
-			if csrfSafeMethod(c.Request().Method) {
+			if isSafeMethod(c.Request().Method) {
 				return next(c)
 			}
 
@@ -139,7 +162,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 			if err != nil {
 				return err
 			}
-			if !allowed && !csrfTokenMatches(c, cfg.TokenSources, token) {
+			if !allowed && !csrfTokenMatches(c, cfg.Sources, token) {
 				return errInvalidCSRFToken
 			}
 			return next(c)
@@ -149,26 +172,47 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig) router.Middleware[C] {
 
 // CSRFTokenFrom reports the token that [CSRF] stored, for a template to render
 // into a hidden form field. It reports "" when the middleware did not run.
-func CSRFTokenFrom[C router.Context](c C) string {
+func CSRFTokenFrom(c router.Context) string {
 	s, _ := c.Value(CSRFTokenKey).(string)
 	return s
 }
 
-func csrfSafeMethod(method string) bool {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
-		return true
-	default:
-		return false
+// csrfCookieName reports the name of the cookie in use: the configured one,
+// or the default for the scheme.
+func csrfCookieName(configured string, https bool) string {
+	switch {
+	case configured != "":
+		return configured
+	case https:
+		return DefaultCSRFHostCookieName
 	}
+	return DefaultCSRFCookieName
 }
 
+// csrfCookieToken reports the token of the one cookie named name, or "" when
+// there is no such cookie, more than one, or one that CSRF did not issue.
 func csrfCookieToken(r *http.Request, name string) string {
 	cookies := r.CookiesNamed(name)
-	if len(cookies) != 1 {
+	if len(cookies) != 1 || !isCSRFToken(cookies[0].Value) {
 		return ""
 	}
 	return cookies[0].Value
+}
+
+// isCSRFToken reports whether s has the length and the base64url alphabet of
+// the tokens [newCSRFToken] makes.
+func isCSRFToken(s string) bool {
+	if len(s) != csrfTokenLength {
+		return false
+	}
+	for i := range len(s) {
+		switch b := s[i]; {
+		case 'A' <= b && b <= 'Z', 'a' <= b && b <= 'z', '0' <= b && b <= '9', b == '-', b == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func csrfTokenMatches(c router.Context, sources []TokenSource, token string) bool {
@@ -180,6 +224,15 @@ func csrfTokenMatches(c router.Context, sources []TokenSource, token string) boo
 	return false
 }
 
+// hostOnlyCSRFCookie reports whether the cookie in use carries the __Host-
+// prefix, which the browser keeps to this host, so no other host can set it.
+func hostOnlyCSRFCookie(r *http.Request, configured string) bool {
+	https := router.SchemeOf(r) == "https"
+	return https && strings.HasPrefix(csrfCookieName(configured, https), hostCookiePrefix)
+}
+
+const hostCookiePrefix = "__Host-"
+
 func newCSRFToken() string {
 	var b [csrfTokenBytes]byte
 	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program instead.
@@ -187,29 +240,29 @@ func newCSRFToken() string {
 	return base64.RawURLEncoding.EncodeToString(b[:])
 }
 
-func secFetchSite(trusted []string) func(router.Context) (bool, error) {
-	return func(c router.Context) (bool, error) {
-		switch c.Request().Header.Get(router.HeaderSecFetchSite) {
+// secFetchSite lets a same-origin request through, and a request from a
+// trusted origin. It refuses any other cross-site request outright, and leaves
+// one without the header to the token. A same-site request goes to the token
+// only when the cookie is a __Host- one over HTTPS, since a sibling subdomain
+// can plant any other cookie for the parent domain; otherwise it is refused.
+func secFetchSite[C router.Context](trusted []string, cookieName string) func(C) (bool, error) {
+	return func(c C) (bool, error) {
+		site := c.Request().Header.Get(router.HeaderSecFetchSite)
+		switch site {
 		case "same-origin", "none":
 			return true, nil
 		case "":
 			return false, nil
-		default:
-			origin := c.Request().Header.Get(router.HeaderOrigin)
-			if origin != "" && slices.ContainsFunc(trusted, func(t string) bool {
-				return strings.EqualFold(t, origin)
-			}) {
-				return true, nil
-			}
-			return false, errCrossSite
 		}
+		origin := c.Request().Header.Get(router.HeaderOrigin)
+		if origin != "" && slices.ContainsFunc(trusted, func(t string) bool {
+			return strings.EqualFold(t, origin)
+		}) {
+			return true, nil
+		}
+		if site == "same-site" && hostOnlyCSRFCookie(c.Request(), cookieName) {
+			return false, nil
+		}
+		return false, errCrossSite
 	}
-}
-
-func checkTrustedOrigins(origins []string) []string {
-	out := make([]string, len(origins))
-	for i, origin := range origins {
-		out[i] = checkOrigin("CSRFConfig.TrustedOrigins", origin, "")
-	}
-	return out
 }

@@ -33,8 +33,8 @@ import (
 // Leftmost takes the first address of the chain in place of the nearest
 // untrusted hop, and vouches for the scheme of any peer. The first address is
 // whatever the client wrote, so use it only where the chain itself is trusted.
-type RealIPConfig struct {
-	Skip      func(c router.Context) bool
+type RealIPConfig[C router.Context] struct {
+	Skip      func(c C) bool
 	Trust     *TrustSet
 	Headers   []string
 	Leftmost  bool
@@ -64,7 +64,7 @@ func canonicalHeaders(names ...string) []string {
 //
 // See Order in the package doc for where it goes.
 func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return RealIPWithConfig[C](RealIPConfig{})(next)
+	return RealIPWithConfig(RealIPConfig[C]{})(next)
 }
 
 // RealIPWithConfig is [RealIP] with a configuration. It rewrites RemoteAddr
@@ -77,7 +77,7 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // peer is deleted, unless Leftmost is set.
 //
 // RealIPWithConfig panics when Headers names X-Forwarded-Proto.
-func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
+func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C] {
 	if slices.ContainsFunc(cfg.Headers, func(name string) bool {
 		return strings.EqualFold(name, router.HeaderXForwardedProto)
 	}) {
@@ -148,7 +148,7 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig) router.Middleware[C] {
 // ClientIP reports the address of the peer, without its port. Put [RealIP] in
 // front for this to be the address of the client rather than of the proxy.
 // [ClientAddr] reports the same address as a [netip.Addr].
-func ClientIP[C router.Context](c C) string {
+func ClientIP(c router.Context) string {
 	host, _, err := net.SplitHostPort(c.Request().RemoteAddr)
 	if err != nil {
 		return c.Request().RemoteAddr
@@ -161,7 +161,7 @@ func ClientIP[C router.Context](c C) string {
 // is false when RemoteAddr holds no IP address, as under a Unix socket.
 //
 // It allocates nothing when it succeeds.
-func ClientAddr[C router.Context](c C) (netip.Addr, bool) {
+func ClientAddr(c router.Context) (netip.Addr, bool) {
 	ap, _, ok := splitHop(c.Request().RemoteAddr)
 	if !ok {
 		return netip.Addr{}, false
@@ -174,7 +174,7 @@ type hop struct {
 	proto string
 }
 
-func (cfg RealIPConfig) client(req *http.Request) (hop, bool) {
+func (cfg RealIPConfig[C]) client(req *http.Request) (hop, bool) {
 	if !cfg.Leftmost {
 		peer, _, ok := splitHop(req.RemoteAddr)
 		if !ok || !cfg.Trust.Trusted(peer.Addr()) {
@@ -203,7 +203,7 @@ func (cfg RealIPConfig) client(req *http.Request) (hop, bool) {
 	return best, true
 }
 
-func (cfg RealIPConfig) trustedHop(values []string, rfc7239 bool) hop {
+func (cfg RealIPConfig[C]) trustedHop(values []string, rfc7239 bool) hop {
 	var best hop
 	for e := range entriesRight(values) {
 		h := parseEntry(e, rfc7239)
@@ -234,33 +234,18 @@ func keptProto(leftmost bool, forwarded string, values []string) (proto string, 
 	return proto, !unchanged
 }
 
-// firstEntry is the first entry of entriesLeft or entriesRight, found without
-// an iterator: a closure picked at run time escapes to the heap.
+// firstEntry is the first entry of entriesLeft or entriesRight. Each loop
+// calls its iterator directly, so the compiler inlines it and nothing escapes;
+// an iterator picked at run time would escape to the heap.
 func firstEntry(values []string, leftmost bool) string {
 	if leftmost {
-		for _, v := range values {
-			for v != "" {
-				var e string
-				e, v, _ = strings.Cut(v, ",")
-				if e = strings.TrimSpace(e); e != "" {
-					return e
-				}
-			}
+		for e := range entriesLeft(values) {
+			return e
 		}
 		return ""
 	}
-	for _, v := range slices.Backward(values) {
-		for v != "" {
-			e := v
-			if j := strings.LastIndexByte(v, ','); j >= 0 {
-				e, v = v[j+1:], v[:j]
-			} else {
-				v = ""
-			}
-			if e = strings.TrimSpace(e); e != "" {
-				return e
-			}
-		}
+	for e := range entriesRight(values) {
+		return e
 	}
 	return ""
 }

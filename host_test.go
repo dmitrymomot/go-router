@@ -353,7 +353,7 @@ func TestHostHandlerAndRouter(t *testing.T) {
 
 	sub := New(func(http.ResponseWriter, *http.Request) *tctx { return &tctx{Tag: "sub"} })
 	sub.GET("/v1/ping", func(c *tctx) error { return c.String(http.StatusOK, "sub "+c.RoutePattern()) })
-	r.HostRouter("api.example.com", sub)
+	r.HostHandler("api.example.com", sub)
 
 	if got := doHost(r, http.MethodGet, "static.example.com", "/css/app.css").Body.String(); got != "static /css/app.css" {
 		t.Errorf("body = %q", got)
@@ -438,6 +438,9 @@ func TestHostPanics(t *testing.T) {
 		}},
 		{"partial wildcard", func() {
 			newTestRouter().Host("x*.example.com", nil)
+		}},
+		{"wildcard is not first", func() {
+			newTestRouter().Host("api.*.example.com", nil)
 		}},
 		{"catch-all is not first", func() {
 			newTestRouter().Host("example.{sub...}.com", nil)
@@ -693,8 +696,9 @@ func TestHostPooledContextClearsHost(t *testing.T) {
 
 func TestHostNilPanics(t *testing.T) {
 	for name, fn := range map[string]func(){
-		"HostRouter":  func() { newTestRouter().HostRouter("example.com", (*Router[*tctx])(nil)) },
-		"HostHandler": func() { newTestRouter().HostHandler("example.com", nil) },
+		"HostHandler nil router":       func() { newTestRouter().HostHandler("example.com", (*Router[*tctx])(nil)) },
+		"HostHandler nil other router": func() { newTestRouter().HostHandler("example.com", (*Router[*pctx])(nil)) },
+		"HostHandler":                  func() { newTestRouter().HostHandler("example.com", nil) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
@@ -961,7 +965,7 @@ func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {
 func TestJSONErrorHandlerOnAHostAnswersItsMisses(t *testing.T) {
 	r := newTestRouter()
 	r.Host("api.example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(JSONErrorHandler[*tctx])
+		h.ErrorHandler(JSONErrorHandler[*tctx](false))
 		h.GET("/users", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
 	})
 	r.GET("/", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })

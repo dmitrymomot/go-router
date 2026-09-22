@@ -13,10 +13,10 @@ import (
 // Level is the level of an answer under 400, ClientErrorLevel of a 4xx, and
 // ServerErrorLevel of a 5xx; they default to info, warn and error. Attrs adds
 // attributes of your own, and DisableUserAgent leaves the User-Agent out.
-type LoggerConfig struct {
-	Skip             func(c router.Context) bool
+type LoggerConfig[C router.Context] struct {
+	Skip             func(c C) bool
 	Logger           *slog.Logger
-	Attrs            func(c router.Context, err error) []slog.Attr
+	Attrs            func(c C, err error) []slog.Attr
 	Level            slog.Leveler
 	ClientErrorLevel slog.Leveler
 	ServerErrorLevel slog.Leveler
@@ -39,11 +39,11 @@ type LoggerConfig struct {
 //
 // See Order in the package doc for where it goes.
 func Logger[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return LoggerWithConfig[C](LoggerConfig{})(next)
+	return LoggerWithConfig(LoggerConfig[C]{})(next)
 }
 
 // LoggerWithConfig is [Logger] with a configuration.
-func LoggerWithConfig[C router.Context](cfg LoggerConfig) router.Middleware[C] {
+func LoggerWithConfig[C router.Context](cfg LoggerConfig[C]) router.Middleware[C] {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}

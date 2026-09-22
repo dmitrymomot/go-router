@@ -2,7 +2,6 @@ package static
 
 import (
 	"errors"
-	"net/http"
 	"path"
 	"strings"
 
@@ -55,16 +54,27 @@ func assetPath(a *Assets, c router.Context) string {
 		return "/" + tail
 	}
 	p := c.Request().URL.Path
-	if a.prefix == "" {
-		return p
-	}
-	if rest, ok := strings.CutPrefix(p, a.prefix); ok && (rest == "" || rest[0] == '/') {
+	if rest, ok := a.stripPrefix(p); ok {
 		return rest
 	}
 	return p
 }
 
-// Mount registers a on r under its own prefix, for GET and HEAD.
+// stripPrefix cuts the prefix of the set off a request path, and reports false
+// for a path outside it.
+func (a *Assets) stripPrefix(p string) (string, bool) {
+	if a.prefix == "" {
+		return p, true
+	}
+	rest, ok := strings.CutPrefix(p, a.prefix)
+	if !ok || rest != "" && rest[0] != '/' {
+		return "", false
+	}
+	return rest, true
+}
+
+// Mount registers a on r under its own prefix, for GET, which also answers
+// HEAD.
 //
 // Mount panics if r or a is nil.
 func Mount[C router.Context](r *router.Router[C], a *Assets) {
@@ -77,8 +87,6 @@ func Mount[C router.Context](r *router.Router[C], a *Assets) {
 	h := Handler[C](a)
 	prefix := a.Prefix()
 	sub := path.Join(prefix, "{"+PathParam+"...}")
-	for _, p := range [...]string{prefix, sub} {
-		r.Handle(http.MethodGet, p, h)
-		r.Handle(http.MethodHead, p, h)
-	}
+	r.GET(prefix, h)
+	r.GET(sub, h)
 }

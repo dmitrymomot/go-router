@@ -287,11 +287,11 @@ func TestKeyAuthOnErrorReplacesTheFailure(t *testing.T) {
 	}
 }
 
-func TestKeyAuthChallengesA401CommittedByOnError(t *testing.T) {
+func TestKeyAuthChallengesA401ReturnedByOnError(t *testing.T) {
 	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
 		Validator: keyValidator,
-		OnError: func(c *appContext, _ error) error {
-			return c.NoContent(http.StatusUnauthorized)
+		OnError: func(*appContext, error) error {
+			return router.ErrUnauthorized.WithMessage("sign in")
 		},
 	})
 

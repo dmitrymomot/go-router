@@ -67,7 +67,7 @@ func (e NoUserError) StatusCode() int { return http.StatusNotFound }
 **One place that writes the failures.** The router answers errors in plain text by default. An API says so once, in `ErrorHandler`, and every handler after that just returns an error:
 
 ```go
-r.ErrorHandler(router.JSONErrorHandler[*Context])
+r.ErrorHandler(router.JSONErrorHandler[*Context](false))
 ```
 
 Every failure then comes back in one envelope, with the fields of a failed `Bind` under `details`:
@@ -83,13 +83,13 @@ A route can say what the middleware should know about it. The health route carri
 ```go
 r.Meta(unlimited{}).GET(healthPath, func(c *Context) error { return c.NoContent(http.StatusNoContent) })
 
-Skip: func(c router.Context) bool {
+Skip: func(c *Context) bool {
 	_, ok := router.MetaAs[unlimited](c)
 	return ok
 },
 ```
 
-`MaxBodyBytes` belongs to the root router. `Mount` refuses a sub-router that carries it, or a cookie codec, because there is one default body limit and one key to sign with. A route that needs another limit, above or below the default, takes the `BodyLimit` middleware.
+`MaxBodyBytes` belongs to the root router. `Mount` refuses a sub-router that carries it, because there is one default body limit. A route that needs another limit, above or below the default, takes the `BodyLimit` middleware.
 
 ## The files
 

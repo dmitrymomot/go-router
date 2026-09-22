@@ -3,7 +3,6 @@ package router
 import (
 	"bytes"
 	"context"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -30,9 +29,14 @@ func (b *Base) contentType(value string) {
 // empty contentType leaves the header for net/http to sniff, and a
 // Content-Type already set is left alone.
 //
-// A HEAD request gets the headers and no body.
+// A HEAD request gets the headers and no body. A status that allows no body
+// (1xx, 204 and 304) gets neither a body nor a Content-Length.
 func (b *Base) Blob(status int, contentType string, data []byte) error {
 	b.contentType(contentType)
+	if !bodyAllowed(status) {
+		b.res.WriteHeader(status)
+		return nil
+	}
 	b.res.Header().Set(HeaderContentLength, strconv.Itoa(len(data)))
 	b.res.WriteHeader(status)
 	if b.req.Method == http.MethodHead {
@@ -42,9 +46,14 @@ func (b *Base) Blob(status int, contentType string, data []byte) error {
 	return err
 }
 
-// String writes s as text/plain with status.
+// String writes s as text/plain with status. It treats HEAD and a status that
+// allows no body as [Base.Blob] does.
 func (b *Base) String(status int, s string) error {
 	b.contentType(MIMETextPlainCharsetUTF8)
+	if !bodyAllowed(status) {
+		b.res.WriteHeader(status)
+		return nil
+	}
 	b.res.Header().Set(HeaderContentLength, strconv.Itoa(len(s)))
 	b.res.WriteHeader(status)
 	if b.req.Method == http.MethodHead {
@@ -54,9 +63,10 @@ func (b *Base) String(status int, s string) error {
 	return err
 }
 
-// Stringf writes the text that format and args build, as [Base.String] does.
-func (b *Base) Stringf(status int, format string, args ...any) error {
-	return b.String(status, fmt.Sprintf(format, args...))
+// bodyAllowed reports whether status may carry a body. net/http refuses a
+// write after 1xx, 204 or 304.
+func bodyAllowed(status int) bool {
+	return status >= http.StatusOK && status != http.StatusNoContent && status != http.StatusNotModified
 }
 
 // HTML writes html as text/html with status. The string goes out as it
@@ -92,17 +102,13 @@ func (b *Base) jsonOptions(opts []json.Options) []json.Options {
 	return append(out, opts...)
 }
 
-// JSONPretty is [Base.JSON] with a line per field and indent per level.
-func (b *Base) JSONPretty(status int, v any, indent string) error {
-	return b.JSON(status, v, jsontext.Multiline(true), jsontext.WithIndent(indent))
-}
-
 // Stream copies r to the response with contentType and status. It sets no
-// Content-Length, so the answer is chunked.
+// Content-Length, so the answer is chunked. A HEAD request and a status that
+// allows no body leave r unread.
 func (b *Base) Stream(status int, contentType string, r io.Reader) error {
 	b.contentType(contentType)
 	b.res.WriteHeader(status)
-	if b.req.Method == http.MethodHead {
+	if b.req.Method == http.MethodHead || !bodyAllowed(status) {
 		return nil
 	}
 	_, err := io.Copy(b.res, r)
@@ -137,9 +143,16 @@ func isRedirectStatus(code int) bool {
 }
 
 // Attachment writes data as a download named filename, through a
-// Content-Disposition header. See [Base.File] to send a file from disk.
+// Content-Disposition header. See [Base.AttachmentFile] to send a file.
 func (b *Base) Attachment(status int, contentType, filename string, data []byte) error {
 	b.res.Header().Set(HeaderContentDisposition, contentDisposition(dispositionAttachment, filename))
+	return b.Blob(status, contentType, data)
+}
+
+// Inline writes data for the browser to display rather than save, under
+// filename. See [Base.InlineFile] to send a file.
+func (b *Base) Inline(status int, contentType, filename string, data []byte) error {
+	b.res.Header().Set(HeaderContentDisposition, contentDisposition(dispositionInline, filename))
 	return b.Blob(status, contentType, data)
 }
 
@@ -200,11 +213,12 @@ func (b *Base) Render(status int, c Component) error {
 
 // RenderStream renders c straight to the client, which suits a large page and
 // a slow one. The header goes out first, so a component that fails halfway
-// leaves a truncated body and the error handler cannot answer.
+// leaves a truncated body and the error handler cannot answer. A HEAD request
+// and a status that allows no body leave c unrendered.
 func (b *Base) RenderStream(status int, c Component) error {
 	b.contentType(MIMETextHTMLCharsetUTF8)
 	b.res.WriteHeader(status)
-	if b.req.Method == http.MethodHead {
+	if b.req.Method == http.MethodHead || !bodyAllowed(status) {
 		return nil
 	}
 	if err := c.Render(b, b.res); err != nil {

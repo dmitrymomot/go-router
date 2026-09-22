@@ -92,7 +92,7 @@ func ExampleRouter_Mount() {
 
 	api := router.New(newCtx)
 	api.GET("/users/{id}", func(c *Context) error {
-		return c.Stringf(http.StatusOK, "tenant=%s user=%s", c.Param("tenant"), c.Param("id"))
+		return c.String(http.StatusOK, fmt.Sprintf("tenant=%s user=%s", c.Param("tenant"), c.Param("id")))
 	})
 
 	r := router.New(newCtx)
@@ -111,7 +111,7 @@ func ExampleRouter_Mount() {
 	// GET /t/{tenant}/api/users/{id}
 }
 
-func ExampleRouter_MountRouter() {
+func ExampleRouter_MountHandler() {
 	type AdminContext struct {
 		router.Base
 		Role string
@@ -121,11 +121,11 @@ func ExampleRouter_MountRouter() {
 		return &AdminContext{Role: "root"}
 	})
 	admin.GET("/users/{id}", func(c *AdminContext) error {
-		return c.Stringf(http.StatusOK, "%s sees user %s at %s", c.Role, c.Param("id"), c.Path())
+		return c.String(http.StatusOK, fmt.Sprintf("%s sees user %s at %s", c.Role, c.Param("id"), c.Path()))
 	})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.MountRouter("/admin", admin)
+	r.MountHandler("/admin", admin)
 
 	fmt.Println(serve(r, http.MethodGet, "/admin/users/7"))
 	// Output:
@@ -147,14 +147,14 @@ func ExampleRouter_Host() {
 		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
 		h.Route("/blog", func(b *router.Router[*Context]) {
 			b.GET("/{slug}", func(c *Context) error {
-				return c.Stringf(http.StatusOK, "post %s", c.Param("slug"))
+				return c.String(http.StatusOK, fmt.Sprintf("post %s", c.Param("slug")))
 			})
 		})
 	})
 
 	r.Host("api.example.com", func(h *router.Router[*Context]) {
 		h.GET("/v1/users/{id}", func(c *Context) error {
-			return c.Stringf(http.StatusOK, "user %s", c.Param("id"))
+			return c.String(http.StatusOK, fmt.Sprintf("user %s", c.Param("id")))
 		})
 	})
 
@@ -164,7 +164,7 @@ func ExampleRouter_Host() {
 			if tenant == "" {
 				tenant = "domain:" + c.Host()
 			}
-			return c.Stringf(http.StatusOK, "dashboard of %s", tenant)
+			return c.String(http.StatusOK, fmt.Sprintf("dashboard of %s", tenant))
 		})
 	})
 
@@ -185,7 +185,7 @@ func ExampleRouter_Host() {
 	// 200 ok
 }
 
-func ExampleRouter_HostRouter() {
+func ExampleRouter_HostHandler() {
 	type APIContext struct {
 		router.Base
 		Version string
@@ -195,14 +195,14 @@ func ExampleRouter_HostRouter() {
 		return &APIContext{Version: "v1"}
 	})
 	api.ErrorHandler(func(c *APIContext, err error) error {
-		return c.Stringf(router.StatusOf(err), "%s: no such endpoint", c.Version)
+		return c.String(router.StatusOf(err), fmt.Sprintf("%s: no such endpoint", c.Version))
 	})
 	api.GET("/users/{id}", func(c *APIContext) error {
-		return c.Stringf(http.StatusOK, "%s user %s", c.Version, c.Param("id"))
+		return c.String(http.StatusOK, fmt.Sprintf("%s user %s", c.Version, c.Param("id")))
 	})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.HostRouter("api.example.com", api)
+	r.HostHandler("api.example.com", api)
 	r.Host("example.com", func(h *router.Router[*Context]) {
 		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
 	})
@@ -228,7 +228,7 @@ func ExampleBase_Bind() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusCreated, "%s is %d", in.Name, in.Age)
+		return c.String(http.StatusCreated, fmt.Sprintf("%s is %d", in.Name, in.Age))
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/users",
@@ -254,7 +254,7 @@ func ExampleBase_BindForm() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s %t", in.Name, in.Newsletter)
+		return c.String(http.StatusOK, fmt.Sprintf("%s %t", in.Name, in.Newsletter))
 	})
 
 	for _, body := range []string{"name=ann&newsletter=on", "name=bo"} {
@@ -292,20 +292,14 @@ func TestReadmeContracts(t *testing.T) {
 		t.Fatalf("SchemeOf() = %q", got)
 	}
 
-	store := middleware.NewMemoryStoreWithConfig[*Context](middleware.MemoryStoreConfig{
+	store := middleware.NewRateLimitMemoryStoreWithConfig(middleware.RateLimitMemoryStoreConfig{
 		Rate:       10,
 		Burst:      30,
 		ExpiresIn:  time.Minute,
 		MaxEntries: 1024,
 	})
-	if middleware.RateLimit(store) == nil {
+	if middleware.RateLimit[*Context](store) == nil {
 		t.Fatal("RateLimit() returned nil")
-	}
-	if router.HTMXPartial(
-		func(c *Context) error { return c.NoContent(http.StatusOK) },
-		func(c *Context) error { return c.NoContent(http.StatusOK) },
-	) == nil {
-		t.Fatal("HTMXPartial() returned nil")
 	}
 }
 
@@ -375,11 +369,11 @@ func ExampleBase_SetBodyLimit() {
 	// /note 413
 }
 
-func ExampleBase_FormRequired() {
+func ExampleBase_FormAs() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.Logger(slog.New(slog.DiscardHandler))
 	r.POST("/confirm", func(c *Context) error {
-		token, err := c.FormRequired("token")
+		token, err := c.FormAs[string]("token")
 		if err != nil {
 			return err
 		}
@@ -395,7 +389,7 @@ func ExampleBase_FormRequired() {
 	}
 	// Output:
 	// 200 confirmed abc
-	// 400 invalid request
+	// 400 missing form field "token"
 	// token: is required
 }
 
@@ -431,10 +425,10 @@ func ExampleRouter_GET_partialSegment() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "report for %d", date)
+		return c.String(http.StatusOK, fmt.Sprintf("report for %d", date))
 	})
 	r.GET("/files/{name}.{ext}", func(c *Context) error {
-		return c.Stringf(http.StatusOK, "name=%s ext=%s", c.Param("name"), c.Param("ext"))
+		return c.String(http.StatusOK, fmt.Sprintf("name=%s ext=%s", c.Param("name"), c.Param("ext")))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/reports/rep-20260102.csv"))
@@ -452,14 +446,14 @@ func ExampleRouter_GET_paramClass() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "agent %s", id)
+		return c.String(http.StatusOK, fmt.Sprintf("agent %s", id))
 	})
 	r.GET("/pages/{n:int}", func(c *Context) error {
 		n, err := c.ParamAs[int]("n")
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "page %d", n)
+		return c.String(http.StatusOK, fmt.Sprintf("page %d", n))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/agents/0198c5b6-3f0e-7b3a-9c1d-2f4e6a8b0c1d"))
@@ -479,7 +473,7 @@ func ExampleRouter_ParamClass() {
 	// A plain func works as well, and a fast one keeps routing fast.
 	r.ParamClass("sku", regexp.MustCompile(`^[A-Z]{3}-[0-9]{4}$`).MatchString)
 	r.GET("/products/{sku:sku}", func(c *Context) error {
-		return c.Stringf(http.StatusOK, "product %s", c.Param("sku"))
+		return c.String(http.StatusOK, fmt.Sprintf("product %s", c.Param("sku")))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/products/ABC-1234"))
@@ -498,7 +492,7 @@ func ExampleBase_ParamAs() {
 			return err
 		}
 		page := c.QueryAsDefault("page", 1)
-		return c.Stringf(http.StatusOK, "user %d page %d", id, page)
+		return c.String(http.StatusOK, fmt.Sprintf("user %d page %d", id, page))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/users/7?page=2"))
@@ -532,224 +526,6 @@ func ExampleBase_Render() {
 	// Output:
 	// 200 text/html; charset=utf-8
 	// <h1>hello</h1><p>/posts/hello</p>
-}
-
-func ExampleServeSSE() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-
-	r.GET("/users/stream", func(c *Context) error {
-		users := make(chan *User, 2)
-		users <- &User{ID: "7", Name: "ann"}
-		users <- &User{ID: "8", Name: "bob"}
-		close(users)
-
-		return router.ServeSSE(c, users, router.SSEJSON[*User]("user"),
-			router.SSEHeartbeat(15*time.Second))
-	})
-
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/stream", nil))
-	fmt.Println(rec.Code, rec.Header().Get("Content-Type"))
-	fmt.Print(rec.Body.String())
-	// Output:
-	// 200 text/event-stream
-	// event: user
-	// data: {"id":"7","name":"ann"}
-	//
-	// event: user
-	// data: {"id":"8","name":"bob"}
-}
-
-func ExampleNewSSEStream() {
-	stream := router.NewSSEStream(
-		router.SSEComponent("user", card),
-		router.SSERetry(3*time.Second),
-	)
-
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.GET("/users/stream", func(c *Context) error {
-		users := make(chan *User, 1)
-		users <- &User{ID: "7", Name: "ann"}
-		close(users)
-
-		return stream.Serve(c, users)
-	})
-
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/stream", nil))
-	fmt.Print(rec.Body.String())
-	// Output:
-	// retry: 3000
-	//
-	// event: user
-	// data: <li id="user-7">ann</li>
-}
-
-func card(u *User) router.ComponentFunc {
-	return func(_ context.Context, w io.Writer) error {
-		_, err := fmt.Fprintf(w, "<li id=%q>%s</li>", "user-"+u.ID, u.Name)
-		return err
-	}
-}
-
-func ExampleBase_HX() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-
-	r.PUT("/users/{id}", func(c *Context) error {
-		u := &User{ID: c.Param("id"), Name: "ann"}
-		return c.HX().
-			Retarget("#user-"+u.ID).
-			Reswap(router.HXSwapOuterHTML).
-			Trigger("user-saved").
-			Render(http.StatusOK, card(u))
-	})
-
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/users/7", nil))
-	fmt.Println(rec.Code)
-	fmt.Println(rec.Header().Get(router.HeaderHXRetarget), rec.Header().Get(router.HeaderHXReswap))
-	fmt.Println(rec.Header().Get(router.HeaderHXTrigger))
-	fmt.Println(rec.Body.String())
-	// Output:
-	// 200
-	// #user-7 outerHTML
-	// user-saved
-	// <li id="user-7">ann</li>
-}
-
-func ExampleBase_HX_redirect() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.POST("/join", func(c *Context) error { return c.HX().Redirect("/chat") })
-
-	for _, htmx := range []bool{true, false} {
-		req := httptest.NewRequest(http.MethodPost, "/join", nil)
-		if htmx {
-			req.Header.Set(router.HeaderHXRequest, "true")
-		}
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		fmt.Printf("%d HX-Redirect=%q Location=%q\n", rec.Code,
-			rec.Header().Get(router.HeaderHXRedirect),
-			rec.Header().Get("Location"))
-	}
-	// Output:
-	// 200 HX-Redirect="/chat" Location=""
-	// 303 HX-Redirect="" Location="/chat"
-}
-
-func ExampleHTMXPartial() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-
-	r.GET("/users", router.HTMXPartial(
-		func(c *Context) error { return c.Render(http.StatusOK, card(&User{ID: "7", Name: "ann"})) },
-		func(c *Context) error { return c.Render(http.StatusOK, page("users")) },
-	))
-
-	for _, htmx := range []bool{true, false} {
-		req := httptest.NewRequest(http.MethodGet, "/users", nil)
-		if htmx {
-			req.Header.Set(router.HeaderHXRequest, "true")
-			req.Header.Set(router.HeaderHXRequestType, "partial")
-		}
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		fmt.Println(rec.Body.String())
-	}
-	// Output:
-	// <li id="user-7">ann</li>
-	// <h1>users</h1><p>/users</p>
-}
-
-func ExampleBase_WantsPartial() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-
-	r.POST("/users", func(c *Context) error {
-		u := &User{ID: "7", Name: "ann"}
-		if c.WantsPartial() {
-			return c.Render(http.StatusCreated, card(u))
-		}
-		return c.Redirect(http.StatusSeeOther, "/users")
-	})
-
-	for _, htmx := range []bool{true, false} {
-		req := httptest.NewRequest(http.MethodPost, "/users", nil)
-		if htmx {
-			req.Header.Set(router.HeaderHXRequest, "true")
-			req.Header.Set(router.HeaderHXRequestType, "partial")
-		}
-		rec := serveRequest(r, req)
-		fmt.Println(rec.Code, rec.Header().Get("Location")+rec.Body.String())
-	}
-	// Output:
-	// 201 <li id="user-7">ann</li>
-	// 303 /users
-}
-
-func ExampleBase_RenderPartial() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-
-	r.GET("/users", func(c *Context) error {
-		return c.RenderPartial(http.StatusOK, card(&User{ID: "7", Name: "ann"}), page("users"))
-	})
-
-	var rec *httptest.ResponseRecorder
-	for _, requestType := range []string{"", "partial", "full"} {
-		req := httptest.NewRequest(http.MethodGet, "/users", nil)
-		if requestType != "" {
-			// htmx 4 sends "full" for a boosted link and a history restore.
-			req.Header.Set(router.HeaderHXRequest, "true")
-			req.Header.Set(router.HeaderHXRequestType, requestType)
-		}
-		rec = serveRequest(r, req)
-		fmt.Println(rec.Body)
-	}
-	fmt.Println(strings.Join(rec.Header().Values("Vary"), ", "))
-	// Output:
-	// <h1>users</h1><p>/users</p>
-	// <li id="user-7">ann</li>
-	// <h1>users</h1><p>/users</p>
-	// Hx-Request, Hx-Request-Type
-}
-
-func ExampleHTMXRequest_TargetID() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-
-	r.GET("/users", func(c *Context) error {
-		c.Vary(router.HeaderHXTarget)
-		switch c.HTMX().TargetID() {
-		case "user-list":
-			return c.Render(http.StatusOK, card(&User{ID: "7", Name: "ann"}))
-		default:
-			return c.Render(http.StatusOK, page("users"))
-		}
-	})
-
-	for _, target := range []string{"ul#user-list", "body"} {
-		req := httptest.NewRequest(http.MethodGet, "/users", nil)
-		req.Header.Set(router.HeaderHXRequest, "true")
-		req.Header.Set(router.HeaderHXTarget, target)
-		fmt.Println(serveRequest(r, req).Body)
-	}
-	// Output:
-	// <li id="user-7">ann</li>
-	// <h1>users</h1><p>/users</p>
-}
-
-func ExampleHTMXRequest_SourceID() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-
-	// htmx 4 names the element that made the request in HX-Source. This is
-	// what HX-Trigger carried as a request header in htmx 2.
-	r.POST("/users/actions", func(c *Context) error {
-		return c.String(http.StatusOK, c.HTMX().SourceID())
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/users/actions", nil)
-	req.Header.Set(router.HeaderHXRequest, "true")
-	req.Header.Set(router.HeaderHXSource, "button#delete-7")
-	fmt.Println(serveRequest(r, req).Body)
-	// Output:
-	// delete-7
 }
 
 func ExampleBase_NewCookie() {
@@ -790,149 +566,6 @@ func ExampleBase_ClearCookie() {
 	fmt.Println(rec.Code, rec.Header().Get("Set-Cookie"))
 	// Output:
 	// 303 session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax
-}
-
-func ExampleRouter_CookieCodec() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	// The key signs every cookie. NewCookieCodec panics under 32 bytes, so read
-	// it from the environment rather than writing one here.
-	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
-
-	r.POST("/signin", func(c *Context) error {
-		if err := c.SetSignedCookie(c.NewCookie("session", "ann", 12*time.Hour)); err != nil {
-			return err
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-	r.GET("/me", func(c *Context) error {
-		name, err := c.SignedCookie("session")
-		if err != nil {
-			return router.ErrUnauthorized
-		}
-		return c.String(http.StatusOK, name)
-	})
-
-	signin := serveRequest(r, httptest.NewRequest(http.MethodPost, "/signin", nil))
-	req := httptest.NewRequest(http.MethodGet, "/me", nil)
-	req.Header.Set("Cookie", signin.Header().Get("Set-Cookie"))
-
-	fmt.Println(signin.Code)
-	fmt.Println(serveRequest(r, req).Body)
-	// Output:
-	// 204
-	// ann
-}
-
-func ExampleNewCookieCodec_rotation() {
-	oldKey := []byte("32-bytes-of-key-material-for-hmac")
-	newKey := []byte("32-more-bytes-of-fresh-key-material")
-	signedBefore := router.NewCookieCodec(oldKey).Encode("session", []byte("ann"))
-
-	// Sign with newKey, and keep reading what oldKey signed until it runs out.
-	codec := router.NewCookieCodec(newKey, oldKey)
-	value, err := codec.Decode("session", signedBefore)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Println(string(value))
-
-	// A value signed now carries newKey, so a codec that has only oldKey
-	// refuses it.
-	_, err = router.NewCookieCodec(oldKey).Decode("session", codec.Encode("session", []byte("ann")))
-	fmt.Println(err)
-	// Output:
-	// ann
-	// router: the signed cookie does not verify
-}
-
-// The codec of the router also signs the flash cookie, so a message survives
-// the redirect after a form.
-func ExampleRouter_CookieCodec_flash() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	// The key signs the cookie. NewCookieCodec panics under 32 bytes, so read
-	// it from the environment rather than writing one here.
-	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
-
-	r.POST("/users", func(c *Context) error {
-		if err := c.AddFlash(router.Flash{Kind: "success", Message: "user created"}); err != nil {
-			return err
-		}
-		return c.Redirect(http.StatusSeeOther, "/users")
-	})
-	r.GET("/users", func(c *Context) error {
-		// Flashes reads once: it clears the cookie on the way out.
-		return c.Stringf(http.StatusOK, "%v", c.Flashes())
-	})
-
-	created := serveRequest(r, httptest.NewRequest(http.MethodPost, "/users", nil))
-	req := httptest.NewRequest(http.MethodGet, "/users", nil)
-	for _, c := range created.Result().Cookies() {
-		req.AddCookie(c) // AddCookie sends only name=value, as a browser does.
-	}
-
-	fmt.Println(created.Code, created.Header().Get("Location"))
-	fmt.Println(serveRequest(r, req).Body)
-	// Output:
-	// 303 /users
-	// [{success user created}]
-}
-
-// toasts shows the flash messages. A layout runs it on every page, and a
-// partial runs it out of band.
-func toasts(ctx context.Context, w io.Writer) error {
-	c, ok := router.FromContext(ctx)
-	if !ok {
-		return nil
-	}
-	if _, err := io.WriteString(w, `<div id="toasts" hx-swap-oob="true">`); err != nil {
-		return err
-	}
-	for _, f := range c.Flashes() {
-		if _, err := fmt.Fprintf(w, "<p class=%q>%s</p>", f.Kind, f.Message); err != nil {
-			return err
-		}
-	}
-	_, err := io.WriteString(w, "</div>")
-	return err
-}
-
-// An htmx partial shows the flash in place, and a plain form post carries it
-// across the redirect. A flash read in the request that added it never
-// reaches the browser as a cookie.
-func ExampleBase_Flashes() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
-
-	r.POST("/users", func(c *Context) error {
-		u := &User{ID: "7", Name: "ann"}
-		if err := c.AddFlash(router.Flash{Kind: "success", Message: "user created"}); err != nil {
-			return err
-		}
-		if !c.WantsPartial() {
-			return c.Redirect(http.StatusSeeOther, "/users")
-		}
-		// Render buffers, so toasts may call Flashes before the headers go out.
-		return c.Render(http.StatusCreated, router.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-			if err := card(u).Render(ctx, w); err != nil {
-				return err
-			}
-			return toasts(ctx, w)
-		}))
-	})
-
-	for _, htmx := range []bool{true, false} {
-		req := httptest.NewRequest(http.MethodPost, "/users", nil)
-		if htmx {
-			req.Header.Set(router.HeaderHXRequest, "true")
-			req.Header.Set(router.HeaderHXRequestType, "partial")
-		}
-		rec := serveRequest(r, req)
-		fmt.Println(rec.Code, len(rec.Header().Values("Set-Cookie")), rec.Header().Get("Location")+rec.Body.String())
-	}
-	// Output:
-	// 201 0 <li id="user-7">ann</li><div id="toasts" hx-swap-oob="true"><p class="success">user created</p></div>
-	// 303 1 /users
 }
 
 func serveRequest(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
@@ -999,11 +632,12 @@ func ExampleHandleError() {
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.Logger(slog.New(slog.DiscardHandler))
+	fallback := router.TextErrorHandler[*Context](false)
 	r.ErrorHandler(func(c *Context, err error) error {
 		if errors.Is(err, errLocked) {
 			return c.String(http.StatusLocked, "locked")
 		}
-		return router.DefaultErrorHandler(c, err)
+		return fallback(c, err)
 	})
 	// A metrics middleware answers the error itself, so it reads the status
 	// the error handler wrote rather than guessing it from err.
@@ -1050,7 +684,7 @@ func ExampleJSONErrorHandler() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.Logger(slog.New(slog.DiscardHandler))
 	r.Host("api.example.com", func(h *router.Router[*Context]) {
-		h.ErrorHandler(router.JSONErrorHandler[*Context])
+		h.ErrorHandler(router.JSONErrorHandler[*Context](false))
 		h.GET("/v1/users/{id}", func(c *Context) error {
 			return router.ErrNotFound.WithMessage("no user %s", c.Param("id"))
 		})
@@ -1099,7 +733,7 @@ func ExampleFieldErrorsOf() {
 	r.POST("/signup", func(c *Context) error {
 		in, err := c.BindForm[Signup]()
 		if err == nil {
-			return c.Stringf(http.StatusCreated, "welcome %s", in.Email)
+			return c.String(http.StatusCreated, fmt.Sprintf("welcome %s", in.Email))
 		}
 		// Show the form again with what the client typed and a message
 		// under each field that failed.
@@ -1107,7 +741,7 @@ func ExampleFieldErrorsOf() {
 		for _, f := range router.FieldErrorsOf(err) {
 			problems[f.Field] = f.Message
 		}
-		return c.Stringf(router.StatusOf(err), "email=%s age: %s", in.Email, problems["age"])
+		return c.String(router.StatusOf(err), fmt.Sprintf("email=%s age: %s", in.Email, problems["age"]))
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader("email=ann@example.com&age=old"))
@@ -1142,7 +776,7 @@ func ExampleValidator() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusAccepted, "%d events", len(in.Events))
+		return c.String(http.StatusAccepted, fmt.Sprintf("%d events", len(in.Events)))
 	})
 
 	for _, body := range []string{
@@ -1168,7 +802,7 @@ func ExampleExpand() {
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.POST(suspendAgent, func(c *Context) error {
-		return c.Stringf(http.StatusOK, "suspended %s", c.Param("agent"))
+		return c.String(http.StatusOK, fmt.Sprintf("suspended %s", c.Param("agent")))
 	})
 
 	link, _ := router.Expand(suspendAgent, "agent", "a b")
@@ -1208,8 +842,8 @@ func serveLocation(h http.Handler, host, target string) string {
 
 func ExampleRouter_Redirect() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.Redirect("/bonuses/{agent}", "/bonus?agent={agent}", http.StatusFound)
-	r.Redirect("/old", "/new", http.StatusMovedPermanently)
+	r.Redirect("/bonuses/{agent}", http.StatusFound, "/bonus?agent={agent}")
+	r.Redirect("/old", http.StatusMovedPermanently, "/new")
 
 	fmt.Println(serveLocation(r, "", "/bonuses/a%20b"))
 	fmt.Println(serveLocation(r, "", "/old?page=2"))
@@ -1223,8 +857,8 @@ func ExampleRouter_RedirectHost() {
 	r.Host("example.com", func(h *router.Router[*Context]) {
 		h.GET("/pricing", func(c *Context) error { return c.String(http.StatusOK, "pricing") })
 	})
-	r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
-	r.RedirectHost("{tenant}.example.org", "{tenant}.example.com", http.StatusPermanentRedirect)
+	r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
+	r.RedirectHost("{tenant}.example.org", http.StatusPermanentRedirect, "{tenant}.example.com")
 
 	fmt.Println(serveLocation(r, "www.example.com", "/pricing?plan=pro"))
 	fmt.Println(serveLocation(r, "acme.example.org:8080", "/orders"))

@@ -5,13 +5,14 @@ import (
 	"net/http"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 )
 
 // HTMXRedirectConfig configures [HTMXRedirectWithConfig]. Location sends
 // HX-Location, which swaps the new page in, in place of HX-Redirect, which
 // loads it whole.
-type HTMXRedirectConfig struct {
-	Skip     func(c router.Context) bool
+type HTMXRedirectConfig[C router.Context] struct {
+	Skip     func(c C) bool
 	Location bool
 }
 
@@ -19,11 +20,11 @@ type HTMXRedirectConfig struct {
 // with a Location becomes a 200 with HX-Redirect, so the browser navigates
 // rather than swapping the redirect target into the page.
 //
-// It only touches a request that wants a fragment, as HX-Request-Type decides
-// (see [router.HTMXWantsPartial]), and it adds HX-Request and HX-Request-Type
-// to Vary. A browser request keeps its redirect, and so does an htmx 4 full
-// request, such as a boosted link or a history restore: fetch follows the
-// redirect, and htmx puts the final URL in the history.
+// It only touches a request that wants a fragment, as [htmx.WantsPartial]
+// decides, and like it, it adds HX-Request and HX-Request-Type to Vary. A
+// browser request keeps its redirect, and so does an htmx 4 full request, such
+// as a boosted link or a history restore: fetch follows the redirect, and htmx
+// puts the final URL in the history.
 //
 // It answers an error of a partial request itself, through
 // [router.HandleError], so a redirect that the error handler writes is turned
@@ -33,14 +34,14 @@ type HTMXRedirectConfig struct {
 // Put it outside [Idempotency], so a replayed redirect is turned for the
 // request that asks again; see Order in the package doc.
 func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return HTMXRedirectWithConfig[C](HTMXRedirectConfig{})(next)
+	return HTMXRedirectWithConfig(HTMXRedirectConfig[C]{})(next)
 }
 
 // HTMXRedirectWithConfig is [HTMXRedirect] with a configuration.
-func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Middleware[C] {
-	header := router.HeaderHXRedirect
+func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig[C]) router.Middleware[C] {
+	header := htmx.HeaderRedirect
 	if cfg.Location {
-		header = router.HeaderHXLocation
+		header = htmx.HeaderLocation
 	}
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -49,16 +50,11 @@ func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Mid
 				return next(c)
 			}
 
-			res := c.Response()
-
-			router.AddVary(res.Header(),
-				router.HeaderHXRequest,
-				router.HeaderHXRequestType,
-			)
-
-			if !router.HTMXWantsPartial(c.Request()) {
+			if !htmx.WantsPartial(c) {
 				return next(c)
 			}
+
+			res := c.Response()
 
 			w := &hxRedirectWriter{ResponseWriter: res.ResponseWriter, header: header}
 			res.ResponseWriter = w

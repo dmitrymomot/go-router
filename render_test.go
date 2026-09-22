@@ -3,8 +3,10 @@ package router
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -193,7 +195,7 @@ func TestRenderStreamHEADWritesNoBody(t *testing.T) {
 	}
 }
 
-func TestJSONPretty(t *testing.T) {
+func TestJSONTakesIndentOptions(t *testing.T) {
 	type payload struct {
 		Name string `json:"name"`
 		Age  int    `json:"age"`
@@ -201,7 +203,7 @@ func TestJSONPretty(t *testing.T) {
 
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
-		return c.JSONPretty(http.StatusAccepted, payload{Name: "Ada", Age: 37}, "\t")
+		return c.JSON(http.StatusAccepted, payload{Name: "Ada", Age: 37}, jsontext.Multiline(true), jsontext.WithIndent("\t"))
 	})
 
 	rec := do(r, http.MethodGet, "/")
@@ -398,4 +400,54 @@ func BenchmarkRenderStream(b *testing.B) {
 	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
 	r.GET("/", func(c *tctx) error { return c.RenderStream(http.StatusOK, page) })
 	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/")
+}
+
+func TestBodylessStatusWritesNoBody(t *testing.T) {
+	writers := map[string]func(c *tctx, status int) error{
+		"Blob":   func(c *tctx, status int) error { return c.Blob(status, MIMETextPlain, []byte("hello")) },
+		"JSON":   func(c *tctx, status int) error { return c.JSON(status, map[string]int{"a": 1}) },
+		"String": func(c *tctx, status int) error { return c.String(status, "hello") },
+		"HTML":   func(c *tctx, status int) error { return c.HTML(status, "<p>hello</p>") },
+	}
+	for name, write := range writers {
+		for _, status := range []int{http.StatusNoContent, http.StatusNotModified} {
+			t.Run(name+" "+http.StatusText(status), func(t *testing.T) {
+				sink := &recordSink{}
+				r := newTestRouter()
+				r.Logger(slog.New(sink))
+				var got error
+				r.GET("/", func(c *tctx) error {
+					got = write(c, status)
+					return got
+				})
+
+				rec := do(r, http.MethodGet, "/")
+				if rec.Code != status || rec.Body.Len() != 0 {
+					t.Errorf("answer = %d %q, want %d and no body", rec.Code, rec.Body.String(), status)
+				}
+				if cl := rec.Header().Get(HeaderContentLength); cl != "" {
+					t.Errorf("Content-Length = %q, want none", cl)
+				}
+
+				srv := httptest.NewServer(r)
+				defer srv.Close()
+				res, err := srv.Client().Get(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = res.Body.Close()
+				if res.StatusCode != status {
+					t.Errorf("status = %d, want %d", res.StatusCode, status)
+				}
+				if got != nil {
+					t.Errorf("the write reported %v, want nil", got)
+				}
+				for _, rec := range sink.records {
+					if rec.Level >= slog.LevelError {
+						t.Errorf("logged %q at %v", rec.Message, rec.Level)
+					}
+				}
+			})
+		}
+	}
 }

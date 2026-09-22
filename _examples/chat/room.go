@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/sse"
 )
 
 type kind string
@@ -90,8 +90,8 @@ type view struct {
 // sendTo sends each message as an unnamed event, because hx-sse in htmx 4
 // swaps only those; a named one becomes a DOM event. The kind still picks the
 // template.
-func sendTo(reader string) router.SSESender[message] {
-	return func(s *router.SSEWriter, m message) error {
+func sendTo(reader string) sse.Sender[message] {
+	return func(s *sse.Writer, m message) error {
 		return s.SendComponent("", tmpl(string(m.Kind), view{
 			message: m,
 			Own:     m.Author == reader,

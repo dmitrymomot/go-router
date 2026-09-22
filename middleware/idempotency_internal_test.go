@@ -12,16 +12,16 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-func newTestIdempotencyStore(t *testing.T, cfg IdempotencyMemoryStoreConfig) *idempotencyMemoryStore[router.Context] {
+func newTestIdempotencyStore(t *testing.T, cfg IdempotencyMemoryStoreConfig) *idempotencyMemoryStore {
 	t.Helper()
-	s, ok := NewIdempotencyMemoryStoreWithConfig[router.Context](cfg).(*idempotencyMemoryStore[router.Context])
+	s, ok := NewIdempotencyMemoryStoreWithConfig(cfg).(*idempotencyMemoryStore)
 	if !ok {
 		t.Fatal("NewIdempotencyMemoryStoreWithConfig no longer returns an *idempotencyMemoryStore")
 	}
 	return s
 }
 
-func mustClaim(t *testing.T, s *idempotencyMemoryStore[router.Context], key, fp string) (IdempotencyEntry, bool) {
+func mustClaim(t *testing.T, s *idempotencyMemoryStore, key, fp string) (IdempotencyEntry, bool) {
 	t.Helper()
 	held, claimed, err := s.Claim(nil, key, []byte(fp))
 	if err != nil {
@@ -31,7 +31,7 @@ func mustClaim(t *testing.T, s *idempotencyMemoryStore[router.Context], key, fp 
 }
 
 // storeKeys walks the list both ways and checks it against the map.
-func storeKeys(t *testing.T, s *idempotencyMemoryStore[router.Context]) []string {
+func storeKeys(t *testing.T, s *idempotencyMemoryStore) []string {
 	t.Helper()
 	var keys []string
 	var prev *idempotencyMemoryEntry
@@ -60,12 +60,12 @@ func TestIdempotencyMemoryStoreDefaults(t *testing.T) {
 		t.Errorf("defaults = %v/%d, want %v/%d", s.expiresIn, s.maxEntries,
 			DefaultIdempotencyExpiry, DefaultIdempotencyMaxEntries)
 	}
-	if s, ok := NewIdempotencyMemoryStore[router.Context](-time.Second).(*idempotencyMemoryStore[router.Context]); !ok ||
-		s.expiresIn != DefaultIdempotencyExpiry {
-		t.Error("a negative expiry did not take the default")
+	if DefaultIdempotencyMaxEntries != 65536 {
+		t.Errorf("DefaultIdempotencyMaxEntries = %d, want 65536", DefaultIdempotencyMaxEntries)
 	}
+	mustPanicWith(t, "ExpiresIn", func() { NewIdempotencyMemoryStore(-time.Second) })
 	mustPanicWith(t, "MaxEntries", func() {
-		NewIdempotencyMemoryStoreWithConfig[router.Context](IdempotencyMemoryStoreConfig{MaxEntries: -1})
+		NewIdempotencyMemoryStoreWithConfig(IdempotencyMemoryStoreConfig{MaxEntries: -1})
 	})
 }
 

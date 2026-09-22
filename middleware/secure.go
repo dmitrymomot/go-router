@@ -22,8 +22,8 @@ const SecureOmit = "-"
 // it as a report rather than a rule. The HSTS fields build
 // Strict-Transport-Security, which goes out over HTTPS alone; HSTSMaxAge is a
 // [time.Duration], so write 365*24*time.Hour.
-type SecureConfig struct {
-	Skip                  func(c router.Context) bool
+type SecureConfig[C router.Context] struct {
+	Skip                  func(c C) bool
 	ContentTypeNosniff    string
 	FrameOptions          string
 	ContentSecurityPolicy string
@@ -40,14 +40,14 @@ type SecureConfig struct {
 //
 // See Order in the package doc for where it goes.
 func Secure[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return SecureWithConfig[C](SecureConfig{})(next)
+	return SecureWithConfig(SecureConfig[C]{})(next)
 }
 
 // SecureWithConfig is [Secure] with a configuration.
 //
 // SecureWithConfig panics on an HSTSMaxAge under one second, which is the
 // shape of a caller who wrote a number of seconds in place of a duration.
-func SecureWithConfig[C router.Context](cfg SecureConfig) router.Middleware[C] {
+func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C] {
 	nosniff := setting(cfg.ContentTypeNosniff, "nosniff")
 	frame := setting(cfg.FrameOptions, "SAMEORIGIN")
 	referrer := setting(cfg.ReferrerPolicy, "strict-origin-when-cross-origin")

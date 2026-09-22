@@ -19,7 +19,6 @@ import (
 //betteralign:check
 type Response struct {
 	http.ResponseWriter
-	before    []func()
 	Status    int
 	Size      int64
 	Committed bool
@@ -30,40 +29,28 @@ type Response struct {
 // wrapper.
 func (r *Response) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-// Before registers fn to run just before the header goes out, which is the
-// last moment a header can still be set. Callbacks run in the order they were
-// added.
-//
-// Before panics if fn is nil.
-func (r *Response) Before(fn func()) {
-	if fn == nil {
-		panic("router: Response.Before needs a callback")
-	}
-	r.before = append(r.before, fn)
-}
-
-// WriteHeader writes the status and commits the response, after it runs the
-// callbacks of [Response.Before]. A 1xx other than 101 passes through as an
-// informational response and commits nothing. A second call is dropped and
-// logged at debug level.
+// WriteHeader writes the status and commits the response. A 1xx other than
+// 101 passes through as an informational response and commits nothing. A
+// second call is dropped and logged at debug level.
 func (r *Response) WriteHeader(code int) {
 	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		r.ResponseWriter.WriteHeader(code)
 		return
 	}
 	if r.Committed {
-		if l := slog.Default(); l.Enabled(context.Background(), slog.LevelDebug) {
-			l.Debug("router: the response is already committed",
-				slog.Int("dropped", code), slog.Int("status", r.Status))
-		}
+		r.dropStatus(code)
 		return
 	}
 	r.Status = code
-	for _, fn := range r.before {
-		fn()
-	}
 	r.ResponseWriter.WriteHeader(code)
 	r.Committed = true
+}
+
+func (r *Response) dropStatus(code int) {
+	if l := slog.Default(); l.Enabled(context.Background(), slog.LevelDebug) {
+		l.Debug("router: the response is already committed",
+			slog.Int("dropped", code), slog.Int("status", r.Status))
+	}
 }
 
 // Write writes b, committing the response with a 200 when no status went out
@@ -88,14 +75,21 @@ func (r *Response) WriteString(s string) (int, error) {
 	return n, err
 }
 
-// Flush sends what is buffered to the client, committing the response with a
-// 200 when no status went out yet. A writer that cannot flush is left alone.
+// Flush is [Response.FlushError] without the error, for [http.Flusher].
 func (r *Response) Flush() {
+	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
+	r.FlushError()
+}
+
+// FlushError sends what is buffered to the client, committing the response
+// with a 200 when no status went out yet. It reports the error of the writer
+// underneath, or [http.ErrNotSupported] when that writer cannot flush; the
+// response is committed either way. [http.NewResponseController] calls it.
+func (r *Response) FlushError() error {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
 	}
-	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
-	http.NewResponseController(r.ResponseWriter).Flush()
+	return http.NewResponseController(r.ResponseWriter).Flush()
 }
 
 // ReadFrom copies src to the client, committing the response with a 200 when
@@ -137,8 +131,8 @@ func (r *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 //
 //betteralign:check
 type Recorded struct {
-	// Header is the header that went out with the status, after the callbacks
-	// of [Response.Before] ran. It is nil when no status went out.
+	// Header is the header that went out with the status. It is nil when no
+	// status went out.
 	Header http.Header
 	// Body holds the body up to the limit of the capture.
 	Body []byte
@@ -177,6 +171,7 @@ func (r *Response) Capture(limit int) (stop func() Recorded) {
 	if r.Committed && r.Status != http.StatusSwitchingProtocols {
 		w.status, w.header = r.Status, r.Header().Clone()
 	}
+	// stop holds the writer beneath and puts it back.
 	r.ResponseWriter = w
 	return w.stop
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
@@ -100,7 +101,7 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 		"name":                          {"  Alice  "},
 	}, true, s.csrfCookie)
 	wantStatus(t, joined, http.StatusOK)
-	if got := joined.Header().Get(router.HeaderHXRedirect); got != "/room" {
+	if got := joined.Header().Get(htmx.HeaderRedirect); got != "/room" {
 		t.Errorf("HX-Redirect = %q, want /room", got)
 	}
 	s.userCookie = responseCookie(t, joined, cookieName)
@@ -142,7 +143,7 @@ func TestJoinRefusalWorksWithoutJavaScript(t *testing.T) {
 			t.Error("the refusal does not carry the reason")
 		}
 		// CSRF varies on Cookie first.
-		want := []string{router.HeaderCookie, router.HeaderHXRequest, router.HeaderHXRequestType}
+		want := []string{router.HeaderCookie, htmx.HeaderRequest, htmx.HeaderRequestType}
 		if got := rec.Header().Values(router.HeaderVary); !slices.Equal(got, want) {
 			t.Errorf("Vary = %q, want %q", got, want)
 		}
@@ -168,7 +169,7 @@ func TestAuthenticationRedirectsPagesAndRejectsAnonymousSSE(t *testing.T) {
 
 	hx := send(t, h, http.MethodGet, "/room", nil, true)
 	wantStatus(t, hx, http.StatusOK)
-	if got := hx.Header().Get(router.HeaderHXRedirect); got != "/" {
+	if got := hx.Header().Get(htmx.HeaderRedirect); got != "/" {
 		t.Errorf("HX-Redirect = %q, want /", got)
 	}
 
@@ -194,7 +195,7 @@ func TestLogoutIsPOSTAndCSRFProtected(t *testing.T) {
 		middleware.DefaultCSRFFormField: {s.csrfToken},
 	}, true, s.csrfCookie, s.userCookie)
 	wantStatus(t, left, http.StatusOK)
-	if got := left.Header().Get(router.HeaderHXRedirect); got != "/" {
+	if got := left.Header().Get(htmx.HeaderRedirect); got != "/" {
 		t.Errorf("HX-Redirect = %q, want /", got)
 	}
 	cleared := responseCookie(t, left, cookieName)
@@ -228,7 +229,7 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 		"text":                          {" hello\x00   room "},
 	}, true, s.csrfCookie, s.userCookie)
 	wantStatus(t, sent, http.StatusNoContent)
-	if got := sent.Header().Get(router.HeaderHXTrigger); got != "message-sent" {
+	if got := sent.Header().Get(htmx.HeaderTrigger); got != "message-sent" {
 		t.Errorf("HX-Trigger = %q, want message-sent", got)
 	}
 	select {
@@ -245,7 +246,7 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 		"text":                          {" \t "},
 	}, true, s.csrfCookie, s.userCookie)
 	wantStatus(t, empty, http.StatusNoContent)
-	if got := empty.Header().Get(router.HeaderHXTrigger); got != "" {
+	if got := empty.Header().Get(htmx.HeaderTrigger); got != "" {
 		t.Errorf("empty message HX-Trigger = %q", got)
 	}
 	wantNoMessage(t, messages)
@@ -294,8 +295,8 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	joinReq.Header.Set(router.HeaderContentType, "application/x-www-form-urlencoded")
-	joinReq.Header.Set(router.HeaderHXRequest, "true")
-	joinReq.Header.Set(router.HeaderHXRequestType, "partial")
+	joinReq.Header.Set(htmx.HeaderRequest, "true")
+	joinReq.Header.Set(htmx.HeaderRequestType, "partial")
 	joinRes, err := client.Do(joinReq)
 	if err != nil {
 		t.Fatal(err)
@@ -320,8 +321,8 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 	}
 	// What hx-sse sends: an htmx request that also accepts a stream.
 	eventsReq.Header.Set(router.HeaderAccept, "text/html, "+router.MIMETextEventStream)
-	eventsReq.Header.Set(router.HeaderHXRequest, "true")
-	eventsReq.Header.Set(router.HeaderHXRequestType, "partial")
+	eventsReq.Header.Set(htmx.HeaderRequest, "true")
+	eventsReq.Header.Set(htmx.HeaderRequestType, "partial")
 	eventsRes, err := client.Do(eventsReq)
 	if err != nil {
 		t.Fatal(err)
@@ -378,8 +379,8 @@ func send(t *testing.T, h http.Handler, method, target string, form url.Values, 
 		req.Header.Set(router.HeaderContentType, "application/x-www-form-urlencoded")
 	}
 	if hx {
-		req.Header.Set(router.HeaderHXRequest, "true")
-		req.Header.Set(router.HeaderHXRequestType, "partial")
+		req.Header.Set(htmx.HeaderRequest, "true")
+		req.Header.Set(htmx.HeaderRequestType, "partial")
 	}
 	for _, cookie := range cookies {
 		req.AddCookie(cookie)

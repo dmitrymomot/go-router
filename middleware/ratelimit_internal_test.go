@@ -8,29 +8,27 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
-
-	"github.com/dmitrymomot/go-router"
 )
 
-func newTestMemoryStore(t *testing.T, rate float64, burst int, expiresIn time.Duration) *memoryStore[router.Context] {
+func newTestMemoryStore(t *testing.T, rate float64, burst int, expiresIn time.Duration) *memoryStore {
 	t.Helper()
-	s, ok := NewMemoryStore[router.Context](rate, burst, expiresIn).(*memoryStore[router.Context])
+	s, ok := NewRateLimitMemoryStore(rate, burst, expiresIn).(*memoryStore)
 	if !ok {
-		t.Fatal("NewMemoryStore no longer returns a *memoryStore")
+		t.Fatal("NewRateLimitMemoryStore no longer returns a *memoryStore")
 	}
 	return s
 }
 
-func newTestMemoryStoreWithConfig(t *testing.T, cfg MemoryStoreConfig) *memoryStore[router.Context] {
+func newTestMemoryStoreWithConfig(t *testing.T, cfg RateLimitMemoryStoreConfig) *memoryStore {
 	t.Helper()
-	s, ok := NewMemoryStoreWithConfig[router.Context](cfg).(*memoryStore[router.Context])
+	s, ok := NewRateLimitMemoryStoreWithConfig(cfg).(*memoryStore)
 	if !ok {
-		t.Fatal("NewMemoryStoreWithConfig no longer returns a *memoryStore")
+		t.Fatal("NewRateLimitMemoryStoreWithConfig no longer returns a *memoryStore")
 	}
 	return s
 }
 
-func take(t *testing.T, s *memoryStore[router.Context], id string) bool {
+func take(t *testing.T, s *memoryStore, id string) bool {
 	t.Helper()
 	allowed, _, err := s.Allow(nil, id)
 	if err != nil {
@@ -39,7 +37,7 @@ func take(t *testing.T, s *memoryStore[router.Context], id string) bool {
 	return allowed
 }
 
-func memoryStoreSize(s *memoryStore[router.Context]) int {
+func memoryStoreSize(s *memoryStore) int {
 	total := 0
 	for i := range s.shards {
 		shard := &s.shards[i]
@@ -50,7 +48,7 @@ func memoryStoreSize(s *memoryStore[router.Context]) int {
 	return total
 }
 
-func memoryStoreExpirySize(s *memoryStore[router.Context]) int {
+func memoryStoreExpirySize(s *memoryStore) int {
 	total := 0
 	for i := range s.shards {
 		shard := &s.shards[i]
@@ -61,7 +59,7 @@ func memoryStoreExpirySize(s *memoryStore[router.Context]) int {
 	return total
 }
 
-func sameShardID(s *memoryStore[router.Context], id string, n int) string {
+func sameShardID(s *memoryStore, id string, n int) string {
 	want := s.shard(id)
 	for i := n; ; i++ {
 		candidate := fmt.Sprintf("client-%d", i)
@@ -71,7 +69,7 @@ func sameShardID(s *memoryStore[router.Context], id string, n int) string {
 	}
 }
 
-func shardID(s *memoryStore[router.Context], shard int) string {
+func shardID(s *memoryStore, shard int) string {
 	for i := 0; ; i++ {
 		candidate := fmt.Sprintf("shard-%d-client-%d", shard, i)
 		if s.shard(candidate) == &s.shards[shard] {
@@ -80,7 +78,7 @@ func shardID(s *memoryStore[router.Context], shard int) string {
 	}
 }
 
-func shardIndex(s *memoryStore[router.Context], id string) int {
+func shardIndex(s *memoryStore, id string) int {
 	want := s.shard(id)
 	for i := range s.shards {
 		if want == &s.shards[i] {
@@ -247,21 +245,21 @@ func TestMemoryStoreAllowsConcurrentShards(t *testing.T) {
 
 func TestMemoryStoreHasAFiniteDefaultCapacity(t *testing.T) {
 	s := newTestMemoryStore(t, 1, 1, time.Minute)
-	if got := s.maxEntries; got != DefaultMemoryStoreMaxEntries {
-		t.Errorf("max entries = %d, want %d", got, DefaultMemoryStoreMaxEntries)
+	if got := s.maxEntries; got != DefaultRateLimitMaxEntries {
+		t.Errorf("max entries = %d, want %d", got, DefaultRateLimitMaxEntries)
 	}
 }
 
 func TestMemoryStoreConfigDefaults(t *testing.T) {
-	s := newTestMemoryStoreWithConfig(t, MemoryStoreConfig{Rate: 2})
+	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{Rate: 2})
 	if s.burst != 1 {
 		t.Errorf("burst = %v, want 1", s.burst)
 	}
 	if s.expiresIn != DefaultRateLimitExpiry {
 		t.Errorf("expiry = %s, want %s", s.expiresIn, DefaultRateLimitExpiry)
 	}
-	if s.maxEntries != DefaultMemoryStoreMaxEntries {
-		t.Errorf("max entries = %d, want %d", s.maxEntries, DefaultMemoryStoreMaxEntries)
+	if s.maxEntries != DefaultRateLimitMaxEntries {
+		t.Errorf("max entries = %d, want %d", s.maxEntries, DefaultRateLimitMaxEntries)
 	}
 	if !take(t, s, "ada") || take(t, s, "ada") {
 		t.Error("the default burst did not allow exactly one immediate request")
@@ -271,14 +269,14 @@ func TestMemoryStoreConfigDefaults(t *testing.T) {
 func TestMemoryStoreRejectsNegativeCapacity(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("NewMemoryStoreWithConfig accepted a negative capacity")
+			t.Fatal("NewRateLimitMemoryStoreWithConfig accepted a negative capacity")
 		}
 	}()
-	newTestMemoryStoreWithConfig(t, MemoryStoreConfig{Rate: 1, MaxEntries: -1})
+	newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{Rate: 1, MaxEntries: -1})
 }
 
-func TestMemoryStoreCapacityFailsClosed(t *testing.T) {
-	s := newTestMemoryStoreWithConfig(t, MemoryStoreConfig{
+func TestMemoryStoreCapacityDropsTheFirstToExpire(t *testing.T) {
+	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      2,
 		ExpiresIn:  time.Hour,
@@ -287,20 +285,14 @@ func TestMemoryStoreCapacityFailsClosed(t *testing.T) {
 	if !take(t, s, "ada") || !take(t, s, "grace") {
 		t.Fatal("the store denied an entry before reaching capacity")
 	}
-	allowed, wait, err := s.Allow(nil, "linus")
-	if err != nil {
-		t.Fatalf("Allow at capacity: %v", err)
+	// ada expires first, so the new client takes her place.
+	if !take(t, s, "linus") {
+		t.Fatal("a new client was refused at capacity")
 	}
-	if allowed {
-		t.Fatal("an untracked client passed at capacity")
-	}
-	if wait != time.Hour {
-		t.Errorf("retry after = %s, want %s", wait, time.Hour)
-	}
-	if !take(t, s, "ada") {
+	if !take(t, s, "grace") {
 		t.Error("a tracked client lost its remaining token at capacity")
 	}
-	if take(t, s, "ada") {
+	if take(t, s, "grace") {
 		t.Error("a tracked client exceeded its burst at capacity")
 	}
 	if got := memoryStoreSize(s); got != 2 {
@@ -313,7 +305,7 @@ func TestMemoryStoreCapacityFailsClosed(t *testing.T) {
 
 func TestMemoryStoreCapacityRecoversAfterExpiry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s := newTestMemoryStoreWithConfig(t, MemoryStoreConfig{
+		s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 			Rate:       1000,
 			Burst:      1,
 			ExpiresIn:  time.Second,
@@ -343,7 +335,7 @@ func TestMemoryStoreCapacityIsRaceSafe(t *testing.T) {
 		maxEntries = 127
 		requests   = 2048
 	)
-	s := newTestMemoryStoreWithConfig(t, MemoryStoreConfig{
+	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      1,
 		ExpiresIn:  time.Hour,
@@ -371,8 +363,8 @@ func TestMemoryStoreCapacityIsRaceSafe(t *testing.T) {
 	if got := failures.Load(); got != 0 {
 		t.Errorf("Allow returned %d errors, want none", got)
 	}
-	if got := allowed.Load(); got != maxEntries {
-		t.Errorf("allowed requests = %d, want %d", got, maxEntries)
+	if got := allowed.Load(); got != requests {
+		t.Errorf("allowed requests = %d, want %d: a full store makes room", got, requests)
 	}
 	if got := memoryStoreSize(s); got != maxEntries {
 		t.Errorf("the store holds %d buckets, want %d", got, maxEntries)
@@ -387,7 +379,7 @@ func TestMemoryStoreCardinalityStaysBoundedForUniqueIDs(t *testing.T) {
 		maxEntries = 256
 		requests   = 100000
 	)
-	s := newTestMemoryStoreWithConfig(t, MemoryStoreConfig{
+	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      1,
 		ExpiresIn:  time.Hour,
@@ -403,8 +395,8 @@ func TestMemoryStoreCardinalityStaysBoundedForUniqueIDs(t *testing.T) {
 			allowed++
 		}
 	}
-	if allowed != maxEntries {
-		t.Errorf("allowed requests = %d, want %d", allowed, maxEntries)
+	if allowed != requests {
+		t.Errorf("allowed requests = %d, want %d: a full store makes room", allowed, requests)
 	}
 	if got := memoryStoreSize(s); got != maxEntries {
 		t.Errorf("the store holds %d buckets, want %d", got, maxEntries)
@@ -419,21 +411,23 @@ func TestMemoryStoreCardinalityStaysBoundedForUniqueIDs(t *testing.T) {
 
 func BenchmarkMemoryStoreAtCapacityUniqueIDs(b *testing.B) {
 	const maxEntries = 1024
-	s := NewMemoryStoreWithConfig[router.Context](MemoryStoreConfig{
+	s := NewRateLimitMemoryStoreWithConfig(RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      1,
 		ExpiresIn:  time.Hour,
 		MaxEntries: maxEntries,
-	}).(*memoryStore[router.Context])
+	}).(*memoryStore)
 	for i := range maxEntries {
 		if allowed, _, err := s.Allow(nil, strconv.Itoa(i)); err != nil || !allowed {
 			b.Fatalf("fill request %d: allowed = %t, err = %v", i, allowed, err)
 		}
 	}
 	b.ReportAllocs()
+	// A full store evicts the entry that expires first, so each new client is
+	// admitted and the store stays at its bound.
 	for i := 0; b.Loop(); i++ {
 		allowed, _, err := s.Allow(nil, strconv.Itoa(i+maxEntries))
-		if err != nil || allowed {
+		if err != nil || !allowed {
 			b.Fatalf("request %d: allowed = %t, err = %v", i, allowed, err)
 		}
 	}

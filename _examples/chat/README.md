@@ -52,18 +52,18 @@ OnDrain: rm.close,
 
 ## The htmx pieces
 
-**A redirect that htmx can follow.** htmx follows a `303` inside the request that it made and swaps whatever the new page answers into the form. `HX()` asks the browser to go there instead, and falls back to the `303` for a client that runs no JavaScript:
+**A redirect that htmx can follow.** htmx follows a `303` inside the request that it made and swaps whatever the new page answers into the form. `htmx.NewResponse` asks the browser to go there instead, and falls back to the `303` for a client that runs no JavaScript:
 
 ```go
-return c.HX().Redirect("/room")
+return htmx.NewResponse(c).Redirect("/room")
 ```
 
 `middleware.HTMXRedirect` does the same to every redirect of a scope, for an application with more pages than this one.
 
-**One answer for htmx and for a plain form.** A refused name goes back as the form alone to htmx, which swaps it in place of the old one, and as the whole page to a browser that posted without JavaScript. `RenderPartial` picks by `HX-Request-Type` and adds it to `Vary`:
+**One answer for htmx and for a plain form.** A refused name goes back as the form alone to htmx, which swaps it in place of the old one, and as the whole page to a browser that posted without JavaScript. `htmx.RenderPartial` picks by `HX-Request-Type` and adds it to `Vary`:
 
 ```go
-return c.RenderPartial(http.StatusOK, tmpl("join", form), tmpl("index", form))
+return htmx.RenderPartial(c, http.StatusOK, tmpl("join", form), tmpl("index", form))
 ```
 
 **An error that swaps nothing.** htmx 4 swaps a `4xx` or `5xx` answer like any other, so a plain-text `403` from the CSRF check would replace the form. Every form says to swap nothing for those:
@@ -75,7 +75,7 @@ return c.RenderPartial(http.StatusOK, tmpl("join", form), tmpl("index", form))
 **An answer that swaps nothing.** `NoSwap` writes a `204`, which tells htmx to leave the page alone. The headers of the chain still apply, so the same answer fires the event that empties the input:
 
 ```go
-return c.HX().Trigger("message-sent").NoSwap()
+return htmx.NewResponse(c).Trigger("message-sent").NoSwap()
 ```
 
 ```html
@@ -86,7 +86,7 @@ return c.HX().Trigger("message-sent").NoSwap()
 **A stream of HTML, not of JSON.** `SendComponent` renders a template into the event, and the hx-sse extension swaps it into the element that connects. It swaps only an unnamed event, and a named one becomes a DOM event, so the room names none:
 
 ```go
-return router.ServeSSE(c, ch, sendTo(c.User), router.SSEHeartbeat(20*time.Second))
+return sse.Serve(c, ch, sendTo(c.User), sse.Heartbeat(20*time.Second))
 ```
 
 ```html
@@ -97,8 +97,8 @@ return router.ServeSSE(c, ch, sendTo(c.User), router.SSEHeartbeat(20*time.Second
 The sender is built per connection, so each window renders the same message for itself and marks the ones that its own author wrote:
 
 ```go
-func sendTo(reader string) router.SSESender[message] {
-	return func(s *router.SSEWriter, m message) error {
+func sendTo(reader string) sse.Sender[message] {
+	return func(s *sse.Writer, m message) error {
 		return s.SendComponent("", tmpl(string(m.Kind), view{
 			message: m,
 			Own:     m.Author == reader,

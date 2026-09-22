@@ -54,7 +54,7 @@ func TestPoolResetsApplicationFields(t *testing.T) {
 		return c.NoContent(http.StatusNoContent)
 	})
 	r.GET("/read", func(c *pctx) error {
-		return c.Stringf(http.StatusOK, "user=%q hits=%d", c.User, c.Hits)
+		return c.String(http.StatusOK, fmt.Sprintf("user=%q hits=%d", c.User, c.Hits))
 	})
 
 	do(r, http.MethodGet, "/set")
@@ -71,8 +71,8 @@ func TestPoolResetsTheRequestState(t *testing.T) {
 	})
 	r.GET("/plain", func(c *pctx) error {
 		tenant, ok := c.Get("tenant")
-		return c.Stringf(http.StatusOK, "id=%q pattern=%q tenant=%v/%v status=%d",
-			c.Param("id"), c.RoutePattern(), tenant, ok, c.Response().Status)
+		return c.String(http.StatusOK, fmt.Sprintf("id=%q pattern=%q tenant=%v/%v status=%d",
+			c.Param("id"), c.RoutePattern(), tenant, ok, c.Response().Status))
 	})
 
 	do(r, http.MethodGet, "/users/7")
@@ -100,8 +100,8 @@ func TestPoolResetsTheCachedRequestState(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "q=%q host=%q routeHost=%q name=%q",
-			c.Query("q"), c.Host(), c.RouteHost(), vals.Get("name"))
+		return c.String(http.StatusOK, fmt.Sprintf("q=%q host=%q routeHost=%q name=%q",
+			c.Query("q"), c.Host(), c.RouteHost(), vals.Get("name")))
 	})
 
 	first := httptest.NewRequest(http.MethodPost, "/first?q=one",
@@ -130,7 +130,7 @@ func TestPoolForgetsTheBodyLimitOfAnEarlierRequest(t *testing.T) {
 	r := NewPooled(func() *pctx { return new(pctx) }, resetPctx)
 	r.MaxBodyBytes(16)
 	bind := func(c *pctx) error {
-		if _, err := c.Bind[map[string]string](); err != nil {
+		if _, err := c.BindJSON[map[string]string](); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -227,8 +227,7 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 			req := c.Request()
 			c.Set("request", req)
 			c.Query("q")
-			c.setHXError(ErrBadRequest)
-			c.Response().Before(func() { _ = req.Method })
+			_ = c.setFormError(ErrBadRequest)
 			return c.NoContent(http.StatusNoContent)
 		})
 	})
@@ -245,7 +244,7 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 		if b.req != releasedRequest || b.res != nil || b.queryCache != nil || b.deferred != nil {
 			t.Fatal("pooled context retained completed request state")
 		}
-		if len(b.store) != 0 || b.resStorage.ResponseWriter != nil || b.resStorage.before != nil {
+		if len(b.store) != 0 || b.resStorage.ResponseWriter != nil {
 			t.Fatal("pooled context retained request-owned references")
 		}
 		if b.host != "" || b.rawTail != "" || cap(b.paramVals) > len(b.paramArr) {
@@ -316,16 +315,16 @@ func TestPoolClearsTheHandledErrorFlag(t *testing.T) {
 }
 
 // betteralign keeps the fields in order but does not stop Base from growing.
-// Base and a string of the application share a 320-byte size class.
+// Base and a string of the application share a 288-byte size class.
 func TestBaseStaysInItsSizeClass(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) != 8 {
 		t.Skip("the size classes are those of a 64-bit platform")
 	}
-	if got := unsafe.Sizeof(Base{}); got != 296 {
-		t.Errorf("unsafe.Sizeof(Base{}) = %d, want 296", got)
+	if got := unsafe.Sizeof(Base{}); got != 272 {
+		t.Errorf("unsafe.Sizeof(Base{}) = %d, want 272", got)
 	}
-	if got := unsafe.Sizeof(tctx{}); got > 320 {
-		t.Errorf("a Base plus a string is %d bytes, want at most 320", got)
+	if got := unsafe.Sizeof(tctx{}); got > 288 {
+		t.Errorf("a Base plus a string is %d bytes, want at most 288", got)
 	}
 }
 
@@ -382,7 +381,7 @@ func TestPoolDoesNotCarryParametersBetweenRequests(t *testing.T) {
 			narrowBody: "one=narrow1",
 		},
 		{
-			// Six parameters against an InlineParamBudget of four: paramVals
+			// Six parameters against an inline budget of four: paramVals
 			// spills to the heap, and what stays in paramArr is whatever the
 			// trie wrote before the spill.
 			name:       "spilled",
@@ -510,8 +509,8 @@ func TestReleasedBaseReadsItsRequestFields(t *testing.T) {
 	if c.URL() == nil {
 		t.Error("URL() on a released context is nil")
 	}
-	if c.Header() == nil {
-		t.Error("Header() on a released context is nil")
+	if c.Request().Header == nil {
+		t.Error("the header of a released context is nil")
 	}
 }
 
@@ -521,7 +520,7 @@ func TestPoolDoesNotCarryRouteMetaBetweenRequests(t *testing.T) {
 			var metas [][]any
 			r := newPooledRouter()
 			if observed {
-				r.Observe(func(Context, int, int64, time.Duration, error) {})
+				r.Observe(func(*pctx, int, int64, time.Duration, error) {})
 			}
 			r.Use(func(next HandlerFunc[*pctx]) HandlerFunc[*pctx] {
 				return func(c *pctx) error {

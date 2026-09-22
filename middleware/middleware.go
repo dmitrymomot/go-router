@@ -1,16 +1,19 @@
 // Package middleware holds the middleware that ships with the router.
 //
-// Each one comes in two forms. The plain form takes the defaults: pass it to
-// [router.Router.Use] as it stands, as in r.Use(middleware.Recover[*Context]).
-// The WithConfig form takes a Config struct and reports the middleware, as in
-// r.Use(middleware.RecoverWithConfig[*Context](cfg)).
+// Each one comes in two forms. X takes only the required arguments, as in
+// r.Use(middleware.Recover[*Context]) or r.Use(middleware.BodyLimit[*Context](n)).
+// XWithConfig takes the whole config, as in
+// r.Use(middleware.RecoverWithConfig(middleware.RecoverConfig[*Context]{})).
 //
-// Every Config carries a Skip field. A request for which Skip reports true
-// passes straight to the next handler, which suits a health check or an asset
-// path. A nil Skip skips nothing.
+// A field left at its zero value takes its default. Every Config carries a
+// Skip field, and every callback of a Config, Skip included, takes the context
+// C of the router. A request for which Skip reports true passes straight to
+// the next handler, which suits a health check or an asset path. A nil Skip
+// skips nothing.
 //
-// A WithConfig form validates its configuration at the call, so a setting that
-// cannot work panics at the line that wrote it and never at the first request.
+// Both forms check their arguments at the call, so a setting that cannot work,
+// such as a negative size, panics at the line that wrote it and never at the
+// first request.
 //
 // # Order
 //
@@ -56,7 +59,7 @@
 // RateLimit goes before auth when it counts addresses, and after it when it
 // counts accounts.
 //
-// Idempotency goes inside auth and CSRF, so its Scope sees the user and a
+// Idempotency goes inside auth and CSRF, so its Client sees the user and a
 // forged request cannot claim a key.
 //
 // MinDuration goes outside Idempotency, so a replay waits too. It hides only
@@ -78,8 +81,18 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-func skipped[C router.Context](skip func(router.Context) bool, c C) bool {
+func skipped[C router.Context](skip func(C) bool, c C) bool {
 	return skip != nil && skip(c)
+}
+
+// isSafeMethod reports the methods RFC 9110 calls safe: they change nothing,
+// so CSRF lets them through without a token and a repeat cannot harm.
+func isSafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, router.MethodQuery:
+		return true
+	}
+	return false
 }
 
 func originOf(s string) (string, bool) {
@@ -92,13 +105,24 @@ func originOf(s string) (string, bool) {
 	return strings.ToLower(u.Scheme + "://" + u.Host), true
 }
 
-func checkOrigin(setting, s, hint string) string {
-	canonical, ok := originOf(s)
-	if !ok {
-		panic("middleware: " + setting + " got " + strconv.Quote(s) +
-			`, which is not an origin; write a scheme and a host, as in "https://app.example"` + hint)
+// checkOrigins reports origins in canonical form, and whether one of them is
+// "*". It panics on an entry that is not an origin, and on "*" unless
+// wildcard allows it. hint ends the message of that panic.
+func checkOrigins(setting string, origins []string, wildcard bool, hint string) (out []string, star bool) {
+	out = make([]string, len(origins))
+	for i, o := range origins {
+		if o == "*" && wildcard {
+			out[i], star = o, true
+			continue
+		}
+		canonical, ok := originOf(o)
+		if !ok {
+			panic("middleware: " + setting + " got " + strconv.Quote(o) +
+				`, which is not an origin; write a scheme and a host, as in "https://app.example"` + hint)
+		}
+		out[i] = canonical
 	}
-	return canonical
+	return out, star
 }
 
 func tooLarge(err error, message string, limit int64) error {

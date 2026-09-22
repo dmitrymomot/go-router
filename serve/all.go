@@ -9,12 +9,11 @@ import (
 	"sync"
 )
 
-// Server is one server for [RunAll]: the handler, the Config and the options
-// that [Run] takes as separate arguments.
+// Server is one server for [RunAll]: the handler and the Config that [Run]
+// takes as separate arguments.
 type Server struct {
 	Handler http.Handler
 	Config  Config
-	Options []Option
 }
 
 // RunAll runs every server until ctx ends, or until any one of them stops, and
@@ -35,8 +34,8 @@ type Server struct {
 //
 // Each error names the index of its server, on the first line of its text;
 // [errors.Is] and [errors.As] see through that. RunAll closes every
-// Config.Listener on every path, as Run does, and reports nil for a cancelled
-// ctx.
+// Config.Listener on every path, as Run does. For a ctx that has already
+// ended, it checks every server, then reports nil without listening.
 func RunAll(ctx context.Context, servers ...Server) error {
 	for _, s := range servers {
 		if s.Config.Listener != nil {
@@ -52,19 +51,19 @@ func RunAll(ctx context.Context, servers ...Server) error {
 
 	ins := make([]*instance, len(servers))
 	for i, s := range servers {
-		in, err := prepare(s.Handler, s.Config, s.Options)
+		in, err := prepare(s.Handler, s.Config)
 		if err != nil {
 			return serverError{i: i, err: err}
 		}
 		ins[i] = in
 	}
-	if ctx.Err() != nil {
-		return nil
-	}
 	for i, in := range ins {
 		if err := in.build(); err != nil {
 			return serverError{i: i, err: err}
 		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	defer func() {
 		for _, in := range ins {

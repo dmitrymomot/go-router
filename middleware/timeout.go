@@ -1,8 +1,10 @@
 package middleware
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -12,16 +14,16 @@ import (
 // DefaultTimeout is the deadline that [Timeout] applies.
 const DefaultTimeout = 30 * time.Second
 
-// TimeoutConfig configures [TimeoutWithConfig]. Duration is the deadline and
-// is required. Status and Message shape the answer, and they default to 503
-// with its standard text. OnTimeout answers the request itself, in place of
-// that error.
-type TimeoutConfig struct {
-	Skip      func(c router.Context) bool
+// TimeoutConfig configures [TimeoutWithConfig]. Duration is the deadline, and
+// zero takes [DefaultTimeout]. Status and Message shape the answer, and they
+// default to 503 with its standard text; a Status has to be a 4xx or a 5xx.
+// OnTimeout answers the request itself, in place of that error.
+type TimeoutConfig[C router.Context] struct {
+	Skip      func(c C) bool
+	OnTimeout func(c C, err error) error
+	Message   string
 	Duration  time.Duration
 	Status    int
-	Message   string
-	OnTimeout func(c router.Context, err error) error
 }
 
 // Timeout gives the handler a context that ends after [DefaultTimeout] and
@@ -37,19 +39,23 @@ type TimeoutConfig struct {
 // out of time is never stored and the floor still holds; see Order in the
 // package doc.
 func Timeout[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return TimeoutWithConfig[C](TimeoutConfig{Duration: DefaultTimeout})(next)
+	return TimeoutWithConfig(TimeoutConfig[C]{})(next)
 }
 
 // TimeoutWithConfig is [Timeout] with a configuration.
 //
-// TimeoutWithConfig panics on a Duration of zero or less.
-func TimeoutWithConfig[C router.Context](cfg TimeoutConfig) router.Middleware[C] {
-	if cfg.Duration <= 0 {
-		panic("middleware: TimeoutWithConfig needs a Duration above zero")
+// TimeoutWithConfig panics on a negative Duration, and on a Status that is
+// neither zero nor a 4xx or a 5xx.
+func TimeoutWithConfig[C router.Context](cfg TimeoutConfig[C]) router.Middleware[C] {
+	if cfg.Duration < 0 {
+		panic("middleware: TimeoutWithConfig needs a Duration of zero or more")
 	}
-	if cfg.Status == 0 {
-		cfg.Status = http.StatusServiceUnavailable
+	if cfg.Status != 0 && (cfg.Status < 400 || cfg.Status > 599) {
+		panic(fmt.Sprintf("middleware: TimeoutWithConfig got the Status %d; take a 4xx or a 5xx, "+
+			"or zero for 503", cfg.Status))
 	}
+	cfg.Duration = cmp.Or(cfg.Duration, DefaultTimeout)
+	cfg.Status = cmp.Or(cfg.Status, http.StatusServiceUnavailable)
 	if cfg.Message == "" {
 		cfg.Message = http.StatusText(cfg.Status)
 	}

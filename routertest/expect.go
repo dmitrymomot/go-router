@@ -1,7 +1,10 @@
 package routertest
 
 import (
+	"bytes"
 	"mime"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -126,6 +129,53 @@ func (e *Expect) FieldErrors(names ...string) *Expect {
 	want := slices.Sorted(slices.Values(names))
 	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
 		e.tb.Errorf("%sfield errors = %v, want %v; body: %s", e.where(), got, want, e.res.Body)
+	}
+	return e
+}
+
+// Events reports a body that does not hold exactly the server-sent events
+// want, in order. See [Events] for how the body is read.
+func (e *Expect) Events(want ...Event) *Expect {
+	e.tb.Helper()
+	if got := Events(e.res); !slices.Equal(got, want) {
+		e.tb.Errorf("%sevents = %+v, want %+v; body: %s", e.where(), got, want, e.res.Body)
+	}
+	return e
+}
+
+// Golden reports a body that differs from the file testdata/name. Run the test
+// with -routertest.update, or with an -update flag of your own, to write the
+// file instead.
+//
+// name is a slash path inside testdata, and it cannot leave that directory.
+func (e *Expect) Golden(name string) *Expect {
+	e.tb.Helper()
+	rel, err := goldenName(name)
+	if err != nil {
+		e.tb.Errorf("routertest: invalid golden file name %q: %v", name, err)
+		return e
+	}
+	file := filepath.Join("testdata", rel)
+	if goldenUpdate() {
+		if err := writeGolden(e.tb, rel, e.res.Body); err != nil {
+			e.tb.Errorf("routertest: write %s: %v", file, err)
+		}
+		return e
+	}
+	root, err := os.OpenRoot("testdata")
+	if err != nil {
+		e.tb.Errorf("routertest: open the golden directory: %v", err)
+		return e
+	}
+	defer closeGoldenRoot(e.tb, root)
+	want, err := root.ReadFile(rel)
+	if err != nil {
+		e.tb.Errorf("%sread %s: %v; run the test with -%s to write it", e.where(), file, err, updateFlagName)
+		return e
+	}
+	if !bytes.Equal(e.res.Body, want) {
+		e.tb.Errorf("%s%s differs; run the test with -%s to accept the change\ngot:\n%s\nwant:\n%s",
+			e.where(), file, updateFlagName, e.res.Body, want)
 	}
 	return e
 }

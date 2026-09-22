@@ -1,9 +1,12 @@
 package middleware
 
 import (
+	"cmp"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,18 +18,31 @@ import (
 // because the header of the format costs more than the saving.
 const DefaultGzipMinLength = 1024
 
-// GzipConfig configures [GzipWithConfig]. Level is a level of [compress/gzip],
-// and zero or one out of range takes the default. MinLength is the shortest
-// body worth compressing, and zero takes [DefaultGzipMinLength].
-type GzipConfig struct {
-	Skip      func(c router.Context) bool
+// GzipConfig configures [GzipWithConfig]. Level is a level of [compress/gzip]
+// from [gzip.HuffmanOnly] to [gzip.BestCompression], and zero takes
+// [gzip.DefaultCompression]; [gzip.NoCompression] cannot be asked for, since
+// Skip does that better. MinLength is the shortest body worth compressing, and
+// zero takes [DefaultGzipMinLength].
+type GzipConfig[C router.Context] struct {
+	Skip      func(c C) bool
 	Level     int
 	MinLength int
 }
 
 // Gzip compresses the response for a client that says it takes gzip, and adds
 // Accept-Encoding to Vary. A body under [DefaultGzipMinLength], a status with
-// no body, and a body that is already encoded all go out untouched.
+// no body, a body that is already encoded, and an answer whose Cache-Control
+// says no-transform all go out untouched.
+//
+// A compressed answer drops Accept-Ranges, since a range of the compressed
+// bytes is not a range of the resource. Its ETag gets the suffix "-gzip" inside
+// the quotes, so "abc" becomes "abc-gzip" and W/"abc" becomes W/"abc-gzip":
+// the compressed bytes are a representation of their own, with a tag of their
+// own. For a client that takes gzip, Gzip drops the suffix from the tags of
+// If-None-Match and If-Match before the handler reads them, so the handler
+// compares its own tags. A 304 carries the tag the client holds: the suffixed
+// one when If-None-Match named it, or, with no If-None-Match, whenever
+// Cache-Control allows a transform.
 //
 // A stream passes through: an event stream is never compressed, and a handler
 // that flushes keeps its data moving to the client.
@@ -36,16 +52,25 @@ type GzipConfig struct {
 // Put it outside [Idempotency], so a replay is compressed for the client that
 // asks again; see Order in the package doc.
 func Gzip[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return GzipWithConfig[C](GzipConfig{})(next)
+	return GzipWithConfig(GzipConfig[C]{})(next)
 }
 
 // GzipWithConfig is [Gzip] with a configuration.
-func GzipWithConfig[C router.Context](cfg GzipConfig) router.Middleware[C] {
-	level := gzipLevel(cfg.Level)
-	minLength := cfg.MinLength
-	if minLength <= 0 {
-		minLength = DefaultGzipMinLength
+//
+// GzipWithConfig panics on a Level out of range and on a negative MinLength.
+func GzipWithConfig[C router.Context](cfg GzipConfig[C]) router.Middleware[C] {
+	level := cfg.Level
+	switch {
+	case level == 0:
+		level = gzip.DefaultCompression
+	case level < gzip.HuffmanOnly || level > gzip.BestCompression:
+		panic(fmt.Sprintf("middleware: GzipWithConfig got the Level %d; "+
+			"take one from %d to %d, or zero for the default", level, gzip.HuffmanOnly, gzip.BestCompression))
 	}
+	if cfg.MinLength < 0 {
+		panic("middleware: GzipWithConfig needs a MinLength of zero or more")
+	}
+	minLength := cmp.Or(cfg.MinLength, DefaultGzipMinLength)
 	pool := &sync.Pool{New: func() any {
 		w, _ := gzip.NewWriterLevel(io.Discard, level)
 		return w
@@ -72,6 +97,8 @@ func GzipWithConfig[C router.Context](cfg GzipConfig) router.Middleware[C] {
 				min:            minLength,
 				head:           req.Method == http.MethodHead,
 			}
+			w.revalidating, w.unsuffixed = unsuffixGzipETags(req.Header, router.HeaderIfNoneMatch)
+			unsuffixGzipETags(req.Header, headerIfMatch)
 			before := res.Size
 			res.ResponseWriter = w
 
@@ -106,6 +133,11 @@ type gzipWriter struct {
 	code    int
 	state   uint8
 	head    bool
+
+	// revalidating says that the request sent If-None-Match, and unsuffixed
+	// holds its tags that carried the suffix of a compressed answer.
+	revalidating bool
+	unsuffixed   []string
 }
 
 func (w *gzipWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -121,9 +153,13 @@ func (w *gzipWriter) WriteHeader(code int) {
 	w.code = code
 
 	h := w.Header()
+	if code == http.StatusNotModified {
+		w.tagNotModified(h)
+	}
 	if !compressibleStatus(code) ||
 		h.Get(router.HeaderContentEncoding) != "" ||
-		isEventStream(h.Get(router.HeaderContentType)) {
+		isEventStream(h.Get(router.HeaderContentType)) ||
+		noTransform(h.Values(router.HeaderCacheControl)) {
 		//nolint:errcheck // Nothing writes a status line and reads an error.
 		w.commit(false)
 		return
@@ -219,6 +255,10 @@ func (w *gzipWriter) commit(compress bool) error {
 		h.Set(router.HeaderContentType, http.DetectContentType(w.buf))
 	}
 	h.Del(router.HeaderContentLength)
+	h.Del(headerAcceptRanges)
+	if etag := h.Get(router.HeaderETag); etag != "" {
+		h.Set(router.HeaderETag, suffixGzipETag(etag))
+	}
 	h.Set(router.HeaderContentEncoding, "gzip")
 
 	w.state = gzipOn
@@ -258,6 +298,22 @@ func (w *gzipWriter) finish(ok bool) {
 	}
 }
 
+// tagNotModified gives a 304 the ETag of the answer the client holds; see
+// [Gzip].
+func (w *gzipWriter) tagNotModified(h http.Header) {
+	etag := h.Get(router.HeaderETag)
+	if etag == "" || h.Get(router.HeaderContentEncoding) != "" {
+		return
+	}
+	suffix := !noTransform(h.Values(router.HeaderCacheControl))
+	if w.revalidating {
+		suffix = slices.Contains(w.unsuffixed, strings.TrimPrefix(etag, "W/"))
+	}
+	if suffix {
+		h.Set(router.HeaderETag, suffixGzipETag(etag))
+	}
+}
+
 type gzipSink struct{ w *gzipWriter }
 
 func (s gzipSink) Write(p []byte) (int, error) {
@@ -266,15 +322,79 @@ func (s gzipSink) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func gzipLevel(level int) int {
-	switch {
-	case level == 0, level < gzip.HuffmanOnly:
-		return gzip.DefaultCompression
-	case level > gzip.BestCompression:
-		return gzip.BestCompression
-	default:
-		return level
+const (
+	headerAcceptRanges = "Accept-Ranges"
+	headerIfMatch      = "If-Match"
+)
+
+// gzipETagSuffix marks the ETag of a compressed answer.
+const gzipETagSuffix = "-gzip"
+
+// suffixGzipETag puts [gzipETagSuffix] inside the quotes of an entity tag. A
+// value that is not a quoted tag stays as it is.
+func suffixGzipETag(etag string) string {
+	tag := strings.TrimPrefix(etag, "W/")
+	if len(tag) < 2 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+		return etag
 	}
+	return etag[:len(etag)-1] + gzipETagSuffix + `"`
+}
+
+// unsuffixGzipETags drops [gzipETagSuffix] from each entity tag of the header
+// field name. It reports whether the field is present, and the opaque tags,
+// without W/, that lost the suffix. A field it cannot parse stays as it is.
+func unsuffixGzipETags(h http.Header, name string) (present bool, unsuffixed []string) {
+	values := h.Values(name)
+	if len(values) == 0 {
+		return false, nil
+	}
+	var tags []string
+	for _, v := range values {
+		for v = trimETagSeparators(v); v != ""; v = trimETagSeparators(v) {
+			if v[0] == '*' {
+				tags = append(tags, "*")
+				v = v[1:]
+				continue
+			}
+			weak := strings.HasPrefix(v, "W/")
+			opaque := strings.TrimPrefix(v, "W/")
+			end := strings.IndexByte(opaque[min(1, len(opaque)):], '"') + 1
+			if len(opaque) == 0 || opaque[0] != '"' || end == 0 {
+				return true, nil
+			}
+			v = opaque[end+1:]
+			opaque = opaque[:end+1]
+			if plain, ok := strings.CutSuffix(opaque, gzipETagSuffix+`"`); ok {
+				opaque = plain + `"`
+				unsuffixed = append(unsuffixed, opaque)
+			}
+			if weak {
+				opaque = "W/" + opaque
+			}
+			tags = append(tags, opaque)
+		}
+	}
+	if len(unsuffixed) > 0 {
+		h.Set(name, strings.Join(tags, ", "))
+	}
+	return true, unsuffixed
+}
+
+func trimETagSeparators(s string) string {
+	return strings.TrimLeft(s, " \t,")
+}
+
+// noTransform reports whether a Cache-Control header forbids a proxy, and so
+// this middleware, to change the encoding of the body.
+func noTransform(cacheControl []string) bool {
+	for _, v := range cacheControl {
+		for d := range strings.SplitSeq(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(d), "no-transform") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func compressibleStatus(code int) bool {

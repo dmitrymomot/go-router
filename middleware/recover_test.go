@@ -10,14 +10,14 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-func recoverRouter(cfg middleware.RecoverConfig, caught **router.PanicValue) *router.Router[*appContext] {
+func recoverRouter(cfg middleware.RecoverConfig[*appContext], caught **router.PanicValue) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.RecoverWithConfig[*appContext](cfg))
 	r.ErrorHandler(func(c *appContext, err error) error {
 		if pv, ok := errors.AsType[*router.PanicValue](err); ok {
 			*caught = pv
 		}
-		return router.DefaultErrorHandler(c, err)
+		return router.TextErrorHandler[*appContext](false)(c, err)
 	})
 	r.GET("/boom", func(*appContext) error { panic("handler exploded") })
 	return r
@@ -52,7 +52,7 @@ func TestRecoverPassesOnErrAbortHandler(t *testing.T) {
 
 func TestRecoverKeepsTheStackOfThePanic(t *testing.T) {
 	var caught *router.PanicValue
-	r := recoverRouter(middleware.RecoverConfig{}, &caught)
+	r := recoverRouter(middleware.RecoverConfig[*appContext]{}, &caught)
 
 	get(r, "/boom")
 	if caught == nil {
@@ -71,7 +71,7 @@ func TestRecoverKeepsTheStackOfThePanic(t *testing.T) {
 
 func TestRecoverStackSizeBoundsTheTrace(t *testing.T) {
 	var caught *router.PanicValue
-	r := recoverRouter(middleware.RecoverConfig{StackSize: 128}, &caught)
+	r := recoverRouter(middleware.RecoverConfig[*appContext]{StackSize: 128}, &caught)
 
 	get(r, "/boom")
 	if caught == nil {
@@ -83,9 +83,9 @@ func TestRecoverStackSizeBoundsTheTrace(t *testing.T) {
 	}
 }
 
-func TestRecoverDisableStackKeepsTheValue(t *testing.T) {
+func TestRecoverNegativeStackSizeKeepsTheValue(t *testing.T) {
 	var caught *router.PanicValue
-	r := recoverRouter(middleware.RecoverConfig{DisableStack: true}, &caught)
+	r := recoverRouter(middleware.RecoverConfig[*appContext]{StackSize: -1}, &caught)
 
 	rec := get(r, "/boom")
 	if rec.Code != http.StatusInternalServerError {
@@ -107,7 +107,7 @@ func TestRecoverDisableStackKeepsTheValue(t *testing.T) {
 
 func TestRecoverSkip(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.RecoverWithConfig[*appContext](middleware.RecoverConfig{Skip: skipPath("/boom")}))
+	r.Use(middleware.RecoverWithConfig(middleware.RecoverConfig[*appContext]{Skip: skipPath("/boom")}))
 	r.GET("/boom", func(*appContext) error { panic("handler exploded") })
 
 	rec := get(r, "/boom")

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"runtime"
 	"slices"
-	"strings"
 )
 
 // HTTPError is an error that names the status the client sees. A handler
@@ -25,19 +24,21 @@ type HTTPError struct {
 	Err     error
 }
 
-// NewHTTPError builds an error for status. Without a message it takes the
-// standard text of the status; several message parts join with a space.
-func NewHTTPError(status int, message ...string) *HTTPError {
-	e := &HTTPError{Status: status, Message: http.StatusText(status)}
-	if len(message) > 0 {
-		e.Message = strings.Join(message, " ")
+// NewHTTPError builds an error for status with message. An empty message takes
+// the standard text of the status.
+func NewHTTPError(status int, message string) *HTTPError {
+	if message == "" {
+		message = http.StatusText(status)
 	}
-	return e
+	return &HTTPError{Status: status, Message: message}
 }
 
 // Error reports the status, the message, and the wrapped cause when there is
 // one.
 func (e *HTTPError) Error() string {
+	if e == nil {
+		return "<nil *router.HTTPError>"
+	}
 	if e.Err != nil {
 		return fmt.Sprintf("%d %s: %v", e.Status, e.Message, e.Err)
 	}
@@ -45,13 +46,19 @@ func (e *HTTPError) Error() string {
 }
 
 // Unwrap reports the wrapped cause, which [HTTPError.WithError] sets.
-func (e *HTTPError) Unwrap() error { return e.Err }
+func (e *HTTPError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // Is reports whether target is an HTTPError of the same status, so
-// errors.Is(err, [ErrNotFound]) matches any 404 this package builds.
+// errors.Is(err, [ErrNotFound]) matches any 404 this package builds. A target
+// that only wraps an HTTPError does not match.
 func (e *HTTPError) Is(target error) bool {
-	t, ok := errors.AsType[*HTTPError](target)
-	return ok && t.Status == e.Status
+	t, ok := target.(*HTTPError)
+	return ok && t != nil && e != nil && t.Status == e.Status
 }
 
 // WithMessage copies e with the message that format and args build. Without
@@ -66,7 +73,7 @@ func (e *HTTPError) WithMessage(format string, args ...any) *HTTPError {
 	return &c
 }
 
-// WithDetails copies e with details attached. The default error handler writes
+// WithDetails copies e with details attached. [TextErrorHandler] writes
 // a []FieldError one line per field, and leaves any other type to a handler
 // that knows it. [JSONErrorHandler] writes any details as JSON, so they must
 // hold nothing private.
@@ -77,7 +84,8 @@ func (e *HTTPError) WithDetails(details any) *HTTPError {
 }
 
 // WithError copies e with err as its cause. The cause reaches the log, and it
-// reaches the client only through [ErrorHandler] with exposeCause set.
+// reaches the client only through an error handler with exposeCause set, such
+// as [TextErrorHandler] and [JSONErrorHandler].
 func (e *HTTPError) WithError(err error) *HTTPError {
 	c := *e
 	c.Err = err
@@ -148,40 +156,41 @@ type StatusCoder interface {
 // or copy it with [HTTPError.WithMessage], [HTTPError.WithDetails] or
 // [HTTPError.WithError]. errors.Is matches on the status alone.
 var (
-	ErrBadRequest           = NewHTTPError(http.StatusBadRequest)
-	ErrUnauthorized         = NewHTTPError(http.StatusUnauthorized)
-	ErrPaymentRequired      = NewHTTPError(http.StatusPaymentRequired)
-	ErrForbidden            = NewHTTPError(http.StatusForbidden)
-	ErrNotFound             = NewHTTPError(http.StatusNotFound)
-	ErrMethodNotAllowed     = NewHTTPError(http.StatusMethodNotAllowed)
-	ErrConflict             = NewHTTPError(http.StatusConflict)
-	ErrGone                 = NewHTTPError(http.StatusGone)
-	ErrPayloadTooLarge      = NewHTTPError(http.StatusRequestEntityTooLarge)
-	ErrUnsupportedMediaType = NewHTTPError(http.StatusUnsupportedMediaType)
-	ErrUnprocessableEntity  = NewHTTPError(http.StatusUnprocessableEntity)
-	ErrTooManyRequests      = NewHTTPError(http.StatusTooManyRequests)
-	ErrInternalServerError  = NewHTTPError(http.StatusInternalServerError)
-	ErrNotImplemented       = NewHTTPError(http.StatusNotImplemented)
-	ErrBadGateway           = NewHTTPError(http.StatusBadGateway)
-	ErrServiceUnavailable   = NewHTTPError(http.StatusServiceUnavailable)
-	ErrGatewayTimeout       = NewHTTPError(http.StatusGatewayTimeout)
+	ErrBadRequest           = NewHTTPError(http.StatusBadRequest, "")
+	ErrUnauthorized         = NewHTTPError(http.StatusUnauthorized, "")
+	ErrPaymentRequired      = NewHTTPError(http.StatusPaymentRequired, "")
+	ErrForbidden            = NewHTTPError(http.StatusForbidden, "")
+	ErrNotFound             = NewHTTPError(http.StatusNotFound, "")
+	ErrMethodNotAllowed     = NewHTTPError(http.StatusMethodNotAllowed, "")
+	ErrConflict             = NewHTTPError(http.StatusConflict, "")
+	ErrGone                 = NewHTTPError(http.StatusGone, "")
+	ErrPayloadTooLarge      = NewHTTPError(http.StatusRequestEntityTooLarge, "")
+	ErrUnsupportedMediaType = NewHTTPError(http.StatusUnsupportedMediaType, "")
+	ErrUnprocessableEntity  = NewHTTPError(http.StatusUnprocessableEntity, "")
+	ErrTooManyRequests      = NewHTTPError(http.StatusTooManyRequests, "")
+	ErrInternalServerError  = NewHTTPError(http.StatusInternalServerError, "")
+	ErrNotImplemented       = NewHTTPError(http.StatusNotImplemented, "")
+	ErrBadGateway           = NewHTTPError(http.StatusBadGateway, "")
+	ErrServiceUnavailable   = NewHTTPError(http.StatusServiceUnavailable, "")
+	ErrGatewayTimeout       = NewHTTPError(http.StatusGatewayTimeout, "")
 )
 
 // DefaultStackSize is how many bytes of stack [PanicError] records.
 const DefaultStackSize = 8 << 10
 
 // PanicValue is the value a handler panicked with, and the stack at that
-// moment. [PanicError] wraps one in an [ErrInternalServerError], so the stack
-// reaches the log and never the client.
+// moment. [PanicError] wraps one in an [ErrInternalServerError]. Its Error
+// leaves the stack out, so an error handler that exposes the cause shows the
+// value alone; the log of the router adds the stack as the "stack" attribute.
 type PanicValue struct {
 	Value any
 	Stack []byte
 	Err   error
 }
 
-// Error reports the value and the stack.
+// Error reports the panic value, without the stack.
 func (e *PanicValue) Error() string {
-	return fmt.Sprintf("panic: %v\n\n%s", e.Value, e.Stack)
+	return fmt.Sprintf("panic: %v", e.Value)
 }
 
 // Unwrap reports the panic value as an error. A panic with a value that is not
@@ -189,19 +198,17 @@ func (e *PanicValue) Error() string {
 func (e *PanicValue) Unwrap() error { return e.Err }
 
 // PanicError turns the result of recover into an [ErrInternalServerError] that
-// carries a [PanicValue]. It records [DefaultStackSize] bytes of stack.
-func PanicError(recovered any) *HTTPError {
-	return PanicErrorSize(recovered, DefaultStackSize)
-}
-
-// PanicErrorSize is [PanicError] with the size of the stack it records. A
-// stackSize of zero or less takes [DefaultStackSize].
-func PanicErrorSize(recovered any, stackSize int) *HTTPError {
-	if stackSize <= 0 {
-		stackSize = DefaultStackSize
+// carries a [PanicValue]. It records stackSize bytes of stack: zero takes
+// [DefaultStackSize], and a negative size records none.
+func PanicError(recovered any, stackSize int) *HTTPError {
+	var stack []byte
+	if stackSize >= 0 {
+		if stackSize == 0 {
+			stackSize = DefaultStackSize
+		}
+		buf := make([]byte, stackSize)
+		stack = buf[:runtime.Stack(buf, false)]
 	}
-	buf := make([]byte, stackSize)
-	n := runtime.Stack(buf, false)
 
 	cause, ok := recovered.(error)
 	if !ok {
@@ -209,7 +216,7 @@ func PanicErrorSize(recovered any, stackSize int) *HTTPError {
 	}
 	return ErrInternalServerError.WithError(&PanicValue{
 		Value: recovered,
-		Stack: buf[:n],
+		Stack: stack,
 		Err:   cause,
 	})
 }
@@ -218,12 +225,13 @@ func PanicErrorSize(recovered any, stackSize int) *HTTPError {
 // the status of a [StatusCoder], 413 for an [http.MaxBytesError], 499 for an
 // error that is [context.Canceled], 200 for a nil error, and 500 for anything
 // else. 499 is the status nginx logs for a client that went away, so a
-// disconnect does not count as a 5xx.
+// disconnect does not count as a 5xx. The HTTPError is the first in the tree
+// of err that is not a typed nil.
 func StatusOf(err error) int {
 	if err == nil {
 		return http.StatusOK
 	}
-	if he, ok := errors.AsType[*HTTPError](err); ok {
+	if he, ok := httpErrorOf(err); ok {
 		// The fields are exported, so a caller can build one with no status.
 		if he.Status != 0 {
 			return he.Status
@@ -247,6 +255,37 @@ func StatusOf(err error) int {
 // statusClientClosedRequest has no constant in net/http and no text there.
 const statusClientClosedRequest = 499
 
+// httpErrorOf reports the first *HTTPError in the tree of err that is not nil.
+// It walks the tree as [errors.As] does, depth first, and passes over a typed
+// nil, which has no fields to read, so a real one after it still counts.
+func httpErrorOf(err error) (*HTTPError, bool) {
+	for err != nil {
+		if he, ok := err.(*HTTPError); ok && he != nil {
+			return he, true
+		}
+		if x, ok := err.(interface{ As(any) bool }); ok {
+			var he *HTTPError
+			if x.As(&he) && he != nil {
+				return he, true
+			}
+		}
+		switch x := err.(type) {
+		case interface{ Unwrap() error }:
+			err = x.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, e := range x.Unwrap() {
+				if he, ok := httpErrorOf(e); ok {
+					return he, true
+				}
+			}
+			return nil, false
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
 // ResolveStatus reports the status that went out. A response that already
 // wrote its header keeps that status, whatever err asks for; otherwise the
 // answer is [StatusOf].
@@ -259,7 +298,8 @@ func ResolveStatus(res *Response, err error) int {
 
 // HTTPErrorOf reports the [HTTPError] the client is answered with: the one
 // inside err, or one with the status of [StatusOf], its standard text, and err
-// as the cause. A nil err gives nil.
+// as the cause. A nil err gives nil. A typed nil *HTTPError is passed over,
+// and one alone counts as a plain error.
 //
 // Status is never 0. An empty Message takes the standard text of the status,
 // which is itself empty for a status net/http does not name, such as 499.
@@ -270,7 +310,7 @@ func HTTPErrorOf(err error) *HTTPError {
 	if err == nil {
 		return nil
 	}
-	he, ok := errors.AsType[*HTTPError](err)
+	he, ok := httpErrorOf(err)
 	if !ok {
 		status := StatusOf(err)
 		return &HTTPError{Status: status, Message: http.StatusText(status), Err: err}
@@ -299,30 +339,32 @@ func HTTPErrorOf(err error) *HTTPError {
 // returns an error having written nothing.
 type ErrorHandlerFunc[C Context] func(c C, err error) error
 
-// DefaultErrorHandler writes the status and the message of [HTTPErrorOf] as
-// plain text, one line per [FieldError] in its Details. The cause stays out
-// of the response.
+// TextErrorHandler writes the status and the message of [HTTPErrorOf] as
+// plain text, one line per [FieldError] in its Details. It is the error
+// handler of a router that installs none, as TextErrorHandler(false).
+//
+// With exposeCause set, the wrapped cause follows the message in the body,
+// which suits a development server and leaks internals anywhere else. The
+// cause of a panic shows the panic value, never the stack.
 //
 // It is a plain writer: called directly, it neither logs nor checks for a
 // committed response. The router does both around every error handler.
-func DefaultErrorHandler[C Context](c C, err error) error {
-	return writeText(c.base(), err, false)
-}
-
-// ErrorHandler is [DefaultErrorHandler] with a say over the cause. With
-// exposeCause set, the wrapped cause follows the message in the body, which
-// suits a development server and leaks internals anywhere else.
-func ErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
+func TextErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
 	return func(c C, err error) error { return writeText(c.base(), err, exposeCause) }
 }
 
+// defaultErrorHandler answers for [HandleError] outside a router.
+var defaultErrorHandler = TextErrorHandler[Context](false)
+
 // ErrorBody is the object [JSONErrorHandler] writes under "error". Details is
 // the Details of the [HTTPError], such as the []FieldError of a failed
-// [Base.Bind], and it is left out when nil.
+// [Base.Bind], and it is left out when nil. Cause is the text of the wrapped
+// cause, set only by JSONErrorHandler(true) and left out when empty.
 type ErrorBody struct {
 	Status  int    `json:"status"`
 	Message string `json:"message"`
 	Details any    `json:"details,omitzero"`
+	Cause   string `json:"cause,omitzero"`
 }
 
 type errorEnvelope struct {
@@ -330,16 +372,27 @@ type errorEnvelope struct {
 }
 
 // JSONErrorHandler writes err as {"error": [ErrorBody]} with the status, the
-// message and the details of [HTTPErrorOf]. The cause never reaches the body.
-// Install it on an API host or prefix with [Router.ErrorHandler], rather than
-// branching on the host inside one handler.
-func JSONErrorHandler[C Context](c C, err error) error {
+// message and the details of [HTTPErrorOf]. With exposeCause set, the text of
+// the wrapped cause goes in Cause, which suits a development server and leaks
+// internals anywhere else; the cause of a panic shows the panic value, never
+// the stack. Install it on an API host or prefix with [Router.ErrorHandler],
+// rather than branching on the host inside one handler.
+//
+// Like [TextErrorHandler], it neither logs nor checks for a committed response
+// when called directly.
+func JSONErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
+	return func(c C, err error) error { return writeJSON(c.base(), err, exposeCause) }
+}
+
+func writeJSON(b *Base, err error, exposeCause bool) error {
 	he := HTTPErrorOf(err)
 	if he == nil {
 		return nil
 	}
-	b := c.base()
 	body := errorEnvelope{ErrorBody{Status: he.Status, Message: he.Message, Details: he.Details}}
+	if exposeCause && he.Err != nil {
+		body.Error.Cause = he.Err.Error()
+	}
 	data, err := json.Marshal(body, b.jsonOptions(nil)...)
 	if err != nil {
 		return ErrInternalServerError.WithError(fmt.Errorf("router: encode the error body: %w", err))
@@ -385,7 +438,7 @@ func writeText(b *Base, err error, exposeCause bool) error {
 // so a middleware that calls it after next reads the final Response.Status
 // and Size. The router then skips its own call. A nil err, or a call after the
 // error was answered, does nothing. Outside a router, on a context from
-// [NewBase], it answers with [DefaultErrorHandler].
+// [NewBase], it answers with TextErrorHandler(false).
 //
 // Like the router, HandleError logs the failure, and skips the error handler
 // for a response that already committed and for [context.Canceled].
@@ -404,7 +457,7 @@ func HandleError(c Context, err error) {
 		answer(c, err)
 		return
 	}
-	answerError(c, err, DefaultErrorHandler[Context])
+	answerError(c, err, defaultErrorHandler)
 }
 
 // answerError is the error pipeline of a request: the guard, the handler,
@@ -415,9 +468,7 @@ func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	// recurse. A pooled router lowers it again on release.
 	b.errorHandled = true
 	committedBefore := b.res.Committed
-	he, isHTTP := errors.AsType[*HTTPError](err)
-	// A typed nil *HTTPError has no fields to read; it answers as a plain error.
-	isHTTP = isHTTP && he != nil
+	he, isHTTP := httpErrorOf(err)
 	// A sentinel such as ErrNotFound, returned as it stands, wraps nothing and
 	// so cannot be context.Canceled; the check skips the walk for a 404.
 	bare := isHTTP && he.Err == nil && error(he) == err
@@ -462,7 +513,7 @@ func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 // handler wrote, or the one err asks for when the response committed before.
 // A bare HTTPError under 500 is an answer, not a failure, so it goes unlogged.
 //
-// he and isHTTP are errors.AsType[*HTTPError](err), which the caller has.
+// he and isHTTP are httpErrorOf(err), which the caller has.
 func logFailure(b *Base, err error, he *HTTPError, isHTTP, committedBefore bool) {
 	var status int
 	switch {
@@ -487,11 +538,16 @@ func logFailure(b *Base, err error, he *HTTPError, isHTTP, committedBefore bool)
 	case status < http.StatusInternalServerError:
 		level = slog.LevelWarn
 	}
-	b.Logger().Log(b.req.Context(), level, "router: request failed",
+	attrs := []any{
 		slog.String("method", b.req.Method),
 		slog.String("path", b.req.URL.Path),
 		slog.String("route", b.RoutePattern()),
 		slog.Int("status", status),
 		slog.Any("error", err),
-	)
+	}
+	// The text of a panic leaves the stack out, so the log adds it.
+	if pv, ok := errors.AsType[*PanicValue](err); ok && len(pv.Stack) > 0 {
+		attrs = append(attrs, slog.String("stack", string(pv.Stack)))
+	}
+	b.Logger().Log(b.req.Context(), level, "router: request failed", attrs...)
 }

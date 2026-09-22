@@ -17,7 +17,7 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-func loggerRouter(cfg middleware.LoggerConfig) (*router.Router[*appContext], *bytes.Buffer) {
+func loggerRouter(cfg middleware.LoggerConfig[*appContext]) (*router.Router[*appContext], *bytes.Buffer) {
 	var buf bytes.Buffer
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -32,7 +32,7 @@ func loggerRouter(cfg middleware.LoggerConfig) (*router.Router[*appContext], *by
 }
 
 func TestLoggerReportsTheStatusOfAFailedHandler(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{})
 
 	get(r, "/gone")
 	if !strings.Contains(buf.String(), "status=410") {
@@ -63,9 +63,9 @@ func TestLoggerReportsTheStatusTheErrorHandlerWrote(t *testing.T) {
 		if errors.Is(err, errLocked) {
 			return c.String(http.StatusLocked, "locked")
 		}
-		return router.DefaultErrorHandler(c, err)
+		return router.TextErrorHandler[*appContext](false)(c, err)
 	})
-	r.Use(middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+	r.Use(middleware.LoggerWithConfig(middleware.LoggerConfig[*appContext]{
 		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
 	}))
 	r.GET("/rows/{id}", func(*appContext) error { return errLocked })
@@ -85,7 +85,7 @@ func TestLoggerReportsTheStatusTheErrorHandlerWrote(t *testing.T) {
 }
 
 func TestLoggerReportsACancelledRequestAs499(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{})
 	r.Logger(slog.New(slog.DiscardHandler))
 	r.GET("/gone-away", func(c *appContext) error {
 		ctx, cancel := context.WithCancel(c.Request().Context())
@@ -108,10 +108,10 @@ func TestLoggerOutsideTimeoutLogsThe503(t *testing.T) {
 		r := newRouter()
 		r.Logger(slog.New(slog.DiscardHandler))
 		r.Use(
-			middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+			middleware.LoggerWithConfig(middleware.LoggerConfig[*appContext]{
 				Logger: slog.New(slog.NewTextHandler(&buf, nil)),
 			}),
-			middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: 20 * time.Millisecond}),
+			middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: 20 * time.Millisecond}),
 		)
 		r.GET("/slow", func(c *appContext) error {
 			<-c.Done()
@@ -128,7 +128,7 @@ func TestLoggerOutsideTimeoutLogsThe503(t *testing.T) {
 }
 
 func TestLoggerSkip(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{Skip: skipPath("/health")})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{Skip: skipPath("/health")})
 
 	get(r, "/health")
 	if buf.Len() != 0 {
@@ -142,7 +142,7 @@ func TestLoggerSkip(t *testing.T) {
 }
 
 func TestLoggerCustomMessage(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{Message: "http"})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{Message: "http"})
 
 	get(r, "/ok")
 	if !strings.Contains(buf.String(), `msg=http`) {
@@ -151,7 +151,7 @@ func TestLoggerCustomMessage(t *testing.T) {
 }
 
 func TestLoggerRecordsTheRequestItself(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{})
 
 	req := httptest.NewRequest(http.MethodGet, "/ok?token=secret", nil)
 	req.Header.Set(router.HeaderUserAgent, "curl/8.0")
@@ -180,7 +180,7 @@ func TestLoggerRecordsTheRequestItself(t *testing.T) {
 }
 
 func TestLoggerOmitsAHeaderThatTheRequestDoesNotCarry(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{})
 
 	get(r, "/ok")
 	if strings.Contains(buf.String(), "referer") {
@@ -192,7 +192,7 @@ func TestLoggerOmitsAHeaderThatTheRequestDoesNotCarry(t *testing.T) {
 }
 
 func TestLoggerDisableUserAgent(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{DisableUserAgent: true})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{DisableUserAgent: true})
 
 	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
 	req.Header.Set(router.HeaderUserAgent, "curl/8.0")
@@ -206,7 +206,7 @@ func TestLoggerDisableUserAgent(t *testing.T) {
 func TestLoggerRecordsTheHostThatAnsweredTheRequest(t *testing.T) {
 	var buf bytes.Buffer
 	r := newRouter()
-	r.Use(middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+	r.Use(middleware.LoggerWithConfig(middleware.LoggerConfig[*appContext]{
 		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
 	}))
 	r.Host("{tenant}.example.com", func(h *router.Router[*appContext]) {
@@ -227,8 +227,8 @@ func TestLoggerRecordsTheHostThatAnsweredTheRequest(t *testing.T) {
 }
 
 func TestLoggerAttrs(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{
-		Attrs: func(c router.Context, err error) []slog.Attr {
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{
+		Attrs: func(c *appContext, err error) []slog.Attr {
 			return []slog.Attr{
 				slog.String("tenant", "acme"),
 				slog.Bool("failed", err != nil),
@@ -252,7 +252,7 @@ func TestLoggerAttrs(t *testing.T) {
 }
 
 func TestLoggerLevelsSelectInfo(t *testing.T) {
-	r, buf := loggerRouter(middleware.LoggerConfig{
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{
 		ClientErrorLevel: slog.LevelInfo,
 		ServerErrorLevel: slog.LevelInfo,
 	})
@@ -270,7 +270,7 @@ func TestLoggerLevelsMoveAtRunTime(t *testing.T) {
 	var serverErrors slog.LevelVar
 	serverErrors.Set(slog.LevelError)
 
-	r, buf := loggerRouter(middleware.LoggerConfig{ServerErrorLevel: &serverErrors})
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{ServerErrorLevel: &serverErrors})
 
 	get(r, "/boom")
 	if !strings.Contains(buf.String(), "level=ERROR") {
@@ -293,7 +293,7 @@ func TestLoggerInsideBodyLimitAnswersAnOversizedBodyWith413(t *testing.T) {
 	r := newRouter()
 	r.Use(
 		middleware.BodyLimit[*appContext](4),
-		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+		middleware.LoggerWithConfig(middleware.LoggerConfig[*appContext]{
 			Logger: slog.New(slog.NewTextHandler(&buf, nil)),
 		}),
 	)

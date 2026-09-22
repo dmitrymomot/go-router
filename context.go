@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"slices"
@@ -42,8 +43,7 @@ type Context interface {
 // under it answers without a second allocation. Host parameters count too: a
 // "{tenant}.example.com" scope spends one before the path spends any. Going
 // over is not an error, it costs one allocation per request, and on a pooled
-// router that is the difference between zero and one. Route.Params and
-// InlineParamBudget let a route table assert it stays under.
+// router that is the difference between zero and one.
 const maxInlineParams = 4
 
 // Base carries the request, the response and the route. An application
@@ -70,15 +70,15 @@ type Base struct {
 	// One word rather than the fields it points to, which would push an
 	// embedder with a string of its own past 320 bytes and into the next size
 	// class.
-	deferred      *deferredState
-	resStorage    Response
-	hostIdx       int32
-	errorScopeIdx int32
-	hostKnown     bool
-	pathEscaped   bool
-	errorRouted   bool
-	needsCleanup  bool
-	errorHandled  bool
+	deferred   *deferredState
+	resStorage Response
+	// errIdx picks the error handler, in engine.errHandlers, that answers a
+	// failure of this request. 0, the root's, until routing picks one.
+	errIdx       int32
+	hostKnown    bool
+	pathEscaped  bool
+	needsCleanup bool
+	errorHandled bool
 
 	// Routing matches the path trimmed of its trailing slash, so a mounted
 	// handler has to be told the slash was there.
@@ -88,7 +88,6 @@ type Base struct {
 type routerOpts struct {
 	jsonOpts     []json.Options
 	logger       *slog.Logger
-	codec        *CookieCodec
 	answer       func(c Context, err error) // HandleError's way to the router that serves
 	maxBody      int64
 	maxMultipart int64
@@ -104,13 +103,17 @@ func (b *Base) opts() *routerOpts {
 }
 
 // NewBase builds a Base outside a router, for a test or for a handler that the
-// router never calls. The route, its parameters and the host stay empty, and
-// the Base has no cookie codec.
+// router never calls. The route, its parameters and the host stay empty.
 //
 // To test a handler of your own context type, let routertest.NewContext build
 // the whole context. It fills an embedded Base in place, whereas a struct
 // literal that copies *NewBase(w, r) keeps writing through the Base it was
 // copied from.
+//
+// The router removes the files that a multipart body spilled to disk once it
+// is done with the request. Outside a router nothing does: call RemoveAll on
+// the form of [Base.MultipartForm] when done. routertest.NewContext does it
+// when the test ends.
 //
 // NewBase panics if w or r is nil.
 func NewBase(w http.ResponseWriter, r *http.Request) *Base {
@@ -125,8 +128,7 @@ func NewBase(w http.ResponseWriter, r *http.Request) *Base {
 	return b
 }
 
-// Every request pays for this, so it has to stay under the inline budget:
-// go build -gcflags='-m=2' . 2>&1 | grep 'Base).init'
+// Every request pays for this, so keep it to plain stores.
 func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	res, ok := w.(*Response)
 	if !ok {
@@ -137,8 +139,8 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.route, b.rawTail = nil, ""
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
-	b.hostIdx = -1
-	b.pathEscaped, b.errorRouted, b.tailSlash = false, false, false
+	b.errIdx = 0
+	b.pathEscaped, b.tailSlash = false, false
 	b.queryCache = nil
 	b.deferred = nil
 	// clear on a map is a runtime call even when the map is nil, and most
@@ -149,7 +151,6 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Base) clearRequestSlow() {
-	b.resStorage.before = nil
 	clear(b.paramArr[:])
 	clear(b.paramVals[:cap(b.paramVals)])
 	b.paramVals = nil
@@ -165,7 +166,9 @@ func (b *Base) clearRequestSlow() {
 // deferredState holds what few requests need, so Base does not carry it.
 type deferredState struct {
 	form error
-	hx   error
+	// forms are the multipart forms whose spilled parts go once the request
+	// is done.
+	forms []*multipart.Form
 	// bodyLimit is the cap of SetBodyLimit: 0 leaves the router's, and -1
 	// lifts it.
 	bodyLimit int64
@@ -191,23 +194,10 @@ func (b *Base) setFormError(err error) error {
 	return err
 }
 
-func (b *Base) hxError() error {
-	if b.deferred == nil {
-		return nil
-	}
-	return b.deferred.hx
-}
-
-func (b *Base) setHXError(err error) {
-	if d := b.deferrals(); d.hx == nil {
-		d.hx = err
-	}
-}
-
 // routeRecord is what a matched route publishes to its Base. Registration
 // builds it, and every request of the route shares it, so it never changes.
 // Base holds one pointer to it rather than the pattern string, which keeps an
-// embedder with a string of its own in the 320-byte size class.
+// embedder with a string of its own in the 288-byte size class.
 type routeRecord struct {
 	pattern string
 	meta    []any
@@ -252,8 +242,7 @@ func (b *Base) SetRequest(r *http.Request) {
 // A context derived from b is fine to pass on, to a [Component] or to domain
 // code, but it must not come back as the request context: b looks up in the
 // request context what it lacks itself. Derive ctx from Request().Context(),
-// so that it still ends when the client goes away and the files that
-// [Base.Bind] spilled to disk are still removed with the request.
+// so that it still ends when the client goes away.
 //
 // SetContext panics if ctx is nil or derives from b.
 func (b *Base) SetContext(ctx context.Context) {
@@ -283,12 +272,9 @@ func (b *Base) Logger() *slog.Logger {
 }
 
 // Response reports the response writer, which records the status and the
-// number of bytes written.
+// number of bytes written. It is an [http.ResponseWriter], so a library that
+// takes one takes it as it stands.
 func (b *Base) Response() *Response { return b.res }
-
-// ResponseWriter reports the response as an [http.ResponseWriter], for a
-// library that takes one.
-func (b *Base) ResponseWriter() http.ResponseWriter { return b.res }
 
 // releasedRequest stands in for the request once the handler has returned, so a
 // Base held past its request reads as a finished context rather than
@@ -405,11 +391,6 @@ func (b *Base) Host() string {
 	return b.host
 }
 
-// IsTLS reports whether the client reached this server over TLS. It reads the
-// connection and not a header, so a request that a proxy forwarded in plain
-// HTTP reports false.
-func (b *Base) IsTLS() bool { return b.req.TLS != nil }
-
 // Scheme reports "https" or "http". See [SchemeOf].
 func (b *Base) Scheme() string { return SchemeOf(b.req) }
 
@@ -450,16 +431,15 @@ func joinAccept(r *http.Request) string {
 	return strings.Join(values, ",")
 }
 
-// Param reports the route parameter name, or "" when the route carries no such
-// parameter. Use [Base.ParamOK] to tell an empty value from a missing one.
+// Param reports the route parameter name, of the path or the host, or "" when
+// the route carries no such parameter. [Base.ParamNames] lists the names the
+// route has.
 func (b *Base) Param(name string) string {
-	v, _ := b.ParamOK(name)
+	v, _ := b.param(name)
 	return v
 }
 
-// ParamOK reports the route parameter name. ok is false when the route carries
-// no such parameter.
-func (b *Base) ParamOK(name string) (string, bool) {
+func (b *Base) param(name string) (string, bool) {
 	for i, n := range b.paramNames {
 		if n == name && i < len(b.paramVals) {
 			return b.paramVals[i], true
@@ -480,10 +460,6 @@ func (b *Base) Path() string { return b.req.URL.Path }
 
 // URL reports the URL of the request.
 func (b *Base) URL() *url.URL { return b.req.URL }
-
-// Header reports the headers that came in with the request. Write to
-// [Base.SetHeader] or to the header of [Base.Response] to answer.
-func (b *Base) Header() http.Header { return b.req.Header }
 
 // SetHeader sets a header of the response, replacing any earlier value.
 func (b *Base) SetHeader(key, value string) { b.res.Header().Set(key, value) }
@@ -514,26 +490,9 @@ func (b *Base) queryValues() url.Values {
 }
 
 // Query reports the first query parameter name, or "" when it is absent.
+// [Base.QueryAs] reads it as another type, and [Base.QueryValues] tells an
+// empty value from an absent one.
 func (b *Base) Query(name string) string { return b.queryValues().Get(name) }
-
-// QueryOK reports the first query parameter name. ok is false when the query
-// carries no such parameter.
-func (b *Base) QueryOK(name string) (string, bool) {
-	v, ok := b.queryValues()[name]
-	if !ok || len(v) == 0 {
-		return "", false
-	}
-	return v[0], true
-}
-
-// QueryDefault reports the first query parameter name, or def when it is
-// absent or empty.
-func (b *Base) QueryDefault(name, def string) string {
-	if v := b.queryValues()[name]; len(v) > 0 && v[0] != "" {
-		return v[0]
-	}
-	return def
-}
 
 // QueryValues reports the parsed query. The router parses it once per request
 // and hands back the same map, so the caller must not change it.

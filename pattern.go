@@ -38,7 +38,13 @@ type matcher struct {
 	key   string
 }
 
+// mountParam names the catch-all that MountHandler and RedirectHost append.
+// No pattern can spell it, because "*" is not a parameter name, so it never
+// takes a name from the routes around it.
 const mountParam = "*"
+
+// mountRest is how a pattern reports that catch-all, as in [Router.Routes].
+const mountRest = "/{" + mountParam + "...}"
 
 func normalizePattern(p string) string {
 	if p == "" {
@@ -97,17 +103,6 @@ func parsePattern(pattern string, classes classLookup) ([]segment, []string, err
 		}
 
 		switch {
-		case raw == "*":
-			// {*} spells the same name through the brace branch, which checks
-			// for duplicates. This one did not, so "/{*}/*" registered with two
-			// parameters called "*": Param returned only the first, and Expand
-			// could fill only one of them.
-			if slices.Contains(names, mountParam) {
-				return nil, nil, fmt.Errorf("router: duplicate parameter %q in %q", mountParam, pattern)
-			}
-			segs = append(segs, segment{kind: segWildcard, value: mountParam})
-			names = append(names, mountParam)
-
 		case isWholeBrace(raw):
 			name, expr, wildcard, err := parseBraceSegment(raw, pattern)
 			if err != nil {
@@ -145,7 +140,7 @@ func parsePattern(pattern string, classes classLookup) ([]segment, []string, err
 
 		default:
 			if strings.Contains(raw, "*") {
-				return nil, nil, fmt.Errorf("router: a catch-all must span a whole segment, but %q does not in %q", raw, pattern)
+				return nil, nil, fmt.Errorf("router: %q in %q holds '*'; a catch-all is spelled {name...}", raw, pattern)
 			}
 			if err := checkLiteral(raw, pattern); err != nil {
 				return nil, nil, err
@@ -264,10 +259,10 @@ func parseTemplate(raw, pattern string, classes classLookup) ([]segPart, []strin
 		i = end + 1
 
 		name, expr, _ := strings.Cut(body, ":")
-		switch {
-		case name == "":
-			return nil, nil, fmt.Errorf("router: empty parameter name in %q", pattern)
-		case strings.HasSuffix(body, "..."):
+		if err := checkParamName(name, pattern); err != nil {
+			return nil, nil, err
+		}
+		if strings.HasSuffix(body, "...") {
 			return nil, nil, fmt.Errorf("router: a catch-all must span a whole segment, but %q does not in %q", raw, pattern)
 		}
 
@@ -421,22 +416,26 @@ func parseBraceSegment(raw, pattern string) (name, expr string, wildcard bool, e
 	}
 
 	body := raw[1:end]
-	if name, expr, ok := strings.Cut(body, ":"); ok {
-		if name == "" {
-			return "", "", false, fmt.Errorf("router: empty parameter name in %q", pattern)
-		}
-		return name, expr, false, nil
+	name, expr, constrained := strings.Cut(body, ":")
+	if !constrained {
+		name, wildcard = strings.CutSuffix(body, "...")
 	}
-	if after, ok := strings.CutSuffix(body, "..."); ok {
-		if after == "" {
-			return "", "", false, fmt.Errorf("router: empty parameter name in %q", pattern)
-		}
-		return after, "", true, nil
+	if err := checkParamName(name, pattern); err != nil {
+		return "", "", false, err
 	}
-	if body == "" {
-		return "", "", false, fmt.Errorf("router: empty parameter name in %q", pattern)
+	return name, expr, wildcard, nil
+}
+
+// checkParamName refuses an empty name and "*", which the router keeps for
+// the catch-all of a mount.
+func checkParamName(name, pattern string) error {
+	switch name {
+	case "":
+		return fmt.Errorf("router: empty parameter name in %q", pattern)
+	case mountParam:
+		return fmt.Errorf("router: %q is not a parameter name in %q; a catch-all is spelled {name...}", name, pattern)
 	}
-	return body, "", false, nil
+	return nil
 }
 
 // classLookup finds the parameter class a constraint names, or nil.

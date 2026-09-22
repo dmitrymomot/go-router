@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/serve"
 )
@@ -33,11 +34,13 @@ const addr = "localhost:8080"
 
 const maxBodyBytes = 8 << 10
 
-// Context is what every handler receives. The signed-in email and the
+// Context is what every handler receives. The factory gives it the store and
+// the codec that signs the session cookie. The signed-in email and the
 // workspace of the subdomain are filled in by middleware.
 type Context struct {
 	router.Base
 	Store     *Store
+	Cookies   *cookie.Codec
 	Email     string
 	Workspace Workspace
 }
@@ -48,7 +51,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	r := newRouter(NewStore(), router.NewCookieCodec(sessionKey()))
+	r := newRouter(NewStore(), cookie.NewCodec(sessionKey()))
 
 	if err := serve.Run(ctx, r, serve.Config{
 		Addr:              addr,
@@ -67,20 +70,19 @@ func main() {
 	}
 }
 
-func newRouter(store *Store, codec *router.CookieCodec) *router.Router[Ctx] {
+func newRouter(store *Store, codec *cookie.Codec) *router.Router[Ctx] {
 	r := router.New(func(http.ResponseWriter, *http.Request) Ctx {
-		return &Context{Store: store}
+		return &Context{Store: store, Cookies: codec}
 	})
 
 	r.ErrorHandler(renderError)
-	r.CookieCodec(codec)
 
 	r.Use(
 		middleware.Logger[Ctx],
 		middleware.Recover[Ctx],
 		middleware.Secure[Ctx],
 		middleware.BodyLimit[Ctx](maxBodyBytes),
-		middleware.CSRFWithConfig[Ctx](middleware.CSRFConfig{
+		middleware.CSRFWithConfig(middleware.CSRFConfig[Ctx]{
 			CookieHTTPOnly: true,
 			CookieSameSite: http.SameSiteLaxMode,
 		}),
@@ -91,7 +93,7 @@ func newRouter(store *Store, codec *router.CookieCodec) *router.Router[Ctx] {
 	// exact host wins over a pattern, so www never reads as a workspace named
 	// "www".
 	r.Host(baseDomain, apexRoutes)
-	r.RedirectHost("www."+baseDomain, baseDomain, http.StatusMovedPermanently)
+	r.RedirectHost("www."+baseDomain, http.StatusMovedPermanently, baseDomain)
 
 	// One table for every workspace: the subdomain is the {tenant} parameter.
 	r.Host(tenantHost, workspaceRoutes)
@@ -127,10 +129,10 @@ func renderError(c Ctx, err error) error {
 // every session with the process, which is right for an example and wrong for
 // a service.
 func sessionKey() []byte {
-	if key := []byte(os.Getenv("SESSION_KEY")); len(key) >= router.MinCookieKeyLen {
+	if key := []byte(os.Getenv("SESSION_KEY")); len(key) >= cookie.MinKeyLen {
 		return key
 	}
-	key := make([]byte, router.MinCookieKeyLen)
+	key := make([]byte, cookie.MinKeyLen)
 	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program.
 	rand.Read(key)
 	slog.Info("no SESSION_KEY of 32 bytes or more, so this run signs with a new one")

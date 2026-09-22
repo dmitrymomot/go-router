@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -20,13 +21,14 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
 // fakeIdempotencyStore wraps the memory store to count the calls, note when
 // each Claim ran, and fail on demand.
 type fakeIdempotencyStore struct {
-	middleware.IdempotencyStore[*appContext]
+	middleware.IdempotencyStore
 	claimErr    error
 	completeErr error
 	claimTimes  []time.Time
@@ -37,10 +39,10 @@ type fakeIdempotencyStore struct {
 }
 
 func newFakeIdempotencyStore() *fakeIdempotencyStore {
-	return &fakeIdempotencyStore{IdempotencyStore: middleware.NewIdempotencyMemoryStore[*appContext](0)}
+	return &fakeIdempotencyStore{IdempotencyStore: middleware.NewIdempotencyMemoryStore(0)}
 }
 
-func (s *fakeIdempotencyStore) Claim(c *appContext, key string, fp []byte) (middleware.IdempotencyEntry, bool, error) {
+func (s *fakeIdempotencyStore) Claim(c router.Context, key string, fp []byte) (middleware.IdempotencyEntry, bool, error) {
 	s.claims.Add(1)
 	s.mu.Lock()
 	s.claimTimes = append(s.claimTimes, time.Now())
@@ -51,7 +53,7 @@ func (s *fakeIdempotencyStore) Claim(c *appContext, key string, fp []byte) (midd
 	return s.IdempotencyStore.Claim(c, key, fp)
 }
 
-func (s *fakeIdempotencyStore) Complete(c *appContext, key string, rec router.Recorded) error {
+func (s *fakeIdempotencyStore) Complete(c router.Context, key string, rec router.Recorded) error {
 	s.completes.Add(1)
 	if s.completeErr != nil {
 		return s.completeErr
@@ -59,7 +61,7 @@ func (s *fakeIdempotencyStore) Complete(c *appContext, key string, rec router.Re
 	return s.IdempotencyStore.Complete(c, key, rec)
 }
 
-func (s *fakeIdempotencyStore) Release(c *appContext, key string) error {
+func (s *fakeIdempotencyStore) Release(c router.Context, key string) error {
 	s.releases.Add(1)
 	return s.IdempotencyStore.Release(c, key)
 }
@@ -80,7 +82,7 @@ func (s *seenErrors) handle(c *appContext, err error) error {
 	s.mu.Lock()
 	s.errs = append(s.errs, err)
 	s.mu.Unlock()
-	return router.DefaultErrorHandler(c, err)
+	return router.TextErrorHandler[*appContext](false)(c, err)
 }
 
 func (s *seenErrors) count() int {
@@ -136,9 +138,9 @@ func (p *payments) pay(c *appContext) error {
 	if p.gate != nil {
 		<-p.gate
 	}
-	c.Response().Header().Set(router.HeaderHXRedirect, "/receipts/"+strconv.Itoa(int(n)))
+	c.Response().Header().Set(htmx.HeaderRedirect, "/receipts/"+strconv.Itoa(int(n)))
 	http.SetCookie(c.Response(), &http.Cookie{Name: "_flash", Value: "paid"})
-	return c.Stringf(http.StatusCreated, "payment %d of %s", n, c.FormValue("amount"))
+	return c.String(http.StatusCreated, fmt.Sprintf("payment %d of %s", n, c.FormValue("amount")))
 }
 
 func amount(v string) url.Values { return url.Values{"amount": {v}} }
@@ -148,7 +150,7 @@ func sameAnswer(t *testing.T, a, b *httptest.ResponseRecorder) {
 	if a.Code != b.Code || a.Body.String() != b.Body.String() {
 		t.Errorf("answers differ: %d %q and %d %q", a.Code, a.Body, b.Code, b.Body)
 	}
-	for _, k := range []string{router.HeaderHXRedirect, "Set-Cookie"} {
+	for _, k := range []string{htmx.HeaderRedirect, "Set-Cookie"} {
 		if got, want := b.Header().Values(k), a.Header().Values(k); strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
@@ -159,7 +161,7 @@ func sameAnswer(t *testing.T, a, b *httptest.ResponseRecorder) {
 func TestIdempotencyRunsADoubleSubmitOnce(t *testing.T) {
 	p := &payments{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	store := newFakeIdempotencyStore()
-	r := idempotencyRouter(nil, middleware.Idempotency(store))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 	r.POST("/pay", p.pay)
 
 	var first, second *httptest.ResponseRecorder
@@ -202,7 +204,7 @@ func TestIdempotencyRefusesAReusedKeyWithAnotherRequest(t *testing.T) {
 					p.gate, p.entered = make(chan struct{}), make(chan struct{}, 1)
 				}
 				seen := &seenErrors{}
-				r := idempotencyRouter(seen, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+				r := idempotencyRouter(seen, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 				r.POST("/pay", p.pay)
 				r.POST("/refund", p.pay)
 				r.PUT("/pay", p.pay)
@@ -241,7 +243,7 @@ func TestIdempotencyRefusesAMismatchWithoutWaiting(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := &payments{gate: make(chan struct{})}
 		store := newFakeIdempotencyStore()
-		r := idempotencyRouter(nil, middleware.Idempotency(store))
+		r := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 		r.POST("/pay", p.pay)
 
 		var wg sync.WaitGroup
@@ -287,7 +289,7 @@ func TestIdempotencyRequiredRefusesAMissingKey(t *testing.T) {
 		t.Errorf("GET without a key: status = %d, want 201", rec.Code)
 	}
 
-	optional := idempotencyRouter(nil, middleware.Idempotency(store))
+	optional := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 	optional.POST("/pay", p.pay)
 	before := p.runs.Load()
 	postKey(optional, "/pay", "", amount("5"))
@@ -303,7 +305,7 @@ func TestIdempotencyAnswersAConflictWhileTheFirstRuns(t *testing.T) {
 			p := &payments{gate: make(chan struct{})}
 			store := newFakeIdempotencyStore()
 			seen := &seenErrors{}
-			r := idempotencyRouter(seen, middleware.Idempotency(store))
+			r := idempotencyRouter(seen, middleware.Idempotency[*appContext](store))
 			r.POST("/pay", p.pay)
 
 			var wg sync.WaitGroup
@@ -361,7 +363,7 @@ func TestIdempotencyAnswersAConflictWhileTheFirstRuns(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			var runs atomic.Int32
 			r := idempotencyRouter(nil, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-				Store: middleware.NewIdempotencyMemoryStore[*appContext](0), Wait: 50 * time.Millisecond,
+				Store: middleware.NewIdempotencyMemoryStore(0), Wait: 50 * time.Millisecond,
 			}))
 			r.POST("/pay", func(c *appContext) error {
 				if runs.Add(1) == 1 {
@@ -387,7 +389,7 @@ func TestIdempotencyTakesAKeyReleasedWhileWaiting(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		gate := make(chan struct{})
 		var runs atomic.Int32
-		r := idempotencyRouter(nil, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+		r := idempotencyRouter(nil, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 		r.POST("/pay", func(c *appContext) error {
 			if runs.Add(1) == 1 {
 				<-gate
@@ -425,7 +427,7 @@ func TestIdempotencyStopsWaitingWhenTheClientLeaves(t *testing.T) {
 			}
 			return err
 		}
-	}, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	}, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", p.pay)
 
 	var wg sync.WaitGroup
@@ -448,19 +450,13 @@ func TestIdempotencyStopsWaitingWhenTheClientLeaves(t *testing.T) {
 	wg.Wait()
 }
 
-func TestIdempotencyScopesKeys(t *testing.T) {
+func TestIdempotencyClientOwnsKeys(t *testing.T) {
 	p := &payments{}
 	store := newFakeIdempotencyStore()
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-		Store: store,
-		Scope: func(c *appContext) (string, error) {
-			user := c.Request().Header.Get("X-User")
-			if user == "anonymous" {
-				return "", errors.New("no session")
-			}
-			return user, nil
-		},
+		Store:  store,
+		Client: func(c *appContext) string { return c.Request().Header.Get("X-User") },
 	}))
 	r.POST("/pay", p.pay)
 
@@ -476,14 +472,6 @@ func TestIdempotencyScopesKeys(t *testing.T) {
 	}
 	sameAnswer(t, alice, as("alice"))
 
-	claims := store.claims.Load()
-	if rec := as("anonymous"); rec.Code != http.StatusForbidden {
-		t.Errorf("a Scope error: status = %d, want 403", rec.Code)
-	}
-	if store.claims.Load() != claims {
-		t.Error("a Scope error reached the store")
-	}
-
 	nobody := as("")
 	sameAnswer(t, nobody, as(""))
 	if n := p.runs.Load(); n != 3 {
@@ -494,7 +482,7 @@ func TestIdempotencyScopesKeys(t *testing.T) {
 func TestIdempotencyReleasesAKeyWhenTheHandlerFails(t *testing.T) {
 	var runs atomic.Int32
 	store := newFakeIdempotencyStore()
-	r := idempotencyRouter(nil, middleware.Idempotency(store))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 	r.POST("/pay", func(c *appContext) error {
 		if runs.Add(1) == 1 {
 			return router.ErrBadRequest.WithMessage("the card was declined")
@@ -515,7 +503,7 @@ func TestIdempotencyReleasesAKeyWhenTheHandlerFails(t *testing.T) {
 
 func TestIdempotencyRunsARepeatOfA5xxAgain(t *testing.T) {
 	var runs atomic.Int32
-	r := idempotencyRouter(nil, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		if runs.Add(1) == 1 {
 			return c.String(http.StatusBadGateway, "the bank is down")
@@ -531,7 +519,7 @@ func TestIdempotencyRunsARepeatOfA5xxAgain(t *testing.T) {
 
 func TestIdempotencyReplaysARedirectWithNoBody(t *testing.T) {
 	var runs atomic.Int32
-	r := idempotencyRouter(nil, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
 		return c.Redirect(http.StatusSeeOther, "/receipt")
@@ -554,8 +542,8 @@ func TestIdempotencyReleasesAKeyOnATimeout(t *testing.T) {
 			var runs atomic.Int32
 			store := newFakeIdempotencyStore()
 			r := idempotencyRouter(nil,
-				middleware.Idempotency(store),
-				middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{
+				middleware.Idempotency[*appContext](store),
+				middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{
 					Duration: 10 * time.Millisecond,
 					Status:   status,
 				}))
@@ -590,7 +578,7 @@ func TestIdempotencyKeepsTheKeyOfAnAnswerTooLargeToKeep(t *testing.T) {
 	var runs atomic.Int32
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-		Store: middleware.NewIdempotencyMemoryStore[*appContext](0), MaxBody: 4,
+		Store: middleware.NewIdempotencyMemoryStore(0), MaxBody: 4,
 	}))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
@@ -617,7 +605,7 @@ func TestIdempotencyKeepsTheKeyWhenCompleteFails(t *testing.T) {
 		var logs bytes.Buffer
 		store := newFakeIdempotencyStore()
 		store.completeErr = errors.New("redis is down")
-		r := idempotencyRouter(nil, middleware.Idempotency(store))
+		r := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 		r.Logger(slog.New(slog.NewTextHandler(&logs, nil)))
 		r.POST("/pay", func(c *appContext) error {
 			runs.Add(1)
@@ -654,7 +642,7 @@ func (brokenWriter) WriteString(string) (int, error) { return 0, errors.New("the
 
 func TestIdempotencyKeepsTheKeyOfASuccessWhoseWriteFailed(t *testing.T) {
 	var runs atomic.Int32
-	r := idempotencyRouter(nil, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
 		return c.String(http.StatusCreated, "paid")
@@ -671,9 +659,9 @@ func TestIdempotencyReleasesTheKeyOfAPanicAndKeepsTheStack(t *testing.T) {
 	var runs atomic.Int32
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen,
-		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{Logger: slog.New(slog.DiscardHandler)}),
+		middleware.LoggerWithConfig(middleware.LoggerConfig[*appContext]{Logger: slog.New(slog.DiscardHandler)}),
 		middleware.Recover[*appContext],
-		middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+		middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		if runs.Add(1) == 1 {
 			panic("the ledger is locked")
@@ -722,7 +710,7 @@ func TestIdempotencyNeverCallsHandleError(t *testing.T) {
 	p := &payments{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-		Store: middleware.NewIdempotencyMemoryStore[*appContext](0), Wait: -1, Required: true,
+		Store: middleware.NewIdempotencyMemoryStore(0), Wait: -1, Required: true,
 	}))
 	r.POST("/pay", p.pay)
 
@@ -759,7 +747,7 @@ func TestIdempotencyNeverCallsHandleError(t *testing.T) {
 }
 
 func TestIdempotencyKeepsFlushWorking(t *testing.T) {
-	r := idempotencyRouter(nil, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		if _, err := c.Response().WriteString("part"); err != nil {
 			return err
@@ -780,7 +768,7 @@ func TestIdempotencyKeepsFlushWorking(t *testing.T) {
 func TestIdempotencyReplaysOnlyTheHeadersTheHandlerSet(t *testing.T) {
 	r := idempotencyRouter(nil,
 		middleware.RequestID[*appContext],
-		middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+		middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		c.Response().Header().Set("X-Charge", "ch_1")
 		return c.String(http.StatusCreated, "paid")
@@ -800,7 +788,7 @@ func TestIdempotencyReplaysOnlyTheHeadersTheHandlerSet(t *testing.T) {
 func TestIdempotencyReplaysOnlyTheCookiesTheHandlerSet(t *testing.T) {
 	r := idempotencyRouter(nil,
 		middleware.CSRF[*appContext],
-		middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+		middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		http.SetCookie(c.Response(), &http.Cookie{Name: "receipt", Value: "r1"})
 		return c.String(http.StatusCreated, "paid")
@@ -822,20 +810,18 @@ func TestIdempotencyReplaysOnlyTheCookiesTheHandlerSet(t *testing.T) {
 	}
 }
 
-// Regression: a replay sent the session cookie that a callback in front set on
-// the first request, next to the one it set for the repeat.
-func TestIdempotencyDoesNotReplayACookieAnOuterCallbackSet(t *testing.T) {
+// Regression: a replay sent the session cookie that a middleware in front set
+// on the first request, next to the one it set for the repeat.
+func TestIdempotencyDoesNotReplayACookieAnOuterMiddlewareSet(t *testing.T) {
 	var sessions atomic.Int32
 	session := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
 		return func(c *appContext) error {
 			sid := strconv.Itoa(int(sessions.Add(1)))
-			c.Response().Before(func() {
-				http.SetCookie(c.Response(), &http.Cookie{Name: "sid", Value: sid})
-			})
+			http.SetCookie(c.Response(), &http.Cookie{Name: "sid", Value: sid})
 			return next(c)
 		}
 	}
-	r := idempotencyRouter(nil, session, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r := idempotencyRouter(nil, session, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		http.SetCookie(c.Response(), &http.Cookie{Name: "receipt", Value: "r1"})
 		return c.String(http.StatusCreated, "paid")
@@ -860,7 +846,7 @@ func TestIdempotencyReplaysAHeaderTheHandlerRemoved(t *testing.T) {
 			return next(c)
 		}
 	}
-	r := idempotencyRouter(nil, noStore, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r := idempotencyRouter(nil, noStore, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		c.Response().Header().Del(router.HeaderCacheControl)
 		return c.String(http.StatusCreated, "paid")
@@ -877,25 +863,25 @@ func TestIdempotencyUnderAnOuterHTMXRedirect(t *testing.T) {
 	var runs atomic.Int32
 	r := idempotencyRouter(nil,
 		middleware.HTMXRedirect[*appContext],
-		middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+		middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
 		return c.Redirect(http.StatusSeeOther, "/receipt")
 	})
 
-	send := func(htmx bool) *httptest.ResponseRecorder {
+	send := func(hx bool) *httptest.ResponseRecorder {
 		req := idempotentRequest(http.MethodPost, "/pay", "k", amount("5"))
-		if htmx {
-			req.Header.Set(router.HeaderHXRequest, "true")
+		if hx {
+			req.Header.Set(htmx.HeaderRequest, "true")
 		}
 		return do(r, req)
 	}
-	for i, htmx := range []bool{true, true, false} {
-		rec := send(htmx)
-		if htmx && (rec.Code != http.StatusOK || rec.Header().Get(router.HeaderHXRedirect) != "/receipt") {
-			t.Errorf("request %d: %d HX-Redirect %q, want 200 to /receipt", i, rec.Code, rec.Header().Get(router.HeaderHXRedirect))
+	for i, hx := range []bool{true, true, false} {
+		rec := send(hx)
+		if hx && (rec.Code != http.StatusOK || rec.Header().Get(htmx.HeaderRedirect) != "/receipt") {
+			t.Errorf("request %d: %d HX-Redirect %q, want 200 to /receipt", i, rec.Code, rec.Header().Get(htmx.HeaderRedirect))
 		}
-		if !htmx && (rec.Code != http.StatusSeeOther || rec.Header().Get(router.HeaderLocation) != "/receipt") {
+		if !hx && (rec.Code != http.StatusSeeOther || rec.Header().Get(router.HeaderLocation) != "/receipt") {
 			t.Errorf("request %d: %d Location %q, want 303 to /receipt", i, rec.Code, rec.Header().Get(router.HeaderLocation))
 		}
 	}
@@ -909,7 +895,7 @@ func TestIdempotencyUnderAnOuterGzip(t *testing.T) {
 	var runs atomic.Int32
 	r := idempotencyRouter(nil,
 		middleware.Gzip[*appContext],
-		middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+		middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
 		return c.String(http.StatusCreated, body)
@@ -979,7 +965,7 @@ func TestIdempotencyPassesSafeMethodsAndSkip(t *testing.T) {
 
 func TestIdempotencyRefusesAnOverlongKey(t *testing.T) {
 	store := newFakeIdempotencyStore()
-	r := idempotencyRouter(nil, middleware.Idempotency(store))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 	r.POST("/pay", (&payments{}).pay)
 
 	key := strings.Repeat("k", middleware.MaxIdempotencyKeyLength+1)
@@ -997,7 +983,7 @@ func TestIdempotencyRefusesAnOverlongKey(t *testing.T) {
 func TestIdempotencyStoreErrorIsAServerFault(t *testing.T) {
 	store := newFakeIdempotencyStore()
 	store.claimErr = errors.New("redis at 10.0.0.7 is down")
-	r := idempotencyRouter(nil, middleware.Idempotency(store))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 	r.POST("/pay", (&payments{}).pay)
 
 	rec := postKey(r, "/pay", "k", amount("5"))
@@ -1006,8 +992,8 @@ func TestIdempotencyStoreErrorIsAServerFault(t *testing.T) {
 	}
 
 	p := &payments{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
-	full := idempotencyRouter(nil, middleware.Idempotency(
-		middleware.NewIdempotencyMemoryStoreWithConfig[*appContext](middleware.IdempotencyMemoryStoreConfig{MaxEntries: 1})))
+	full := idempotencyRouter(nil, middleware.Idempotency[*appContext](
+		middleware.NewIdempotencyMemoryStoreWithConfig(middleware.IdempotencyMemoryStoreConfig{MaxEntries: 1})))
 	full.POST("/pay", p.pay)
 	var wg sync.WaitGroup
 	wg.Go(func() { postKey(full, "/pay", "a", amount("5")) })
@@ -1039,7 +1025,7 @@ func multipartBody(t *testing.T, fileContent string) (*bytes.Buffer, string) {
 	return &buf, mw.FormDataContentType()
 }
 
-func TestIdempotencyFormFingerprint(t *testing.T) {
+func TestIdempotencyDefaultFingerprint(t *testing.T) {
 	form := func(target, body string) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 		req.Header.Set(router.HeaderContentType, router.MIMEApplicationForm)
@@ -1056,6 +1042,13 @@ func TestIdempotencyFormFingerprint(t *testing.T) {
 	plain := func(target, body string) func(*testing.T) *http.Request {
 		return func(*testing.T) *http.Request { return form(target, body) }
 	}
+	raw := func(contentType, body string) func(*testing.T) *http.Request {
+		return func(*testing.T) *http.Request {
+			req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(body))
+			req.Header.Set(router.HeaderContentType, contentType)
+			return req
+		}
+	}
 	tests := []struct {
 		first, repeat func(*testing.T) *http.Request
 		name          string
@@ -1067,14 +1060,19 @@ func TestIdempotencyFormFingerprint(t *testing.T) {
 		{name: "another amount", first: plain("/pay", "amount=5"), repeat: plain("/pay", "amount=9"), want: http.StatusUnprocessableEntity},
 		{name: "a file of another size", first: upload("12345"), repeat: upload("123456"), want: http.StatusUnprocessableEntity},
 		{name: "the same file", first: upload("12345"), repeat: upload("12345"), want: http.StatusCreated},
-		// The query and the host are not covered, as the doc says.
-		{name: "another query", first: plain("/pay?ref=a", "amount=5"), repeat: plain("/pay?ref=b", "amount=5"), want: http.StatusCreated},
+		{name: "another query", first: plain("/pay?ref=a", "amount=5"), repeat: plain("/pay?ref=b", "amount=5"), want: http.StatusUnprocessableEntity},
+		{name: "the same JSON", first: raw("application/json", `{"amount":1}`), repeat: raw("application/json", `{"amount":1}`), want: http.StatusCreated},
+		{name: "another JSON body", first: raw("application/json", `{"amount":1}`), repeat: raw("application/json", `{"amount":999}`), want: http.StatusUnprocessableEntity},
+		{name: "another content type", first: raw("application/json", `{}`), repeat: raw("text/plain", `{}`), want: http.StatusUnprocessableEntity},
+		{name: "another charset", first: raw("application/json", `{}`), repeat: raw("application/json; charset=utf-8", `{}`), want: http.StatusCreated},
+		{name: "another multipart boundary", first: upload("12345"), repeat: upload("12345"), want: http.StatusCreated},
+		// The host is not covered, as the doc says.
 		{name: "another host", first: plain("http://a.example/pay", "amount=5"), repeat: plain("http://b.example/pay", "amount=5"), want: http.StatusCreated},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var runs atomic.Int32
-			r := idempotencyRouter(nil, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+			r := idempotencyRouter(nil, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 			r.POST("/pay", func(c *appContext) error {
 				runs.Add(1)
 				return c.NoContent(http.StatusCreated)
@@ -1097,16 +1095,11 @@ func TestIdempotencyFormFingerprint(t *testing.T) {
 			}
 		})
 	}
-
-	b := router.NewBase(httptest.NewRecorder(), form("/pay", "amount=5"))
-	if fp, err := middleware.IdempotencyFormFingerprint(b); err != nil || len(fp) != 32 {
-		t.Errorf("fingerprint of a bare Base = %x, %v; want 32 bytes", fp, err)
-	}
 }
 
 func TestIdempotencyFingerprintErrorStopsTheRequest(t *testing.T) {
 	store := newFakeIdempotencyStore()
-	r := idempotencyRouter(nil, middleware.Idempotency(store))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](store))
 	r.MaxBodyBytes(16)
 	r.POST("/pay", (&payments{}).pay)
 
@@ -1120,7 +1113,7 @@ func TestIdempotencyFingerprintErrorStopsTheRequest(t *testing.T) {
 }
 
 func TestIdempotencyWithConfigPanics(t *testing.T) {
-	store := middleware.NewIdempotencyMemoryStore[*appContext](0)
+	store := middleware.NewIdempotencyMemoryStore(0)
 	tests := []struct {
 		name string
 		want string
@@ -1152,7 +1145,7 @@ func TestIdempotencyPanicsOnANilStore(t *testing.T) {
 
 func TestIdempotencyMemoryStoreRunsOneOfManyRacers(t *testing.T) {
 	var runs atomic.Int32
-	r := idempotencyRouter(nil, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r := idempotencyRouter(nil, middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
 		time.Sleep(20 * time.Millisecond)
@@ -1188,5 +1181,126 @@ func TestIdempotencyMemoryStoreRunsOneOfManyRacers(t *testing.T) {
 		default:
 			t.Errorf("racer %d: %d %q with the winner %q", i, code, bodies[i], winner)
 		}
+	}
+}
+
+func TestIdempotencyDefaultFingerprintCoversAJSONBody(t *testing.T) {
+	var runs atomic.Int32
+	r := newRouter()
+	r.Use(middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
+	r.POST("/pay", func(c *appContext) error {
+		runs.Add(1)
+		body, _ := io.ReadAll(c.Request().Body)
+		return c.String(http.StatusOK, string(body))
+	})
+	send := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(body))
+		req.Header.Set(router.HeaderContentType, "application/json")
+		req.Header.Set(router.HeaderIdempotencyKey, "k1")
+		return do(r, req)
+	}
+	if rec := send(`{"amount":1}`); rec.Code != http.StatusOK || rec.Body.String() != `{"amount":1}` {
+		t.Fatalf("first = %d %q", rec.Code, rec.Body)
+	}
+	if rec := send(`{"amount":999}`); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("second with another body = %d, want 422", rec.Code)
+	}
+}
+
+func TestIdempotencyKeysBelongToTheClientAddress(t *testing.T) {
+	var runs atomic.Int32
+	r := newRouter()
+	r.Use(middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
+	r.POST("/pay", func(c *appContext) error {
+		runs.Add(1)
+		return c.NoContent(http.StatusCreated)
+	})
+	for _, addr := range []string{"192.0.2.1:1", "192.0.2.2:1"} {
+		req := httptest.NewRequest(http.MethodPost, "/pay", nil)
+		req.RemoteAddr = addr
+		req.Header.Set(router.HeaderIdempotencyKey, "k1")
+		do(r, req)
+	}
+	if n := runs.Load(); n != 2 {
+		t.Errorf("runs = %d, want 2: another client's key is its own", n)
+	}
+}
+
+func TestIdempotencyMemoryStoreWarnsOfAnEarlyEviction(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRouter()
+	r.Logger(slog.New(slog.NewTextHandler(&buf, nil)))
+	store := middleware.NewIdempotencyMemoryStoreWithConfig(
+		middleware.IdempotencyMemoryStoreConfig{MaxEntries: 1})
+	r.Use(middleware.Idempotency[*appContext](store))
+	r.POST("/pay", func(c *appContext) error { return c.NoContent(http.StatusCreated) })
+	for _, key := range []string{"a", "b"} {
+		req := httptest.NewRequest(http.MethodPost, "/pay", nil)
+		req.Header.Set(router.HeaderIdempotencyKey, key)
+		do(r, req)
+	}
+	if !strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("no warning for an early eviction; log = %q", buf.String())
+	}
+}
+
+func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
+	var runs atomic.Int32
+	seen := &seenErrors{}
+	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
+		Store:   middleware.NewIdempotencyMemoryStore(0),
+		MaxBody: 8,
+	}))
+	r.POST("/pay", func(c *appContext) error {
+		runs.Add(1)
+		body, err := io.ReadAll(c.Request().Body)
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, string(body))
+	})
+	send := func(body string, length int64) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(body))
+		req.ContentLength = length
+		req.Header.Set(router.HeaderIdempotencyKey, "k")
+		return do(r, req)
+	}
+
+	// Two bodies that share the first MaxBody bytes must not share an answer.
+	for _, body := range []string{"01234567-pay-1", "01234567-pay-999"} {
+		for _, length := range []int64{int64(len(body)), -1} {
+			if rec := send(body, length); rec.Code != http.StatusRequestEntityTooLarge {
+				t.Errorf("%q with Content-Length %d: status = %d, want 413", body, length, rec.Code)
+			}
+			if err := seen.last(); !errors.Is(err, middleware.ErrIdempotencyBodyTooLarge) {
+				t.Errorf("%q: error = %v, want ErrIdempotencyBodyTooLarge", body, err)
+			}
+		}
+	}
+	if n := runs.Load(); n != 0 {
+		t.Fatalf("runs = %d, want 0 for a body over MaxBody", n)
+	}
+
+	// A body of MaxBody bytes reaches the handler whole, and counts whole.
+	if rec := send("01234567", -1); rec.Code != http.StatusOK || rec.Body.String() != "01234567" {
+		t.Errorf("a body at MaxBody: %d %q, want 200 with the body", rec.Code, rec.Body)
+	}
+	if rec := send("01234567", -1); rec.Code != http.StatusOK || runs.Load() != 1 {
+		t.Errorf("a repeat: %d after %d runs, want a replay", rec.Code, runs.Load())
+	}
+	if rec := send("01234568", -1); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("another body of MaxBody bytes: status = %d, want 422", rec.Code)
+	}
+}
+
+func TestIdempotencyDefaultFingerprintHonoursTheBodyLimit(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.BodyLimit[*appContext](4), middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
+	r.POST("/pay", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader("0123456789"))
+	req.ContentLength = -1
+	req.Header.Set(router.HeaderIdempotencyKey, "k")
+	if rec := do(r, req); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
 	}
 }

@@ -3,10 +3,7 @@ package middleware_test
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -45,8 +42,8 @@ func ExampleCSRF() {
 	// The token reaches the page through the context, and comes back in the
 	// _csrf form field. It is also the value of the _csrf cookie.
 	r.GET("/form", func(c *Context) error {
-		return c.Stringf(http.StatusOK, `<input name="_csrf" value=%q>`,
-			middleware.CSRFTokenFrom(c))
+		return c.String(http.StatusOK, fmt.Sprintf(`<input name="_csrf" value=%q>`,
+			middleware.CSRFTokenFrom(c)))
 	})
 	r.POST("/save", sayOK)
 
@@ -70,11 +67,11 @@ func ExampleCSRF() {
 func ExampleRateLimit() {
 	// One request per second, one in the bucket. Build the store once and
 	// share it: a store per route counts each route separately.
-	store := middleware.NewMemoryStore[*Context](1, 1, time.Minute)
+	store := middleware.NewRateLimitMemoryStore(1, 1, time.Minute)
 
 	r := newAPI()
 	// The key is ClientIP, so RealIP belongs in front of this behind a proxy.
-	r.Use(middleware.RateLimit(store))
+	r.Use(middleware.RateLimit[*Context](store))
 	r.GET("/ping", sayOK)
 
 	first := routertest.Get(r, "/ping")
@@ -108,13 +105,13 @@ func ExampleRealIPWithConfig() {
 	// scheme of a trusted proxy is kept without being named.
 	proxies := middleware.NewTrustSet(
 		middleware.TrustPrefix(netip.MustParsePrefix("192.0.2.0/24")))
-	fmt.Println(report(middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
+	fmt.Println(report(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
 		Headers: []string{router.HeaderXForwardedFor},
 		Trust:   proxies,
 	})))
 
 	// DropProto takes the scheme from the connection alone.
-	fmt.Println(report(middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
+	fmt.Println(report(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
 		Headers:   []string{router.HeaderXForwardedFor},
 		Trust:     proxies,
 		DropProto: true,
@@ -127,7 +124,7 @@ func ExampleRealIPWithConfig() {
 
 func ExampleClientAddr() {
 	r := newAPI()
-	r.Use(middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
+	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
 		Headers: []string{router.HeaderXForwardedFor},
 		Trust: middleware.NewTrustSet(
 			middleware.TrustPrefix(netip.MustParsePrefix("192.0.2.0/24"))),
@@ -171,7 +168,7 @@ func ExampleKeyAuth() {
 
 func ExampleTimeoutWithConfig() {
 	r := newAPI()
-	r.Use(middleware.TimeoutWithConfig[*Context](middleware.TimeoutConfig{
+	r.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig[*Context]{
 		Duration: time.Millisecond,
 	}))
 	// The deadline cancels the request context; it does not stop the
@@ -208,9 +205,9 @@ func ExampleMinDurationWithConfig() {
 	r := newAPI()
 	r.Route("/login", func(g *router.Router[*Context]) {
 		// The form itself gives nothing away, so only the POST waits.
-		g.Use(middleware.MinDurationWithConfig[*Context](middleware.MinDurationConfig{
+		g.Use(middleware.MinDurationWithConfig(middleware.MinDurationConfig[*Context]{
 			Duration: 20 * time.Millisecond,
-			Skip:     func(c router.Context) bool { return c.Request().Method == http.MethodGet },
+			Skip:     func(c *Context) bool { return c.Request().Method == http.MethodGet },
 		}))
 		g.GET("/", sayOK)
 		g.POST("/", sayOK)
@@ -253,7 +250,7 @@ func ExampleParseForm() {
 		calls++
 		// Without ParseForm, an oversized form would read as empty here and
 		// switch the setting off.
-		return c.Stringf(http.StatusOK, "on=%t", c.FormValue("on") == "on")
+		return c.String(http.StatusOK, fmt.Sprintf("on=%t", c.FormValue("on") == "on"))
 	})
 
 	for _, body := range []string{"on=on", "on=on&note=" + strings.Repeat("x", 64)} {
@@ -273,7 +270,7 @@ func ExampleBodyLimit() {
 	// The default for every route, and more for the one that takes uploads.
 	r.MaxBodyBytes(64)
 	save := func(c *Context) error {
-		if _, err := c.Bind[map[string]string](); err != nil {
+		if _, err := c.BindJSON[map[string]string](); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusOK)
@@ -299,12 +296,12 @@ func ExampleDecompress() {
 	// zip bomb needs both.
 	r.Use(
 		middleware.BodyLimit[*Context](1<<20),
-		middleware.DecompressWithConfig[*Context](middleware.DecompressConfig{
+		middleware.DecompressWithConfig(middleware.DecompressConfig[*Context]{
 			MaxDecompressedSize: 1 << 20,
 		}),
 	)
 	r.POST("/echo", func(c *Context) error {
-		body, err := c.Bind[map[string]string]()
+		body, err := c.BindJSON[map[string]string]()
 		if err != nil {
 			return err
 		}
@@ -327,7 +324,7 @@ func ExampleDecompress() {
 
 func ExampleSecureWithConfig() {
 	r := newAPI()
-	r.Use(middleware.SecureWithConfig[*Context](middleware.SecureConfig{
+	r.Use(middleware.SecureWithConfig(middleware.SecureConfig[*Context]{
 		// An empty field keeps the default. SecureOmit drops the header.
 		FrameOptions:          middleware.SecureOmit,
 		ContentSecurityPolicy: "default-src 'self'",
@@ -347,7 +344,7 @@ func ExampleSecureWithConfig() {
 func ExampleCORSWithConfig() {
 	r := newAPI()
 	// A wildcard origin beside AllowCredentials panics: no browser honors it.
-	r.Use(middleware.CORSWithConfig[*Context](middleware.CORSConfig{
+	r.Use(middleware.CORSWithConfig(middleware.CORSConfig[*Context]{
 		AllowOrigins:     []string{"https://app.example.com"},
 		AllowCredentials: true,
 		MaxAge:           time.Hour,
@@ -372,7 +369,7 @@ func ExampleCORSWithConfig() {
 
 func ExampleRequestIDWithConfig() {
 	r := newAPI()
-	r.Use(middleware.RequestIDWithConfig[*Context](middleware.RequestIDConfig{
+	r.Use(middleware.RequestIDWithConfig(middleware.RequestIDConfig[*Context]{
 		// A real program leaves Generator nil, for a UUIDv7 per request.
 		Generator: func() string { return "req-1" },
 		// IgnoreInbound refuses the id a client sends, which nothing verifies.
@@ -399,7 +396,7 @@ func ExampleLoggerWithConfig() {
 	}
 
 	r := newAPI()
-	r.Use(middleware.LoggerWithConfig[*Context](middleware.LoggerConfig{
+	r.Use(middleware.LoggerWithConfig(middleware.LoggerConfig[*Context]{
 		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{ReplaceAttr: keep})),
 	}))
 	r.GET("/ok", sayOK)
@@ -418,13 +415,13 @@ func ExampleLoggerWithConfig() {
 
 func ExampleIdempotency() {
 	// Build the store once and share it across the routes it covers.
-	store := middleware.NewIdempotencyMemoryStore[*Context](time.Hour)
+	store := middleware.NewIdempotencyMemoryStore(time.Hour)
 
 	r := newAPI()
 	charges := 0
-	r.With(middleware.Idempotency(store)).POST("/pay", func(c *Context) error {
+	r.With(middleware.Idempotency[*Context](store)).POST("/pay", func(c *Context) error {
 		charges++
-		return c.Stringf(http.StatusCreated, "payment %d", charges)
+		return c.String(http.StatusCreated, fmt.Sprintf("payment %d", charges))
 	})
 
 	// The client lost the first answer and sent the same request again.
@@ -447,12 +444,12 @@ func ExampleIdempotencyWithConfig() {
 	// A plain HTML form carries its key in a hidden field, and every form on
 	// these routes must carry one.
 	r.With(middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*Context]{
-		Store:    middleware.NewIdempotencyMemoryStore[*Context](time.Hour),
+		Store:    middleware.NewIdempotencyMemoryStore(time.Hour),
 		Sources:  []middleware.TokenSource{middleware.FromForm("_request")},
 		Required: true,
 	})).POST("/pay", func(c *Context) error {
 		charges++
-		return c.Stringf(http.StatusOK, "paid %s", c.FormValue("amount"))
+		return c.String(http.StatusOK, fmt.Sprintf("paid %s", c.FormValue("amount")))
 	})
 
 	submit := func(form url.Values) {
@@ -472,42 +469,18 @@ func ExampleIdempotencyWithConfig() {
 	// charged 1
 }
 
-func ExampleIdempotencyFormFingerprint() {
-	// The default fingerprint covers a form body only. A JSON API hashes the
-	// body too, so a key reused with another body is refused.
-	jsonFingerprint := func(c *Context) ([]byte, error) {
-		// The router has already capped this body, at MaxBodyBytes or at the
-		// BodyLimit of the route.
-		body, err := io.ReadAll(c.Request().Body)
-		if err != nil {
-			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-				return nil, router.ErrPayloadTooLarge.WithError(err)
-			}
-			return nil, router.ErrBadRequest.WithError(err)
-		}
-		// Put the body back for the handler.
-		c.Request().Body = io.NopCloser(bytes.NewReader(body))
-
-		base, err := middleware.IdempotencyFormFingerprint(c)
-		if err != nil {
-			return nil, err
-		}
-		sum := sha256.Sum256(append(base, body...))
-		return sum[:], nil
-	}
-
+func ExampleIdempotency_json() {
+	// The default fingerprint covers the body, so a key reused with another
+	// body is refused.
 	r := newAPI()
-	r.With(middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*Context]{
-		Store:       middleware.NewIdempotencyMemoryStore[*Context](time.Hour),
-		Fingerprint: jsonFingerprint,
-	})).POST("/pay", func(c *Context) error {
+	r.With(middleware.Idempotency[*Context](middleware.NewIdempotencyMemoryStore(time.Hour))).POST("/pay", func(c *Context) error {
 		in, err := c.Bind[struct {
 			Amount int `json:"amount"`
 		}]()
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusCreated, "paid %d", in.Amount)
+		return c.String(http.StatusCreated, fmt.Sprintf("paid %d", in.Amount))
 	})
 
 	for _, body := range []string{`{"amount":5}`, `{"amount":5}`, `{"amount":9}`} {
@@ -525,7 +498,7 @@ func ExampleIdempotencyFormFingerprint() {
 func ExampleNewIdempotencyMemoryStoreWithConfig() {
 	// Keep a key for a day, and at most 10000 of them. A full store drops the
 	// oldest key whose answer it holds.
-	store := middleware.NewIdempotencyMemoryStoreWithConfig[*Context](middleware.IdempotencyMemoryStoreConfig{
+	store := middleware.NewIdempotencyMemoryStoreWithConfig(middleware.IdempotencyMemoryStoreConfig{
 		ExpiresIn:  24 * time.Hour,
 		MaxEntries: 10000,
 	})
@@ -545,10 +518,10 @@ func ExampleNewIdempotencyMemoryStoreWithConfig() {
 		Store: store,
 		// Each user has keys of their own. BasicAuth in front checked the
 		// password, so the name is that of the signed-in user.
-		Scope: func(c *Context) (string, error) { return signedIn(c), nil },
+		Client: signedIn,
 	}))
 	r.POST("/orders", func(c *Context) error {
-		return c.Stringf(http.StatusCreated, "order for %s", signedIn(c))
+		return c.String(http.StatusCreated, fmt.Sprintf("order for %s", signedIn(c)))
 	})
 
 	for _, user := range []string{"alice", "bob"} {

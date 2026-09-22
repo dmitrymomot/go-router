@@ -1,12 +1,16 @@
 package middleware
 
-import "github.com/dmitrymomot/go-router"
+import (
+	"cmp"
 
-// BodyLimitConfig configures [BodyLimitWithConfig]. A Limit of zero or less
-// takes [router.DefaultMaxBodyBytes], which then replaces the cap of the
-// router as any other Limit does.
-type BodyLimitConfig struct {
-	Skip  func(c router.Context) bool
+	"github.com/dmitrymomot/go-router"
+)
+
+// BodyLimitConfig configures [BodyLimitWithConfig]. A Limit of zero takes
+// [router.DefaultMaxBodyBytes], which then replaces the cap of the router as
+// any other Limit does.
+type BodyLimitConfig[C router.Context] struct {
+	Skip  func(c C) bool
 	Limit int64
 }
 
@@ -27,16 +31,21 @@ type BodyLimitConfig struct {
 // reads.
 //
 // See Order in the package doc for where it goes.
+//
+// BodyLimit panics on a negative limit, and a limit of zero takes
+// [router.DefaultMaxBodyBytes].
 func BodyLimit[C router.Context](limit int64) router.Middleware[C] {
-	return BodyLimitWithConfig[C](BodyLimitConfig{Limit: limit})
+	return BodyLimitWithConfig(BodyLimitConfig[C]{Limit: limit})
 }
 
 // BodyLimitWithConfig is [BodyLimit] with a configuration.
-func BodyLimitWithConfig[C router.Context](cfg BodyLimitConfig) router.Middleware[C] {
-	limit := cfg.Limit
-	if limit <= 0 {
-		limit = router.DefaultMaxBodyBytes
+//
+// BodyLimitWithConfig panics on a negative Limit.
+func BodyLimitWithConfig[C router.Context](cfg BodyLimitConfig[C]) router.Middleware[C] {
+	if cfg.Limit < 0 {
+		panic("middleware: BodyLimitWithConfig needs a Limit of zero or more")
 	}
+	limit := cmp.Or(cfg.Limit, router.DefaultMaxBodyBytes)
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {

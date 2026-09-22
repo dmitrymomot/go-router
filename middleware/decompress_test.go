@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -33,7 +34,7 @@ func gzipped(t *testing.T, s string) []byte {
 	return buf.Bytes()
 }
 
-func decompressRouter(cfg middleware.DecompressConfig) *router.Router[*appContext] {
+func decompressRouter(cfg middleware.DecompressConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.DecompressWithConfig[*appContext](cfg))
 	r.POST("/bind", func(c *appContext) error {
@@ -48,12 +49,12 @@ func decompressRouter(cfg middleware.DecompressConfig) *router.Router[*appContex
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", len(body))
+		return c.String(http.StatusOK, fmt.Sprintf("%d", len(body)))
 	})
 	r.POST("/headers", func(c *appContext) error {
 		req := c.Request()
-		return c.Stringf(http.StatusOK, "%q %d",
-			req.Header.Get(router.HeaderContentEncoding), req.ContentLength)
+		return c.String(http.StatusOK, fmt.Sprintf("%q %d",
+			req.Header.Get(router.HeaderContentEncoding), req.ContentLength))
 	})
 	return r
 }
@@ -66,7 +67,7 @@ func decompressPost(target string, body []byte) *http.Request {
 }
 
 func TestDecompressExpandsAGzipBody(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig{})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
 
 	rec := do(r, decompressPost("/bind", gzipped(t, `{"name":"ada"}`)))
 	if rec.Code != http.StatusOK {
@@ -78,7 +79,7 @@ func TestDecompressExpandsAGzipBody(t *testing.T) {
 }
 
 func TestDecompressClearsTheHeadersOfTheCompressedBody(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig{})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
 
 	rec := do(r, decompressPost("/headers", gzipped(t, "0123456789")))
 	if got, want := rec.Body.String(), `"" -1`; got != want {
@@ -104,7 +105,7 @@ func TestDecompressLeavesTheRequestThatCameInAlone(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", len(body))
+		return c.String(http.StatusOK, fmt.Sprintf("%d", len(body)))
 	})
 
 	if rec := do(r, decompressPost("/read", gzipped(t, "0123456789"))); rec.Code != http.StatusOK {
@@ -116,7 +117,7 @@ func TestDecompressLeavesTheRequestThatCameInAlone(t *testing.T) {
 }
 
 func TestDecompressLeavesAPlainBodyAlone(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig{})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
 
 	req := httptest.NewRequest(http.MethodPost, "/bind", strings.NewReader(`{"name":"ada"}`))
 	req.Header.Set(router.HeaderContentType, router.MIMEApplicationJSON)
@@ -126,7 +127,7 @@ func TestDecompressLeavesAPlainBodyAlone(t *testing.T) {
 }
 
 func TestDecompressPassesAnEncodingItDoesNotKnow(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig{})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
 
 	req := httptest.NewRequest(http.MethodPost, "/read", strings.NewReader("0123456789"))
 	req.Header.Set(router.HeaderContentEncoding, "br")
@@ -140,7 +141,7 @@ func TestDecompressPassesAnEncodingItDoesNotKnow(t *testing.T) {
 }
 
 func TestDecompressRejectsABodyThatIsNotGzip(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig{})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
 
 	rec := do(r, decompressPost("/read", []byte("this is not a gzip stream")))
 	if rec.Code != http.StatusBadRequest {
@@ -149,7 +150,7 @@ func TestDecompressRejectsABodyThatIsNotGzip(t *testing.T) {
 }
 
 func TestDecompressPassesAnEmptyBodyThrough(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig{})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
 
 	rec := do(r, decompressPost("/read", nil))
 	if rec.Code != http.StatusOK {
@@ -170,11 +171,11 @@ func TestDecompressStopsAZipBomb(t *testing.T) {
 	}{
 		{name: "a cap below the body", limit: 1024, want: http.StatusRequestEntityTooLarge},
 		{name: "a cap above the body", limit: 1 << 20, want: http.StatusOK},
-		{name: "no cap at all", limit: -1, want: http.StatusOK},
+		{name: "the default cap", want: http.StatusOK},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := decompressRouter(middleware.DecompressConfig{MaxDecompressedSize: tc.limit})
+			r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: tc.limit})
 			if rec := do(r, decompressPost("/read", bomb)); rec.Code != tc.want {
 				t.Errorf("status = %d, want %d", rec.Code, tc.want)
 			}
@@ -200,7 +201,7 @@ func TestDecompressPlainFormExpandsTheBody(t *testing.T) {
 }
 
 func TestDecompressSkip(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig{Skip: skipPath("/read")})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{Skip: skipPath("/read")})
 
 	body := gzipped(t, "0123456789")
 	rec := do(r, decompressPost("/read", body))
@@ -217,7 +218,7 @@ func decompressFailingRouter(read func(body []byte, err error)) *router.Router[*
 		read(body, err)
 		return nil
 	})
-	r.Use(middleware.DecompressWithConfig[*appContext](middleware.DecompressConfig{}))
+	r.Use(middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{}))
 	r.POST("/fail", func(*appContext) error {
 		return router.ErrBadRequest.WithMessage("validation failed")
 	})
@@ -261,5 +262,45 @@ func TestDecompressDoesNotHandOneReaderToTwoRequests(t *testing.T) {
 
 	if n := leaked.Load(); n != 0 {
 		t.Errorf("%d reads after the chain reached a reader that another request holds", n)
+	}
+}
+
+func TestDecompressRejectsANegativeCap(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("no panic for a negative MaxDecompressedSize")
+		}
+	}()
+	middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: -1})
+}
+
+func TestDecompressTooLargeClosesTheConnection(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: 10}))
+	r.POST("/", func(c *appContext) error {
+		_, err := io.ReadAll(c.Request().Body)
+		return err
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL,
+		bytes.NewReader(gzipped(t, strings.Repeat("a", 1000))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(router.HeaderContentEncoding, "gzip")
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := res.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", res.StatusCode)
+	}
+	if !res.Close {
+		t.Error("the connection stays open after a 413")
 	}
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-func csrfRouter(cfg middleware.CSRFConfig) *router.Router[*appContext] {
+func csrfRouter(cfg middleware.CSRFConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.CSRFWithConfig[*appContext](cfg))
 	h := func(c *appContext) error {
@@ -30,7 +30,7 @@ func csrfRouter(cfg middleware.CSRFConfig) *router.Router[*appContext] {
 func csrfCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == middleware.DefaultCSRFCookieName {
+		if c.Name == middleware.DefaultCSRFCookieName || c.Name == middleware.DefaultCSRFHostCookieName {
 			return c
 		}
 	}
@@ -53,7 +53,7 @@ func withCookie(req *http.Request, c *http.Cookie) *http.Request {
 }
 
 func TestCSRFIssuesATokenOnASafeRequest(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
 
 	rec := get(r, "/")
 	if rec.Code != http.StatusOK {
@@ -81,7 +81,7 @@ func TestCSRFIssuesATokenOnASafeRequest(t *testing.T) {
 }
 
 func TestCSRFTokensDiffer(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
 
 	seen := make(map[string]bool, 64)
 	for range 64 {
@@ -94,7 +94,7 @@ func TestCSRFTokensDiffer(t *testing.T) {
 }
 
 func TestCSRFKeepsTheTokenOfTheCookie(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
 	token, cookie := csrfSession(t, r)
 
 	rec := do(r, withCookie(httptest.NewRequest(http.MethodGet, "/", nil), cookie))
@@ -136,7 +136,7 @@ func TestCSRFSafeMethodsSkipValidation(t *testing.T) {
 }
 
 func TestCSRFAcceptsTheTokenFromTheHeader(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
 	token, cookie := csrfSession(t, r)
 
 	req := withCookie(httptest.NewRequest(http.MethodPost, "/", nil), cookie)
@@ -168,7 +168,7 @@ func TestCSRFAcceptsTheTokenFromTheForm(t *testing.T) {
 }
 
 func TestCSRFRefusesAnUnsafeRequest(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
 	token, cookie := csrfSession(t, r)
 
 	tests := []struct {
@@ -224,7 +224,7 @@ func TestCSRFRefusesAnUnsafeRequest(t *testing.T) {
 }
 
 func TestCSRFSecFetchSiteDecidesFirst(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
 	token, cookie := csrfSession(t, r)
 
 	tests := []struct {
@@ -236,7 +236,8 @@ func TestCSRFSecFetchSiteDecidesFirst(t *testing.T) {
 		{"the site asked itself", "same-origin", false, http.StatusOK},
 		{"the user asked", "none", false, http.StatusOK},
 		{"another site asked", "cross-site", true, http.StatusForbidden},
-		{"a sibling subdomain asked", "same-site", true, http.StatusForbidden},
+		{"a sibling subdomain asked with a token over HTTP", "same-site", true, http.StatusForbidden},
+		{"a sibling subdomain asked without a token", "same-site", false, http.StatusForbidden},
 		{"no metadata and a token", "", true, http.StatusOK},
 		{"no metadata and no token", "", false, http.StatusForbidden},
 	}
@@ -258,7 +259,7 @@ func TestCSRFSecFetchSiteDecidesFirst(t *testing.T) {
 }
 
 func TestCSRFTrustedOriginPasses(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{
 		TrustedOrigins: []string{"https://APP.example", "http://localhost:3000"},
 	})
 	_, cookie := csrfSession(t, r)
@@ -309,7 +310,7 @@ func TestCSRFMalformedTrustedOriginPanics(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mustPanicContaining(t, "CSRFConfig.TrustedOrigins", func() {
-				middleware.CSRFWithConfig[*appContext](middleware.CSRFConfig{
+				middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{
 					TrustedOrigins: []string{tt.origin},
 				})
 			})
@@ -317,7 +318,7 @@ func TestCSRFMalformedTrustedOriginPanics(t *testing.T) {
 	}
 
 	t.Run("an origin that is one", func(t *testing.T) {
-		middleware.CSRFWithConfig[*appContext](middleware.CSRFConfig{
+		middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{
 			TrustedOrigins: []string{"https://app.example", "http://localhost:3000"},
 		})
 	})
@@ -325,8 +326,8 @@ func TestCSRFMalformedTrustedOriginPanics(t *testing.T) {
 
 func TestCSRFAllowSecFetchSiteOfItsOwn(t *testing.T) {
 	t.Run("it accepts the request", func(t *testing.T) {
-		r := csrfRouter(middleware.CSRFConfig{
-			AllowSecFetchSite: func(router.Context) (bool, error) { return true, nil },
+		r := csrfRouter(middleware.CSRFConfig[*appContext]{
+			AllowSecFetchSite: func(*appContext) (bool, error) { return true, nil },
 		})
 		if rec := do(r, httptest.NewRequest(http.MethodPost, "/", nil)); rec.Code != http.StatusOK {
 			t.Errorf("status = %d, want 200", rec.Code)
@@ -334,8 +335,8 @@ func TestCSRFAllowSecFetchSiteOfItsOwn(t *testing.T) {
 	})
 
 	t.Run("it refuses the request", func(t *testing.T) {
-		r := csrfRouter(middleware.CSRFConfig{
-			AllowSecFetchSite: func(router.Context) (bool, error) {
+		r := csrfRouter(middleware.CSRFConfig[*appContext]{
+			AllowSecFetchSite: func(*appContext) (bool, error) {
 				return false, router.ErrTooManyRequests
 			},
 		})
@@ -349,8 +350,8 @@ func TestCSRFAllowSecFetchSiteOfItsOwn(t *testing.T) {
 	})
 
 	t.Run("it hands the request to the token", func(t *testing.T) {
-		r := csrfRouter(middleware.CSRFConfig{
-			AllowSecFetchSite: func(router.Context) (bool, error) { return false, nil },
+		r := csrfRouter(middleware.CSRFConfig[*appContext]{
+			AllowSecFetchSite: func(*appContext) (bool, error) { return false, nil },
 		})
 		token, cookie := csrfSession(t, r)
 
@@ -364,7 +365,7 @@ func TestCSRFAllowSecFetchSiteOfItsOwn(t *testing.T) {
 
 func TestCSRFCookieAttributes(t *testing.T) {
 	t.Run("the defaults", func(t *testing.T) {
-		cookie := csrfCookie(t, get(csrfRouter(middleware.CSRFConfig{}), "/"))
+		cookie := csrfCookie(t, get(csrfRouter(middleware.CSRFConfig[*appContext]{}), "/"))
 
 		if cookie.Path != "/" {
 			t.Errorf("path = %q, want the whole site", cookie.Path)
@@ -379,7 +380,7 @@ func TestCSRFCookieAttributes(t *testing.T) {
 	})
 
 	t.Run("a config of its own", func(t *testing.T) {
-		cookie := csrfCookie(t, get(csrfRouter(middleware.CSRFConfig{
+		cookie := csrfCookie(t, get(csrfRouter(middleware.CSRFConfig[*appContext]{
 			CookieName:     "_csrf",
 			CookiePath:     "/app",
 			CookieDomain:   "app.example",
@@ -404,7 +405,7 @@ func TestCSRFCookieAttributes(t *testing.T) {
 	})
 
 	t.Run("SameSite None forces Secure", func(t *testing.T) {
-		cookie := csrfCookie(t, get(csrfRouter(middleware.CSRFConfig{
+		cookie := csrfCookie(t, get(csrfRouter(middleware.CSRFConfig[*appContext]{
 			CookieSameSite: http.SameSiteNoneMode,
 		}), "/"))
 
@@ -414,7 +415,7 @@ func TestCSRFCookieAttributes(t *testing.T) {
 	})
 
 	t.Run("a cookie name of its own", func(t *testing.T) {
-		r := csrfRouter(middleware.CSRFConfig{CookieName: "session_csrf"})
+		r := csrfRouter(middleware.CSRFConfig[*appContext]{CookieName: "session_csrf"})
 
 		rec := get(r, "/")
 		cookies := rec.Result().Cookies()
@@ -455,7 +456,7 @@ func TestCSRFTokenReachesAComponent(t *testing.T) {
 
 func TestCSRFCopiesConfiguredTokenSources(t *testing.T) {
 	sources := []middleware.TokenSource{middleware.FromHeader("X-Original-CSRF", "")}
-	r := csrfRouter(middleware.CSRFConfig{TokenSources: sources})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{Sources: sources})
 	sources[0] = middleware.FromHeader("X-Replaced-CSRF", "")
 
 	token, cookie := csrfSession(t, r)
@@ -467,7 +468,7 @@ func TestCSRFCopiesConfiguredTokenSources(t *testing.T) {
 }
 
 func TestCSRFSkip(t *testing.T) {
-	r := csrfRouter(middleware.CSRFConfig{Skip: skipPath("/")})
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{Skip: skipPath("/")})
 
 	rec := do(r, httptest.NewRequest(http.MethodPost, "/", nil))
 	if rec.Code != http.StatusOK {
@@ -490,4 +491,129 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestCSRFHostCookieOverHTTPS(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.CSRF[*appContext])
+	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	req := httptest.NewRequest(http.MethodGet, "https://app.example/", nil)
+	rec := do(r, req)
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "__Host-csrf" || !cookies[0].Secure || cookies[0].Path != "/" {
+		t.Errorf("cookies = %v, want one __Host-csrf, Secure, Path=/", cookies)
+	}
+}
+
+func TestCSRFIgnoresACookieItDidNotIssue(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.CSRF[*appContext])
+	r.POST("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "_csrf", Value: "planted"})
+	req.Header.Set(router.HeaderXCSRFToken, "planted")
+	if rec := do(r, req); rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a planted token", rec.Code)
+	}
+}
+
+func TestCSRFSameSiteWithATokenInTheHostCookiePasses(t *testing.T) {
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
+	cookie := csrfCookie(t, get(r, "https://app.example.com/"))
+	if cookie.Name != middleware.DefaultCSRFHostCookieName {
+		t.Fatalf("cookie = %s, want %s", cookie.Name, middleware.DefaultCSRFHostCookieName)
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://app.example.com/", nil)
+	req.AddCookie(cookie)
+	req.Header.Set(router.HeaderXCSRFToken, cookie.Value)
+	req.Header.Set(router.HeaderSecFetchSite, "same-site")
+	if rec := do(r, req); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 for same-site with a valid token in %s",
+			rec.Code, middleware.DefaultCSRFHostCookieName)
+	}
+}
+
+// A sibling subdomain can set any cookie but a __Host- one for the parent
+// domain, so a same-site request cannot prove itself with any other.
+func TestCSRFSameSiteRefusedWithoutTheHostCookie(t *testing.T) {
+	planted := strings.Repeat("A", 43)
+	tests := []struct {
+		name   string
+		target string
+		cfg    middleware.CSRFConfig[*appContext]
+		cookie string
+	}{
+		{"a planted cookie over HTTP", "http://app.example.com/", middleware.CSRFConfig[*appContext]{}, middleware.DefaultCSRFCookieName},
+		{"a configured name over HTTPS", "https://app.example.com/", middleware.CSRFConfig[*appContext]{CookieName: "token"}, "token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := csrfRouter(tt.cfg)
+			form := url.Values{middleware.DefaultCSRFFormField: {planted}}
+			req := httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(form.Encode()))
+			req.Header.Set(router.HeaderContentType, router.MIMEApplicationForm)
+			req.AddCookie(&http.Cookie{Name: tt.cookie, Value: planted})
+			req.Header.Set(router.HeaderSecFetchSite, "same-site")
+			if rec := do(r, req); rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 for same-site without %s", rec.Code, middleware.DefaultCSRFHostCookieName)
+			}
+		})
+	}
+}
+
+func TestCSRFTreatsQueryAsSafe(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.CSRF[*appContext])
+	r.Handle(router.MethodQuery, "/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	req := httptest.NewRequest(router.MethodQuery, "/", nil)
+	if rec := do(r, req); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 for QUERY, a safe method", rec.Code)
+	}
+}
+
+func TestCSRFCookieNameFollowsTheScheme(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		cfg    middleware.CSRFConfig[*appContext]
+		want   string
+		secure bool
+	}{
+		{"plain HTTP", "http://app.example/", middleware.CSRFConfig[*appContext]{}, "_csrf", false},
+		{"HTTPS", "https://app.example/", middleware.CSRFConfig[*appContext]{}, "__Host-csrf", true},
+		{"a configured name", "https://app.example/", middleware.CSRFConfig[*appContext]{CookieName: "token"}, "token", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := csrfRouter(tt.cfg)
+			cookies := get(r, tt.target).Result().Cookies()
+			if len(cookies) != 1 || cookies[0].Name != tt.want || cookies[0].Secure != tt.secure {
+				t.Errorf("cookies = %v, want one %s with Secure %t", cookies, tt.want, tt.secure)
+			}
+		})
+	}
+}
+
+func TestCSRFReadsOnlyTheHostCookieOverHTTPS(t *testing.T) {
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
+	// A sibling subdomain can set _csrf, but not __Host-csrf.
+	token, _ := csrfSession(t, r)
+	req := httptest.NewRequest(http.MethodPost, "https://app.example/", nil)
+	req.AddCookie(&http.Cookie{Name: middleware.DefaultCSRFCookieName, Value: token})
+	req.Header.Set(router.HeaderXCSRFToken, token)
+	if rec := do(r, req); rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a token in the plain cookie over HTTPS", rec.Code)
+	}
+}
+
+func TestCSRFWithConfigRejectsACookieScopeWithoutAName(t *testing.T) {
+	mustPanicContaining(t, "without a CookieName", func() {
+		middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{CookieDomain: "example.com"})
+	})
+	mustPanicContaining(t, "without a CookieName", func() {
+		middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{CookiePath: "/app"})
+	})
+	mustPanicContaining(t, "CookieMaxAge", func() {
+		middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{CookieMaxAge: -time.Second})
+	})
 }

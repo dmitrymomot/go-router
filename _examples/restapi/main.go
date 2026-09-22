@@ -57,29 +57,29 @@ func newRouter(store *Store, apiKey string) *router.Router[*Context] {
 
 	// Every failure, from a bad body to a panic, ends up here as JSON. The
 	// body limit belongs to the root: Mount refuses a sub-router that carries
-	// one, as it does one with a cookie codec.
-	r.ErrorHandler(router.JSONErrorHandler[*Context])
+	// one.
+	r.ErrorHandler(router.JSONErrorHandler[*Context](false))
 	r.MaxBodyBytes(1 << 20)
 
 	// The order is the one the middleware package doc gives: learn who sent
 	// the request, name it, log it with Recover inside so a panic gets its
 	// line, then decide whether to serve it.
 	r.Use(
-		middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
+		middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
 			Headers: []string{router.HeaderXForwardedFor},
 		}),
 		middleware.RequestID[*Context],
 		middleware.Logger[*Context],
 		middleware.Recover[*Context],
-		middleware.CORSWithConfig[*Context](middleware.CORSConfig{
+		middleware.CORSWithConfig(middleware.CORSConfig[*Context]{
 			AllowOrigins: []string{"https://app.example.com"},
 		}),
 		middleware.RateLimitWithConfig(middleware.RateLimitConfig[*Context]{
-			Store: middleware.NewMemoryStore[*Context](10, 20, time.Minute),
+			Store: middleware.NewRateLimitMemoryStore(10, 20, time.Minute),
 			// A load balancer polls the health of this service far harder than
 			// any client, and must never be turned away. The route says so
 			// itself, with Meta, rather than the limiter knowing its path.
-			Skip: func(c router.Context) bool {
+			Skip: func(c *Context) bool {
 				_, ok := router.MetaAs[unlimited](c)
 				return ok
 			},

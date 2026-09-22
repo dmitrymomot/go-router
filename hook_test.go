@@ -11,7 +11,7 @@ func TestFillPatternWritesEveryPartAndKeepsAnUnbalancedBrace(t *testing.T) {
 	}{
 		{pattern: "/a/{id:int}/{rest...}", want: "/a/%3Cid:int%3E/%3Crest:%3E"},
 		{pattern: "/r/rep-{d:[0-9]{4}}.csv", want: "/r/rep-%3Cd:%5B0-9%5D%7B4%7D%3E.csv"},
-		{pattern: "/files/*", want: "/files/%3C%2A:%3E"},
+		{pattern: "/files/{*...}", want: "/files/%3C%2A:%3E"},
 		{pattern: "/a/{id", want: "/a/{id"},
 		{pattern: "/a/x{id}{rest", want: "/a/x%3Cid:%3E{rest"},
 		{pattern: "{t.example.test", host: true, want: "{t.example.test"},
