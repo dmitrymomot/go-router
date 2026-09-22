@@ -108,3 +108,63 @@ func get(url string) string {
 	body, _ := io.ReadAll(res.Body)
 	return fmt.Sprint(res.StatusCode, " ", strings.TrimSpace(string(body)))
 }
+
+func ExampleRunAll() {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	public := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		//nolint:errcheck // The example has no better place to report it.
+		fmt.Fprint(w, "hello")
+	})
+
+	// The private server answers the probes of the load balancer and keeps
+	// answering while the public one drains, because it is listed last.
+	var ready atomic.Bool
+	ready.Store(true)
+	private := http.NewServeMux()
+	private.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
+		//nolint:errcheck // The example has no better place to report it.
+		fmt.Fprint(w, "ready")
+	})
+
+	draining := make(chan struct{})
+	addrs := make(chan string, 2)
+	onListen := func(addr net.Addr) { addrs <- "http://" + addr.String() }
+	go func() {
+		pub, priv := <-addrs, <-addrs
+		fmt.Println("public:", get(pub+"/"))
+		fmt.Println("private:", get(priv+"/readyz"))
+		stop()
+		<-draining
+		fmt.Println("private:", get(priv+"/readyz"))
+	}()
+
+	err := serve.RunAll(ctx,
+		serve.Server{Handler: public, Config: serve.Config{
+			Addr:       "127.0.0.1:0",
+			DrainDelay: 500 * time.Millisecond,
+			Logger:     slog.New(slog.DiscardHandler),
+			OnListen:   onListen,
+			OnDrain: func() {
+				ready.Store(false)
+				close(draining)
+			},
+		}},
+		serve.Server{Handler: private, Config: serve.Config{
+			Addr:     "127.0.0.1:0",
+			Logger:   slog.New(slog.DiscardHandler),
+			OnListen: onListen,
+		}},
+	)
+	fmt.Println("RunAll returned:", err)
+	// Output:
+	// public: 200 hello
+	// private: 200 ready
+	// private: 503 draining
+	// RunAll returned: <nil>
+}
