@@ -122,8 +122,8 @@ func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 }
 
 // Run serves h until ctx ends, waits Config.DrainDelay, then drains the
-// requests in flight and reports once the server has stopped. A cancelled ctx is the ordinary way to stop, so
-// Run reports nil for it.
+// requests in flight and reports once the server has stopped. A cancelled ctx
+// is the ordinary way to stop, so Run reports nil for it.
 //
 // Any certificate among opts turns the server into an HTTPS one, over TLS 1.3
 // and h2. A Config.TLSConfig of your own wins, and the certificates join the
@@ -131,8 +131,9 @@ func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 //
 // Run reports an error for a nil context, a nil handler, a Config that names
 // neither an address nor a listener, a negative DrainDelay, a nil or failing
-// option, a TLS config with no certificate, a listener it cannot open, and a drain that runs out of
-// time. It checks the certificate after OnServer and before it listens.
+// option, a TLS config with no certificate, a listener it cannot open, and a
+// drain that runs out of time. It checks the certificate after OnServer and
+// before it listens.
 func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error {
 	// Run closes a caller-supplied listener on the serving path, so it owns it
 	// from here on and has to close it on every path. It used to return early
