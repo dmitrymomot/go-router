@@ -59,7 +59,7 @@ func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
 
 // compile turns the scope tree into the non-route half of a table: the fallback
 // chains, the scope list and the host order. Routes never come through here;
-// installInto puts those in the trie.
+// install puts those in the trie.
 func (r *Router[C]) compile(eng *engine[C]) {
 	eng.scopes, eng.errScopes = nil, nil
 	if eng.hostSet != nil {

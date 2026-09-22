@@ -78,7 +78,7 @@ func (r *Router[C]) top() *Router[C] {
 	return s
 }
 
-// hostEntries returns the entries of the nearest host scope, or none when the
+// hostEntriesIn returns the entries of the nearest host scope, or none when the
 // route answers on every host.
 func (r *Router[C]) hostEntriesIn(eng *engine[C]) []*hostEntry[C] {
 	for s := r; s != nil; s = s.owner {

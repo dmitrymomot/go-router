@@ -24,7 +24,7 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	c := root.acquire(w, req)
 	defer root.release(c)
 	if root.preChain != nil {
-		//nolint:errcheck // The error handler already ran inside dispatch; the
+		//nolint:errcheck // The error handler already ran inside dispatch.
 		root.dispatch(c, root.preChain)
 		return
 	}
