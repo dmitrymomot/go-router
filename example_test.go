@@ -1035,3 +1035,77 @@ func ExampleHTTPErrorOf() {
 	// 404 <h1>no user 9</h1>
 	// 500 <h1>Internal Server Error</h1>
 }
+
+func ExampleFieldErrorsOf() {
+	type Signup struct {
+		Email string `form:"email"`
+		Age   int    `form:"age"`
+	}
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/signup", func(c *Context) error {
+		in, err := c.BindForm[Signup]()
+		if err == nil {
+			return c.Stringf(http.StatusCreated, "welcome %s", in.Email)
+		}
+		// Show the form again with what the client typed and a message
+		// under each field that failed.
+		problems := make(map[string]string)
+		for _, f := range router.FieldErrorsOf(err) {
+			problems[f.Field] = f.Message
+		}
+		return c.Stringf(router.StatusOf(err), "email=%s age: %s", in.Email, problems["age"])
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader("email=ann@example.com&age=old"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := serveRequest(r, req)
+	fmt.Println(rec.Code, rec.Body.String())
+	// Output:
+	// 400 email=ann@example.com age: cannot parse "old" as int
+}
+
+type Batch struct {
+	Events []string `json:"events"`
+}
+
+func (b Batch) Validate() error {
+	switch n := len(b.Events); {
+	case n == 0:
+		return router.FieldError{Field: "events", Message: "is required"}
+	case n > 2:
+		return router.ErrUnprocessableEntity.
+			WithMessage("the batch holds %d events, 2 at most", n).
+			WithDetails([]router.FieldError{{Field: "events", Message: "too many"}})
+	}
+	return nil
+}
+
+func ExampleValidator() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/events", func(c *Context) error {
+		in, err := c.Bind[Batch]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusAccepted, "%d events", len(in.Events))
+	})
+
+	for _, body := range []string{
+		`{"events":["a"]}`,
+		`{"events":[]}`,
+		`{"events":["a","b","c"]}`,
+		`{"events":"x"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := serveRequest(r, req)
+		fmt.Printf("%d %q\n", rec.Code, rec.Body.String())
+	}
+	// Output:
+	// 202 "1 events"
+	// 422 "Unprocessable Entity\nevents: is required"
+	// 422 "the batch holds 3 events, 2 at most\nevents: too many"
+	// 400 "invalid request\nevents: has the wrong JSON type"
+}

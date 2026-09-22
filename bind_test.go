@@ -2,10 +2,12 @@ package router
 
 import (
 	"bytes"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -94,6 +96,9 @@ func TestBindJSONTellsAnEmptyBodyFromAMalformedOne(t *testing.T) {
 			}
 			if got := strings.Contains(rec.Body.String(), "the request body is empty"); got != tt.empty {
 				t.Errorf("body = %s, want the empty body message: %v", rec.Body, tt.empty)
+			}
+			if first, _, _ := strings.Cut(rec.Body.String(), "\n"); !tt.empty && first != "malformed JSON body" {
+				t.Errorf("first body line = %q, want exactly %q", first, "malformed JSON body")
 			}
 		})
 	}
@@ -261,6 +266,34 @@ func TestBindQueryLeavesAnOptionalFieldNilForAnEmptyValue(t *testing.T) {
 	}
 }
 
+func TestBindQueryLeavesAFailedPointerNil(t *testing.T) {
+	type filter struct {
+		Page *int `query:"page"`
+	}
+	var got filter
+	var gotAs *int
+	r := newTestRouter()
+	r.GET("/search", func(c *tctx) error {
+		var err error
+		got, err = c.BindQuery[filter]()
+		if err == nil {
+			t.Error("BindQuery reported no error for page=abc")
+		}
+		if gotAs, err = c.QueryAs[*int]("page"); err == nil {
+			t.Error("QueryAs reported no error for page=abc")
+		}
+		return nil
+	})
+
+	do(r, http.MethodGet, "/search?page=abc")
+	if got.Page != nil {
+		t.Errorf("BindQuery Page = %d, want nil", *got.Page)
+	}
+	if gotAs != nil {
+		t.Errorf("QueryAs = %d, want nil", *gotAs)
+	}
+}
+
 func TestParamAsAndQueryAs(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/users/{id}", func(c *tctx) error {
@@ -320,6 +353,164 @@ func TestJSONOptionsApplyToBind(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	want := []FieldError{{Field: "nope", Message: "is not a known field"}}
+	if got := details(t, rec); !reflect.DeepEqual(got, want) {
+		t.Errorf("details = %+v, want %+v", got, want)
+	}
+}
+
+type rejectedText struct{}
+
+func (*rejectedText) UnmarshalText([]byte) error { return errors.New("the secret reason") }
+
+type mistyped struct {
+	Age     int `json:"age"`
+	Address struct {
+		Zip int `json:"zip"`
+	} `json:"address"`
+	Items []struct {
+		N int `json:"n"`
+	} `json:"items"`
+	M     map[string]int `json:"m"`
+	Small int8           `json:"small"`
+	N     int            `json:"n"`
+	Code  rejectedText   `json:"code"`
+}
+
+func TestBindJSONNamesTheMemberOfAWrongType(t *testing.T) {
+	var bindErr error
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/in", func(c *tctx) error {
+		_, bindErr = c.BindJSON[mistyped]()
+		return bindErr
+	})
+
+	for _, tt := range []struct {
+		body string
+		want FieldError
+	}{
+		{body: `{"age":"x"}`, want: FieldError{Field: "age", Message: "has the wrong JSON type"}},
+		{body: `{"address":{"zip":"x"}}`, want: FieldError{Field: "address.zip", Message: "has the wrong JSON type"}},
+		{body: `{"items":[{"n":1},{"n":"x"}]}`, want: FieldError{Field: "items[1].n", Message: "has the wrong JSON type"}},
+		{body: `{"m":{"a/b":"x"}}`, want: FieldError{Field: "m.a/b", Message: "has the wrong JSON type"}},
+		{body: `{"small":300}`, want: FieldError{Field: "small", Message: "is not a valid value"}},
+		{body: `{"n":1.5}`, want: FieldError{Field: "n", Message: "is not a valid value"}},
+		{body: `{"code":"x"}`, want: FieldError{Field: "code", Message: "is not a valid value"}},
+	} {
+		t.Run(tt.body, func(t *testing.T) {
+			bindErr = nil
+			rec := post(r, "/in", MIMEApplicationJSON, tt.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+			}
+			body := rec.Body.String()
+			if first, _, _ := strings.Cut(body, "\n"); first != "invalid request" {
+				t.Errorf("first body line = %q, want %q", first, "invalid request")
+			}
+			if got := details(t, rec); !reflect.DeepEqual(got, []FieldError{tt.want}) {
+				t.Errorf("details = %+v, want %+v", got, tt.want)
+			}
+			for _, leak := range []string{"json:", "Go ", "the secret reason"} {
+				if strings.Contains(body, leak) {
+					t.Errorf("body = %q, carries %q", body, leak)
+				}
+			}
+			if _, ok := errors.AsType[*json.SemanticError](bindErr); !ok {
+				t.Errorf("error = %v, want a *json.SemanticError in it", bindErr)
+			}
+		})
+	}
+}
+
+func TestBindJSONReturnsTheMembersBeforeTheFailure(t *testing.T) {
+	var in createUser
+	var bindErr error
+	r := newTestRouter()
+	r.POST("/users", func(c *tctx) error {
+		in, bindErr = c.BindJSON[createUser]()
+		return bindErr
+	})
+
+	post(r, "/users", MIMEApplicationJSON, `{"name":"ann","age":"x","admin":true}`)
+	if in.Name != "ann" || in.Admin {
+		t.Errorf("in = %+v, want the name and nothing after the age", in)
+	}
+	want := []FieldError{{Field: "age", Message: "has the wrong JSON type"}}
+	if got := FieldErrorsOf(bindErr); !reflect.DeepEqual(got, want) {
+		t.Errorf("FieldErrorsOf = %+v, want %+v", got, want)
+	}
+}
+
+func TestBindJSONKeepsTheParserTextInTheCause(t *testing.T) {
+	var bindErr error
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/users", func(c *tctx) error {
+		_, bindErr = c.BindJSON[createUser]()
+		return bindErr
+	})
+	r.POST("/count", func(c *tctx) error {
+		_, bindErr = c.BindJSON[int]()
+		return bindErr
+	})
+
+	rec := post(r, "/users", MIMEApplicationJSON, `{"name":`)
+	if rec.Code != http.StatusBadRequest || rec.Body.String() != "malformed JSON body" {
+		t.Errorf("answer = %d %q, want 400 %q", rec.Code, rec.Body.String(), "malformed JSON body")
+	}
+	if _, ok := errors.AsType[*jsontext.SyntacticError](bindErr); !ok {
+		t.Errorf("error = %v, want a *jsontext.SyntacticError in it", bindErr)
+	}
+
+	rec = post(r, "/users", MIMEApplicationJSON, `{"name":"a"} x`)
+	if rec.Code != http.StatusBadRequest || rec.Body.String() != "malformed JSON body" {
+		t.Errorf("trailing garbage: answer = %d %q, want 400 %q", rec.Code, rec.Body.String(), "malformed JSON body")
+	}
+
+	rec = post(r, "/users", MIMEApplicationJSON, `[1]`)
+	if rec.Code != http.StatusBadRequest || rec.Body.String() != "the request body has the wrong JSON type" {
+		t.Errorf("root: answer = %d %q, want 400 %q", rec.Code, rec.Body.String(), "the request body has the wrong JSON type")
+	}
+	if fields := FieldErrorsOf(bindErr); fields != nil {
+		t.Errorf("root: FieldErrorsOf = %+v, want nil", fields)
+	}
+	if _, ok := errors.AsType[*json.SemanticError](bindErr); !ok {
+		t.Errorf("root: error = %v, want a *json.SemanticError in it", bindErr)
+	}
+
+	rec = post(r, "/count", MIMEApplicationJSON, `1.5`)
+	if rec.Code != http.StatusBadRequest || rec.Body.String() != "the request body is not a valid value" {
+		t.Errorf("root value: answer = %d %q, want 400 %q", rec.Code, rec.Body.String(), "the request body is not a valid value")
+	}
+
+	dev := newTestRouter()
+	dev.Logger(slog.New(slog.DiscardHandler))
+	dev.ErrorHandler(ErrorHandler[*tctx](true))
+	dev.POST("/users", func(c *tctx) error {
+		_, err := c.BindJSON[createUser]()
+		return err
+	})
+	rec = post(dev, "/users", MIMEApplicationJSON, `{"name":`)
+	if body := rec.Body.String(); !strings.HasPrefix(body, "malformed JSON body\n\n") || !strings.Contains(body, "jsontext:") {
+		t.Errorf("exposed cause: body = %q, want the parser text after the message", body)
+	}
+}
+
+func TestJSONField(t *testing.T) {
+	for _, tt := range []struct{ pointer, want string }{
+		{pointer: "", want: ""},
+		{pointer: "/a", want: "a"},
+		{pointer: "/a/b", want: "a.b"},
+		{pointer: "/a/0/b", want: "a[0].b"},
+		{pointer: "/0/n", want: "[0].n"},
+		{pointer: "/a~1b", want: "a/b"},
+		{pointer: "/a~0b", want: "a~b"},
+	} {
+		if got := jsonField(jsontext.Pointer(tt.pointer)); got != tt.want {
+			t.Errorf("jsonField(%q) = %q, want %q", tt.pointer, got, tt.want)
+		}
 	}
 }
 
@@ -936,6 +1127,163 @@ func TestValidatorWithoutFieldErrorsReportsNoDetails(t *testing.T) {
 	}
 }
 
+// validateCases maps the name a request binds to what Validate returns.
+var validateCases = map[string]error{
+	"message":        ErrConflict.WithMessage("the name is taken"),
+	"wrapped":        fmt.Errorf("check: %w", ErrConflict.WithMessage("the name is taken")),
+	"details":        ErrUnprocessableEntity.WithMessage("check the form").WithDetails([]FieldError{{Field: "email", Message: "is not an address"}}),
+	"coder":          &codedError{status: http.StatusConflict},
+	"coder of zero":  &codedError{},
+	"zero status":    &HTTPError{Message: "x"},
+	"server error":   ErrInternalServerError.WithMessage("x"),
+	"field and http": errors.Join(FieldError{Field: "email", Message: "is not an address"}, ErrConflict),
+	"typed nil":      (*HTTPError)(nil),
+}
+
+type chosenInvalid struct {
+	Case string `json:"case"`
+}
+
+func (c *chosenInvalid) Validate() error { return validateCases[c.Case] }
+
+func TestValidatorKeepsTheStatusItNames(t *testing.T) {
+	var bindErr error
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/names", func(c *tctx) error {
+		_, bindErr = c.Bind[chosenInvalid]()
+		return bindErr
+	})
+
+	for _, tt := range []struct {
+		name       string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "message", wantStatus: http.StatusConflict, wantBody: "the name is taken"},
+		{name: "wrapped", wantStatus: http.StatusConflict, wantBody: "the name is taken"},
+		{name: "details", wantStatus: http.StatusUnprocessableEntity, wantBody: "check the form\nemail: is not an address"},
+		{name: "coder", wantStatus: http.StatusConflict, wantBody: "Conflict"},
+		{name: "coder of zero", wantStatus: http.StatusUnprocessableEntity, wantBody: "Unprocessable Entity"},
+		{name: "zero status", wantStatus: http.StatusUnprocessableEntity, wantBody: "Unprocessable Entity"},
+		{name: "server error", wantStatus: http.StatusInternalServerError, wantBody: "x"},
+		{name: "field and http", wantStatus: http.StatusConflict, wantBody: "Conflict"},
+		{name: "typed nil", wantStatus: http.StatusUnprocessableEntity, wantBody: "Unprocessable Entity"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bindErr = nil
+			rec := post(r, "/names", MIMEApplicationJSON, `{"case":"`+tt.name+`"}`)
+			if rec.Code != tt.wantStatus || rec.Body.String() != tt.wantBody {
+				t.Errorf("answer = %d %q, want %d %q", rec.Code, rec.Body.String(), tt.wantStatus, tt.wantBody)
+			}
+			if _, ok := errors.AsType[*HTTPError](bindErr); !ok {
+				t.Errorf("Bind error = %#v, want an *HTTPError in it", bindErr)
+			}
+			if tt.wantStatus == http.StatusConflict && !errors.Is(bindErr, ErrConflict) {
+				t.Errorf("errors.Is(%v, ErrConflict) = false", bindErr)
+			}
+		})
+	}
+}
+
+func TestBindFormReturnsWhatDecoded(t *testing.T) {
+	var in signup
+	var bindErr error
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/signups", func(c *tctx) error {
+		in, bindErr = c.BindForm[signup]()
+		return bindErr
+	})
+	r.POST("/small", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		in, bindErr = c.BindForm[signup]()
+		return bindErr
+	})
+
+	t.Run("a field that does not decode", func(t *testing.T) {
+		postForm(r, "/signups", url.Values{"email": {"bo@x.io"}, "age": {"abc"}})
+		if in.Email != "bo@x.io" {
+			t.Errorf("Email = %q, want the value that decoded", in.Email)
+		}
+		want := []FieldError{{Field: "age", Message: `cannot parse "abc" as int`}}
+		if got := FieldErrorsOf(bindErr); !reflect.DeepEqual(got, want) {
+			t.Errorf("FieldErrorsOf = %+v, want %+v", got, want)
+		}
+		if got := StatusOf(bindErr); got != http.StatusBadRequest {
+			t.Errorf("StatusOf = %d, want 400", got)
+		}
+	})
+
+	t.Run("a value that Validate refuses", func(t *testing.T) {
+		postForm(r, "/signups", url.Values{"email": {"bo"}, "age": {"9"}})
+		if in.Email != "bo" || in.Age != 9 {
+			t.Errorf("in = %+v, want the bound value", in)
+		}
+		got := FieldErrorsOf(bindErr)
+		if len(got) != 2 || got[0].Field != "email" || got[1].Field != "age" {
+			t.Errorf("FieldErrorsOf = %+v, want email and age", got)
+		}
+		if got := StatusOf(bindErr); got != http.StatusUnprocessableEntity {
+			t.Errorf("StatusOf = %d, want 422", got)
+		}
+	})
+
+	t.Run("a body over the limit", func(t *testing.T) {
+		post(r, "/small", MIMEApplicationForm, "email="+strings.Repeat("x", 100))
+		if in != (signup{}) {
+			t.Errorf("in = %+v, want the zero value", in)
+		}
+		if got := FieldErrorsOf(bindErr); got != nil {
+			t.Errorf("FieldErrorsOf = %+v, want nil", got)
+		}
+		if got := StatusOf(bindErr); got != http.StatusRequestEntityTooLarge {
+			t.Errorf("StatusOf = %d, want 413", got)
+		}
+	})
+}
+
+type countedValidate struct {
+	Age int `form:"age" json:"age"`
+}
+
+var countedValidateRuns int
+
+func (*countedValidate) Validate() error {
+	countedValidateRuns++
+	return nil
+}
+
+func TestValidatorRunsOnlyOnAFullyDecodedValue(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/ages", func(c *tctx) error {
+		_, err := c.Bind[countedValidate]()
+		return err
+	})
+
+	for _, tt := range []struct {
+		name string
+		rec  func() *httptest.ResponseRecorder
+	}{
+		{name: "form", rec: func() *httptest.ResponseRecorder { return postForm(r, "/ages", url.Values{"age": {"abc"}}) }},
+		{name: "json", rec: func() *httptest.ResponseRecorder { return post(r, "/ages", MIMEApplicationJSON, `{"age":"x"}`) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			countedValidateRuns = 0
+			rec := tt.rec()
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+			}
+			if got := details(t, rec); len(got) != 1 || got[0].Field != "age" {
+				t.Errorf("details = %+v, want age", got)
+			}
+			if countedValidateRuns != 0 {
+				t.Errorf("Validate ran %d times, want 0", countedValidateRuns)
+			}
+		})
+	}
+}
+
 func TestBindReportsEveryFieldThatDidNotFit(t *testing.T) {
 	type filter struct {
 		Page  int           `query:"page"`
@@ -1104,37 +1452,6 @@ func TestParseValueDefault(t *testing.T) {
 		t.Run(tt.in, func(t *testing.T) {
 			if got := ParseValueDefault(tt.in, time.Minute); got != tt.want {
 				t.Errorf("ParseValueDefault(%q) = %v, want %v", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFieldErrorsReachesThroughAnErrorTree(t *testing.T) {
-	email := FieldError{Field: "email", Message: "is not an address"}
-	age := FieldError{Field: "age", Message: "must be 18 or more"}
-
-	tests := []struct {
-		name string
-		err  error
-		want []FieldError
-	}{
-		{name: "one field error", err: email, want: []FieldError{email}},
-		{name: "a pointer to one", err: &email, want: []FieldError{email}},
-		{name: "several joined", err: errors.Join(email, age), want: []FieldError{email, age}},
-		{
-			name: "the details of an HTTPError",
-			err:  ErrUnprocessableEntity.WithDetails([]FieldError{email}),
-			want: []FieldError{email},
-		},
-		{name: "a wrapped one", err: fmt.Errorf("read the form: %w", email), want: []FieldError{email}},
-		{name: "an error that names no field", err: errors.New("nope")},
-		{name: "no error at all"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := fieldErrors(tt.err); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("fieldErrors = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -1673,6 +1990,9 @@ func TestFormRequired(t *testing.T) {
 			}
 			if fe, ok := errors.AsType[FieldError](got); !ok || fe != tt.wantFields[0] {
 				t.Errorf("errors.AsType[FieldError] = %#v, %v, want %#v", fe, ok, tt.wantFields[0])
+			}
+			if fields := FieldErrorsOf(got); !reflect.DeepEqual(fields, tt.wantFields) {
+				t.Errorf("FieldErrorsOf = %#v, want exactly %#v", fields, tt.wantFields)
 			}
 		})
 	}

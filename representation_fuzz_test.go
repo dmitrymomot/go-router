@@ -2,6 +2,9 @@ package router
 
 import (
 	"bytes"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
@@ -176,6 +179,61 @@ func FuzzParseBool(f *testing.F) {
 		want, wantErr := strconv.ParseBool(s)
 		if got != want || (err == nil) != (wantErr == nil) {
 			t.Fatalf("parseBool(%q) = %v, %v; strconv.ParseBool says %v, %v", s, got, err, want, wantErr)
+		}
+	})
+}
+
+func FuzzBindJSONErrorShape(f *testing.F) {
+	for _, seed := range []string{
+		"",
+		"{",
+		`{"n":"x"}`,
+		`{"a":{"b":[1,"x"]}}`,
+		`[1]`,
+		`{"m":{"a/b":"x"}}`,
+		`null`,
+		`{"n":1.5}`,
+		`{"n":1e400}`,
+		`{"n":1} x`,
+	} {
+		f.Add(seed)
+	}
+
+	type target struct {
+		N int `json:"n"`
+		A struct {
+			B []int `json:"b"`
+		} `json:"a"`
+		M map[string]int `json:"m"`
+	}
+
+	f.Fuzz(func(t *testing.T, body string) {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+		b := NewBase(httptest.NewRecorder(), req)
+
+		_, err := b.BindJSON[target]()
+		if err == nil {
+			return
+		}
+		he, ok := errors.AsType[*HTTPError](err)
+		if !ok {
+			t.Fatalf("error = %#v, want an *HTTPError", err)
+		}
+		if he.Status != http.StatusBadRequest && he.Status != http.StatusRequestEntityTooLarge {
+			t.Errorf("status = %d, want 400 or 413", he.Status)
+		}
+		if strings.Contains(he.Message, "json:") || strings.Contains(he.Message, " Go ") {
+			t.Errorf("message = %q, carries the decoder text", he.Message)
+		}
+		fields := FieldErrorsOf(err)
+		if len(fields) > 1 {
+			t.Errorf("FieldErrorsOf = %+v, want at most one", fields)
+		}
+		for _, fe := range fields {
+			if fe.Field == "" || fe.Message == "" {
+				t.Errorf("field error = %+v, want a field and a message", fe)
+			}
 		}
 	})
 }

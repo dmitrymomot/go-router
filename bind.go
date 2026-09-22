@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
@@ -27,10 +28,16 @@ const defaultMaxMultipartMemory int64 = 32 << 20
 //
 // T names its sources with struct tags, one per source: `json`, `form`,
 // `query`, `param` for a route parameter, and `header`. A T that implements
-// [Validator] is validated last, and a failure becomes an
-// [ErrUnprocessableEntity] whose Details hold the [FieldError] list.
+// [Validator] is validated last.
 //
-// The error is an [HTTPError], so a handler can return it as it stands.
+// A value that does not fit its field is an [ErrBadRequest] "invalid
+// request", and a value that Validate refuses is an [ErrUnprocessableEntity],
+// unless the Validator names a status of its own. Both list the fields in
+// Details, which [FieldErrorsOf] reads. The T comes back with the error and
+// holds what decoded: every field of a form, the query, the path or the
+// headers, and the JSON members before the one that failed.
+// errors.AsType[*HTTPError] finds one in every error, and [StatusOf] reports
+// its status, so a handler can return it as it stands.
 func (b *Base) Bind[T any]() (T, error) {
 	var v T
 
@@ -59,31 +66,90 @@ func (b *Base) Bind[T any]() (T, error) {
 }
 
 // BindJSON decodes the body as JSON into a T and validates it. opts win over
-// the options of [Router.JSONOptions].
+// the options of [Router.JSONOptions]. It reports errors as [Base.Bind] does.
 //
-// An empty body, a malformed one and a body over the limit each report their
-// own [HTTPError].
+// A member of the wrong JSON type, a value that its UnmarshalText or
+// UnmarshalJSON rejects, and an unknown member under RejectUnknownMembers
+// each report a 400 "invalid request" with one [FieldError] at the path of the
+// member, such as events[3].amount. Decoding stops at the first member that
+// does not fit, so T holds the members before it. A malformed body reports
+// "malformed JSON body", and an empty body and a body over the limit each
+// report their own [HTTPError]. The text of the decoder stays in Err.
+//
+// Options of the v1 legacy semantics make the decoder report errors of
+// another type, so such a member reports "malformed JSON body" and no field.
 func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 	var v T
 	body := countingBody{r: b.limitedBody()}
 	if err := json.UnmarshalRead(&body, &v, b.jsonOptions(opts)...); err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			return v, ErrPayloadTooLarge.WithError(err)
-		}
 		// json/v2 reports an empty body with the same syntax error as a
 		// truncated one, so the byte count tells them apart.
-		if body.read == 0 {
-			return v, ErrBadRequest.WithMessage("the request body is empty").WithError(err)
-		}
-		return v, ErrBadRequest.WithMessage("malformed JSON body: %s", err).WithError(err)
+		return v, jsonError(err, body.read == 0)
 	}
 	return v, validate(&v)
+}
+
+// jsonError keeps the text of json/v2 out of the message: it names Go types,
+// and its wording changes from run to run.
+func jsonError(err error, empty bool) *HTTPError {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		return ErrPayloadTooLarge.WithError(err)
+	}
+	if empty {
+		return ErrBadRequest.WithMessage("the request body is empty").WithError(err)
+	}
+	// A SemanticError can wrap a SyntacticError, so the syntax check goes
+	// first.
+	if _, ok := errors.AsType[*jsontext.SyntacticError](err); ok || errors.Is(err, io.ErrUnexpectedEOF) {
+		return ErrBadRequest.WithMessage("malformed JSON body").WithError(err)
+	}
+	se, ok := errors.AsType[*json.SemanticError](err)
+	if !ok {
+		return ErrBadRequest.WithMessage("malformed JSON body").WithError(err)
+	}
+	if field := jsonField(se.JSONPointer); field != "" {
+		return badFields([]FieldError{{Field: field, Message: jsonProblem(se)}}, err)
+	}
+	return ErrBadRequest.WithMessage("the request body %s", jsonProblem(se)).WithError(err)
+}
+
+func jsonProblem(se *json.SemanticError) string {
+	switch {
+	case errors.Is(se.Err, json.ErrUnknownName):
+		return "is not a known field"
+	case se.Err == nil:
+		return "has the wrong JSON type"
+	default:
+		return "is not a valid value"
+	}
+}
+
+// jsonField spells a JSON pointer the way a client reads a field: /events/3/amount
+// becomes events[3].amount.
+func jsonField(p jsontext.Pointer) string {
+	var sb strings.Builder
+	for tok := range p.Tokens() {
+		if tok != "" && strings.Trim(tok, "0123456789") == "" {
+			sb.WriteByte('[')
+			sb.WriteString(tok)
+			sb.WriteByte(']')
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteByte('.')
+		}
+		sb.WriteString(tok)
+	}
+	return sb.String()
 }
 
 // BindForm fills a T from the form of the body and validates it. It reads a
 // URL-encoded form and a multipart one alike, through the `form` tag. Parsing
 // happens once per request, so a later form read costs nothing. A bool field
 // reads a checkbox: "on" when it is checked, and false when it is absent.
+//
+// It reports errors as [Base.Bind] does. Every field that decoded is set, and
+// a field that failed keeps its zero value, nil for a pointer.
 func (b *Base) BindForm[T any]() (T, error) {
 	var v T
 	if err := b.parseForm(); err != nil {
@@ -96,7 +162,7 @@ func (b *Base) BindForm[T any]() (T, error) {
 }
 
 // BindQuery fills a T from the query string and validates it, through the
-// `query` tag.
+// `query` tag. It reports errors as [Base.Bind] does.
 func (b *Base) BindQuery[T any]() (T, error) {
 	var v T
 	if err := b.decodeInto(b.queryValues(), &v, "query"); err != nil {
@@ -106,7 +172,7 @@ func (b *Base) BindQuery[T any]() (T, error) {
 }
 
 // BindPath fills a T from the route parameters and validates it, through the
-// `param` tag.
+// `param` tag. It reports errors as [Base.Bind] does.
 func (b *Base) BindPath[T any]() (T, error) {
 	var v T
 	vals := make(url.Values, len(b.paramNames))
@@ -122,7 +188,8 @@ func (b *Base) BindPath[T any]() (T, error) {
 }
 
 // BindHeader fills a T from the request headers and validates it, through the
-// `header` tag, whose value is the header name.
+// `header` tag, whose value is the header name. It reports errors as
+// [Base.Bind] does.
 func (b *Base) BindHeader[T any]() (T, error) {
 	var v T
 	if err := b.decodeInto(url.Values(b.req.Header), &v, "header"); err != nil {
@@ -132,9 +199,22 @@ func (b *Base) BindHeader[T any]() (T, error) {
 }
 
 // Validator is a bound value that checks itself. Every Bind method calls
-// Validate after it fills the value. Return a [FieldError], a slice of them
-// joined with [errors.Join], or any other error, which becomes a plain
-// [ErrUnprocessableEntity].
+// Validate once the value decoded in full, and never after a field failed to
+// decode. What Validate returns decides the answer:
+//
+//   - An [HTTPError], wrapped or not, passes through as it stands, with its
+//     status, message and Details.
+//   - A [StatusCoder] passes through inside an HTTPError of its status. Its
+//     text stays out of the response.
+//   - A [FieldError], or several joined with [errors.Join], becomes an
+//     [ErrUnprocessableEntity] that lists them.
+//   - Any other error becomes a plain [ErrUnprocessableEntity], and its text
+//     reaches only the log.
+//
+// The first HTTPError in the tree decides before a StatusCoder, as in
+// [StatusOf], and FieldErrors beside it are not added to its Details. When
+// its status is zero, the rest of the list decides, and a nil *HTTPError
+// becomes a plain ErrUnprocessableEntity.
 type Validator interface {
 	Validate() error
 }
@@ -160,34 +240,23 @@ func validate[T any](v *T) error {
 	if err == nil {
 		return nil
 	}
-	if fields := fieldErrors(err); len(fields) > 0 {
+	he, ok := errors.AsType[*HTTPError](err)
+	if ok && he == nil {
+		// Every method of a typed nil panics, so it is not kept as the cause.
+		return ErrUnprocessableEntity.WithError(nil)
+	}
+	// A status of zero would answer 500, so such an error falls through to
+	// the 422 below.
+	if ok && he.Status != 0 {
+		return err
+	}
+	if sc, ok := errors.AsType[StatusCoder](err); ok && sc.StatusCode() != 0 {
+		return NewHTTPError(sc.StatusCode()).WithError(err)
+	}
+	if fields := FieldErrorsOf(err); fields != nil {
 		return ErrUnprocessableEntity.WithDetails(fields).WithError(err)
 	}
 	return ErrUnprocessableEntity.WithError(err)
-}
-
-func fieldErrors(err error) []FieldError {
-	switch e := err.(type) {
-	case FieldError:
-		return []FieldError{e}
-	case *FieldError:
-		return []FieldError{*e}
-	case *HTTPError:
-		if fields, ok := e.Details.([]FieldError); ok {
-			return fields
-		}
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		var out []FieldError
-		for _, sub := range joined.Unwrap() {
-			out = append(out, fieldErrors(sub)...)
-		}
-		return out
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return fieldErrors(wrapped.Unwrap())
-	}
-	return nil
 }
 
 func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {
@@ -202,9 +271,13 @@ func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {
 	for i, f := range fields {
 		errs[i] = f
 	}
-	return ErrBadRequest.WithMessage("invalid request").
-		WithDetails(fields).
-		WithError(errors.Join(errs...))
+	return badFields(fields, errors.Join(errs...))
+}
+
+// badFields is the 400 of a value that did not decode, one [FieldError] per
+// field that failed.
+func badFields(fields []FieldError, cause error) *HTTPError {
+	return ErrBadRequest.WithMessage("invalid request").WithDetails(fields).WithError(cause)
 }
 
 type countingBody struct {
@@ -398,7 +471,8 @@ func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 // ParseValue parses s as a T. T may be any string, bool, integer, float,
 // time.Duration or time.Time, or a type that implements
 // encoding.TextUnmarshaler. A bool takes what strconv.ParseBool takes, and
-// also on and off. The error is the parse failure itself, without a status.
+// also on and off. The error is the parse failure itself, without a status,
+// and a pointer T is nil on error.
 func ParseValue[T any](s string) (T, error) {
 	var v T
 	if err := setScalar(reflect.ValueOf(&v).Elem(), s, ""); err != nil {
@@ -462,9 +536,7 @@ func (b *Base) FormRequired(name string) (string, error) {
 		return v, nil
 	}
 	fe := FieldError{Field: name, Message: "is required"}
-	return "", ErrBadRequest.WithMessage("invalid request").
-		WithDetails([]FieldError{fe}).
-		WithError(fe)
+	return "", badFields([]FieldError{fe}, fe)
 }
 
 // FormValues reports the parsed form of the body. The router parses it once

@@ -221,10 +221,17 @@ func setScalar(fv reflect.Value, s, layout string) error {
 	}
 
 	if fv.Kind() == reflect.Pointer {
-		if fv.IsNil() {
-			fv.Set(reflect.New(fv.Type().Elem()))
+		if !fv.IsNil() {
+			return setScalar(fv.Elem(), s, layout)
 		}
-		return setScalar(fv.Elem(), s, layout)
+		// Fill a new value before setting it, so a failure leaves the pointer
+		// nil and not pointing at a zero.
+		nv := reflect.New(fv.Type().Elem())
+		if err := setScalar(nv.Elem(), s, layout); err != nil {
+			return err
+		}
+		fv.Set(nv)
+		return nil
 	}
 
 	if layout != "" && fv.Type() == reflect.TypeFor[time.Time]() {
