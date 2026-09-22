@@ -44,7 +44,14 @@ type registration[C Context] struct {
 	pattern string
 	handler HandlerFunc[C]
 	mws     []Middleware[C]
+	// claim is set on the routes of a RedirectHost, which own their host in
+	// every table they are installed into, a Mount replay included.
+	claim *hostClaim
 }
+
+// hostClaim is the hold one RedirectHost call has on its host. It is not zero
+// size, so two claims never share an address.
+type hostClaim struct{ _ byte }
 
 // Router matches a request to a handler. C is the context type of the
 // application, and every handler and middleware of this router takes it.
@@ -200,6 +207,11 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 }
 
 func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
+	r.register(registration[C]{method: method, pattern: pattern, handler: h, mws: mws})
+}
+
+func (r *Router[C]) register(reg registration[C]) {
+	method, pattern := reg.method, reg.pattern
 	// Ordered against the freeze: without it the check below is a guess, and a
 	// route could go into a trie a request had already started reading.
 	r.root.regMu.Lock()
@@ -211,19 +223,14 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 	if method == "" {
 		panic("router: Handle needs a method")
 	}
-	if h == nil {
+	if reg.handler == nil {
 		panic("router: Handle needs a handler for " + method + " " + pattern)
 	}
-	validateMiddleware(mws)
+	validateMiddleware(reg.mws)
 	for s := r; s != nil; s = s.owner {
 		s.hasRoutes = true
 	}
-	reg := registration[C]{
-		method:  method,
-		pattern: pattern,
-		handler: h,
-		mws:     slices.Clone(mws),
-	}
+	reg.mws = slices.Clone(reg.mws)
 	r.regs = append(r.regs, reg)
 	r.install(reg)
 }
@@ -250,12 +257,24 @@ func (r *Router[C]) install(reg registration[C]) {
 		r.record(reg, nil, full, meta)
 		return
 	}
+	if reg.claim != nil && normalizePattern(r.scopePrefix()) != "/" {
+		panic(errRedirectHostPrefix)
+	}
 	for _, e := range entries {
-		if e.redirect {
+		claim := reg.claim != nil && e.redirect != reg.claim
+		switch {
+		case reg.claim == nil && e.redirect != nil:
 			panic("router: the host " + e.pattern + " belongs to RedirectHost; register its routes on the target host")
+		case claim && e.redirect != nil:
+			panic("router: the host " + e.pattern + " already has a RedirectHost")
+		case claim && !e.tree.empty():
+			panic("router: the host " + e.pattern + " already holds routes, so RedirectHost cannot own it")
 		}
 		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
 			panic(err.Error())
+		}
+		if claim {
+			e.redirect = reg.claim
 		}
 		r.record(reg, e, full, meta)
 	}
@@ -696,8 +715,9 @@ func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
 // its routes, and so do the classes that sub declared with [Router.ParamClass].
 //
 // Mount panics if sub is nil, is a scope of another router, is mounted inside
-// itself, or carries such a setting, or if sub and this router register one
-// host pattern whose classes they declare apart.
+// itself, or carries such a setting, if sub and this router register one
+// host pattern whose classes they declare apart, or if a [Router.RedirectHost]
+// of sub lands under a prefix or on a host that this router already uses.
 func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")

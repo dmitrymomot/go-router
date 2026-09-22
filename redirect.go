@@ -90,7 +90,8 @@ func (r *Router[C]) sharedHostNames() []string {
 // port of the request. Like any host scope it wins over routes registered outside
 // host scopes, so a pattern of "*" also catches a host that nothing else names.
 // The host belongs to the redirect: no other route may be registered for
-// pattern, before or after. A request that already names target gets
+// pattern, before or after, and that holds in every router this one is mounted
+// into, which must mount it at "/". A request that already names target gets
 // [ErrNotFound] rather than a redirect loop. Use 308 to keep the method and body
 // of a POST.
 //
@@ -110,7 +111,7 @@ func (r *Router[C]) RedirectHost(pattern, target string, status int) {
 		panic("router: a host scope cannot sit inside another host scope")
 	}
 	if normalizePattern(r.scopePrefix()) != "/" {
-		panic("router: RedirectHost answers every path of a host, so it cannot sit in a scope with a prefix")
+		panic(errRedirectHostPrefix)
 	}
 	spec, err := parseHostPattern(pattern, r.class)
 	if err != nil {
@@ -141,14 +142,6 @@ func (r *Router[C]) RedirectHost(pattern, target string, status int) {
 	if port == "" && tmpl.host.pattern == spec.pattern {
 		panic(fmt.Sprintf("router: the redirect of the host %q points at itself", pattern))
 	}
-	e := r.top().eng.mustHostEntry(spec)
-	if e.redirect {
-		panic("router: the host " + spec.pattern + " already has a RedirectHost")
-	}
-	if !e.tree.empty() {
-		panic("router: the host " + spec.pattern + " already holds routes, so RedirectHost cannot own it")
-	}
-
 	h := func(c C) error {
 		b := c.base()
 		to, err := tmpl.expand(b.ParamOK)
@@ -172,9 +165,11 @@ func (r *Router[C]) RedirectHost(pattern, target string, status int) {
 		}
 		return b.Redirect(status, b.Scheme()+"://"+to+uri)
 	}
+	claim := new(hostClaim)
 	r.Host(pattern, func(g *Router[C]) {
-		g.handle(anyMethod, "/", h, nil)
-		g.handle(anyMethod, "/{"+mountParam+"...}", h, nil)
+		g.register(registration[C]{method: anyMethod, pattern: "/", handler: h, claim: claim})
+		g.register(registration[C]{method: anyMethod, pattern: "/{" + mountParam + "...}", handler: h, claim: claim})
 	})
-	e.redirect = true
 }
+
+const errRedirectHostPrefix = "router: RedirectHost answers every path of a host, so it cannot sit in a scope with a prefix"

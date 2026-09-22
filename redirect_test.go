@@ -348,6 +348,46 @@ func TestRedirectHostOwnsItsHost(t *testing.T) {
 	})
 }
 
+func TestRedirectHostOwnsItsHostThroughAMount(t *testing.T) {
+	sub := func() *Router[*tctx] {
+		s := newTestRouter()
+		s.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+		return s
+	}
+	t.Run("a route of the parent registered before", func(t *testing.T) {
+		defer wantPanic(t, "already holds routes")
+		r := newTestRouter()
+		r.Host("www.example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
+		r.Mount("/", sub())
+	})
+	t.Run("a route of the parent registered after", func(t *testing.T) {
+		defer wantPanic(t, "belongs to RedirectHost")
+		r := newTestRouter()
+		r.Mount("/", sub())
+		r.Host("www.example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
+	})
+	t.Run("a redirect of the parent", func(t *testing.T) {
+		defer wantPanic(t, "already has a RedirectHost")
+		r := newTestRouter()
+		r.RedirectHost("www.example.com", "example.org", http.StatusMovedPermanently)
+		r.Mount("/", sub())
+	})
+	t.Run("a mount under a prefix", func(t *testing.T) {
+		defer wantPanic(t, "scope with a prefix")
+		newTestRouter().Mount("/api", sub())
+	})
+	t.Run("a mount at the root", func(t *testing.T) {
+		r := newTestRouter()
+		r.Mount("/", sub())
+		for _, path := range []string{"/", "/x"} {
+			rec := doHost(r, http.MethodGet, "www.example.com", path)
+			if rec.Code != http.StatusMovedPermanently || rec.Header().Get(HeaderLocation) != "http://example.com"+path {
+				t.Errorf("GET www.example.com%s = %d %q, want 301 to example.com", path, rec.Code, rec.Header().Get(HeaderLocation))
+			}
+		}
+	})
+}
+
 func TestRedirectHostRefusesALoop(t *testing.T) {
 	captureLogs(t)
 	r := newTestRouter()
