@@ -73,10 +73,11 @@ Each line links to the example that proves it.
 - [Rendering](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Render), [buffered or streamed](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderStream).
 - [Server-sent events](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-ServeSSE) that send JSON, text or rendered HTML.
 - htmx 4: [a fragment or the whole page](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderPartial) from one handler, and [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.HX): retarget, reswap, trigger, redirect.
+- [Cookies with safe defaults](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.NewCookie), and [signed cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.CookieCodec) with one codec for the whole router and [key rotation](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-NewCookieCodec-Rotation), and [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.AddFlash) that survive a redirect.
 - [Fifteen middlewares](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware): [CSRF](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CSRF), [rate limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RateLimit), [real IP](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RealIPWithConfig), [key auth](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-KeyAuth), [CORS](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CORSWithConfig), and the rest.
 - [Fingerprinted static assets](https://pkg.go.dev/github.com/dmitrymomot/go-router/static#example-package) from an `embed.FS`.
 - [A server that drains on Ctrl-C](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-Run).
-- [Test helpers](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-package) for a router, a bare handler, an SSE stream and a golden file.
+- [Test helpers](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-package) for a router, a bare handler, an SSE stream, [a signed cookie](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-SignedCookie) and a golden file.
 - [A stdlib handler](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-WrapHandler) still works, route parameters and all.
 
 ## Examples you can run
