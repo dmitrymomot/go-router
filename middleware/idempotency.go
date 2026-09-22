@@ -160,7 +160,7 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
-			if skipped(cfg.Skip, c) || idempotentMethod(c.Request().Method) {
+			if skipped(cfg.Skip, c) || idempotencySafeMethod(c.Request().Method) {
 				return next(c)
 			}
 
@@ -205,9 +205,9 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 	}
 }
 
-// idempotentMethod reports the methods RFC 9110 calls safe, which a repeat
+// idempotencySafeMethod reports the methods RFC 9110 calls safe, which a repeat
 // cannot harm.
-func idempotentMethod(method string) bool {
+func idempotencySafeMethod(method string) bool {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, router.MethodQuery:
 		return true
