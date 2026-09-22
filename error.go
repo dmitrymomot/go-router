@@ -225,13 +225,13 @@ func PanicError(recovered any, stackSize int) *HTTPError {
 // the status of a [StatusCoder], 413 for an [http.MaxBytesError], 499 for an
 // error that is [context.Canceled], 200 for a nil error, and 500 for anything
 // else. 499 is the status nginx logs for a client that went away, so a
-// disconnect does not count as a 5xx.
+// disconnect does not count as a 5xx. The HTTPError is the first in the tree
+// of err that is not a typed nil.
 func StatusOf(err error) int {
 	if err == nil {
 		return http.StatusOK
 	}
-	// A typed nil *HTTPError has no status to read; it answers 500.
-	if he, ok := errors.AsType[*HTTPError](err); ok && he != nil {
+	if he, ok := httpErrorOf(err); ok {
 		// The fields are exported, so a caller can build one with no status.
 		if he.Status != 0 {
 			return he.Status
@@ -255,6 +255,37 @@ func StatusOf(err error) int {
 // statusClientClosedRequest has no constant in net/http and no text there.
 const statusClientClosedRequest = 499
 
+// httpErrorOf reports the first *HTTPError in the tree of err that is not nil.
+// It walks the tree as [errors.As] does, depth first, and passes over a typed
+// nil, which has no fields to read, so a real one after it still counts.
+func httpErrorOf(err error) (*HTTPError, bool) {
+	for err != nil {
+		if he, ok := err.(*HTTPError); ok && he != nil {
+			return he, true
+		}
+		if x, ok := err.(interface{ As(any) bool }); ok {
+			var he *HTTPError
+			if x.As(&he) && he != nil {
+				return he, true
+			}
+		}
+		switch x := err.(type) {
+		case interface{ Unwrap() error }:
+			err = x.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, e := range x.Unwrap() {
+				if he, ok := httpErrorOf(e); ok {
+					return he, true
+				}
+			}
+			return nil, false
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
 // ResolveStatus reports the status that went out. A response that already
 // wrote its header keeps that status, whatever err asks for; otherwise the
 // answer is [StatusOf].
@@ -267,8 +298,8 @@ func ResolveStatus(res *Response, err error) int {
 
 // HTTPErrorOf reports the [HTTPError] the client is answered with: the one
 // inside err, or one with the status of [StatusOf], its standard text, and err
-// as the cause. A nil err gives nil, and a typed nil *HTTPError counts as a
-// plain error.
+// as the cause. A nil err gives nil. A typed nil *HTTPError is passed over,
+// and one alone counts as a plain error.
 //
 // Status is never 0. An empty Message takes the standard text of the status,
 // which is itself empty for a status net/http does not name, such as 499.
@@ -279,8 +310,8 @@ func HTTPErrorOf(err error) *HTTPError {
 	if err == nil {
 		return nil
 	}
-	he, ok := errors.AsType[*HTTPError](err)
-	if !ok || he == nil {
+	he, ok := httpErrorOf(err)
+	if !ok {
 		status := StatusOf(err)
 		return &HTTPError{Status: status, Message: http.StatusText(status), Err: err}
 	}
@@ -437,9 +468,7 @@ func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	// recurse. A pooled router lowers it again on release.
 	b.errorHandled = true
 	committedBefore := b.res.Committed
-	he, isHTTP := errors.AsType[*HTTPError](err)
-	// A typed nil *HTTPError has no fields to read; it answers as a plain error.
-	isHTTP = isHTTP && he != nil
+	he, isHTTP := httpErrorOf(err)
 	// A sentinel such as ErrNotFound, returned as it stands, wraps nothing and
 	// so cannot be context.Canceled; the check skips the walk for a 404.
 	bare := isHTTP && he.Err == nil && error(he) == err
@@ -484,7 +513,7 @@ func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 // handler wrote, or the one err asks for when the response committed before.
 // A bare HTTPError under 500 is an answer, not a failure, so it goes unlogged.
 //
-// he and isHTTP are errors.AsType[*HTTPError](err), which the caller has.
+// he and isHTTP are httpErrorOf(err), which the caller has.
 func logFailure(b *Base, err error, he *HTTPError, isHTTP, committedBefore bool) {
 	var status int
 	switch {

@@ -876,3 +876,54 @@ func TestExposedPanicKeepsTheStackInTheLog(t *testing.T) {
 		t.Errorf("log = %q, want the stack", logged.String())
 	}
 }
+
+type joinedNilValidated struct {
+	Name string `query:"name"`
+}
+
+func (joinedNilValidated) Validate() error {
+	return errors.Join((*HTTPError)(nil), ErrConflict.WithMessage("taken"))
+}
+
+// A typed nil *HTTPError early in the tree must not hide a real one after it.
+func TestATypedNilHTTPErrorDoesNotHideALaterOne(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{"joined", errors.Join((*HTTPError)(nil), ErrNotFound)},
+		{"wrapped then joined", errors.Join(fmt.Errorf("lookup: %w", (*HTTPError)(nil)), fmt.Errorf("db: %w", ErrNotFound))},
+		{"nested join", fmt.Errorf("outer: %w", errors.Join(errors.New("plain"), errors.Join((*HTTPError)(nil), ErrNotFound)))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StatusOf(tt.err); got != http.StatusNotFound {
+				t.Errorf("StatusOf = %d, want 404", got)
+			}
+			if he := HTTPErrorOf(tt.err); he.Status != http.StatusNotFound || he.Message != "Not Found" {
+				t.Errorf("HTTPErrorOf = %d %q, want 404 %q", he.Status, he.Message, "Not Found")
+			}
+
+			sink := &recordSink{}
+			r := newTestRouter()
+			r.Logger(slog.New(sink))
+			r.GET("/x", func(*tctx) error { return tt.err })
+			if rec := do(r, http.MethodGet, "/x"); rec.Code != http.StatusNotFound {
+				t.Errorf("GET /x = %d, want 404", rec.Code)
+			}
+			if len(sink.records) != 0 {
+				t.Errorf("logged %d records, want none for a 404", len(sink.records))
+			}
+		})
+	}
+
+	t.Run("validate", func(t *testing.T) {
+		r := newTestRouter()
+		r.GET("/v", func(c *tctx) error {
+			_, err := c.BindQuery[joinedNilValidated]()
+			return err
+		})
+		if rec := do(r, http.MethodGet, "/v?name=a"); rec.Code != http.StatusConflict {
+			t.Errorf("GET /v = %d %q, want 409", rec.Code, rec.Body.String())
+		}
+	})
+}
