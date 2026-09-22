@@ -184,6 +184,42 @@ func ExampleTimeoutWithConfig() {
 	// 503 Service Unavailable
 }
 
+func ExampleMinDuration() {
+	r := newAPI()
+	// The answer is the same whether or not the address has an account, and
+	// the floor makes it take the same time, so neither gives the account away.
+	r.With(middleware.MinDuration[*Context](20*time.Millisecond)).POST("/login",
+		func(c *Context) error {
+			return c.String(http.StatusOK, "check your inbox")
+		})
+
+	start := time.Now()
+	res := routertest.Do(r, http.MethodPost, "/login",
+		routertest.FormBody(url.Values{"email": {"nobody@example.com"}}))
+	fmt.Println(res.StatusCode, res.String(), time.Since(start) >= 20*time.Millisecond)
+	// Output:
+	// 200 check your inbox true
+}
+
+func ExampleMinDurationWithConfig() {
+	r := newAPI()
+	r.Route("/login", func(g *router.Router[*Context]) {
+		// The form itself gives nothing away, so only the POST waits.
+		g.Use(middleware.MinDurationWithConfig[*Context](middleware.MinDurationConfig{
+			Duration: 20 * time.Millisecond,
+			Skip:     func(c router.Context) bool { return c.Request().Method == http.MethodGet },
+		}))
+		g.GET("/", sayOK)
+		g.POST("/", sayOK)
+	})
+
+	start := time.Now()
+	res := routertest.Do(r, http.MethodPost, "/login")
+	fmt.Println(res.StatusCode, "held:", time.Since(start) >= 20*time.Millisecond)
+	// Output:
+	// 200 held: true
+}
+
 func ExampleGzip() {
 	r := newAPI()
 	r.Use(middleware.Gzip[*Context])
