@@ -61,6 +61,8 @@ func canonicalHeaders(names ...string) []string {
 //
 // Name the headers your proxy actually sets, through [RealIPWithConfig], to
 // have the address of the client replace RemoteAddr.
+//
+// See Order in the package doc for where it goes.
 func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return RealIPWithConfig[C](RealIPConfig{})(next)
 }

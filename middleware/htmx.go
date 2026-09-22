@@ -24,6 +24,9 @@ type HTMXRedirectConfig struct {
 // to Vary. A browser request keeps its redirect, and so does an htmx 4 full
 // request, such as a boosted link or a history restore: fetch follows the
 // redirect, and htmx puts the final URL in the history.
+//
+// Put it outside [Idempotency], so a replayed redirect is turned for the
+// request that asks again; see Order in the package doc.
 func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return HTMXRedirectWithConfig[C](HTMXRedirectConfig{})(next)
 }

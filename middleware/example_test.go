@@ -3,7 +3,10 @@ package middleware_test
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -411,4 +414,150 @@ func ExampleLoggerWithConfig() {
 	// level=INFO msg=request status=200
 	// level=WARN msg=request status=410
 	// level=ERROR msg=request status=500
+}
+
+func ExampleIdempotency() {
+	// Build the store once and share it across the routes it covers.
+	store := middleware.NewIdempotencyMemoryStore[*Context](time.Hour)
+
+	r := newAPI()
+	charges := 0
+	r.With(middleware.Idempotency(store)).POST("/pay", func(c *Context) error {
+		charges++
+		return c.Stringf(http.StatusCreated, "payment %d", charges)
+	})
+
+	// The client lost the first answer and sent the same request again.
+	for range 2 {
+		res := routertest.Do(r, http.MethodPost, "/pay",
+			routertest.Header(router.HeaderIdempotencyKey, "k1"),
+			routertest.FormBody(url.Values{"amount": {"5"}}))
+		fmt.Println(res.StatusCode, res.String())
+	}
+	fmt.Println("charged", charges)
+	// Output:
+	// 201 payment 1
+	// 201 payment 1
+	// charged 1
+}
+
+func ExampleIdempotencyWithConfig() {
+	r := newAPI()
+	charges := 0
+	// A plain HTML form carries its key in a hidden field, and every form on
+	// these routes must carry one.
+	r.With(middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*Context]{
+		Store:    middleware.NewIdempotencyMemoryStore[*Context](time.Hour),
+		Sources:  []middleware.TokenSource{middleware.FromForm("_request")},
+		Required: true,
+	})).POST("/pay", func(c *Context) error {
+		charges++
+		return c.Stringf(http.StatusOK, "paid %s", c.FormValue("amount"))
+	})
+
+	submit := func(form url.Values) {
+		res := routertest.Do(r, http.MethodPost, "/pay", routertest.FormBody(form))
+		fmt.Println(res.StatusCode, res.String())
+	}
+	submit(url.Values{"_request": {"r1"}, "amount": {"5"}})
+	submit(url.Values{"_request": {"r1"}, "amount": {"5"}}) // a double click
+	submit(url.Values{"_request": {"r1"}, "amount": {"9"}}) // the same key, another request
+	submit(url.Values{"amount": {"5"}})
+	fmt.Println("charged", charges)
+	// Output:
+	// 200 paid 5
+	// 200 paid 5
+	// 422 the idempotency key was used for a different request
+	// 400 the request needs an Idempotency-Key
+	// charged 1
+}
+
+func ExampleIdempotencyFormFingerprint() {
+	// The default fingerprint covers a form body only. A JSON API hashes the
+	// body too, so a key reused with another body is refused.
+	jsonFingerprint := func(c *Context) ([]byte, error) {
+		// The router has already capped this body, at MaxBodyBytes or at the
+		// BodyLimit of the route.
+		body, err := io.ReadAll(c.Request().Body)
+		if err != nil {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+				return nil, router.ErrPayloadTooLarge.WithError(err)
+			}
+			return nil, router.ErrBadRequest.WithError(err)
+		}
+		// Put the body back for the handler.
+		c.Request().Body = io.NopCloser(bytes.NewReader(body))
+
+		base, err := middleware.IdempotencyFormFingerprint(c)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(append(base, body...))
+		return sum[:], nil
+	}
+
+	r := newAPI()
+	r.With(middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*Context]{
+		Store:       middleware.NewIdempotencyMemoryStore[*Context](time.Hour),
+		Fingerprint: jsonFingerprint,
+	})).POST("/pay", func(c *Context) error {
+		in, err := c.Bind[struct {
+			Amount int `json:"amount"`
+		}]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusCreated, "paid %d", in.Amount)
+	})
+
+	for _, body := range []string{`{"amount":5}`, `{"amount":5}`, `{"amount":9}`} {
+		res := routertest.Do(r, http.MethodPost, "/pay",
+			routertest.Header(router.HeaderIdempotencyKey, "k1"),
+			routertest.Body(router.MIMEApplicationJSON, strings.NewReader(body)))
+		fmt.Println(res.StatusCode, res.String())
+	}
+	// Output:
+	// 201 paid 5
+	// 201 paid 5
+	// 422 the idempotency key was used for a different request
+}
+
+func ExampleNewIdempotencyMemoryStoreWithConfig() {
+	// Keep a key for a day, and at most 10000 of them. A full store drops the
+	// oldest key whose answer it holds.
+	store := middleware.NewIdempotencyMemoryStoreWithConfig[*Context](middleware.IdempotencyMemoryStoreConfig{
+		ExpiresIn:  24 * time.Hour,
+		MaxEntries: 10000,
+	})
+
+	passwords := map[string]string{"alice": "a-pass", "bob": "b-pass"}
+	signedIn := func(c *Context) string {
+		user, _, _ := c.Request().BasicAuth()
+		return user
+	}
+
+	r := newAPI()
+	r.Use(middleware.BasicAuth(func(_ *Context, user, pass string) (bool, error) {
+		want, ok := passwords[user]
+		return ok && middleware.SecureCompare(pass, want), nil
+	}))
+	r.Use(middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*Context]{
+		Store: store,
+		// Each user has keys of their own. BasicAuth in front checked the
+		// password, so the name is that of the signed-in user.
+		Scope: func(c *Context) (string, error) { return signedIn(c), nil },
+	}))
+	r.POST("/orders", func(c *Context) error {
+		return c.Stringf(http.StatusCreated, "order for %s", signedIn(c))
+	})
+
+	for _, user := range []string{"alice", "bob"} {
+		res := routertest.Do(r, http.MethodPost, "/orders",
+			routertest.Header(router.HeaderIdempotencyKey, "k1"),
+			func(req *http.Request) { req.SetBasicAuth(user, passwords[user]) })
+		fmt.Println(res.StatusCode, res.String())
+	}
+	// Output:
+	// 201 order for alice
+	// 201 order for bob
 }

@@ -3,6 +3,7 @@ package router
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -443,4 +444,392 @@ func TestHijackCommitsTheResponse(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Error("Observe never ran")
 	}
+}
+
+func TestCaptureRecordsTheAnswerAndPassesItOn(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	res.Before(func() { res.Header().Set("X-Hook", "ran") })
+
+	stop := res.Capture(64)
+	res.Header().Set(HeaderContentType, MIMETextPlain)
+	if _, err := res.Write([]byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := res.WriteString("b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := res.ReadFrom(strings.NewReader("c")); err != nil {
+		t.Fatal(err)
+	}
+	got := stop()
+	res.Header().Set("X-Late", "1")
+
+	if got.Status != http.StatusOK || string(got.Body) != "abc" || got.Truncated {
+		t.Errorf("recorded %d %q truncated=%v, want 200 %q false", got.Status, got.Body, got.Truncated, "abc")
+	}
+	if got.Header.Get("X-Hook") != "ran" || got.Header.Get(HeaderContentType) != MIMETextPlain {
+		t.Errorf("recorded header = %v, want the hook's and the handler's", got.Header)
+	}
+	if got.Header.Get("X-Late") != "" {
+		t.Error("the recorded header changed after the status went out")
+	}
+	if rec.Body.String() != "abc" || res.Size != 3 {
+		t.Errorf("client got %q, Size = %d; want %q, 3", rec.Body, res.Size, "abc")
+	}
+}
+
+func TestCaptureStopsAtTheLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		writes    []string
+		want      string
+		limit     int
+		truncated bool
+	}{
+		{name: "over", limit: 4, writes: []string{"hello"}, want: "hell", truncated: true},
+		{name: "over across writes", limit: 4, writes: []string{"he", "llo"}, want: "hell", truncated: true},
+		{name: "zero", limit: 0, writes: []string{"hello"}, want: "", truncated: true},
+		{name: "exactly at", limit: 5, writes: []string{"hello"}, want: "hello"},
+		{name: "nothing written", limit: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			res := &Response{ResponseWriter: rec}
+			stop := res.Capture(tt.limit)
+			for _, s := range tt.writes {
+				if _, err := res.WriteString(s); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := stop()
+			if string(got.Body) != tt.want || got.Truncated != tt.truncated {
+				t.Errorf("recorded %q truncated=%v, want %q %v", got.Body, got.Truncated, tt.want, tt.truncated)
+			}
+			if rec.Body.String() != strings.Join(tt.writes, "") {
+				t.Errorf("client got %q, want all of it", rec.Body)
+			}
+		})
+	}
+}
+
+func TestCaptureKeepsFlushHijackAndDeadlines(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	stop := res.Capture(8)
+	res.Flush()
+	if !rec.Flushed {
+		t.Error("Flush did not reach the recorder")
+	}
+	if got := stop(); got.Status != http.StatusOK {
+		t.Errorf("recorded status = %d after a Flush, want 200", got.Status)
+	}
+
+	type hijacked struct {
+		status    int
+		committed bool
+	}
+	seen := make(chan hijacked, 1)
+	r := newTestRouter()
+	r.GET("/deadline", func(c *tctx) error {
+		stop := c.Response().Capture(8)
+		defer stop()
+		if err := http.NewResponseController(c.Response()).SetWriteDeadline(time.Now().Add(time.Minute)); err != nil {
+			return ErrInternalServerError.WithError(err)
+		}
+		return c.String(http.StatusOK, "ok")
+	})
+	r.GET("/hijack", func(c *tctx) error {
+		stop := c.Response().Capture(8)
+		conn, buf, err := c.Response().Hijack()
+		if err != nil {
+			return ErrInternalServerError.WithError(err)
+		}
+		defer conn.Close() //nolint:errcheck // The connection is going away.
+		//nolint:errcheck // The client below reports what arrived.
+		buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\n\r\n")
+		seen <- hijacked{status: stop().Status, committed: c.Response().Committed}
+		return buf.Flush()
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/deadline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close() //nolint:errcheck,gosec // Only the status matters.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("deadline: status = %d, want 200", resp.StatusCode)
+	}
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() //nolint:errcheck // The test is done with it.
+	if _, err := fmt.Fprint(conn, "GET /hijack HTTP/1.1\r\nHost: example.com\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-seen:
+		if got.status != 0 || !got.committed {
+			t.Errorf("after a hijack: recorded %d, committed %v; want 0, true", got.status, got.committed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the handler never hijacked the connection")
+	}
+}
+
+// MaxBytesReader closes the connection only when it reaches the writer of
+// net/http, so a capture left in the chain must not hide it.
+func TestCaptureKeepsA413ClosingTheConnection(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(16)
+	r.POST("/b", func(c *tctx) error {
+		c.Response().Capture(64)
+		_, err := c.Bind[map[string]any]()
+		return err
+	})
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body := `{"k":"` + strings.Repeat("a", 4096) + `"}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/b", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // The test is done with it.
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	if !resp.Close {
+		t.Error("the server kept the connection open after a 413")
+	}
+}
+
+func TestCaptureRecordsTheErrorHandlerWhenStoppedAfterIt(t *testing.T) {
+	captureLogs(t)
+	var got Recorded
+	r := newTestRouter()
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			stop := c.Response().Capture(64)
+			HandleError(c, next(c))
+			got = stop()
+			return nil
+		}
+	})
+	r.GET("/", func(*tctx) error { return ErrNotFound })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if got.Status != http.StatusNotFound || string(got.Body) != rec.Body.String() {
+		t.Errorf("recorded %d %q, want 404 %q", got.Status, got.Body, rec.Body)
+	}
+}
+
+// swapWriter stands in for Gzip: it puts its own writer in and takes it out on
+// the way back, whatever sits in its place by then.
+func swapWriter(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+	return func(c *tctx) error {
+		res := c.Response()
+		w := &wrapWriter{ResponseWriter: res.ResponseWriter}
+		res.ResponseWriter = w
+		defer func() { res.ResponseWriter = w.ResponseWriter }()
+		return next(c)
+	}
+}
+
+func TestCaptureEndsWhenAnOuterWriterIsPutBack(t *testing.T) {
+	captureLogs(t)
+	var stop func() Recorded
+	r := newTestRouter()
+	r.Use(swapWriter)
+	r.GET("/", func(c *tctx) error {
+		stop = c.Response().Capture(64)
+		return ErrConflict
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	if got := stop(); got.Status != 0 || len(got.Body) != 0 {
+		t.Errorf("recorded %d %q after the outer writer was put back, want nothing", got.Status, got.Body)
+	}
+}
+
+// redirectToOK stands in for HTMXRedirect: it turns a redirect into a 200.
+type redirectToOK struct {
+	http.ResponseWriter
+}
+
+func (w *redirectToOK) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *redirectToOK) WriteHeader(code int) {
+	if loc := w.Header().Get(HeaderLocation); loc != "" {
+		w.Header().Del(HeaderLocation)
+		w.Header().Set(HeaderHXRedirect, loc)
+		code = http.StatusOK
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func TestCaptureSeesWhatAnInnerWriterMakesOfTheAnswer(t *testing.T) {
+	var got Recorded
+	r := newTestRouter()
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			stop := c.Response().Capture(64)
+			err := next(c)
+			got = stop()
+			return err
+		}
+	}, func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			res := c.Response()
+			w := &redirectToOK{ResponseWriter: res.ResponseWriter}
+			res.ResponseWriter = w
+			defer func() { res.ResponseWriter = w.ResponseWriter }()
+			return next(c)
+		}
+	})
+	r.POST("/", func(c *tctx) error { return c.Redirect(http.StatusSeeOther, "/next") })
+
+	rec := do(r, http.MethodPost, "/")
+	if rec.Code != http.StatusOK || got.Status != http.StatusOK {
+		t.Fatalf("client got %d, recorded %d; want 200 for both", rec.Code, got.Status)
+	}
+	if got.Header.Get(HeaderHXRedirect) != "/next" || got.Header.Get(HeaderLocation) != "" {
+		t.Errorf("recorded header = %v, want HX-Redirect and no Location", got.Header)
+	}
+}
+
+func TestCaptureStopRestoresTheWriter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	stop := res.Capture(8)
+	if res.ResponseWriter == http.ResponseWriter(rec) {
+		t.Fatal("Capture left the writer in place")
+	}
+	if _, err := res.WriteString("hi"); err != nil {
+		t.Fatal(err)
+	}
+	first := stop()
+	if res.ResponseWriter != http.ResponseWriter(rec) {
+		t.Fatalf("writer after stop = %T, want the recorder", res.ResponseWriter)
+	}
+	second := stop()
+	if second.Status != first.Status || string(second.Body) != string(first.Body) || second.Truncated != first.Truncated {
+		t.Errorf("a second stop reported %+v, want %+v", second, first)
+	}
+}
+
+func TestCaptureStoppedOutOfOrderPassesThrough(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	stopOuter := res.Capture(8)
+	outer := res.ResponseWriter
+	stopInner := res.Capture(8)
+
+	stopOuter()
+	if _, err := res.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopInner(); string(got.Body) != "x" {
+		t.Errorf("inner recorded %q, want %q", got.Body, "x")
+	}
+	if res.ResponseWriter != outer {
+		t.Fatalf("writer after the inner stop = %T, want the outer capture", res.ResponseWriter)
+	}
+	if _, err := res.WriteString("y"); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopOuter(); len(got.Body) != 0 {
+		t.Errorf("outer recorded %q after its stop, want nothing", got.Body)
+	}
+	if rec.Body.String() != "xy" {
+		t.Errorf("client got %q, want %q", rec.Body, "xy")
+	}
+}
+
+func TestCaptureIgnoresAnInformationalStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	stop := res.Capture(8)
+	res.Header().Set("Link", "</style.css>; rel=preload")
+	res.WriteHeader(http.StatusEarlyHints)
+	if got := stop(); got.Status != 0 || got.Header != nil {
+		t.Errorf("recorded %d %v for a 103, want nothing", got.Status, got.Header)
+	}
+
+	stop = res.Capture(8)
+	res.WriteHeader(http.StatusEarlyHints)
+	res.WriteHeader(http.StatusCreated)
+	if got := stop(); got.Status != http.StatusCreated {
+		t.Errorf("recorded %d, want 201", got.Status)
+	}
+}
+
+func TestCaptureAfterTheHeaderWentOut(t *testing.T) {
+	rec := httptest.NewRecorder()
+	res := &Response{ResponseWriter: rec}
+	res.Header().Set("X-Early", "1")
+	res.WriteHeader(http.StatusAccepted)
+
+	stop := res.Capture(8)
+	if _, err := res.WriteString("late"); err != nil {
+		t.Fatal(err)
+	}
+	got := stop()
+	if got.Status != http.StatusAccepted || got.Header.Get("X-Early") != "1" || string(got.Body) != "late" {
+		t.Errorf("recorded %d %v %q, want 202 with X-Early and %q", got.Status, got.Header, got.Body, "late")
+	}
+
+	upgraded := &Response{ResponseWriter: httptest.NewRecorder(), Status: http.StatusSwitchingProtocols, Committed: true}
+	if got := upgraded.Capture(8)(); got.Status != 0 {
+		t.Errorf("recorded %d after a 101, want 0", got.Status)
+	}
+}
+
+type failingWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("the client went away") }
+
+func (failingWriter) WriteString(string) (int, error) { return 0, errors.New("the client went away") }
+
+func TestCaptureRecordsWhatTheHandlerMeantWhenTheWriteFails(t *testing.T) {
+	res := &Response{ResponseWriter: failingWriter{httptest.NewRecorder()}}
+	stop := res.Capture(16)
+	if _, err := res.WriteString("lost"); err == nil {
+		t.Fatal("the write did not fail")
+	}
+	if _, err := res.Write([]byte("!")); err == nil {
+		t.Fatal("the write did not fail")
+	}
+	if got := stop(); got.Status != http.StatusOK || string(got.Body) != "lost!" {
+		t.Errorf("recorded %d %q, want 200 %q", got.Status, got.Body, "lost!")
+	}
+}
+
+func TestCaptureRejectsANegativeLimit(t *testing.T) {
+	defer func() {
+		if msg, _ := recover().(string); !strings.Contains(msg, "Response.Capture needs a limit") {
+			t.Errorf("panic = %q, want one about the limit", msg)
+		}
+	}()
+	new(Response).Capture(-1)
 }

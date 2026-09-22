@@ -32,6 +32,10 @@ type TimeoutConfig struct {
 //
 // A handler that already wrote its header keeps that answer, because there is
 // nothing left to replace.
+//
+// Put it last, inside [Idempotency] and [MinDuration], so an answer that ran
+// out of time is never stored and the floor still holds; see Order in the
+// package doc.
 func Timeout[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return TimeoutWithConfig[C](TimeoutConfig{Duration: DefaultTimeout})(next)
 }

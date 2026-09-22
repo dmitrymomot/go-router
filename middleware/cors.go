@@ -37,6 +37,8 @@ type CORSConfig struct {
 // CORS allows every origin, without credentials. It suits a public read-only
 // API; anything that carries a session needs [CORSWithConfig] with the origins
 // named.
+//
+// See Order in the package doc for where it goes.
 func CORS[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return CORSWithConfig[C](CORSConfig{AllowOrigins: []string{"*"}})(next)
 }

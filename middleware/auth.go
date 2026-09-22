@@ -63,6 +63,8 @@ var defaultKeyAuthSources = []TokenSource{FromHeader(router.HeaderAuthorization,
 // reported as it stands, so a database failure reaches the client as a 500 and
 // not as a 401.
 //
+// See Order in the package doc for where it goes.
+//
 // KeyAuth panics if v is nil.
 func KeyAuth[C router.Context](v func(c C, key string) (bool, error)) router.Middleware[C] {
 	return KeyAuthWithConfig(KeyAuthConfig[C]{Validator: v})
@@ -157,6 +159,8 @@ type BasicAuthConfig[C router.Context] struct {
 // A validator that compares a password has to do so in constant time; see
 // [SecureCompare]. An Authorization header this middleware cannot decode is a
 // 400 and v never runs.
+//
+// See Order in the package doc for where it goes.
 //
 // BasicAuth panics if v is nil.
 func BasicAuth[C router.Context](v func(c C, user, pass string) (bool, error)) router.Middleware[C] {

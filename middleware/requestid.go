@@ -23,6 +23,8 @@ type RequestIDConfig struct {
 // RequestID gives each request an id: the one the client sent, or a new UUIDv7.
 // The id goes into the X-Request-Id header of the response and onto the
 // context, where [RequestIDFrom] reads it.
+//
+// See Order in the package doc for where it goes.
 func RequestID[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return RequestIDWithConfig[C](RequestIDConfig{})(next)
 }

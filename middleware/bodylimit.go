@@ -25,6 +25,8 @@ type BodyLimitConfig struct {
 // an outer ParseForm, reads it under the cap in force then. For a body that
 // [Decompress] expands, the limit also counts the expanded bytes that Bind
 // reads.
+//
+// See Order in the package doc for where it goes.
 func BodyLimit[C router.Context](limit int64) router.Middleware[C] {
 	return BodyLimitWithConfig[C](BodyLimitConfig{Limit: limit})
 }

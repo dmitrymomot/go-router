@@ -36,6 +36,8 @@ type LoggerConfig struct {
 //
 // It builds nothing when the logger discards the level, so a quiet level costs
 // almost nothing.
+//
+// See Order in the package doc for where it goes.
 func Logger[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return LoggerWithConfig[C](LoggerConfig{})(next)
 }

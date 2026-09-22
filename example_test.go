@@ -1060,6 +1060,29 @@ func ExampleHandleError() {
 	// 423 locked
 }
 
+func ExampleResponse_Capture() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	// A middleware that keeps the first bytes of each answer, say for an
+	// audit log or a replay store. The client still gets the whole answer.
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			stop := c.Response().Capture(5)
+			err := next(c)
+			rec := stop()
+			fmt.Println(rec.Status, rec.Header.Get(router.HeaderContentType))
+			fmt.Printf("%q truncated=%t\n", rec.Body, rec.Truncated)
+			return err
+		}
+	})
+	r.GET("/", func(c *Context) error { return c.String(http.StatusOK, "hello, world") })
+
+	fmt.Println(serve(r, http.MethodGet, "/"))
+	// Output:
+	// 200 text/plain; charset=utf-8
+	// "hello" truncated=true
+	// 200 hello, world
+}
+
 func ExampleJSONErrorHandler() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.Logger(slog.New(slog.DiscardHandler))
