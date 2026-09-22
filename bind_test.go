@@ -1470,3 +1470,148 @@ func TestOversizedBodyClosesTheConnectionBehindAWrappedWriter(t *testing.T) {
 		t.Error("the server kept the connection open after a 413")
 	}
 }
+
+func setBodyLimitRouter(limit int64) *Router[*tctx] {
+	r := newTestRouter()
+	r.MaxBodyBytes(16)
+	r.POST("/bind", func(c *tctx) error {
+		c.SetBodyLimit(limit)
+		in, err := c.Bind[map[string]string]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, in["k"])
+	})
+	r.POST("/read", func(c *tctx) error {
+		c.SetBodyLimit(limit)
+		n, err := io.Copy(io.Discard, c.Request().Body)
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			return c.String(http.StatusRequestEntityTooLarge, "MaxBytesError")
+		}
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%d", n)
+	})
+	return r
+}
+
+func jsonOfLength(n int) string {
+	return `{"k":"` + strings.Repeat("a", n-len(`{"k":""}`)) + `"}`
+}
+
+func TestSetBodyLimitRaisesTheCapOfTheRouter(t *testing.T) {
+	r := setBodyLimitRouter(1 << 10)
+	body := jsonOfLength(100)
+
+	rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, body)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d %q, want 200", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/bind", strings.NewReader(body))
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	req.ContentLength = -1
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("chunked: status = %d %q, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetBodyLimitLowersTheCapOfTheRouter(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/bind", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		_, err := c.Bind[map[string]string]()
+		return err
+	})
+	r.POST("/read", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		_, err := io.Copy(io.Discard, c.Request().Body)
+		if _, ok := errors.AsType[*http.MaxBytesError](err); !ok {
+			return ErrInternalServerError.WithMessage("read error = %v, want a MaxBytesError", err)
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	body := jsonOfLength(100)
+	if rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, body); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("Bind: status = %d, want 413", rec.Code)
+	}
+	if rec := doBody(r, http.MethodPost, "/read", MIMEApplicationJSON, body); rec.Code != http.StatusNoContent {
+		t.Errorf("raw read: %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetBodyLimitZeroLiftsTheCapOfTheRouter(t *testing.T) {
+	r := setBodyLimitRouter(0)
+	body := jsonOfLength(4 << 10)
+
+	if rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, body); rec.Code != http.StatusOK {
+		t.Errorf("Bind: status = %d, want 200", rec.Code)
+	}
+	if rec := doBody(r, http.MethodPost, "/read", MIMEApplicationJSON, body); rec.Code != http.StatusOK {
+		t.Errorf("raw read: status = %d %q, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetBodyLimitKeepsASmallerCapOnTheBody(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/bind", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		c.SetBodyLimit(0)
+		_, err := c.Bind[map[string]string]()
+		return err
+	})
+
+	if rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, jsonOfLength(100)); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestSetBodyLimitReachesTheFormReaders(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(64)
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			c.SetBodyLimit(4 << 10)
+			return next(c)
+		}
+	})
+	r.POST("/form", func(c *tctx) error {
+		return c.Stringf(http.StatusOK, "%d", len(c.FormValue("name")))
+	})
+	r.POST("/upload", func(c *tctx) error {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return err
+		}
+		_, fh, err := c.FormFile("doc")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%d/%d", len(form.File), fh.Size)
+	})
+
+	rec := postForm(r, "/form", url.Values{"name": {strings.Repeat("x", 1000)}})
+	if rec.Code != http.StatusOK || rec.Body.String() != "1000" {
+		t.Errorf("FormValue = %d %q, want 200 %q", rec.Code, rec.Body.String(), "1000")
+	}
+
+	body, ct := multipartBody(t, nil, upload{field: "doc", name: "a.txt", content: strings.Repeat("x", 1000)})
+	rec = post(r, "/upload", ct, body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "1/1000" {
+		t.Errorf("FormFile = %d %q, want 200 %q", rec.Code, rec.Body.String(), "1/1000")
+	}
+}
+
+func TestSetBodyLimitWithoutABodyAllocatesNothing(t *testing.T) {
+	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if allocs := testing.AllocsPerRun(100, func() { b.SetBodyLimit(1 << 10) }); allocs != 0 {
+		t.Errorf("SetBodyLimit on a request without a body allocated %v times, want 0", allocs)
+	}
+	if b.deferred != nil {
+		t.Error("SetBodyLimit on a request without a body kept a cap")
+	}
+}

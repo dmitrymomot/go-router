@@ -25,6 +25,7 @@ type Context interface {
 	Request() *http.Request
 	SetRequest(r *http.Request)
 	SetContext(ctx context.Context)
+	SetBodyLimit(n int64)
 	Response() *Response
 	Set(key string, value any)
 	Get(key string) (any, bool)
@@ -65,9 +66,10 @@ type Base struct {
 	paramVals   []string
 	ropts       *routerOpts
 
-	// One word rather than two error fields, which would push an embedder
-	// with a string of its own past 320 bytes and into the next size class.
-	deferred      *deferredErrors
+	// One word rather than the fields it points to, which would push an
+	// embedder with a string of its own past 320 bytes and into the next size
+	// class.
+	deferred      *deferredState
 	resStorage    Response
 	hostIdx       int32
 	errorScopeIdx int32
@@ -154,14 +156,18 @@ func (b *Base) clearRequestSlow() {
 	b.needsCleanup, b.errorHandled = false, false
 }
 
-type deferredErrors struct {
+// deferredState holds what few requests need, so Base does not carry it.
+type deferredState struct {
 	form error
 	hx   error
+	// bodyLimit is the cap of SetBodyLimit: 0 leaves the router's, and -1
+	// lifts it.
+	bodyLimit int64
 }
 
-func (b *Base) deferrals() *deferredErrors {
+func (b *Base) deferrals() *deferredState {
 	if b.deferred == nil {
-		b.deferred = new(deferredErrors)
+		b.deferred = new(deferredState)
 		b.needsCleanup = true
 	}
 	return b.deferred

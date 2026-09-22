@@ -14,7 +14,8 @@ import (
 )
 
 // DefaultMaxBodyBytes is the request body that the Bind methods read before
-// they report [ErrPayloadTooLarge]. [Router.MaxBodyBytes] changes it.
+// they report [ErrPayloadTooLarge]. [Router.MaxBodyBytes] changes it, and
+// [Base.SetBodyLimit] changes it for one request.
 const DefaultMaxBodyBytes int64 = 4 << 20
 
 const defaultMaxMultipartMemory int64 = 32 << 20
@@ -217,11 +218,41 @@ func (c *countingBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// SetBodyLimit caps the body of this request at n bytes, in place of the cap
+// of [Router.MaxBodyBytes], above or below it. The Bind methods and the form
+// readers stop there with [ErrPayloadTooLarge], and a handler that reads
+// Request().Body itself meets an [*http.MaxBytesError]. n of zero or less lifts
+// the cap of the router, but not a cap already on the body, so of two calls
+// the smaller cap wins. A request without a body is left alone.
+//
+// It applies to what is still unread: a form parsed before the call keeps the
+// cap it was read under.
+func (b *Base) SetBodyLimit(n int64) {
+	if b.req.Body == nil || b.req.Body == http.NoBody {
+		return
+	}
+	if n <= 0 {
+		b.deferrals().bodyLimit = -1
+		return
+	}
+	b.deferrals().bodyLimit = n
+	b.req.Body = http.MaxBytesReader(innermostWriter(b.res), b.req.Body, n)
+}
+
+func (b *Base) bodyLimit() int64 {
+	if b.deferred != nil && b.deferred.bodyLimit != 0 {
+		return b.deferred.bodyLimit
+	}
+	return b.opts().maxBody
+}
+
+// limitedBody caps the body again even after SetBodyLimit did, because
+// Decompress may have swapped the body since.
 func (b *Base) limitedBody() io.ReadCloser {
 	if b.req.Body == nil {
 		return http.NoBody
 	}
-	limit := b.opts().maxBody
+	limit := b.bodyLimit()
 	if limit <= 0 {
 		return b.req.Body
 	}

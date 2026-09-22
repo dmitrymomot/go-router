@@ -310,6 +310,40 @@ func ExampleBase_SetContext() {
 	// 200 uk
 }
 
+func ExampleBase_SetBodyLimit() {
+	type Note struct {
+		Text string `json:"text"`
+	}
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.MaxBodyBytes(16)
+	r.POST("/import", func(c *Context) error {
+		c.SetBodyLimit(1 << 10)
+		if _, err := c.Bind[Note](); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusOK)
+	})
+	r.POST("/note", func(c *Context) error {
+		if _, err := c.Bind[Note](); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusOK)
+	})
+
+	body := `{"text":"` + strings.Repeat("x", 30) + `"}`
+	for _, target := range []string{"/import", "/note"} {
+		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Println(target, rec.Code)
+	}
+	// Output:
+	// /import 200
+	// /note 413
+}
+
 func ExampleNewPooled() {
 	r := router.NewPooled(
 		func() *Context { return &Context{DB: &store{}} },
