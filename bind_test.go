@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -960,6 +962,104 @@ func TestValidatorWithoutFieldErrorsReportsNoDetails(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "the name is taken") {
 		t.Errorf("body leaks the internal cause: %q", rec.Body.String())
+	}
+}
+
+// validateCases maps the name a request binds to what Validate returns.
+var validateCases = map[string]error{
+	"message":        ErrConflict.WithMessage("the name is taken"),
+	"wrapped":        fmt.Errorf("check: %w", ErrConflict.WithMessage("the name is taken")),
+	"details":        ErrUnprocessableEntity.WithMessage("check the form").WithDetails([]FieldError{{Field: "email", Message: "is not an address"}}),
+	"coder":          &codedError{status: http.StatusConflict},
+	"coder of zero":  &codedError{},
+	"zero status":    &HTTPError{Message: "x"},
+	"server error":   ErrInternalServerError.WithMessage("x"),
+	"field and http": errors.Join(FieldError{Field: "email", Message: "is not an address"}, ErrConflict),
+}
+
+type chosenInvalid struct {
+	Case string `json:"case"`
+}
+
+func (c *chosenInvalid) Validate() error { return validateCases[c.Case] }
+
+func TestValidatorKeepsTheStatusItNames(t *testing.T) {
+	var bindErr error
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/names", func(c *tctx) error {
+		_, bindErr = c.Bind[chosenInvalid]()
+		return bindErr
+	})
+
+	for _, tt := range []struct {
+		name       string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "message", wantStatus: http.StatusConflict, wantBody: "the name is taken"},
+		{name: "wrapped", wantStatus: http.StatusConflict, wantBody: "the name is taken"},
+		{name: "details", wantStatus: http.StatusUnprocessableEntity, wantBody: "check the form\nemail: is not an address"},
+		{name: "coder", wantStatus: http.StatusConflict, wantBody: "Conflict"},
+		{name: "coder of zero", wantStatus: http.StatusUnprocessableEntity, wantBody: "Unprocessable Entity"},
+		{name: "zero status", wantStatus: http.StatusUnprocessableEntity, wantBody: "Unprocessable Entity"},
+		{name: "server error", wantStatus: http.StatusInternalServerError, wantBody: "x"},
+		{name: "field and http", wantStatus: http.StatusConflict, wantBody: "Conflict"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bindErr = nil
+			rec := post(r, "/names", MIMEApplicationJSON, `{"case":"`+tt.name+`"}`)
+			if rec.Code != tt.wantStatus || rec.Body.String() != tt.wantBody {
+				t.Errorf("answer = %d %q, want %d %q", rec.Code, rec.Body.String(), tt.wantStatus, tt.wantBody)
+			}
+			if _, ok := errors.AsType[*HTTPError](bindErr); !ok {
+				t.Errorf("Bind error = %#v, want an *HTTPError in it", bindErr)
+			}
+			if tt.wantStatus == http.StatusConflict && !errors.Is(bindErr, ErrConflict) {
+				t.Errorf("errors.Is(%v, ErrConflict) = false", bindErr)
+			}
+		})
+	}
+}
+
+type countedValidate struct {
+	Age int `form:"age" json:"age"`
+}
+
+var countedValidateRuns int
+
+func (*countedValidate) Validate() error {
+	countedValidateRuns++
+	return nil
+}
+
+func TestValidatorRunsOnlyOnAFullyDecodedValue(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/ages", func(c *tctx) error {
+		_, err := c.Bind[countedValidate]()
+		return err
+	})
+
+	for _, tt := range []struct {
+		name string
+		rec  func() *httptest.ResponseRecorder
+	}{
+		{name: "form", rec: func() *httptest.ResponseRecorder { return postForm(r, "/ages", url.Values{"age": {"abc"}}) }},
+		{name: "json", rec: func() *httptest.ResponseRecorder { return post(r, "/ages", MIMEApplicationJSON, `{"age":"x"}`) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			countedValidateRuns = 0
+			rec := tt.rec()
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+			}
+			if got := details(t, rec); tt.name == "form" && (len(got) != 1 || got[0].Field != "age") {
+				t.Errorf("details = %+v, want age", got)
+			}
+			if countedValidateRuns != 0 {
+				t.Errorf("Validate ran %d times, want 0", countedValidateRuns)
+			}
+		})
 	}
 }
 

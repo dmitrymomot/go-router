@@ -132,9 +132,21 @@ func (b *Base) BindHeader[T any]() (T, error) {
 }
 
 // Validator is a bound value that checks itself. Every Bind method calls
-// Validate after it fills the value. Return a [FieldError], a slice of them
-// joined with [errors.Join], or any other error, which becomes a plain
-// [ErrUnprocessableEntity].
+// Validate once the value decoded in full, and never after a field failed to
+// decode. What Validate returns decides the answer:
+//
+//   - An [HTTPError], wrapped or not, passes through as it stands, with its
+//     status, message and Details.
+//   - A [StatusCoder] passes through inside an HTTPError of its status. Its
+//     text stays out of the response.
+//   - A [FieldError], or several joined with [errors.Join], becomes an
+//     [ErrUnprocessableEntity] that lists them.
+//   - Any other error becomes a plain [ErrUnprocessableEntity], and its text
+//     reaches only the log.
+//
+// An HTTPError anywhere in the tree decides before a StatusCoder, as in
+// [StatusOf], and FieldErrors beside it are not added to its Details. One
+// with a status of zero counts as any other error.
 type Validator interface {
 	Validate() error
 }
@@ -159,6 +171,14 @@ func validate[T any](v *T) error {
 	err := sv.Validate()
 	if err == nil {
 		return nil
+	}
+	// A status of zero would answer 500, so such an error falls through to
+	// the 422 below.
+	if he, ok := errors.AsType[*HTTPError](err); ok && he.Status != 0 {
+		return err
+	}
+	if sc, ok := errors.AsType[StatusCoder](err); ok && sc.StatusCode() != 0 {
+		return NewHTTPError(sc.StatusCode()).WithError(err)
 	}
 	if fields := FieldErrorsOf(err); fields != nil {
 		return ErrUnprocessableEntity.WithDetails(fields).WithError(err)
