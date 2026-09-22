@@ -10,7 +10,7 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-func secureRouter(cfg middleware.SecureConfig) *router.Router[*appContext] {
+func secureRouter(cfg middleware.SecureConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.SecureWithConfig[*appContext](cfg))
 	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
@@ -48,14 +48,14 @@ func TestSecureDefaults(t *testing.T) {
 }
 
 func TestSecureSendsNoXSSProtection(t *testing.T) {
-	h := secureHeaders(secureRouter(middleware.SecureConfig{}), "https://app.example/")
+	h := secureHeaders(secureRouter(middleware.SecureConfig[*appContext]{}), "https://app.example/")
 	if got := h.Get("X-XSS-Protection"); got != "" {
 		t.Errorf("X-XSS-Protection = %q, want none", got)
 	}
 }
 
 func TestSecureOverridesTheDefaults(t *testing.T) {
-	r := secureRouter(middleware.SecureConfig{
+	r := secureRouter(middleware.SecureConfig[*appContext]{
 		ContentTypeNosniff: "nosniff",
 		FrameOptions:       "DENY",
 		ReferrerPolicy:     "no-referrer",
@@ -73,22 +73,22 @@ func TestSecureOverridesTheDefaults(t *testing.T) {
 func TestSecureOmitDropsAHeader(t *testing.T) {
 	tests := []struct {
 		name   string
-		cfg    middleware.SecureConfig
+		cfg    middleware.SecureConfig[*appContext]
 		header string
 	}{
 		{
 			name:   "nosniff",
-			cfg:    middleware.SecureConfig{ContentTypeNosniff: middleware.SecureOmit},
+			cfg:    middleware.SecureConfig[*appContext]{ContentTypeNosniff: middleware.SecureOmit},
 			header: router.HeaderXContentTypeOptions,
 		},
 		{
 			name:   "frame options",
-			cfg:    middleware.SecureConfig{FrameOptions: middleware.SecureOmit},
+			cfg:    middleware.SecureConfig[*appContext]{FrameOptions: middleware.SecureOmit},
 			header: router.HeaderXFrameOptions,
 		},
 		{
 			name:   "referrer policy",
-			cfg:    middleware.SecureConfig{ReferrerPolicy: middleware.SecureOmit},
+			cfg:    middleware.SecureConfig[*appContext]{ReferrerPolicy: middleware.SecureOmit},
 			header: router.HeaderReferrerPolicy,
 		},
 	}
@@ -108,7 +108,7 @@ func TestSecureOmitDropsAHeader(t *testing.T) {
 func TestSecureContentSecurityPolicy(t *testing.T) {
 	const policy = "default-src 'self'"
 
-	h := secureHeaders(secureRouter(middleware.SecureConfig{ContentSecurityPolicy: policy}), "/")
+	h := secureHeaders(secureRouter(middleware.SecureConfig[*appContext]{ContentSecurityPolicy: policy}), "/")
 	if got := h.Get(router.HeaderContentSecurityPolicy); got != policy {
 		t.Errorf("policy = %q, want %q", got, policy)
 	}
@@ -120,7 +120,7 @@ func TestSecureContentSecurityPolicy(t *testing.T) {
 func TestSecureContentSecurityPolicyReportOnly(t *testing.T) {
 	const policy = "default-src 'self'"
 
-	h := secureHeaders(secureRouter(middleware.SecureConfig{
+	h := secureHeaders(secureRouter(middleware.SecureConfig[*appContext]{
 		ContentSecurityPolicy: policy,
 		CSPReportOnly:         true,
 	}), "/")
@@ -135,17 +135,17 @@ func TestSecureContentSecurityPolicyReportOnly(t *testing.T) {
 func TestSecureHSTSValue(t *testing.T) {
 	tests := []struct {
 		name string
-		cfg  middleware.SecureConfig
+		cfg  middleware.SecureConfig[*appContext]
 		want string
 	}{
 		{
 			name: "an age alone",
-			cfg:  middleware.SecureConfig{HSTSMaxAge: 24 * time.Hour},
+			cfg:  middleware.SecureConfig[*appContext]{HSTSMaxAge: 24 * time.Hour},
 			want: "max-age=86400",
 		},
 		{
 			name: "with the subdomains",
-			cfg: middleware.SecureConfig{
+			cfg: middleware.SecureConfig[*appContext]{
 				HSTSMaxAge:            24 * time.Hour,
 				HSTSIncludeSubdomains: true,
 			},
@@ -153,7 +153,7 @@ func TestSecureHSTSValue(t *testing.T) {
 		},
 		{
 			name: "with the preload token",
-			cfg: middleware.SecureConfig{
+			cfg: middleware.SecureConfig[*appContext]{
 				HSTSMaxAge:            365 * 24 * time.Hour,
 				HSTSIncludeSubdomains: true,
 				HSTSPreload:           true,
@@ -162,7 +162,7 @@ func TestSecureHSTSValue(t *testing.T) {
 		},
 		{
 			name: "no age sends nothing",
-			cfg:  middleware.SecureConfig{HSTSIncludeSubdomains: true, HSTSPreload: true},
+			cfg:  middleware.SecureConfig[*appContext]{HSTSIncludeSubdomains: true, HSTSPreload: true},
 			want: "",
 		},
 	}
@@ -177,7 +177,7 @@ func TestSecureHSTSValue(t *testing.T) {
 }
 
 func TestSecureHSTSNeedsHTTPS(t *testing.T) {
-	r := secureRouter(middleware.SecureConfig{HSTSMaxAge: 24 * time.Hour})
+	r := secureRouter(middleware.SecureConfig[*appContext]{HSTSMaxAge: 24 * time.Hour})
 
 	if got := secureHeaders(r, "http://app.example/").Get(router.HeaderStrictTransportSecurity); got != "" {
 		t.Errorf("strict transport security = %q, want none over plaintext", got)
@@ -188,7 +188,7 @@ func TestSecureHSTSNeedsHTTPS(t *testing.T) {
 }
 
 func TestSecureHSTSReadsTheForwardedScheme(t *testing.T) {
-	r := secureRouter(middleware.SecureConfig{HSTSMaxAge: 24 * time.Hour})
+	r := secureRouter(middleware.SecureConfig[*appContext]{HSTSMaxAge: 24 * time.Hour})
 
 	req := httptest.NewRequest(http.MethodGet, "http://app.example/", nil)
 	req.Header.Set(router.HeaderXForwardedProto, "https, http")
@@ -218,7 +218,7 @@ func TestSecureHeadersSurviveAnError(t *testing.T) {
 }
 
 func TestSecureSkip(t *testing.T) {
-	r := secureRouter(middleware.SecureConfig{Skip: skipPath("/")})
+	r := secureRouter(middleware.SecureConfig[*appContext]{Skip: skipPath("/")})
 	if got := secureHeaders(r, "/").Get(router.HeaderXContentTypeOptions); got != "" {
 		t.Errorf("content type options = %q, want none", got)
 	}
@@ -236,7 +236,7 @@ func TestSecureRejectsASubSecondHSTSMaxAge(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mustPanicContaining(t, "HSTSMaxAge", func() {
-				middleware.SecureWithConfig[*appContext](middleware.SecureConfig{
+				middleware.SecureWithConfig(middleware.SecureConfig[*appContext]{
 					HSTSMaxAge:            tt.age,
 					HSTSIncludeSubdomains: true,
 					HSTSPreload:           true,
@@ -247,7 +247,7 @@ func TestSecureRejectsASubSecondHSTSMaxAge(t *testing.T) {
 }
 
 func TestSecureTakesAWholeSecondHSTSMaxAge(t *testing.T) {
-	h := secureHeaders(secureRouter(middleware.SecureConfig{HSTSMaxAge: time.Second}), "https://app.example/")
+	h := secureHeaders(secureRouter(middleware.SecureConfig[*appContext]{HSTSMaxAge: time.Second}), "https://app.example/")
 	if got := h.Get(router.HeaderStrictTransportSecurity); got != "max-age=1" {
 		t.Errorf("strict transport security = %q, want %q", got, "max-age=1")
 	}

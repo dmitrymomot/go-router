@@ -292,13 +292,13 @@ func TestReadmeContracts(t *testing.T) {
 		t.Fatalf("SchemeOf() = %q", got)
 	}
 
-	store := middleware.NewMemoryStoreWithConfig[*Context](middleware.MemoryStoreConfig{
+	store := middleware.NewRateLimitMemoryStoreWithConfig(middleware.RateLimitMemoryStoreConfig{
 		Rate:       10,
 		Burst:      30,
 		ExpiresIn:  time.Minute,
 		MaxEntries: 1024,
 	})
-	if middleware.RateLimit(store) == nil {
+	if middleware.RateLimit[*Context](store) == nil {
 		t.Fatal("RateLimit() returned nil")
 	}
 }

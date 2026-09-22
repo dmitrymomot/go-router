@@ -3,13 +3,14 @@ package middleware_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-func requestIDRouter(cfg middleware.RequestIDConfig) *router.Router[*appContext] {
+func requestIDRouter(cfg middleware.RequestIDConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.RequestIDWithConfig[*appContext](cfg))
 	r.GET("/", func(c *appContext) error {
@@ -19,7 +20,7 @@ func requestIDRouter(cfg middleware.RequestIDConfig) *router.Router[*appContext]
 }
 
 func TestRequestIDGeneratesAndEchoes(t *testing.T) {
-	r := requestIDRouter(middleware.RequestIDConfig{})
+	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{})
 
 	rec := get(r, "/")
 	id := rec.Body.String()
@@ -32,7 +33,7 @@ func TestRequestIDGeneratesAndEchoes(t *testing.T) {
 }
 
 func TestRequestIDKeepsTheInboundValue(t *testing.T) {
-	r := requestIDRouter(middleware.RequestIDConfig{})
+	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(router.HeaderXRequestID, "abc-123")
@@ -42,7 +43,7 @@ func TestRequestIDKeepsTheInboundValue(t *testing.T) {
 }
 
 func TestRequestIDIgnoreInbound(t *testing.T) {
-	r := requestIDRouter(middleware.RequestIDConfig{IgnoreInbound: true})
+	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{IgnoreInbound: true})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(router.HeaderXRequestID, "abc-123")
@@ -53,7 +54,7 @@ func TestRequestIDIgnoreInbound(t *testing.T) {
 
 func TestRequestIDCustomHeaderAndGenerator(t *testing.T) {
 	n := 0
-	r := requestIDRouter(middleware.RequestIDConfig{
+	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{
 		Header:    "X-Trace",
 		Generator: func() string { n++; return "trace-1" },
 	})
@@ -71,9 +72,27 @@ func TestRequestIDCustomHeaderAndGenerator(t *testing.T) {
 }
 
 func TestRequestIDSkip(t *testing.T) {
-	r := requestIDRouter(middleware.RequestIDConfig{Skip: skipPath("/")})
+	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{Skip: skipPath("/")})
 
 	if got := get(r, "/").Body.String(); got != "" {
 		t.Errorf("identifier = %q, want none", got)
+	}
+}
+
+func TestRequestIDReplacesAMalformedInboundID(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.RequestID[*appContext])
+	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	for _, in := range []string{"has space", strings.Repeat("a", 129), "a\"b"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set(router.HeaderXRequestID, in)
+		if got := do(r, req).Header().Get(router.HeaderXRequestID); got == in {
+			t.Errorf("inbound %q was kept", in)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderXRequestID, "abc-123_x.y")
+	if got := do(r, req).Header().Get(router.HeaderXRequestID); got != "abc-123_x.y" {
+		t.Errorf("a good inbound id was replaced by %q", got)
 	}
 }

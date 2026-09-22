@@ -83,7 +83,7 @@ A route can say what the middleware should know about it. The health route carri
 ```go
 r.Meta(unlimited{}).GET(healthPath, func(c *Context) error { return c.NoContent(http.StatusNoContent) })
 
-Skip: func(c router.Context) bool {
+Skip: func(c *Context) bool {
 	_, ok := router.MetaAs[unlimited](c)
 	return ok
 },

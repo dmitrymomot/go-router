@@ -186,7 +186,7 @@ func TestMinDurationLetsTheAnswerGoWhenTheClientLeaves(t *testing.T) {
 
 func TestMinDurationOutlastsAnInnerTimeout(t *testing.T) {
 	const deadline = 100 * time.Millisecond
-	timeout := middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: deadline})
+	timeout := middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: deadline})
 	floored := middleware.MinDuration[*appContext](floor)
 	ok := func(c *appContext) error { return c.String(http.StatusOK, "ok") }
 
@@ -280,9 +280,9 @@ func TestMinDurationSkip(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := quietRouter()
 		r.Route("/login", func(g *router.Router[*appContext]) {
-			g.Use(middleware.MinDurationWithConfig[*appContext](middleware.MinDurationConfig{
+			g.Use(middleware.MinDurationWithConfig(middleware.MinDurationConfig[*appContext]{
 				Duration: floor,
-				Skip:     func(c router.Context) bool { return c.Request().Method == http.MethodGet },
+				Skip:     func(c *appContext) bool { return c.Request().Method == http.MethodGet },
 			}))
 			g.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "form") })
 			g.POST("/", func(c *appContext) error { return c.String(http.StatusOK, "sent") })
@@ -306,7 +306,7 @@ func TestMinDurationNeedsADuration(t *testing.T) {
 		middleware.MinDuration[*appContext](-time.Second)
 	})
 	mustPanicContaining(t, "needs a Duration above zero", func() {
-		middleware.MinDurationWithConfig[*appContext](middleware.MinDurationConfig{})
+		middleware.MinDurationWithConfig(middleware.MinDurationConfig[*appContext]{})
 	})
 }
 

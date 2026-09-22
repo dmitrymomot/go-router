@@ -10,8 +10,8 @@ import (
 // the error carries: zero takes [router.DefaultStackSize], and a negative size
 // records the panic value alone, for a server that must not hold a stack in
 // memory.
-type RecoverConfig struct {
-	Skip      func(c router.Context) bool
+type RecoverConfig[C router.Context] struct {
+	Skip      func(c C) bool
 	StackSize int
 }
 
@@ -24,11 +24,11 @@ type RecoverConfig struct {
 // It passes [http.ErrAbortHandler] on, which is how net/http is told to drop
 // the connection without a log line.
 func Recover[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return RecoverWithConfig[C](RecoverConfig{})(next)
+	return RecoverWithConfig(RecoverConfig[C]{})(next)
 }
 
 // RecoverWithConfig is [Recover] with a configuration.
-func RecoverWithConfig[C router.Context](cfg RecoverConfig) router.Middleware[C] {
+func RecoverWithConfig[C router.Context](cfg RecoverConfig[C]) router.Middleware[C] {
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) (err error) {
 			if skipped(cfg.Skip, c) {

@@ -2,14 +2,17 @@ package middleware
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,7 +28,7 @@ const (
 	// plain HTML form.
 	DefaultIdempotencyFormField = "_idempotency_key"
 	// DefaultIdempotencyMaxBody is the longest answer that is kept for a
-	// replay.
+	// replay, and the longest request body the default fingerprint reads.
 	DefaultIdempotencyMaxBody = 64 << 10
 	// DefaultIdempotencyWait is how long a repeat waits for the request that
 	// holds its key.
@@ -33,7 +36,7 @@ const (
 	// DefaultIdempotencyExpiry is how long the memory store keeps a key.
 	DefaultIdempotencyExpiry = 24 * time.Hour
 	// DefaultIdempotencyMaxEntries is how many keys the memory store holds.
-	DefaultIdempotencyMaxEntries = 1024
+	DefaultIdempotencyMaxEntries = 64 << 10
 	// MaxIdempotencyKeyLength is the longest key a client may send.
 	MaxIdempotencyKeyLength = 255
 )
@@ -51,26 +54,36 @@ var errIdempotencyStoreFull = errors.New("middleware: every idempotency key in t
 
 // IdempotencyConfig configures [IdempotencyWithConfig].
 //
-// Store is required. Scope names whose keys these are, such as the id of the
-// signed-in user, and a nil Scope or one that reports "" makes the keys global.
-// An error from Scope answers 403.
+// Store is required. Client names whose keys these are, and a nil one takes
+// the address that [ClientIP] reports, so one client cannot claim, replay or
+// push out the keys of another. Report the id of the signed-in user instead to
+// share the keys of a user across addresses. A Client that reports "" makes
+// the key global.
 //
-// Fingerprint says what makes two requests the same, and a nil one takes
-// [IdempotencyFormFingerprint]. An error from it is returned as it stands.
+// Fingerprint says what makes two requests the same, and an error from it is
+// returned as it stands. A nil one hashes the method, the path, the raw query,
+// the media type of Content-Type and the body. A form body counts by its
+// fields, in any order and without the [DefaultCSRFFormField] and
+// [DefaultIdempotencyFormField] fields, and an uploaded file by its field,
+// name, size and type; so the form counts the same whether or not [ParseForm]
+// read it first. Any other body counts by its first MaxBody bytes, which the
+// handler still reads; a body over the cap in force is a 413. The parameters
+// of Content-Type do not count, since a multipart boundary changes on every
+// send.
 //
 // Sources say where the key comes from, and an empty list reads the
 // Idempotency-Key header, then the [DefaultIdempotencyFormField] form field.
 // The first key found counts.
 //
-// MaxBody is the longest answer kept for a replay, and zero takes
-// [DefaultIdempotencyMaxBody]. Wait is how long a repeat waits for the request
-// that holds its key, and zero takes [DefaultIdempotencyWait]; a negative Wait
-// answers 409 at once. Required refuses an unsafe request that carries no key
-// with a 400.
+// MaxBody is the longest answer kept for a replay, and the longest body the
+// default fingerprint reads; zero takes [DefaultIdempotencyMaxBody]. Wait is
+// how long a repeat waits for the request that holds its key, and zero takes
+// [DefaultIdempotencyWait]; a negative Wait answers 409 at once. Required
+// refuses an unsafe request that carries no key with a 400.
 type IdempotencyConfig[C router.Context] struct {
-	Skip        func(c router.Context) bool
-	Store       IdempotencyStore[C]
-	Scope       func(c C) (string, error)
+	Skip        func(c C) bool
+	Store       IdempotencyStore
+	Client      func(c C) string
 	Fingerprint func(c C) ([]byte, error)
 	Sources     []TokenSource
 	MaxBody     int
@@ -84,15 +97,15 @@ type IdempotencyConfig[C router.Context] struct {
 // [DefaultIdempotencyFormField] field. A request without a key runs as usual.
 // See [IdempotencyWithConfig] for how each repeat is answered.
 //
-// The keys are global, so they have to be unguessable, such as a UUID the
-// client makes; set Scope through IdempotencyWithConfig to give each user
-// their own.
+// The keys belong to the address of the client, so a client that changes its
+// address loses them; set Client through IdempotencyWithConfig to give each
+// user their own.
 //
 // Put it inside auth and CSRF; see Order in the package doc.
 //
 // Idempotency panics if store is nil.
-func Idempotency[C router.Context](store IdempotencyStore[C]) router.Middleware[C] {
-	return IdempotencyWithConfig[C](IdempotencyConfig[C]{Store: store})
+func Idempotency[C router.Context](store IdempotencyStore) router.Middleware[C] {
+	return IdempotencyWithConfig(IdempotencyConfig[C]{Store: store})
 }
 
 // IdempotencyWithConfig is [Idempotency] with a configuration. It follows the
@@ -128,9 +141,6 @@ func Idempotency[C router.Context](store IdempotencyStore[C]) router.Middleware[
 // callback sets only on the first request goes out again with the replay. A
 // replay never calls the error handler itself: an error goes back up the chain.
 //
-// The default fingerprint covers the method, the path and a form body; see
-// [IdempotencyFormFingerprint]. Set Fingerprint for a JSON body.
-//
 // Put [ParseForm] in front: the form source drops a form that does not parse,
 // and ParseForm refuses it first. See Order in the package doc.
 //
@@ -158,13 +168,17 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 	if cfg.Wait == 0 {
 		cfg.Wait = DefaultIdempotencyWait
 	}
+	if cfg.Client == nil {
+		cfg.Client = func(c C) string { return ClientIP(c) }
+	}
 	if cfg.Fingerprint == nil {
-		cfg.Fingerprint = func(c C) ([]byte, error) { return IdempotencyFormFingerprint(c) }
+		maxBody := cfg.MaxBody
+		cfg.Fingerprint = func(c C) ([]byte, error) { return idempotencyFingerprint(c, maxBody) }
 	}
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
-			if skipped(cfg.Skip, c) || idempotencySafeMethod(c.Request().Method) {
+			if skipped(cfg.Skip, c) || isSafeMethod(c.Request().Method) {
 				return next(c)
 			}
 
@@ -184,14 +198,7 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 				return router.ErrBadRequest.WithMessage("the Idempotency-Key is longer than %d bytes",
 					MaxIdempotencyKeyLength)
 			}
-			var scope string
-			if cfg.Scope != nil {
-				var err error
-				if scope, err = cfg.Scope(c); err != nil {
-					return router.ErrForbidden.WithMessage("the client is not identified").WithError(err)
-				}
-			}
-			key = idempotencyStoreKey(scope, key)
+			key = idempotencyStoreKey(cfg.Client(c), key)
 
 			fp, err := cfg.Fingerprint(c)
 			if err != nil {
@@ -209,16 +216,6 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 	}
 }
 
-// idempotencySafeMethod reports the methods RFC 9110 calls safe, which a repeat
-// cannot harm.
-func idempotencySafeMethod(method string) bool {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, router.MethodQuery:
-		return true
-	}
-	return false
-}
-
 // The backoff of a repeat that waits for the request holding its key.
 const (
 	idempotencyFirstPoll = 10 * time.Millisecond
@@ -228,8 +225,8 @@ const (
 // claimIdempotencyKey reports claimed, or an entry that holds an answer with
 // the same fingerprint. The fingerprint is compared before any wait, so a
 // mismatch is refused while the first request still runs.
-func claimIdempotencyKey[C router.Context](
-	c C, store IdempotencyStore[C], wait time.Duration, key string, fp []byte,
+func claimIdempotencyKey(
+	c router.Context, store IdempotencyStore, wait time.Duration, key string, fp []byte,
 ) (IdempotencyEntry, bool, error) {
 	deadline := time.Now().Add(wait)
 	poll := idempotencyFirstPoll
@@ -280,7 +277,7 @@ func claimIdempotencyKey[C router.Context](
 }
 
 func runIdempotent[C router.Context](
-	c C, store IdempotencyStore[C], maxBody int, key string, next router.HandlerFunc[C],
+	c C, store IdempotencyStore, maxBody int, key string, next router.HandlerFunc[C],
 ) error {
 	res := c.Response()
 	before := res.Header().Clone()
@@ -368,61 +365,83 @@ func logIdempotencyStoreError(c router.Context, op string, err error) {
 }
 
 func idempotencyLogger(c router.Context) *slog.Logger {
-	if b, ok := router.FromContext(c); ok {
-		return b.Logger()
+	if c != nil {
+		if b, ok := router.FromContext(c); ok {
+			return b.Logger()
+		}
 	}
 	return slog.Default()
 }
 
-// IdempotencyFormFingerprint is the default fingerprint of
-// [IdempotencyWithConfig]: a SHA-256 of the method, the path and, for a
-// urlencoded or multipart body, the form. The order of the fields does not
-// count, and neither do the [DefaultCSRFFormField] and
-// [DefaultIdempotencyFormField] fields. An uploaded file counts by its field,
-// name, size and type, not by its content.
-//
-// The query, the host and any other body are not covered, so a JSON API sets
-// a Fingerprint of its own that hashes the body too.
-//
-// An error comes from reading the form, and is a 400 or a 413.
-func IdempotencyFormFingerprint(c router.Context) ([]byte, error) {
+// idempotencyFingerprint is the default fingerprint; see IdempotencyConfig.
+func idempotencyFingerprint(c router.Context, maxBody int) ([]byte, error) {
 	req := c.Request()
-	buf := appendIdempotencyFields(nil, req.Method, req.URL.Path)
+	contentType := req.Header.Get(router.HeaderContentType)
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	buf := appendIdempotencyFields(nil, req.Method, req.URL.Path, req.URL.RawQuery,
+		strings.ToLower(strings.TrimSpace(mediaType)))
 
-	// The rule of ParseForm and of the form readers, so the fingerprint covers
-	// every body that the handler reads as a form.
-	b, ok := router.FromContext(c)
-	if ok && isFormType(req.Header.Get(router.HeaderContentType)) {
+	// The rule of ParseForm and of the form readers, so a form counts the same
+	// whether or not it was read before.
+	if b, ok := router.FromContext(c); ok && isFormType(contentType) {
 		form, err := b.FormValues()
 		if err != nil {
 			return nil, err
 		}
-		keys := slices.DeleteFunc(slices.Sorted(maps.Keys(form)), func(k string) bool {
-			return k == DefaultCSRFFormField || k == DefaultIdempotencyFormField
-		})
-		buf = binary.AppendUvarint(buf, uint64(len(keys)))
-		for _, k := range keys {
-			buf = appendIdempotencyFields(buf, k)
-			buf = binary.AppendUvarint(buf, uint64(len(form[k])))
-			buf = appendIdempotencyFields(buf, form[k]...)
+		buf = appendIdempotencyForm(buf, form, req.MultipartForm)
+	} else if req.Body != nil && req.Body != http.NoBody {
+		body, err := io.ReadAll(io.LimitReader(req.Body, int64(maxBody)))
+		if err != nil {
+			return nil, idempotencyBodyError(err)
 		}
-
-		var files map[string][]*multipart.FileHeader
-		if req.MultipartForm != nil {
-			files = req.MultipartForm.File
-		}
-		buf = binary.AppendUvarint(buf, uint64(len(files)))
-		for _, field := range slices.Sorted(maps.Keys(files)) {
-			buf = appendIdempotencyFields(buf, field)
-			buf = binary.AppendUvarint(buf, uint64(len(files[field])))
-			for _, fh := range files[field] {
-				buf = appendIdempotencyFields(buf, fh.Filename, fh.Header.Get(router.HeaderContentType))
-				buf = binary.AppendUvarint(buf, uint64(max(fh.Size, 0)))
-			}
-		}
+		// The handler reads the body whole: the bytes read here, then the rest.
+		req.Body = readCloser{io.MultiReader(bytes.NewReader(body), req.Body), req.Body}
+		buf = appendIdempotencyFields(buf, string(body))
 	}
 	sum := sha256.Sum256(buf)
 	return sum[:], nil
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func idempotencyBodyError(err error) error {
+	if tooBig, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		return tooLarge(err, "the request body is limited to %d bytes", tooBig.Limit)
+	}
+	return router.ErrBadRequest.WithMessage("the request body could not be read").WithError(err)
+}
+
+// appendIdempotencyForm appends the fields of a form in the order of their
+// names, without the CSRF and idempotency fields, and each uploaded file by
+// its field, name, size and type.
+func appendIdempotencyForm(buf []byte, form url.Values, multi *multipart.Form) []byte {
+	keys := slices.DeleteFunc(slices.Sorted(maps.Keys(form)), func(k string) bool {
+		return k == DefaultCSRFFormField || k == DefaultIdempotencyFormField
+	})
+	buf = binary.AppendUvarint(buf, uint64(len(keys)))
+	for _, k := range keys {
+		buf = appendIdempotencyFields(buf, k)
+		buf = binary.AppendUvarint(buf, uint64(len(form[k])))
+		buf = appendIdempotencyFields(buf, form[k]...)
+	}
+
+	var files map[string][]*multipart.FileHeader
+	if multi != nil {
+		files = multi.File
+	}
+	buf = binary.AppendUvarint(buf, uint64(len(files)))
+	for _, field := range slices.Sorted(maps.Keys(files)) {
+		buf = appendIdempotencyFields(buf, field)
+		buf = binary.AppendUvarint(buf, uint64(len(files[field])))
+		for _, fh := range files[field] {
+			buf = appendIdempotencyFields(buf, fh.Filename, fh.Header.Get(router.HeaderContentType))
+			buf = binary.AppendUvarint(buf, uint64(max(fh.Size, 0)))
+		}
+	}
+	return buf
 }
 
 // appendIdempotencyFields puts the length before each field, so two lists of
@@ -435,11 +454,11 @@ func appendIdempotencyFields(dst []byte, fields ...string) []byte {
 	return dst
 }
 
-// idempotencyStoreKey puts the length of the scope in front, so no scope and
-// key can pass for another pair. A global key is the pair with no scope, so a
-// client cannot name the key of a user either.
-func idempotencyStoreKey(scope, key string) string {
-	return strconv.Itoa(len(scope)) + ":" + scope + key
+// idempotencyStoreKey puts the length of the client in front, so no client
+// and key can pass for another pair. A global key is the pair with no client,
+// so a client cannot name the key of another either.
+func idempotencyStoreKey(client, key string) string {
+	return strconv.Itoa(len(client)) + ":" + client + key
 }
 
 // IdempotencyEntry is what an [IdempotencyStore] holds for one key.
@@ -462,6 +481,8 @@ type IdempotencyEntry struct {
 // Complete stores the answer and Release deletes the entry, both only while
 // the entry is still running. They run after the handler, when c may already
 // be done, so a store that goes over the network uses context.WithoutCancel(c).
+// c is the context of the request, and [router.FromContext] reaches the
+// router, its logger included.
 // Keep every field of the [router.Recorded], Truncated included, and a header
 // field with no value, which stands for one the handler removed.
 //
@@ -470,53 +491,61 @@ type IdempotencyEntry struct {
 //
 // [NewIdempotencyMemoryStore] holds the keys in this process. Implement the
 // interface to share them across several, such as through Redis.
-type IdempotencyStore[C router.Context] interface {
-	Claim(c C, key string, fp []byte) (held IdempotencyEntry, claimed bool, err error)
-	Complete(c C, key string, rec router.Recorded) error
-	Release(c C, key string) error
+type IdempotencyStore interface {
+	Claim(c router.Context, key string, fp []byte) (held IdempotencyEntry, claimed bool, err error)
+	Complete(c router.Context, key string, rec router.Recorded) error
+	Release(c router.Context, key string) error
 }
 
 // IdempotencyMemoryStoreConfig configures [NewIdempotencyMemoryStoreWithConfig].
-// ExpiresIn is how long a key lives, counted from its claim, and zero or less
-// takes [DefaultIdempotencyExpiry]. MaxEntries caps how many keys the store
-// holds, and zero takes [DefaultIdempotencyMaxEntries].
+// ExpiresIn is how long a key lives, counted from its claim, and zero takes
+// [DefaultIdempotencyExpiry]. MaxEntries caps how many keys the store holds,
+// and zero takes [DefaultIdempotencyMaxEntries].
 type IdempotencyMemoryStoreConfig struct {
 	ExpiresIn  time.Duration
 	MaxEntries int
 }
 
 // NewIdempotencyMemoryStore builds an [IdempotencyStore] in this process that
-// keeps a key for expiresIn after its claim. An expiresIn of zero or less takes
+// keeps a key for expiresIn after its claim. An expiresIn of zero takes
 // [DefaultIdempotencyExpiry].
 //
 // The keys live in one process, so several instances each hold their own.
-func NewIdempotencyMemoryStore[C router.Context](expiresIn time.Duration) IdempotencyStore[C] {
-	return NewIdempotencyMemoryStoreWithConfig[C](IdempotencyMemoryStoreConfig{ExpiresIn: expiresIn})
+//
+// NewIdempotencyMemoryStore panics on a negative expiresIn.
+func NewIdempotencyMemoryStore(expiresIn time.Duration) IdempotencyStore {
+	return NewIdempotencyMemoryStoreWithConfig(IdempotencyMemoryStoreConfig{ExpiresIn: expiresIn})
 }
 
 // NewIdempotencyMemoryStoreWithConfig is [NewIdempotencyMemoryStore] with a
 // configuration, which also caps how many keys the store holds.
 //
-// A full store makes room by dropping the oldest key whose answer is stored. A
-// store full of running keys refuses a new one, and the request gets a 500. It
-// holds up to MaxEntries answers of up to the MaxBody of the middleware each.
+// A full store makes room by dropping the oldest key whose answer is stored,
+// before that key expires, and logs a warning through the logger of the router.
+// A retry with that key then runs the handler again. So MaxEntries trades
+// memory for the guarantee: the store holds up to MaxEntries answers of up to
+// the MaxBody of the middleware each, 4 GiB at the defaults if every answer
+// were that large. The keys belong to one client each by default, so one
+// client can push out the keys of another only by filling the whole store;
+// put [RateLimit] in front to make that slow. A store full of running keys
+// refuses a new one, and the request gets a 500.
 //
 // A key lives for ExpiresIn from its claim, however long its request runs. A
 // request that outlives it can store its answer on, or release, the claim of a
 // later request with the same key.
 //
-// NewIdempotencyMemoryStoreWithConfig panics on a negative MaxEntries.
-func NewIdempotencyMemoryStoreWithConfig[C router.Context](cfg IdempotencyMemoryStoreConfig) IdempotencyStore[C] {
+// NewIdempotencyMemoryStoreWithConfig panics on a negative ExpiresIn or
+// MaxEntries.
+func NewIdempotencyMemoryStoreWithConfig(cfg IdempotencyMemoryStoreConfig) IdempotencyStore {
+	if cfg.ExpiresIn < 0 {
+		panic("middleware: NewIdempotencyMemoryStore needs an ExpiresIn of zero or more")
+	}
 	if cfg.MaxEntries < 0 {
-		panic("middleware: NewIdempotencyMemoryStoreWithConfig needs a MaxEntries of zero or more")
+		panic("middleware: NewIdempotencyMemoryStore needs a MaxEntries of zero or more")
 	}
-	if cfg.ExpiresIn <= 0 {
-		cfg.ExpiresIn = DefaultIdempotencyExpiry
-	}
-	if cfg.MaxEntries == 0 {
-		cfg.MaxEntries = DefaultIdempotencyMaxEntries
-	}
-	return &idempotencyMemoryStore[C]{
+	cfg.ExpiresIn = cmp.Or(cfg.ExpiresIn, DefaultIdempotencyExpiry)
+	cfg.MaxEntries = cmp.Or(cfg.MaxEntries, DefaultIdempotencyMaxEntries)
+	return &idempotencyMemoryStore{
 		entries:    make(map[string]*idempotencyMemoryEntry),
 		expiresIn:  cfg.ExpiresIn,
 		maxEntries: cfg.MaxEntries,
@@ -525,7 +554,7 @@ func NewIdempotencyMemoryStoreWithConfig[C router.Context](cfg IdempotencyMemory
 
 // The entries form a list in the order of their claims. Every entry lives for
 // the same time from its claim, so that is also the order they expire in.
-type idempotencyMemoryStore[C router.Context] struct {
+type idempotencyMemoryStore struct {
 	entries    map[string]*idempotencyMemoryEntry
 	head, tail *idempotencyMemoryEntry
 	expiresIn  time.Duration
@@ -541,7 +570,19 @@ type idempotencyMemoryEntry struct {
 	fp         []byte
 }
 
-func (s *idempotencyMemoryStore[C]) Claim(_ C, key string, fp []byte) (IdempotencyEntry, bool, error) {
+func (s *idempotencyMemoryStore) Claim(c router.Context, key string, fp []byte) (IdempotencyEntry, bool, error) {
+	held, claimed, evicted, err := s.claim(key, fp)
+	if evicted > 0 {
+		idempotencyLogger(c).Warn("middleware: the idempotency store is full and dropped a stored answer "+
+			"before it expired; a retry with that key runs again",
+			slog.Duration("left", evicted), slog.Int("max_entries", s.maxEntries))
+	}
+	return held, claimed, err
+}
+
+// claim reports, on top of what Claim reports, how long the answer it dropped
+// to make room had left to live, or zero when it dropped none.
+func (s *idempotencyMemoryStore) claim(key string, fp []byte) (IdempotencyEntry, bool, time.Duration, error) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -550,8 +591,9 @@ func (s *idempotencyMemoryStore[C]) Claim(_ C, key string, fp []byte) (Idempoten
 		s.remove(s.head)
 	}
 	if e, ok := s.entries[key]; ok {
-		return IdempotencyEntry{Fingerprint: e.fp, Answer: cloneRecorded(e.answer)}, false, nil
+		return IdempotencyEntry{Fingerprint: e.fp, Answer: cloneRecorded(e.answer)}, false, 0, nil
 	}
+	var evicted time.Duration
 	if len(s.entries) >= s.maxEntries {
 		// A running entry stays: dropping it would let its key run twice.
 		victim := s.head
@@ -559,8 +601,9 @@ func (s *idempotencyMemoryStore[C]) Claim(_ C, key string, fp []byte) (Idempoten
 			victim = victim.next
 		}
 		if victim == nil {
-			return IdempotencyEntry{}, false, errIdempotencyStoreFull
+			return IdempotencyEntry{}, false, 0, errIdempotencyStoreFull
 		}
+		evicted = victim.expires.Sub(now)
 		s.remove(victim)
 	}
 
@@ -572,10 +615,10 @@ func (s *idempotencyMemoryStore[C]) Claim(_ C, key string, fp []byte) (Idempoten
 	}
 	s.tail = e
 	s.entries[key] = e
-	return IdempotencyEntry{Fingerprint: e.fp}, true, nil
+	return IdempotencyEntry{Fingerprint: e.fp}, true, evicted, nil
 }
 
-func (s *idempotencyMemoryStore[C]) Complete(_ C, key string, rec router.Recorded) error {
+func (s *idempotencyMemoryStore) Complete(_ router.Context, key string, rec router.Recorded) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e, ok := s.entries[key]; ok && e.answer == nil {
@@ -584,7 +627,7 @@ func (s *idempotencyMemoryStore[C]) Complete(_ C, key string, rec router.Recorde
 	return nil
 }
 
-func (s *idempotencyMemoryStore[C]) Release(_ C, key string) error {
+func (s *idempotencyMemoryStore) Release(_ router.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e, ok := s.entries[key]; ok && e.answer == nil {
@@ -593,7 +636,7 @@ func (s *idempotencyMemoryStore[C]) Release(_ C, key string) error {
 	return nil
 }
 
-func (s *idempotencyMemoryStore[C]) remove(e *idempotencyMemoryEntry) {
+func (s *idempotencyMemoryStore) remove(e *idempotencyMemoryEntry) {
 	if e.prev != nil {
 		e.prev.next = e.next
 	} else {

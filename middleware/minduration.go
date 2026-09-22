@@ -9,8 +9,8 @@ import (
 
 // MinDurationConfig configures [MinDurationWithConfig]. Duration is the floor,
 // and it is required.
-type MinDurationConfig struct {
-	Skip     func(c router.Context) bool
+type MinDurationConfig[C router.Context] struct {
+	Skip     func(c C) bool
 	Duration time.Duration
 }
 
@@ -40,13 +40,13 @@ type MinDurationConfig struct {
 //
 // MinDuration panics on a d of zero or less.
 func MinDuration[C router.Context](d time.Duration) router.Middleware[C] {
-	return MinDurationWithConfig[C](MinDurationConfig{Duration: d})
+	return MinDurationWithConfig(MinDurationConfig[C]{Duration: d})
 }
 
 // MinDurationWithConfig is [MinDuration] with a configuration.
 //
 // MinDurationWithConfig panics on a Duration of zero or less.
-func MinDurationWithConfig[C router.Context](cfg MinDurationConfig) router.Middleware[C] {
+func MinDurationWithConfig[C router.Context](cfg MinDurationConfig[C]) router.Middleware[C] {
 	if cfg.Duration <= 0 {
 		panic("middleware: MinDurationWithConfig needs a Duration above zero")
 	}

@@ -32,8 +32,8 @@ func get(h http.Handler, target string) *httptest.ResponseRecorder {
 	return do(h, httptest.NewRequest(http.MethodGet, target, nil))
 }
 
-func skipPath(path string) func(router.Context) bool {
-	return func(c router.Context) bool { return c.Request().URL.Path == path }
+func skipPath(path string) func(*appContext) bool {
+	return func(c *appContext) bool { return c.Request().URL.Path == path }
 }
 
 func TestDefaultFactories(t *testing.T) {
@@ -42,7 +42,7 @@ func TestDefaultFactories(t *testing.T) {
 		middleware.Recover[*appContext],
 		middleware.RequestID[*appContext],
 		middleware.RealIP[*appContext],
-		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+		middleware.LoggerWithConfig(middleware.LoggerConfig[*appContext]{
 			Logger: slog.New(slog.DiscardHandler),
 		}),
 		middleware.Secure[*appContext],

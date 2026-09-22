@@ -68,7 +68,7 @@ func newRouter(rm *room) *router.Router[Ctx] {
 		middleware.Recover[Ctx],
 		middleware.Secure[Ctx],
 		middleware.BodyLimit[Ctx](maxBodyBytes),
-		middleware.CSRFWithConfig[Ctx](middleware.CSRFConfig{
+		middleware.CSRFWithConfig(middleware.CSRFConfig[Ctx]{
 			CookieHTTPOnly: true,
 			CookieSameSite: http.SameSiteLaxMode,
 		}),

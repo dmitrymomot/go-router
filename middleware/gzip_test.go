@@ -20,7 +20,7 @@ import (
 
 var gzipLongBody = strings.Repeat("<p>the quick brown fox</p>", 100)
 
-func gzipRouter(cfg middleware.GzipConfig) *router.Router[*appContext] {
+func gzipRouter(cfg middleware.GzipConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.GzipWithConfig[*appContext](cfg))
 	r.GET("/long", func(c *appContext) error {
@@ -75,7 +75,7 @@ func ungzip(t *testing.T, rec *httptest.ResponseRecorder) string {
 }
 
 func TestGzipCompressesALongBody(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 
 	rec := gzipGet(r, "/long", "gzip")
 	if got := rec.Header().Get(router.HeaderContentEncoding); got != "gzip" {
@@ -94,7 +94,7 @@ func TestGzipCompressesALongBody(t *testing.T) {
 }
 
 func TestGzipLeavesAShortBodyAlone(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 
 	rec := gzipGet(r, "/short", "gzip")
 	if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
@@ -106,7 +106,7 @@ func TestGzipLeavesAShortBodyAlone(t *testing.T) {
 }
 
 func TestGzipMinLengthDecidesWhatIsWorthCompressing(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{MinLength: 1})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{MinLength: 1})
 
 	rec := gzipGet(r, "/short", "gzip")
 	if got := rec.Header().Get(router.HeaderContentEncoding); got != "gzip" {
@@ -118,7 +118,7 @@ func TestGzipMinLengthDecidesWhatIsWorthCompressing(t *testing.T) {
 }
 
 func TestGzipAlwaysSendsVary(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 
 	for _, accept := range []string{"gzip", "", "identity"} {
 		rec := gzipGet(r, "/long", accept)
@@ -148,7 +148,7 @@ func TestGzipReadsTheAcceptEncodingHeader(t *testing.T) {
 		{name: "an upper case token", accept: "GZIP", want: true},
 	}
 
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := gzipGet(r, "/long", tc.accept)
@@ -161,7 +161,7 @@ func TestGzipReadsTheAcceptEncodingHeader(t *testing.T) {
 }
 
 func TestGzipPassesAnEventStreamThrough(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{MinLength: 1})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{MinLength: 1})
 
 	rec := gzipGet(r, "/events", "gzip")
 	if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
@@ -177,7 +177,7 @@ func TestGzipDeliversEachEventAsItIsSent(t *testing.T) {
 
 	w := &flushWatcher{ResponseRecorder: httptest.NewRecorder()}
 	r := newRouter()
-	r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
+	r.Use(middleware.GzipWithConfig(middleware.GzipConfig[*appContext]{MinLength: 1}))
 	r.GET("/events", func(c *appContext) error {
 		s, err := sse.Open(c, http.StatusOK)
 		if err != nil {
@@ -276,7 +276,7 @@ func TestGzipFlushBeforeTheFirstWriteReachesTheClient(t *testing.T) {
 }
 
 func TestGzipHeadUsesTheGetRepresentationHeadersWithoutABody(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 	getRec := gzipGet(r, "/long", "gzip")
 
 	req := httptest.NewRequest(http.MethodHead, "/long", nil)
@@ -304,7 +304,7 @@ func TestGzipHeadUsesTheGetRepresentationHeadersWithoutABody(t *testing.T) {
 }
 
 func TestGzipHeadKeepsAShortRepresentationPlain(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 	getRec := gzipGet(r, "/short", "gzip")
 
 	req := httptest.NewRequest(http.MethodHead, "/short", nil)
@@ -326,7 +326,7 @@ func TestGzipHeadKeepsAShortRepresentationPlain(t *testing.T) {
 }
 
 func TestGzipLeavesAStatusWithoutABodyAlone(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{MinLength: 1})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{MinLength: 1})
 
 	for path, want := range map[string]int{"/empty": 204, "/unchanged": 304} {
 		rec := gzipGet(r, path, "gzip")
@@ -340,7 +340,7 @@ func TestGzipLeavesAStatusWithoutABodyAlone(t *testing.T) {
 }
 
 func TestGzipDoesNotEncodeTwice(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 
 	rec := gzipGet(r, "/encoded", "gzip")
 	if got := rec.Header().Get(router.HeaderContentEncoding); got != "br" {
@@ -352,7 +352,7 @@ func TestGzipDoesNotEncodeTwice(t *testing.T) {
 }
 
 func TestGzipSetsTheContentTypeFromTheUncompressedBody(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{})
 
 	rec := gzipGet(r, "/sniff", "gzip")
 	if got := rec.Header().Get(router.HeaderContentType); !strings.HasPrefix(got, "text/") {
@@ -404,9 +404,31 @@ func TestGzipLeavesAnUnfinishedStreamAfterAPanic(t *testing.T) {
 	}
 }
 
-func TestGzipClampsTheLevel(t *testing.T) {
-	for _, level := range []int{0, 1, 9, 42, -1, -2, -99} {
-		r := gzipRouter(middleware.GzipConfig{Level: level})
+func TestGzipRejectsALevelOutOfRange(t *testing.T) {
+	for _, level := range []int{10, 42, -3, -99} {
+		func() {
+			defer func() {
+				if msg, _ := recover().(string); !strings.Contains(msg, "Level") {
+					t.Errorf("level %d: panic = %q, want one that names the Level", level, msg)
+				}
+			}()
+			middleware.GzipWithConfig(middleware.GzipConfig[*appContext]{Level: level})
+		}()
+	}
+}
+
+func TestGzipRejectsANegativeMinLength(t *testing.T) {
+	defer func() {
+		if msg, _ := recover().(string); !strings.Contains(msg, "MinLength") {
+			t.Errorf("panic = %q, want one that names the MinLength", msg)
+		}
+	}()
+	middleware.GzipWithConfig(middleware.GzipConfig[*appContext]{MinLength: -1})
+}
+
+func TestGzipTakesEveryLevelInRange(t *testing.T) {
+	for _, level := range []int{0, 1, 9, -1, -2} {
+		r := gzipRouter(middleware.GzipConfig[*appContext]{Level: level})
 		rec := gzipGet(r, "/long", "gzip")
 		if got := rec.Header().Get(router.HeaderContentEncoding); got != "gzip" {
 			t.Fatalf("content encoding = %q at level %d, want gzip", got, level)
@@ -433,7 +455,7 @@ func TestGzipPlainFormCompresses(t *testing.T) {
 }
 
 func TestGzipServesARealConnection(t *testing.T) {
-	srv := httptest.NewServer(gzipRouter(middleware.GzipConfig{}))
+	srv := httptest.NewServer(gzipRouter(middleware.GzipConfig[*appContext]{}))
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/long")
@@ -469,7 +491,7 @@ func TestGzipKeepsTheStatusOfTheHandler(t *testing.T) {
 }
 
 func TestGzipSkip(t *testing.T) {
-	r := gzipRouter(middleware.GzipConfig{Skip: skipPath("/long")})
+	r := gzipRouter(middleware.GzipConfig[*appContext]{Skip: skipPath("/long")})
 
 	rec := gzipGet(r, "/long", "gzip")
 	if got := rec.Header().Get(router.HeaderContentEncoding); got != "" {
@@ -480,7 +502,7 @@ func TestGzipSkip(t *testing.T) {
 	}
 }
 
-func gzipFlushRouter(t *testing.T, cfg middleware.GzipConfig, h router.HandlerFunc[*appContext]) *flushWatcher {
+func gzipFlushRouter(t *testing.T, cfg middleware.GzipConfig[*appContext], h router.HandlerFunc[*appContext]) *flushWatcher {
 	t.Helper()
 	r := newRouter()
 	r.Use(middleware.GzipWithConfig[*appContext](cfg))
@@ -494,7 +516,7 @@ func gzipFlushRouter(t *testing.T, cfg middleware.GzipConfig, h router.HandlerFu
 }
 
 func TestGzipFlushWithoutAStatusCompressesTheBodyItAnnounces(t *testing.T) {
-	w := gzipFlushRouter(t, middleware.GzipConfig{}, func(c *appContext) error {
+	w := gzipFlushRouter(t, middleware.GzipConfig[*appContext]{}, func(c *appContext) error {
 		res := c.Response()
 		res.Flush()
 		_, err := res.Write([]byte(gzipLongBody))
@@ -513,7 +535,7 @@ func TestGzipFlushWithoutAStatusCompressesTheBodyItAnnounces(t *testing.T) {
 }
 
 func TestGzipFlushWithoutAStatusCommitsTheResponse(t *testing.T) {
-	w := gzipFlushRouter(t, middleware.GzipConfig{}, func(c *appContext) error {
+	w := gzipFlushRouter(t, middleware.GzipConfig[*appContext]{}, func(c *appContext) error {
 		c.Response().Flush()
 		return errors.New("the render failed halfway")
 	})
@@ -527,7 +549,7 @@ func TestGzipFlushWithoutAStatusCommitsTheResponse(t *testing.T) {
 }
 
 func TestGzipFlushWithoutAStatusLeavesAnEventStreamAlone(t *testing.T) {
-	w := gzipFlushRouter(t, middleware.GzipConfig{MinLength: 1}, func(c *appContext) error {
+	w := gzipFlushRouter(t, middleware.GzipConfig[*appContext]{MinLength: 1}, func(c *appContext) error {
 		res := c.Response()
 		res.Header().Set(router.HeaderContentType, router.MIMETextEventStream)
 		res.Flush()
@@ -577,7 +599,7 @@ func TestGzipCommitsASwitchingProtocols(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newRouter()
-			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
+			r.Use(middleware.GzipWithConfig(middleware.GzipConfig[*appContext]{MinLength: 1}))
 			r.GET("/upgrade", tt.handler)
 
 			rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
@@ -633,7 +655,7 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 			// observer sees the panic: the error handler is skipped for a
 			// committed response.
 			r.Observe(func(_ *appContext, _ int, _ int64, _ time.Duration, err error) { failed = err })
-			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
+			r.Use(middleware.GzipWithConfig(middleware.GzipConfig[*appContext]{MinLength: 1}))
 			r.GET("/x", tt.handler)
 
 			get := routertest.Get(r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
@@ -677,5 +699,41 @@ func TestGzipSniffsWhenContentLengthIsSetWithoutAType(t *testing.T) {
 		if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
 			t.Errorf("Content-Length set=%v: type = %q, want a sniffed text/html", withLength, got)
 		}
+	}
+}
+
+func TestGzipDropsRangesAndWeakensTheETag(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.Gzip[*appContext])
+	r.GET("/", func(c *appContext) error {
+		c.Response().Header().Set("Accept-Ranges", "bytes")
+		c.Response().Header().Set("ETag", `"abc"`)
+		return c.String(http.StatusOK, strings.Repeat("a", 4096))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+	rec := do(r, req)
+	if rec.Header().Get(router.HeaderContentEncoding) != "gzip" {
+		t.Fatal("not compressed")
+	}
+	if got := rec.Header().Get("Accept-Ranges"); got != "" {
+		t.Errorf("Accept-Ranges = %q, want none", got)
+	}
+	if got := rec.Header().Get("ETag"); got != `W/"abc"` {
+		t.Errorf("ETag = %q, want W/\"abc\"", got)
+	}
+}
+
+func TestGzipHonoursNoTransform(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.Gzip[*appContext])
+	r.GET("/", func(c *appContext) error {
+		c.Response().Header().Set("Cache-Control", "public, no-transform")
+		return c.String(http.StatusOK, strings.Repeat("a", 4096))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+	if got := do(r, req).Header().Get(router.HeaderContentEncoding); got != "" {
+		t.Errorf("Content-Encoding = %q, want none under no-transform", got)
 	}
 }

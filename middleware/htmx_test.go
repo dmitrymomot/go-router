@@ -118,7 +118,7 @@ func TestHTMXRedirect(t *testing.T) {
 
 func TestHTMXRedirectLocationConfig(t *testing.T) {
 	r := redirectRouter(middleware.HTMXRedirectWithConfig[*appContext](
-		middleware.HTMXRedirectConfig{Location: true}))
+		middleware.HTMXRedirectConfig[*appContext]{Location: true}))
 
 	rec := hxGet(r, "/go", map[string]string{htmx.HeaderRequest: "true"})
 	if rec.Code != http.StatusOK {
@@ -134,7 +134,7 @@ func TestHTMXRedirectLocationConfig(t *testing.T) {
 
 func TestHTMXRedirectSkip(t *testing.T) {
 	r := redirectRouter(middleware.HTMXRedirectWithConfig[*appContext](
-		middleware.HTMXRedirectConfig{Skip: skipPath("/go")}))
+		middleware.HTMXRedirectConfig[*appContext]{Skip: skipPath("/go")}))
 
 	rec := hxGet(r, "/go", map[string]string{htmx.HeaderRequest: "true"})
 	if rec.Code != http.StatusSeeOther {

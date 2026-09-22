@@ -28,7 +28,7 @@ type fakeRateStore struct {
 	allow bool
 }
 
-func (s fakeRateStore) Allow(*appContext, string) (bool, time.Duration, error) {
+func (s fakeRateStore) Allow(router.Context, string) (bool, time.Duration, error) {
 	return s.allow, s.wait, s.err
 }
 
@@ -41,7 +41,7 @@ func rateLimitGet(h http.Handler, addr string) *httptest.ResponseRecorder {
 func TestRateLimitAllowsTheBurstAndThenDenies(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-			Store: middleware.NewMemoryStore[*appContext](1, 3, time.Minute),
+			Store: middleware.NewRateLimitMemoryStore(1, 3, time.Minute),
 		})
 
 		for i := range 3 {
@@ -63,7 +63,7 @@ func TestRateLimitAllowsTheBurstAndThenDenies(t *testing.T) {
 func TestRateLimitRefillsOverTime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-			Store: middleware.NewMemoryStore[*appContext](1, 1, time.Minute),
+			Store: middleware.NewRateLimitMemoryStore(1, 1, time.Minute),
 		})
 
 		if rec := get(r, "/"); rec.Code != http.StatusOK {
@@ -83,7 +83,7 @@ func TestRateLimitRefillsOverTime(t *testing.T) {
 func TestRateLimitDeniedRequestsTakeNoToken(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-			Store: middleware.NewMemoryStore[*appContext](1, 1, time.Minute),
+			Store: middleware.NewRateLimitMemoryStore(1, 1, time.Minute),
 		})
 
 		get(r, "/")
@@ -104,7 +104,7 @@ func TestRateLimitDeniedRequestsTakeNoToken(t *testing.T) {
 func TestRateLimitCountsEachClientOnItsOwn(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-			Store: middleware.NewMemoryStore[*appContext](1, 1, time.Minute),
+			Store: middleware.NewRateLimitMemoryStore(1, 1, time.Minute),
 		})
 
 		if rec := rateLimitGet(r, "192.0.2.1:1111"); rec.Code != http.StatusOK {
@@ -122,7 +122,7 @@ func TestRateLimitCountsEachClientOnItsOwn(t *testing.T) {
 func TestMemoryStoreForgetsAClientThatWentQuiet(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-			Store: middleware.NewMemoryStore[*appContext](2, 2, time.Second),
+			Store: middleware.NewRateLimitMemoryStore(2, 2, time.Second),
 		})
 
 		get(r, "/")
@@ -138,10 +138,10 @@ func TestMemoryStoreForgetsAClientThatWentQuiet(t *testing.T) {
 	})
 }
 
-func TestRateLimitKeyFunc(t *testing.T) {
+func TestRateLimitClient(t *testing.T) {
 	r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-		Store:   middleware.NewMemoryStore[*appContext](1, 1, time.Minute),
-		KeyFunc: func(c *appContext) (string, error) { return c.Tenant, nil },
+		Store:  middleware.NewRateLimitMemoryStore(1, 1, time.Minute),
+		Client: func(c *appContext) string { return c.Tenant },
 	})
 
 	if rec := rateLimitGet(r, "192.0.2.1:1111"); rec.Code != http.StatusOK {
@@ -149,17 +149,6 @@ func TestRateLimitKeyFunc(t *testing.T) {
 	}
 	if rec := rateLimitGet(r, "198.51.100.7:2222"); rec.Code != http.StatusTooManyRequests {
 		t.Errorf("status = %d, want 429: both requests carry the same tenant", rec.Code)
-	}
-}
-
-func TestRateLimitKeyFuncErrorIsForbidden(t *testing.T) {
-	r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-		Store:   fakeRateStore{allow: true},
-		KeyFunc: func(*appContext) (string, error) { return "", errors.New("no tenant") },
-	})
-
-	if rec := get(r, "/"); rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
 	}
 }
 
@@ -204,7 +193,7 @@ func TestRateLimitOnDenyAnswersTheRequest(t *testing.T) {
 
 func TestRateLimitPlainFormTakesTheStore(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.RateLimit(middleware.NewMemoryStore[*appContext](1, 1, time.Minute)))
+	r.Use(middleware.RateLimit[*appContext](middleware.NewRateLimitMemoryStore(1, 1, time.Minute)))
 	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
 
 	if rec := get(r, "/"); rec.Code != http.StatusOK {
@@ -219,7 +208,7 @@ func TestRateLimitSkip(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.RateLimitWithConfig[*appContext](middleware.RateLimitConfig[*appContext]{
 		Skip:  skipPath("/free"),
-		Store: middleware.NewMemoryStore[*appContext](1, 1, time.Minute),
+		Store: middleware.NewRateLimitMemoryStore(1, 1, time.Minute),
 	}))
 	r.GET("/free", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
 
@@ -239,8 +228,8 @@ func TestRateLimitNeedsAStore(t *testing.T) {
 func TestNewMemoryStoreNeedsARate(t *testing.T) {
 	for _, rate := range []float64{0, -1, math.NaN(), math.Inf(1), math.Inf(-1)} {
 		t.Run(strconv.FormatFloat(rate, 'g', -1, 64), func(t *testing.T) {
-			mustPanicContaining(t, "rate", func() {
-				middleware.NewMemoryStore[*appContext](rate, 1, time.Minute)
+			mustPanicContaining(t, "Rate", func() {
+				middleware.NewRateLimitMemoryStore(rate, 1, time.Minute)
 			})
 		})
 	}
@@ -269,7 +258,7 @@ func TestRateLimitRetryAfterHandlesTheLargestDuration(t *testing.T) {
 func TestMemoryStoreKeepsTheLimitPastTheExpiryWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
-			Store: middleware.NewMemoryStore[*appContext](1000.0/3600, 1000, 0),
+			Store: middleware.NewRateLimitMemoryStore(1000.0/3600, 1000, 0),
 		})
 
 		const rounds = 20
@@ -287,4 +276,56 @@ func TestMemoryStoreKeepsTheLimitPastTheExpiryWindow(t *testing.T) {
 			t.Errorf("%d requests passed a limit of 1000 an hour, want at most %d", allowed, want)
 		}
 	})
+}
+
+func TestRateLimitCountsAnIPv6NetworkAsOneClient(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.RateLimit[*appContext](middleware.NewRateLimitMemoryStore(0.001, 1, 0)))
+	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	codes := []int{}
+	for _, addr := range []string{"[2001:db8::1]:1", "[2001:db8::2]:1"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = addr
+		codes = append(codes, do(r, req).Code)
+	}
+	if codes[1] != http.StatusTooManyRequests {
+		t.Errorf("codes = %v, want the second of one /64 refused", codes)
+	}
+}
+
+func TestRateLimitFullStoreAdmitsANewClient(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.RateLimit[*appContext](middleware.NewRateLimitMemoryStoreWithConfig(
+		middleware.RateLimitMemoryStoreConfig{Rate: 1, Burst: 1, MaxEntries: 1})))
+	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	for _, addr := range []string{"192.0.2.1:1", "192.0.2.2:1"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = addr
+		if rec := do(r, req); rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", addr, rec.Code)
+		}
+	}
+}
+
+func TestRateLimitIPv4AndOtherNetworksCountApart(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.RateLimit[*appContext](middleware.NewRateLimitMemoryStore(0.001, 1, 0)))
+	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	for _, addr := range []string{"192.0.2.1:1", "192.0.2.2:1", "[2001:db8::1]:1", "[2001:db8:0:1::1]:1"} {
+		if rec := rateLimitGet(r, addr); rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", addr, rec.Code)
+		}
+	}
+}
+
+func TestNewRateLimitMemoryStoreRejectsNegatives(t *testing.T) {
+	for field, cfg := range map[string]middleware.RateLimitMemoryStoreConfig{
+		"Burst":      {Rate: 1, Burst: -1},
+		"ExpiresIn":  {Rate: 1, ExpiresIn: -time.Second},
+		"MaxEntries": {Rate: 1, MaxEntries: -1},
+	} {
+		mustPanicContaining(t, field+" of zero or more", func() {
+			middleware.NewRateLimitMemoryStoreWithConfig(cfg)
+		})
+	}
 }

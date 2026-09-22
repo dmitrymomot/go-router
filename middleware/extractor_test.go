@@ -196,21 +196,21 @@ func TestTokenSourceCapPanics(t *testing.T) {
 
 	t.Run("CSRFConfig", func(t *testing.T) {
 		mustPanicContaining(t, "at most 20", func() {
-			middleware.CSRFWithConfig[*appContext](middleware.CSRFConfig{TokenSources: tooMany})
+			middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{Sources: tooMany})
 		})
 	})
 
 	t.Run("the cap itself passes", func(t *testing.T) {
-		middleware.CSRFWithConfig[*appContext](middleware.CSRFConfig{
-			TokenSources: tooMany[:middleware.MaxTokenSources],
+		middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{
+			Sources: tooMany[:middleware.MaxTokenSources],
 		})
 	})
 }
 
 func TestTokenSourceNilPanics(t *testing.T) {
 	mustPanicContaining(t, "nil token source at index 1", func() {
-		middleware.CSRFWithConfig[*appContext](middleware.CSRFConfig{
-			TokenSources: []middleware.TokenSource{middleware.FromQuery("token"), nil},
+		middleware.CSRFWithConfig(middleware.CSRFConfig[*appContext]{
+			Sources: []middleware.TokenSource{middleware.FromQuery("token"), nil},
 		})
 	})
 }

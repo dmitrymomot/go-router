@@ -156,7 +156,7 @@ func TestParseFormIgnoresAMalformedQuery(t *testing.T) {
 func TestParseFormSkip(t *testing.T) {
 	r := newRouter()
 	r.MaxBodyBytes(16)
-	r.Use(middleware.ParseFormWithConfig[*appContext](middleware.ParseFormConfig{
+	r.Use(middleware.ParseFormWithConfig(middleware.ParseFormConfig[*appContext]{
 		Skip: skipPath("/stream"),
 	}))
 	r.POST("/stream", func(c *appContext) error {

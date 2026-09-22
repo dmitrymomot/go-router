@@ -11,8 +11,8 @@ import (
 // HTMXRedirectConfig configures [HTMXRedirectWithConfig]. Location sends
 // HX-Location, which swaps the new page in, in place of HX-Redirect, which
 // loads it whole.
-type HTMXRedirectConfig struct {
-	Skip     func(c router.Context) bool
+type HTMXRedirectConfig[C router.Context] struct {
+	Skip     func(c C) bool
 	Location bool
 }
 
@@ -34,11 +34,11 @@ type HTMXRedirectConfig struct {
 // Put it outside [Idempotency], so a replayed redirect is turned for the
 // request that asks again; see Order in the package doc.
 func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return HTMXRedirectWithConfig[C](HTMXRedirectConfig{})(next)
+	return HTMXRedirectWithConfig(HTMXRedirectConfig[C]{})(next)
 }
 
 // HTMXRedirectWithConfig is [HTMXRedirect] with a configuration.
-func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Middleware[C] {
+func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig[C]) router.Middleware[C] {
 	header := htmx.HeaderRedirect
 	if cfg.Location {
 		header = htmx.HeaderLocation

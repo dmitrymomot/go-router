@@ -7,7 +7,10 @@
 // imports it. Package router checks the types.
 package routerhook
 
-import "encoding/json/v2"
+import (
+	"encoding/json/v2"
+	"net/http"
+)
 
 var (
 	// SetRoute gives b, a *router.Base, a route pattern and its parameters.
@@ -26,4 +29,9 @@ var (
 	// *router.Base, followed by opts, so opts win. Package sse encodes with
 	// them.
 	JSONOptions func(b any, opts []json.Options) []json.Options
+
+	// InnermostWriter follows Unwrap from w to the writer net/http created.
+	// [http.MaxBytesReader] closes the connection after a 413 only when it is
+	// handed that writer. Package middleware caps a body with it.
+	InnermostWriter func(w http.ResponseWriter) http.ResponseWriter
 )

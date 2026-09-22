@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"cmp"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -15,18 +17,25 @@ import (
 // because the header of the format costs more than the saving.
 const DefaultGzipMinLength = 1024
 
-// GzipConfig configures [GzipWithConfig]. Level is a level of [compress/gzip],
-// and zero or one out of range takes the default. MinLength is the shortest
-// body worth compressing, and zero takes [DefaultGzipMinLength].
-type GzipConfig struct {
-	Skip      func(c router.Context) bool
+// GzipConfig configures [GzipWithConfig]. Level is a level of [compress/gzip]
+// from [gzip.HuffmanOnly] to [gzip.BestCompression], and zero takes
+// [gzip.DefaultCompression]; [gzip.NoCompression] cannot be asked for, since
+// Skip does that better. MinLength is the shortest body worth compressing, and
+// zero takes [DefaultGzipMinLength].
+type GzipConfig[C router.Context] struct {
+	Skip      func(c C) bool
 	Level     int
 	MinLength int
 }
 
 // Gzip compresses the response for a client that says it takes gzip, and adds
 // Accept-Encoding to Vary. A body under [DefaultGzipMinLength], a status with
-// no body, and a body that is already encoded all go out untouched.
+// no body, a body that is already encoded, and an answer whose Cache-Control
+// says no-transform all go out untouched.
+//
+// A compressed answer drops Accept-Ranges, since a range of the compressed
+// bytes is not a range of the resource, and its strong ETag turns weak, since
+// the bytes differ from those of the plain answer.
 //
 // A stream passes through: an event stream is never compressed, and a handler
 // that flushes keeps its data moving to the client.
@@ -36,16 +45,25 @@ type GzipConfig struct {
 // Put it outside [Idempotency], so a replay is compressed for the client that
 // asks again; see Order in the package doc.
 func Gzip[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return GzipWithConfig[C](GzipConfig{})(next)
+	return GzipWithConfig(GzipConfig[C]{})(next)
 }
 
 // GzipWithConfig is [Gzip] with a configuration.
-func GzipWithConfig[C router.Context](cfg GzipConfig) router.Middleware[C] {
-	level := gzipLevel(cfg.Level)
-	minLength := cfg.MinLength
-	if minLength <= 0 {
-		minLength = DefaultGzipMinLength
+//
+// GzipWithConfig panics on a Level out of range and on a negative MinLength.
+func GzipWithConfig[C router.Context](cfg GzipConfig[C]) router.Middleware[C] {
+	level := cfg.Level
+	switch {
+	case level == 0:
+		level = gzip.DefaultCompression
+	case level < gzip.HuffmanOnly || level > gzip.BestCompression:
+		panic(fmt.Sprintf("middleware: GzipWithConfig got the Level %d; "+
+			"take one from %d to %d, or zero for the default", level, gzip.HuffmanOnly, gzip.BestCompression))
 	}
+	if cfg.MinLength < 0 {
+		panic("middleware: GzipWithConfig needs a MinLength of zero or more")
+	}
+	minLength := cmp.Or(cfg.MinLength, DefaultGzipMinLength)
 	pool := &sync.Pool{New: func() any {
 		w, _ := gzip.NewWriterLevel(io.Discard, level)
 		return w
@@ -123,7 +141,8 @@ func (w *gzipWriter) WriteHeader(code int) {
 	h := w.Header()
 	if !compressibleStatus(code) ||
 		h.Get(router.HeaderContentEncoding) != "" ||
-		isEventStream(h.Get(router.HeaderContentType)) {
+		isEventStream(h.Get(router.HeaderContentType)) ||
+		noTransform(h.Values(router.HeaderCacheControl)) {
 		//nolint:errcheck // Nothing writes a status line and reads an error.
 		w.commit(false)
 		return
@@ -219,6 +238,10 @@ func (w *gzipWriter) commit(compress bool) error {
 		h.Set(router.HeaderContentType, http.DetectContentType(w.buf))
 	}
 	h.Del(router.HeaderContentLength)
+	h.Del(headerAcceptRanges)
+	if etag := h.Get(router.HeaderETag); etag != "" && !strings.HasPrefix(etag, "W/") {
+		h.Set(router.HeaderETag, "W/"+etag)
+	}
 	h.Set(router.HeaderContentEncoding, "gzip")
 
 	w.state = gzipOn
@@ -266,15 +289,19 @@ func (s gzipSink) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func gzipLevel(level int) int {
-	switch {
-	case level == 0, level < gzip.HuffmanOnly:
-		return gzip.DefaultCompression
-	case level > gzip.BestCompression:
-		return gzip.BestCompression
-	default:
-		return level
+const headerAcceptRanges = "Accept-Ranges"
+
+// noTransform reports whether a Cache-Control header forbids a proxy, and so
+// this middleware, to change the encoding of the body.
+func noTransform(cacheControl []string) bool {
+	for _, v := range cacheControl {
+		for d := range strings.SplitSeq(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(d), "no-transform") {
+				return true
+			}
+		}
 	}
+	return false
 }
 
 func compressibleStatus(code int) bool {

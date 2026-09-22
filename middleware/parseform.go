@@ -8,8 +8,8 @@ import (
 )
 
 // ParseFormConfig configures [ParseFormWithConfig].
-type ParseFormConfig struct {
-	Skip func(c router.Context) bool
+type ParseFormConfig[C router.Context] struct {
+	Skip func(c C) bool
 }
 
 // ParseForm parses a URL-encoded or multipart form body before the handler
@@ -28,11 +28,11 @@ type ParseFormConfig struct {
 //
 // See Order in the package doc for where it goes.
 func ParseForm[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
-	return ParseFormWithConfig[C](ParseFormConfig{})(next)
+	return ParseFormWithConfig(ParseFormConfig[C]{})(next)
 }
 
 // ParseFormWithConfig is [ParseForm] with a configuration.
-func ParseFormWithConfig[C router.Context](cfg ParseFormConfig) router.Middleware[C] {
+func ParseFormWithConfig[C router.Context](cfg ParseFormConfig[C]) router.Middleware[C] {
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
 			req := c.Request()

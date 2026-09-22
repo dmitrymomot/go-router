@@ -18,7 +18,7 @@ type bodyLimitPayload struct {
 	Name string `json:"name"`
 }
 
-func bodyLimitRouter(cfg middleware.BodyLimitConfig, ran *bool) *router.Router[*appContext] {
+func bodyLimitRouter(cfg middleware.BodyLimitConfig[*appContext], ran *bool) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.BodyLimitWithConfig[*appContext](cfg))
 	r.POST("/read", func(c *appContext) error {
@@ -51,7 +51,7 @@ func bodyLimitPost(target, body string, contentLength int64) *http.Request {
 
 func TestBodyLimitRejectsALongContentLength(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig{Limit: 8}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 8}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", strings.Repeat("x", 64), 0))
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -64,7 +64,7 @@ func TestBodyLimitRejectsALongContentLength(t *testing.T) {
 
 func TestBodyLimitStopsABodyThatUnderstatesItsLength(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig{Limit: 8}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 8}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", strings.Repeat("x", 64), -1))
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -77,7 +77,7 @@ func TestBodyLimitStopsABodyThatUnderstatesItsLength(t *testing.T) {
 
 func TestBodyLimitLetsAShortBodyThrough(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig{Limit: 64}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 64}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", "0123456789", 0))
 	if rec.Code != http.StatusOK {
@@ -90,7 +90,7 @@ func TestBodyLimitLetsAShortBodyThrough(t *testing.T) {
 
 func TestBodyLimitKeepsTheStatusThatBindReports(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig{Limit: 8}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 8}, &ran)
 
 	rec := do(r, bodyLimitPost("/bind", `{"name":"a long enough name"}`, -1))
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -100,7 +100,7 @@ func TestBodyLimitKeepsTheStatusThatBindReports(t *testing.T) {
 
 func TestBodyLimitZeroUsesTheRouterDefault(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig{}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", "x", router.DefaultMaxBodyBytes+1))
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -125,7 +125,7 @@ func TestBodyLimitPlainFormTakesTheLimit(t *testing.T) {
 
 func TestBodyLimitSkip(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig{
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{
 		Limit: 8,
 		Skip:  skipPath("/read"),
 	}, &ran)
@@ -217,7 +217,7 @@ func TestBodyLimitStackedTheSmallerWins(t *testing.T) {
 func TestBodyLimitZeroReplacesTheCapOfTheRouter(t *testing.T) {
 	r := newRouter()
 	r.MaxBodyBytes(16)
-	r.Use(middleware.BodyLimitWithConfig[*appContext](middleware.BodyLimitConfig{}))
+	r.Use(middleware.BodyLimitWithConfig(middleware.BodyLimitConfig[*appContext]{}))
 	r.POST("/bind", bindHandler)
 
 	if rec := do(r, bodyLimitPost("/bind", jsonOfLength(100), 0)); rec.Code != http.StatusOK {
@@ -297,4 +297,11 @@ func TestBodyLimitClosesTheConnectionBehindGzip(t *testing.T) {
 	if !resp.Close {
 		t.Error("the server kept the connection open after a 413")
 	}
+}
+
+func TestBodyLimitRejectsANegativeLimit(t *testing.T) {
+	mustPanicContaining(t, "Limit", func() { middleware.BodyLimit[*appContext](-1) })
+	mustPanicContaining(t, "Limit", func() {
+		middleware.BodyLimitWithConfig(middleware.BodyLimitConfig[*appContext]{Limit: -1})
+	})
 }

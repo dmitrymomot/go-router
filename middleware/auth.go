@@ -45,7 +45,7 @@ func SecureCompare(a, b string) bool {
 // lets the request through when OnError reports nil, which suits an optional
 // sign-in.
 type KeyAuthConfig[C router.Context] struct {
-	Skip                   func(c router.Context) bool
+	Skip                   func(c C) bool
 	Sources                []TokenSource
 	Validator              func(c C, key string) (bool, error)
 	OnError                func(c C, err error) error
@@ -147,7 +147,7 @@ func keyAuthChallenge(res *router.Response, challenge string) func() {
 // BasicAuthConfig configures [BasicAuthWithConfig]. Validator is required, and
 // an empty Realm takes [DefaultRealm].
 type BasicAuthConfig[C router.Context] struct {
-	Skip      func(c router.Context) bool
+	Skip      func(c C) bool
 	Validator func(c C, user, pass string) (bool, error)
 	Realm     string
 }

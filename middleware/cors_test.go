@@ -11,7 +11,7 @@ import (
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
-func corsRouter(cfg middleware.CORSConfig) *router.Router[*appContext] {
+func corsRouter(cfg middleware.CORSConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
 	r.Use(middleware.CORSWithConfig[*appContext](cfg))
 	r.GET("/data", func(c *appContext) error { return c.String(http.StatusOK, "data") })
@@ -32,7 +32,7 @@ func panicValue(fn func()) (v any) {
 }
 
 func TestCORSPreflight(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{AllowOrigins: []string{"https://app.example"}})
+	r := corsRouter(middleware.CORSConfig[*appContext]{AllowOrigins: []string{"https://app.example"}})
 
 	req := preflight("/data", http.MethodGet, "https://app.example")
 	req.Header.Set(router.HeaderAccessControlRequestHeaders, "Authorization")
@@ -50,7 +50,7 @@ func TestCORSPreflight(t *testing.T) {
 }
 
 func TestCORSRejectsAnUnknownOrigin(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{AllowOrigins: []string{"https://app.example"}})
+	r := corsRouter(middleware.CORSConfig[*appContext]{AllowOrigins: []string{"https://app.example"}})
 
 	req := httptest.NewRequest(http.MethodGet, "/data", nil)
 	req.Header.Set(router.HeaderOrigin, "https://evil.example")
@@ -66,7 +66,7 @@ func TestCORSRejectsAnUnknownOrigin(t *testing.T) {
 
 func TestCORSPanicsOnTheWildcardWithCredentials(t *testing.T) {
 	v := panicValue(func() {
-		middleware.CORSWithConfig[*appContext](middleware.CORSConfig{
+		middleware.CORSWithConfig(middleware.CORSConfig[*appContext]{
 			AllowOrigins:     []string{"https://app.example", "*"},
 			AllowCredentials: true,
 		})
@@ -94,7 +94,7 @@ func TestCORSPanicsOnAnEntryThatIsNotAnOrigin(t *testing.T) {
 	for _, o := range bad {
 		t.Run(o, func(t *testing.T) {
 			v := panicValue(func() {
-				middleware.CORSWithConfig[*appContext](middleware.CORSConfig{AllowOrigins: []string{o}})
+				middleware.CORSWithConfig(middleware.CORSConfig[*appContext]{AllowOrigins: []string{o}})
 			})
 			if v == nil {
 				t.Errorf("%q built without a word, and it matches no request", o)
@@ -114,7 +114,7 @@ func TestCORSTakesAnOrigin(t *testing.T) {
 	for _, o := range good {
 		t.Run(o, func(t *testing.T) {
 			if v := panicValue(func() {
-				middleware.CORSWithConfig[*appContext](middleware.CORSConfig{AllowOrigins: []string{o}})
+				middleware.CORSWithConfig(middleware.CORSConfig[*appContext]{AllowOrigins: []string{o}})
 			}); v != nil {
 				t.Errorf("%q panicked with %v, and it is an origin", o, v)
 			}
@@ -123,7 +123,7 @@ func TestCORSTakesAnOrigin(t *testing.T) {
 }
 
 func TestCORSCredentialsNameTheOrigin(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{
+	r := corsRouter(middleware.CORSConfig[*appContext]{
 		AllowOrigins:     []string{"https://app.example"},
 		AllowCredentials: true,
 	})
@@ -143,7 +143,7 @@ func TestCORSCredentialsNameTheOrigin(t *testing.T) {
 func TestCORSCopiesTheOrigins(t *testing.T) {
 	origins := []string{"https://app.example"}
 	r := newRouter()
-	r.Use(middleware.CORSWithConfig[*appContext](middleware.CORSConfig{AllowOrigins: origins}))
+	r.Use(middleware.CORSWithConfig(middleware.CORSConfig[*appContext]{AllowOrigins: origins}))
 	r.GET("/data", func(c *appContext) error { return c.String(http.StatusOK, "data") })
 	origins[0] = "https://evil.example"
 
@@ -155,7 +155,7 @@ func TestCORSCopiesTheOrigins(t *testing.T) {
 }
 
 func TestCORSAllowMethodsFollowTheRoute(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{AllowOrigins: []string{"https://app.example"}})
+	r := corsRouter(middleware.CORSConfig[*appContext]{AllowOrigins: []string{"https://app.example"}})
 
 	rec := do(r, preflight("/data", http.MethodDelete, "https://app.example"))
 	if got := rec.Header().Get(router.HeaderAccessControlAllowMethods); got != "GET, HEAD, OPTIONS" {
@@ -164,7 +164,7 @@ func TestCORSAllowMethodsFollowTheRoute(t *testing.T) {
 }
 
 func TestCORSAllowMethodsOverrideTheRoute(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{
+	r := corsRouter(middleware.CORSConfig[*appContext]{
 		AllowOrigins: []string{"https://app.example"},
 		AllowMethods: []string{http.MethodGet, http.MethodPost},
 	})
@@ -177,7 +177,7 @@ func TestCORSAllowMethodsOverrideTheRoute(t *testing.T) {
 
 func TestCORSAllowMethodsFallBackToTheDefaults(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.CORSWithConfig[*appContext](middleware.CORSConfig{
+	r.Use(middleware.CORSWithConfig(middleware.CORSConfig[*appContext]{
 		AllowOrigins: []string{"https://app.example"},
 	}))
 	r.Handle(http.MethodOptions, "/data", func(c *appContext) error {
@@ -192,7 +192,7 @@ func TestCORSAllowMethodsFallBackToTheDefaults(t *testing.T) {
 }
 
 func TestCORSAllowHeadersOverrideTheAsk(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{
+	r := corsRouter(middleware.CORSConfig[*appContext]{
 		AllowOrigins: []string{"https://app.example"},
 		AllowHeaders: []string{router.HeaderAuthorization, router.HeaderContentType},
 	})
@@ -207,7 +207,7 @@ func TestCORSAllowHeadersOverrideTheAsk(t *testing.T) {
 }
 
 func TestCORSExposeHeadersSkipThePreflight(t *testing.T) {
-	cfg := middleware.CORSConfig{
+	cfg := middleware.CORSConfig[*appContext]{
 		AllowOrigins:  []string{"https://app.example"},
 		ExposeHeaders: []string{"X-Total-Count"},
 	}
@@ -237,7 +237,7 @@ func TestCORSMaxAge(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := corsRouter(middleware.CORSConfig{
+			r := corsRouter(middleware.CORSConfig[*appContext]{
 				AllowOrigins: []string{"https://app.example"},
 				MaxAge:       tt.age,
 			})
@@ -250,8 +250,8 @@ func TestCORSMaxAge(t *testing.T) {
 }
 
 func TestCORSAllowOriginFuncReadsTheContext(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{
-		AllowOriginFunc: func(c router.Context, origin string) (bool, error) {
+	r := corsRouter(middleware.CORSConfig[*appContext]{
+		AllowOriginFunc: func(c *appContext, origin string) (bool, error) {
 			return origin == "https://"+c.Host(), nil
 		},
 	})
@@ -270,8 +270,8 @@ func TestCORSAllowOriginFuncReadsTheContext(t *testing.T) {
 }
 
 func TestCORSAllowOriginFuncErrorAnswersWithoutTheHeaders(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{
-		AllowOriginFunc: func(router.Context, string) (bool, error) {
+	r := corsRouter(middleware.CORSConfig[*appContext]{
+		AllowOriginFunc: func(*appContext, string) (bool, error) {
 			return false, errors.New("the tenant store is down")
 		},
 	})
@@ -289,7 +289,7 @@ func TestCORSAllowOriginFuncErrorAnswersWithoutTheHeaders(t *testing.T) {
 }
 
 func TestCORSWildcardStillAnswersWithTheWildcard(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{AllowOrigins: []string{"*"}})
+	r := corsRouter(middleware.CORSConfig[*appContext]{AllowOrigins: []string{"*"}})
 
 	req := httptest.NewRequest(http.MethodGet, "/data", nil)
 	req.Header.Set(router.HeaderOrigin, "https://anywhere.example")
@@ -304,7 +304,7 @@ func TestCORSWildcardStillAnswersWithTheWildcard(t *testing.T) {
 }
 
 func TestCORSSkip(t *testing.T) {
-	r := corsRouter(middleware.CORSConfig{
+	r := corsRouter(middleware.CORSConfig[*appContext]{
 		AllowOrigins: []string{"*"},
 		Skip:         skipPath("/data"),
 	})
@@ -314,4 +314,16 @@ func TestCORSSkip(t *testing.T) {
 	if got := do(r, req).Header().Get(router.HeaderAccessControlAllowOrigin); got != "" {
 		t.Errorf("allow origin = %q, want none", got)
 	}
+}
+
+func TestCORSWithConfigNeedsOneSourceOfOrigins(t *testing.T) {
+	mustPanicContaining(t, "needs AllowOrigins or AllowOriginFunc", func() {
+		middleware.CORSWithConfig(middleware.CORSConfig[*appContext]{})
+	})
+	mustPanicContaining(t, "not both", func() {
+		middleware.CORSWithConfig(middleware.CORSConfig[*appContext]{
+			AllowOrigins:    []string{"https://app.example"},
+			AllowOriginFunc: func(*appContext, string) (bool, error) { return true, nil },
+		})
+	})
 }
