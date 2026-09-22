@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/routertest"
@@ -50,6 +51,36 @@ func ExampleNewContext() {
 	_ = showUser(c)
 	if got := rec.Body.String(); got != "user 7" {
 		tb.Errorf("body = %q, want %q", got, "user 7")
+	}
+}
+
+// SignedCookie reads a signed cookie back through the codec of the router
+// that set it.
+func ExampleSignedCookie() {
+	r := router.New(newContext)
+	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
+	r.POST("/signin", func(c *appContext) error {
+		if err := c.SetSignedCookie(c.NewCookie("session", "ann", time.Hour)); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	fmt.Println(routertest.SignedCookie(routertest.Do(r, http.MethodPost, "/signin"), "session"))
+	// Output:
+	// ann true
+}
+
+// WithCookieCodec gives a context built without a router the codec that
+// router.Router.CookieCodec would.
+func ExampleWithCookieCodec() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
+
+	c, _ := routertest.NewContext(tb, newContext, routertest.WithCookieCodec(codec))
+	if err := c.SetSignedCookie(c.NewCookie("session", "ann", time.Hour)); err != nil {
+		tb.Fatal(err)
 	}
 }
 

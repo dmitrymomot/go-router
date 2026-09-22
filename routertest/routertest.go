@@ -167,6 +167,7 @@ func Request(method, target string, opts ...RequestOption) *http.Request {
 type contextSpec struct {
 	req     *http.Request
 	params  map[string]string
+	codec   *router.CookieCodec
 	pattern string
 }
 
@@ -189,6 +190,17 @@ func WithPattern(pattern string) ContextOption {
 // httptest. Without it the context answers a GET of "/".
 func WithRequest(req *http.Request) ContextOption {
 	return func(s *contextSpec) { s.req = req }
+}
+
+// WithCookieCodec gives the context the codec that [router.Router.CookieCodec]
+// would, so a handler can sign and read cookies.
+//
+// WithCookieCodec panics if cc is nil.
+func WithCookieCodec(cc *router.CookieCodec) ContextOption {
+	if cc == nil {
+		panic("routertest: WithCookieCodec needs a codec")
+	}
+	return func(s *contextSpec) { s.codec = cc }
 }
 
 // NewContext builds one application context and the recorder it writes to, so
@@ -225,6 +237,9 @@ func NewContext[C router.Context](
 	*b = *router.NewBase(res, req)
 	names, vals := paramSlices(spec.params)
 	router.SetRouteForTest(b, spec.pattern, names, vals)
+	if spec.codec != nil {
+		router.SetCookieCodecForTest(b, spec.codec)
+	}
 	if spec.pattern != "" {
 		req.Pattern = spec.pattern
 	}
@@ -249,6 +264,7 @@ type Response struct {
 	*http.Response
 	Body     []byte
 	Recorder *httptest.ResponseRecorder
+	codec    *router.CookieCodec
 }
 
 // Serve sends req to h and reports the answer.
@@ -266,7 +282,7 @@ func Serve(h http.Handler, req *http.Request) *Response {
 	body, _ := io.ReadAll(res.Body)
 	_ = res.Body.Close()
 	res.Body = io.NopCloser(bytes.NewReader(body))
-	return &Response{Response: res, Body: body, Recorder: rec}
+	return &Response{Response: res, Body: body, Recorder: rec, codec: router.CookieCodecOf(h)}
 }
 
 // Do builds a request and sends it to h. See [Request] and [Serve].
@@ -287,6 +303,37 @@ func (r *Response) JSON[T any](opts ...json.Options) (T, error) {
 	var v T
 	err := json.Unmarshal(r.Body, &v, opts...)
 	return v, err
+}
+
+// SignedCookie reports the value of the last cookie called name that r sets,
+// verified with the codec of the router that answered. It reports false when r
+// sets none, clears it, or sets one that does not verify or has run out.
+//
+// The codec is the one of the router given to [Serve]. A response that a
+// sub-router of [router.Router.HostRouter] or [router.Router.MountRouter]
+// signed with a codec of its own has to be served by that sub-router.
+//
+// SignedCookie panics when r did not come from Serve, Do or Get on a
+// *router.Router with a CookieCodec.
+func SignedCookie(r *Response, name string) (string, bool) {
+	if r.codec == nil {
+		panic("routertest: SignedCookie needs a response that Serve got from a router with a CookieCodec")
+	}
+	var last *http.Cookie
+	for _, c := range r.Cookies() {
+		if c.Name == name {
+			last = c
+		}
+	}
+	if last == nil || last.MaxAge < 0 || last.Value == "" {
+		return "", false
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: name, Value: last.Value})
+	b := router.NewBase(httptest.NewRecorder(), req)
+	router.SetCookieCodecForTest(b, r.codec)
+	v, err := b.SignedCookie(name)
+	return v, err == nil
 }
 
 // AssertStatus fails the test unless the status is want. The message carries
