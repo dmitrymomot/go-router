@@ -61,15 +61,19 @@ func newRouter(store *Store, apiKey string) *router.Router[*Context] {
 	r.ErrorHandler(router.JSONErrorHandler[*Context])
 	r.MaxBodyBytes(1 << 20)
 
-	// The order is the order of the request: recover the panic, name the
-	// request, learn who sent it, log it, then decide whether to serve it.
+	// The order is the one the middleware package doc gives: learn who sent
+	// the request, name it, log it with Recover inside so a panic gets its
+	// line, then decide whether to serve it.
 	r.Use(
-		middleware.Recover[*Context],
-		middleware.RequestID[*Context],
 		middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
 			Headers: []string{router.HeaderXForwardedFor},
 		}),
+		middleware.RequestID[*Context],
 		middleware.Logger[*Context],
+		middleware.Recover[*Context],
+		middleware.CORSWithConfig[*Context](middleware.CORSConfig{
+			AllowOrigins: []string{"https://app.example.com"},
+		}),
 		middleware.RateLimitWithConfig(middleware.RateLimitConfig[*Context]{
 			Store: middleware.NewMemoryStore[*Context](10, 20, time.Minute),
 			// A load balancer polls the health of this service far harder than
@@ -79,9 +83,6 @@ func newRouter(store *Store, apiKey string) *router.Router[*Context] {
 				_, ok := router.MetaAs[unlimited](c)
 				return ok
 			},
-		}),
-		middleware.CORSWithConfig[*Context](middleware.CORSConfig{
-			AllowOrigins: []string{"https://app.example.com"},
 		}),
 	)
 
