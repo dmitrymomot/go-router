@@ -104,7 +104,7 @@ func newRouter() *router.Router[*appContext] {
 func TestJSONRoundTrip(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/users",
 		routertest.JSONBody(user{Name: "ann", Age: 30}))
-	res.AssertStatus(t, http.StatusCreated)
+	res.Expect(t).Status(http.StatusCreated)
 
 	got, err := res.JSON[user]()
 	if err != nil {
@@ -190,15 +190,13 @@ func TestResponseErrorBody(t *testing.T) {
 
 func TestGetAndBody(t *testing.T) {
 	res := routertest.Get(newRouter(), "/users/7")
-	res.AssertStatus(t, http.StatusOK)
-	res.AssertBody(t, "user 7")
+	res.Expect(t).Status(http.StatusOK).Body("user 7")
 }
 
 func TestFormBodyAndHeader(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/login",
 		routertest.FormBody(url.Values{"name": {"bo"}}))
-	res.AssertStatus(t, http.StatusNoContent)
-	res.AssertHeader(t, "X-Who", "bo")
+	res.Expect(t).Status(http.StatusNoContent).Header("X-Who", "bo")
 }
 
 func TestRequestOptionsSetHostCookieAndBody(t *testing.T) {
@@ -231,11 +229,11 @@ func TestHTMXOption(t *testing.T) {
 	))
 	r.GET("/type", func(c *appContext) error { return c.String(http.StatusOK, c.HTMX().RequestType) })
 
-	routertest.Get(r, "/panel", routertest.HTMX()).AssertBody(t, "fragment")
-	routertest.Get(r, "/panel").AssertBody(t, "page")
+	routertest.Get(r, "/panel", routertest.HTMX()).Expect(t).Body("fragment")
+	routertest.Get(r, "/panel").Expect(t).Body("page")
 	routertest.Get(r, "/panel", routertest.HTMX(), routertest.Header(router.HeaderHXRequestType, "full")).
-		AssertBody(t, "page")
-	routertest.Get(r, "/type", routertest.HTMX()).AssertBody(t, "partial")
+		Expect(t).Body("page")
+	routertest.Get(r, "/type", routertest.HTMX()).Expect(t).Body("partial")
 }
 
 func TestNewServer(t *testing.T) {
@@ -276,8 +274,7 @@ func eventRouter() *router.Router[*appContext] {
 
 func TestEvents(t *testing.T) {
 	res := routertest.Get(eventRouter(), "/events")
-	res.AssertStatus(t, http.StatusOK)
-	res.AssertHeader(t, "Content-Type", "text/event-stream")
+	res.Expect(t).Status(http.StatusOK).Header("Content-Type", "text/event-stream")
 	routertest.AssertEvents(t, res,
 		routertest.Event{ID: "1", Name: "tick", Data: "one"},
 		routertest.Event{ID: "1", Data: "two\nlines"},
@@ -750,7 +747,7 @@ func TestMultipartBodyPostsAFile(t *testing.T) {
 				Content:     []byte("png bytes"),
 			},
 		))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
@@ -771,7 +768,7 @@ func TestMultipartBodyPostsAFile(t *testing.T) {
 func TestMultipartBodyDefaultsTheFilePart(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
 		routertest.MultipartBody(nil, routertest.FilePart{Field: "avatar", Content: []byte("x")}))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
@@ -792,7 +789,7 @@ func TestMultipartBodyPostsMoreThanOneFile(t *testing.T) {
 			routertest.FilePart{Field: "docs", Filename: "one.txt", Content: []byte("one")},
 			routertest.FilePart{Field: "docs", Filename: "two.txt", Content: []byte("two")},
 		))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
@@ -809,7 +806,7 @@ func TestMultipartBodyPostsMoreThanOneFile(t *testing.T) {
 func TestMultipartBodyIsMissingWithoutAFile(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
 		routertest.MultipartBody(url.Values{"name": {"ann"}}))
-	res.AssertStatus(t, http.StatusBadRequest)
+	res.Expect(t).Status(http.StatusBadRequest)
 }
 
 func TestMultipartBodyWritesTheFieldsInNameOrder(t *testing.T) {
@@ -841,7 +838,7 @@ func TestMultipartBodyEscapesTheNames(t *testing.T) {
 			Filename: `a"b.png`,
 			Content:  []byte("x"),
 		}))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
