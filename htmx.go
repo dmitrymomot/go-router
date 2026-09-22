@@ -185,14 +185,13 @@ type HXLocation struct {
 	Select  string            `json:"select,omitzero"`
 	Source  string            `json:"source,omitzero"`
 	Event   string            `json:"event,omitzero"`
-	Handler string            `json:"handler,omitzero"`
 	Headers map[string]string `json:"headers,omitzero"`
 	Values  map[string]string `json:"values,omitzero"`
 }
 
 func (l HXLocation) isPathOnly() bool {
 	return l.Target == "" && l.Swap == "" && l.Select == "" && l.Source == "" &&
-		l.Event == "" && l.Handler == "" && len(l.Headers) == 0 && len(l.Values) == 0
+		l.Event == "" && len(l.Headers) == 0 && len(l.Values) == 0
 }
 
 // HXResponse builds an htmx answer. The header methods chain, and one of the

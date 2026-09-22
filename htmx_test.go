@@ -578,6 +578,9 @@ func TestHXLocation(t *testing.T) {
 			Values: map[string]string{"room": "go"},
 		})
 	})
+	r.GET("/select", func(c *tctx) error {
+		return c.HX().LocationWith(HXLocation{Path: "/chat", Select: "#messages"})
+	})
 	r.GET("/path-only", func(c *tctx) error {
 		return c.HX().LocationWith(HXLocation{Path: "/chat"})
 	})
@@ -594,6 +597,7 @@ func TestHXLocation(t *testing.T) {
 			"a location with a context becomes JSON", "/full",
 			`{"path":"/chat","target":"#main","swap":"innerHTML","values":{"room":"go"}}`,
 		},
+		{"a location with a select becomes JSON", "/select", `{"path":"/chat","select":"#messages"}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
