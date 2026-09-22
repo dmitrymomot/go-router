@@ -722,6 +722,63 @@ func ExampleRouter_CookieCodec_flash() {
 	// [{success user created}]
 }
 
+// toasts shows the flash messages. A layout runs it on every page, and a
+// partial runs it out of band.
+func toasts(ctx context.Context, w io.Writer) error {
+	c, ok := router.FromContext(ctx)
+	if !ok {
+		return nil
+	}
+	if _, err := io.WriteString(w, `<div id="toasts" hx-swap-oob="true">`); err != nil {
+		return err
+	}
+	for _, f := range c.Flashes() {
+		if _, err := fmt.Fprintf(w, "<p class=%q>%s</p>", f.Kind, f.Message); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "</div>")
+	return err
+}
+
+// An htmx partial shows the flash in place, and a plain form post carries it
+// across the redirect. A flash read in the request that added it never
+// reaches the browser as a cookie.
+func ExampleBase_Flashes() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
+
+	r.POST("/users", func(c *Context) error {
+		u := &User{ID: "7", Name: "ann"}
+		if err := c.AddFlash(router.Flash{Kind: "success", Message: "user created"}); err != nil {
+			return err
+		}
+		if !c.WantsPartial() {
+			return c.Redirect(http.StatusSeeOther, "/users")
+		}
+		// Render buffers, so toasts may call Flashes before the headers go out.
+		return c.Render(http.StatusCreated, router.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+			if err := card(u).Render(ctx, w); err != nil {
+				return err
+			}
+			return toasts(ctx, w)
+		}))
+	})
+
+	for _, htmx := range []bool{true, false} {
+		req := httptest.NewRequest(http.MethodPost, "/users", nil)
+		if htmx {
+			req.Header.Set(router.HeaderHXRequest, "true")
+			req.Header.Set(router.HeaderHXRequestType, "partial")
+		}
+		rec := serveRequest(r, req)
+		fmt.Println(rec.Code, len(rec.Header().Values("Set-Cookie")), rec.Header().Get("Location")+rec.Body.String())
+	}
+	// Output:
+	// 201 0 <li id="user-7">ann</li><div id="toasts" hx-swap-oob="true"><p class="success">user created</p></div>
+	// 303 1 /users
+}
+
 // CookieCodecOf hands test tooling the codec of a router, so it can read the
 // signed cookies the router set.
 func ExampleCookieCodecOf() {
