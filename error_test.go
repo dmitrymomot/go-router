@@ -89,6 +89,34 @@ func TestStatusOfReadsAStatusCoder(t *testing.T) {
 	}
 }
 
+// canceledCoder names its own status for a cause that is context.Canceled.
+type canceledCoder struct{}
+
+func (canceledCoder) Error() string   { return "the upstream call was canceled" }
+func (canceledCoder) StatusCode() int { return http.StatusBadGateway }
+func (canceledCoder) Unwrap() error   { return context.Canceled }
+
+func TestStatusOfReportsACancelledRequestAs499(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"context.Canceled", context.Canceled, 499},
+		{"wrapped by fmt", fmt.Errorf("load user: %w", context.Canceled), 499},
+		{"an HTTPError around it keeps its status", ErrServiceUnavailable.WithError(context.Canceled), http.StatusServiceUnavailable},
+		{"a StatusCoder around it keeps its status", canceledCoder{}, http.StatusBadGateway},
+		{"a deadline is not a disconnect", context.DeadlineExceeded, http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StatusOf(tc.err); got != tc.want {
+				t.Errorf("StatusOf(%v) = %d, want %d", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestErrorHandlerHidesTheMessageOfAStatusCoder(t *testing.T) {
 	captureLogs(t)
 
@@ -121,6 +149,7 @@ func TestResolveStatus(t *testing.T) {
 		{"the handler wrote one and failed after", committed(http.StatusOK), ErrConflict, http.StatusOK},
 		{"the error decides", &Response{}, ErrNotFound, http.StatusNotFound},
 		{"an internal error", &Response{}, errors.New("boom"), http.StatusInternalServerError},
+		{"the client went away", &Response{}, context.Canceled, 499},
 		{"neither", &Response{}, nil, http.StatusOK},
 		{"no response at all", nil, ErrForbidden, http.StatusForbidden},
 	}

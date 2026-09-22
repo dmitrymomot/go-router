@@ -94,6 +94,11 @@ func (e FieldError) Error() string { return e.Field + ": " + e.Message }
 // StatusCoder is an error of your own that names its status. [StatusOf] reads
 // it, so a domain error reaches the client with the right status without
 // being wrapped in an [HTTPError].
+//
+// Give a domain sentinel such as ErrForbidden of an access package a
+// StatusCode method rather than mapping it inside the error handler: the
+// error handler, the log of the router, [HTTPErrorOf] and every middleware
+// that reads [StatusOf] then agree on its status.
 type StatusCoder interface {
 	error
 	StatusCode() int
@@ -170,8 +175,9 @@ func PanicErrorSize(recovered any, stackSize int) *HTTPError {
 }
 
 // StatusOf reports the status that err asks for: the status of an [HTTPError],
-// the status of a [StatusCoder], 200 for a nil error, and 500 for anything
-// else.
+// the status of a [StatusCoder], 499 for an error that is [context.Canceled],
+// 200 for a nil error, and 500 for anything else. 499 is the status nginx logs
+// for a client that went away, so a disconnect does not count as a 5xx.
 func StatusOf(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -188,8 +194,14 @@ func StatusOf(err error) int {
 			return status
 		}
 	}
+	if errors.Is(err, context.Canceled) {
+		return statusClientClosedRequest
+	}
 	return http.StatusInternalServerError
 }
+
+// statusClientClosedRequest has no constant in net/http and no text there.
+const statusClientClosedRequest = 499
 
 // ResolveStatus reports the status that went out. A response that already
 // wrote its header keeps that status, whatever err asks for; otherwise the
