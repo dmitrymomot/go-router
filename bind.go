@@ -225,10 +225,22 @@ func (b *Base) limitedBody() io.ReadCloser {
 	if limit <= 0 {
 		return b.req.Body
 	}
-	// MaxBytesReader marks the connection for closing through an unexported
-	// method on the writer it is handed, and does not unwrap, so it needs the
-	// one net/http gave us rather than the wrapper.
-	return http.MaxBytesReader(b.res.ResponseWriter, b.req.Body, limit)
+	return http.MaxBytesReader(innermostWriter(b.res), b.req.Body, limit)
+}
+
+// innermostWriter follows Unwrap to the writer net/http created. MaxBytesReader
+// marks the connection for closing through an unexported method on the writer
+// it is handed, and does not unwrap, so a wrapper such as the one of Gzip
+// would keep the connection open after a 413.
+func innermostWriter(w http.ResponseWriter) http.ResponseWriter {
+	for range unwrapLimit {
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		w = u.Unwrap()
+	}
+	return w
 }
 
 func (b *Base) parseForm() error {

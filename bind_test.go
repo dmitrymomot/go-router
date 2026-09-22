@@ -1426,3 +1426,47 @@ func TestFormReadersKeepAFormAnEarlierReaderBuilt(t *testing.T) {
 		t.Errorf("Form after FormFile = %d %q, want 200 %q", rec.Code, rec.Body.String(), "1")
 	}
 }
+
+type unwrappingWriter struct{ http.ResponseWriter }
+
+func (w unwrappingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Gzip and HTMXRedirect put a wrapper into the ResponseWriter of the Response,
+// and MaxBytesReader does not unwrap.
+func TestOversizedBodyClosesTheConnectionBehindAWrappedWriter(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(16)
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			res := c.Response()
+			res.ResponseWriter = unwrappingWriter{res.ResponseWriter}
+			return next(c)
+		}
+	})
+	r.POST("/b", func(c *tctx) error {
+		_, err := c.Bind[map[string]any]()
+		return err
+	})
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body := `{"k":"` + strings.Repeat("a", 4096) + `"}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/b", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // The test is done with it.
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	if !resp.Close {
+		t.Error("the server kept the connection open after a 413")
+	}
+}
