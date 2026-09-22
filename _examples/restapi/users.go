@@ -50,7 +50,7 @@ func createUser(c *Context) error {
 }
 
 func showUser(c *Context) error {
-	// ParamAs parses the segment, and answers 400 when it is not a number.
+	// ParamAs parses the segment, and answers 404 when it is not a number.
 	id, err := c.ParamAs[int]("id")
 	if err != nil {
 		return err

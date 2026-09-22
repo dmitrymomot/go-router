@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 )
 
 type createUser struct {
@@ -311,8 +312,98 @@ func TestParamAsAndQueryAs(t *testing.T) {
 	if got, want := do(r, http.MethodGet, "/users/9?limit=5").Body.String(), "9/5"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
-	if code := do(r, http.MethodGet, "/users/abc").Code; code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", code)
+	if code := do(r, http.MethodGet, "/users/abc").Code; code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", code)
+	}
+}
+
+// v0.1.0 answered 400 for a path parameter that did not parse, where the
+// resource it names does not exist.
+func TestParamAsAnswers404ForAMalformedValue(t *testing.T) {
+	var seen error
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) error {
+		seen = err
+		return DefaultErrorHandler(c, err)
+	})
+	r.GET("/users/{id}", func(c *tctx) error {
+		id, err := c.ParamAs[int]("id")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%d", id)
+	})
+	r.GET("/agents/{agent}", func(c *tctx) error {
+		id, err := c.ParamAs[uuid.UUID]("agent")
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, id.String())
+	})
+
+	rec := do(r, http.MethodGet, "/users/abc")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "Not Found" {
+		t.Errorf("body = %q, want the bare status text", got)
+	}
+	if !errors.Is(seen, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", seen)
+	}
+	if cause := errors.Unwrap(seen); cause == nil || !strings.Contains(cause.Error(), "route parameter id") {
+		t.Errorf("cause = %v, want one that names the parameter", cause)
+	}
+
+	const id = "0198c5b6-3f0e-7b3a-9c1d-2f4e6a8b0c1d"
+	if rec := do(r, http.MethodGet, "/agents/"+id); rec.Code != http.StatusOK || rec.Body.String() != id {
+		t.Errorf("GET /agents/%s = %d %q", id, rec.Code, rec.Body)
+	}
+	if got := do(r, http.MethodGet, "/agents/new").Code; got != http.StatusNotFound {
+		t.Errorf("GET /agents/new = %d, want 404", got)
+	}
+}
+
+func TestParamAsReportsAMissingNameAs500(t *testing.T) {
+	var seen error
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) error {
+		seen = err
+		return DefaultErrorHandler(c, err)
+	})
+	r.GET("/users/{id}", func(c *tctx) error {
+		_, err := c.ParamAs[int]("nope")
+		return err
+	})
+
+	if got := do(r, http.MethodGet, "/users/7").Code; got != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", got)
+	}
+	if !errors.Is(seen, ErrInternalServerError) {
+		t.Errorf("err = %v, want ErrInternalServerError", seen)
+	}
+	if msg := errors.Unwrap(seen).Error(); !strings.Contains(msg, `"nope"`) || !strings.Contains(msg, `"/users/{id}"`) {
+		t.Errorf("cause = %q, want one that names the parameter and the route", msg)
+	}
+}
+
+func TestParamAsReadsAHostParameter(t *testing.T) {
+	r := newTestRouter()
+	r.Host("{n}.example.com", func(h *Router[*tctx]) {
+		h.GET("/", func(c *tctx) error {
+			n, err := c.ParamAs[int]("n")
+			if err != nil {
+				return err
+			}
+			return c.Stringf(http.StatusOK, "%d", n)
+		})
+	})
+
+	if rec := doHost(r, http.MethodGet, "42.example.com", "/"); rec.Code != http.StatusOK || rec.Body.String() != "42" {
+		t.Errorf("42.example.com = %d %q, want 200 42", rec.Code, rec.Body)
+	}
+	if got := doHost(r, http.MethodGet, "x.example.com", "/").Code; got != http.StatusNotFound {
+		t.Errorf("x.example.com = %d, want 404", got)
 	}
 }
 
@@ -985,18 +1076,27 @@ func TestBindPathReportsAParseError(t *testing.T) {
 		ID int `param:"id"`
 	}
 
+	var seen error
 	r := newTestRouter()
 	r.GET("/users/{id}", func(c *tctx) error {
 		_, err := c.BindPath[ref]()
 		return err
 	})
 
+	r.ErrorHandler(func(c *tctx, err error) error {
+		seen = err
+		return DefaultErrorHandler(c, err)
+	})
+
 	rec := do(r, http.MethodGet, "/users/abc")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
-	if got := details(t, rec); len(got) != 1 || got[0].Field != "id" {
-		t.Errorf("details = %+v", got)
+	if got := details(t, rec); got != nil {
+		t.Errorf("details = %+v, want none", got)
+	}
+	if got := FieldErrorsOf(seen); len(got) != 1 || got[0].Field != "id" {
+		t.Errorf("FieldErrorsOf(err) = %+v, want the field id", got)
 	}
 }
 

@@ -86,8 +86,23 @@ func TestPartialSegmentParamAs(t *testing.T) {
 	if got := do(r, http.MethodGet, "/reports/rep-20260102.csv").Body.String(); got != "20260103" {
 		t.Errorf("body = %q, want %q", got, "20260103")
 	}
-	if code := do(r, http.MethodGet, "/reports/rep-abc.csv").Code; code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", code)
+	if code := do(r, http.MethodGet, "/reports/rep-abc.csv").Code; code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", code)
+	}
+}
+
+func TestPartialSegmentClassFallsThrough(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/reports/rep-{date:int}.csv", echoRoute)
+	r.GET("/reports/{name}", echoRoute)
+
+	for target, want := range map[string]string{
+		"/reports/rep-20260102.csv": "/reports/rep-{date:int}.csv date=20260102",
+		"/reports/rep-abc.csv":      "/reports/{name} name=rep-abc.csv",
+	} {
+		if got := do(r, http.MethodGet, target).Body.String(); got != want {
+			t.Errorf("GET %s = %q, want %q", target, got, want)
+		}
 	}
 }
 
