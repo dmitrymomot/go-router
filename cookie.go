@@ -34,6 +34,10 @@ var (
 	ErrCookieExpired = errors.New("router: the signed cookie expired")
 )
 
+// ErrNoCookieCodec reports a signed cookie on a router with no codec. It
+// carries no status, so the error handler answers 500.
+var ErrNoCookieCodec = errors.New("router: no codec signs cookies; set one with Router.CookieCodec")
+
 const cookieSep = '.'
 
 var cookieEnc = base64.RawURLEncoding
@@ -244,38 +248,65 @@ func (b *Base) SetCookie(c *http.Cookie) { http.SetCookie(b.res, c) }
 // one with the same Path and Domain: take NewCookie(name, "", -1) and set them.
 func (b *Base) ClearCookie(name string) { b.SetCookie(b.NewCookie(name, "", -1)) }
 
-// SetSignedCookie writes c with its value signed by cc. Every other field of c
-// goes out as it stands, so the caller owns Path, Secure, HttpOnly and
-// SameSite. Build c with [Base.NewCookie] for the router's defaults.
+// SetSignedCookie writes c with its value signed by the codec of
+// [Router.CookieCodec]. Every other field of c goes out as it stands, so the
+// caller owns Path, Secure, HttpOnly and SameSite. Build c with
+// [Base.NewCookie] for the router's defaults.
 //
 // The signature runs out with the cookie: MaxAge first, then Expires, then the
 // MaxAge of the codec.
-func (b *Base) SetSignedCookie(cc *CookieCodec, c *http.Cookie) {
+//
+// It reports [ErrNoCookieCodec], and writes nothing, when the router has no
+// codec.
+func (b *Base) SetSignedCookie(c *http.Cookie) error {
+	cc := b.codec()
+	if cc == nil {
+		return ErrNoCookieCodec
+	}
 	signed := *c
 	signed.Value = cc.encode(c.Name, []byte(c.Value), signedExpiry(cc, c, time.Now()))
 	http.SetCookie(b.res, &signed)
+	return nil
 }
 
-// SignedCookie reads and verifies the cookie called name. It reports
-// [http.ErrNoCookie] when the request carries none, and otherwise the failure
-// of [CookieCodec.Decode].
+// SignedCookie reads and verifies the cookie called name with the codec of
+// [Router.CookieCodec]. It reports [ErrNoCookieCodec] when the router has no
+// codec, [http.ErrNoCookie] when the request carries no such cookie, and
+// otherwise the failure of [CookieCodec.Decode]. A handler that takes any
+// error as signed out should still check for ErrNoCookieCodec.
 //
 // A client that sends the name more than once, which happens across
 // subdomains, has each copy tried and the first that verifies wins.
-func (b *Base) SignedCookie(cc *CookieCodec, name string) ([]byte, error) {
+func (b *Base) SignedCookie(name string) (string, error) {
+	cc := b.codec()
+	if cc == nil {
+		return "", ErrNoCookieCodec
+	}
 	cookies := b.req.CookiesNamed(name)
 	if len(cookies) == 0 {
-		return nil, http.ErrNoCookie
+		return "", http.ErrNoCookie
 	}
 	var first error
 	for _, c := range cookies {
 		value, err := cc.Decode(name, c.Value)
 		if err == nil {
-			return value, nil
+			return string(value), nil
 		}
 		if first == nil {
 			first = err
 		}
 	}
-	return nil, first
+	return "", first
+}
+
+func (b *Base) codec() *CookieCodec { return b.opts().codec }
+
+// CookieCodecOf reports the codec that h signs cookies with when h is a
+// [Router], or nil when it is not or has none. A router wrapped in middleware
+// is not a Router. It exists for test tooling such as routertest.
+func CookieCodecOf(h http.Handler) *CookieCodec {
+	if r, ok := h.(interface{ cookieCodec() *CookieCodec }); ok {
+		return r.cookieCodec()
+	}
+	return nil
 }

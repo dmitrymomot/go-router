@@ -297,6 +297,15 @@ func TestAddFlashKeepsTheCookieForFlashMaxAge(t *testing.T) {
 	}
 }
 
+func TestFlashesReadAfterAKeyRotation(t *testing.T) {
+	previous := bytes.Repeat([]byte("p"), MinCookieKeyLen)
+	post := cookieBase()
+	addFlashes(t, post, NewCookieCodec(previous), Flash{Kind: "success", Message: "saved"})
+
+	get := flashRequest(t, post)
+	wantFlashes(t, get.Flashes(NewCookieCodec(testKey, previous)), []Flash{{Kind: "success", Message: "saved"}})
+}
+
 func TestAddFlashMarksTheCookieSecureOverTLS(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(HeaderXForwardedProto, "https")

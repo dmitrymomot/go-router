@@ -25,6 +25,12 @@ func cookieBase(cookies ...*http.Cookie) *Base {
 	return NewBase(httptest.NewRecorder(), req)
 }
 
+func signedBase(cc *CookieCodec, cookies ...*http.Cookie) *Base {
+	b := cookieBase(cookies...)
+	SetCookieCodecForTest(b, cc)
+	return b
+}
+
 func setCookies(t *testing.T, b *Base) []*http.Cookie {
 	t.Helper()
 	var out []*http.Cookie
@@ -355,8 +361,10 @@ func TestEncodeTakesTheDefaultLifetimeForAZeroMaxAge(t *testing.T) {
 
 func TestSetSignedCookieWritesTheSignedValue(t *testing.T) {
 	cc := testCodec()
-	b := cookieBase()
-	b.SetSignedCookie(cc, &http.Cookie{Name: "uid", Value: "alice", Path: "/", HttpOnly: true})
+	b := signedBase(cc)
+	if err := b.SetSignedCookie(&http.Cookie{Name: "uid", Value: "alice", Path: "/", HttpOnly: true}); err != nil {
+		t.Fatalf("SetSignedCookie: %v", err)
+	}
 
 	cookies := setCookies(t, b)
 	if len(cookies) != 1 {
@@ -376,7 +384,9 @@ func TestSetSignedCookieWritesTheSignedValue(t *testing.T) {
 
 func TestSetSignedCookieLeavesTheCallerCookieAlone(t *testing.T) {
 	c := &http.Cookie{Name: "uid", Value: "alice"}
-	cookieBase().SetSignedCookie(testCodec(), c)
+	if err := signedBase(testCodec()).SetSignedCookie(c); err != nil {
+		t.Fatalf("SetSignedCookie: %v", err)
+	}
 
 	if c.Value != "alice" {
 		t.Errorf("the cookie of the caller now reads %q, want %q", c.Value, "alice")
@@ -419,8 +429,10 @@ func TestSetSignedCookieMatchesTheLifetimeOfTheCookie(t *testing.T) {
 				cc.MaxAge = time.Minute
 				now := time.Now()
 
-				b := cookieBase()
-				b.SetSignedCookie(cc, tc.cookie(now))
+				b := signedBase(cc)
+				if err := b.SetSignedCookie(tc.cookie(now)); err != nil {
+					t.Fatalf("SetSignedCookie: %v", err)
+				}
 
 				cookies := setCookies(t, b)
 				if len(cookies) != 1 {
@@ -436,13 +448,13 @@ func TestSetSignedCookieMatchesTheLifetimeOfTheCookie(t *testing.T) {
 
 func TestSignedCookieReadsTheValue(t *testing.T) {
 	cc := testCodec()
-	b := cookieBase(&http.Cookie{Name: "uid", Value: cc.Encode("uid", []byte("alice"))})
+	b := signedBase(cc, &http.Cookie{Name: "uid", Value: cc.Encode("uid", []byte("alice"))})
 
-	got, err := b.SignedCookie(cc, "uid")
+	got, err := b.SignedCookie("uid")
 	if err != nil {
 		t.Fatalf("SignedCookie: %v", err)
 	}
-	if string(got) != "alice" {
+	if got != "alice" {
 		t.Errorf("SignedCookie = %q, want %q", got, "alice")
 	}
 }
@@ -465,7 +477,7 @@ func TestSignedCookieReportsTheFailure(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := cookieBase(tc.cookies...).SignedCookie(cc, "uid")
+			_, err := signedBase(cc, tc.cookies...).SignedCookie("uid")
 			if !errors.Is(err, tc.want) {
 				t.Errorf("SignedCookie = %v, want %v", err, tc.want)
 			}
@@ -477,11 +489,11 @@ func TestSignedCookieReportsAnExpiredCookie(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cc := testCodec()
 		cc.MaxAge = time.Minute
-		b := cookieBase(&http.Cookie{Name: "uid", Value: cc.Encode("uid", []byte("alice"))})
+		b := signedBase(cc, &http.Cookie{Name: "uid", Value: cc.Encode("uid", []byte("alice"))})
 
 		time.Sleep(2 * time.Minute)
 
-		if _, err := b.SignedCookie(cc, "uid"); !errors.Is(err, ErrCookieExpired) {
+		if _, err := b.SignedCookie("uid"); !errors.Is(err, ErrCookieExpired) {
 			t.Errorf("SignedCookie = %v, want %v", err, ErrCookieExpired)
 		}
 	})
@@ -489,16 +501,16 @@ func TestSignedCookieReportsAnExpiredCookie(t *testing.T) {
 
 func TestSignedCookieTakesTheCookieThatVerifies(t *testing.T) {
 	cc := testCodec()
-	b := cookieBase(
+	b := signedBase(cc,
 		&http.Cookie{Name: "uid", Value: "planted-by-a-neighbour"},
 		&http.Cookie{Name: "uid", Value: cc.Encode("uid", []byte("alice"))},
 	)
 
-	got, err := b.SignedCookie(cc, "uid")
+	got, err := b.SignedCookie("uid")
 	if err != nil {
 		t.Fatalf("SignedCookie: %v", err)
 	}
-	if string(got) != "alice" {
+	if got != "alice" {
 		t.Errorf("SignedCookie = %q, want %q", got, "alice")
 	}
 }
@@ -609,8 +621,10 @@ func TestNewCookieRoundsTheMaxAge(t *testing.T) {
 func TestNewCookieFeedsSetSignedCookie(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cc := testCodec()
-		b := cookieBase()
-		b.SetSignedCookie(cc, b.NewCookie("s", "v", time.Hour))
+		b := signedBase(cc)
+		if err := b.SetSignedCookie(b.NewCookie("s", "v", time.Hour)); err != nil {
+			t.Fatalf("SetSignedCookie: %v", err)
+		}
 
 		cookies := setCookies(t, b)
 		if len(cookies) != 1 {
@@ -624,11 +638,11 @@ func TestNewCookieFeedsSetSignedCookie(t *testing.T) {
 			t.Errorf("the signature expires at %d, want %d", got, want)
 		}
 
-		got, err := cookieBase(&http.Cookie{Name: "s", Value: c.Value}).SignedCookie(cc, "s")
+		got, err := signedBase(cc, &http.Cookie{Name: "s", Value: c.Value}).SignedCookie("s")
 		if err != nil {
 			t.Fatalf("SignedCookie: %v", err)
 		}
-		if string(got) != "v" {
+		if got != "v" {
 			t.Errorf("SignedCookie = %q, want %q", got, "v")
 		}
 	})
@@ -666,5 +680,100 @@ func TestSetCookieDropsAnInvalidName(t *testing.T) {
 
 	if lines := b.Response().Header()["Set-Cookie"]; len(lines) != 0 {
 		t.Errorf("SetCookie wrote a cookie with an invalid name: %q", lines)
+	}
+}
+
+func TestSetSignedCookieWithoutACodecFails(t *testing.T) {
+	b := cookieBase()
+
+	if err := b.SetSignedCookie(b.NewCookie("uid", "alice", time.Hour)); !errors.Is(err, ErrNoCookieCodec) {
+		t.Errorf("SetSignedCookie = %v, want %v", err, ErrNoCookieCodec)
+	}
+	if lines := b.Response().Header()["Set-Cookie"]; len(lines) != 0 {
+		t.Errorf("SetSignedCookie without a codec wrote %q", lines)
+	}
+}
+
+func TestSignedCookieWithoutACodecFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		cookies []*http.Cookie
+	}{
+		{"a request without the cookie", nil},
+		{"a request with the cookie", []*http.Cookie{{Name: "uid", Value: testCodec().Encode("uid", []byte("alice"))}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := cookieBase(tc.cookies...).SignedCookie("uid"); !errors.Is(err, ErrNoCookieCodec) {
+				t.Errorf("SignedCookie = %v, want %v", err, ErrNoCookieCodec)
+			}
+		})
+	}
+}
+
+func TestSetCookieCodecForTestPanicsOnNil(t *testing.T) {
+	tests := []struct {
+		name string
+		b    *Base
+		cc   *CookieCodec
+		want string
+	}{
+		{"no Base", nil, testCodec(), "needs a Base"},
+		{"no codec", cookieBase(), nil, "needs a codec"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				msg, _ := recover().(string)
+				if !strings.Contains(msg, tc.want) {
+					t.Errorf("panic = %q, want one that holds %q", msg, tc.want)
+				}
+			}()
+			SetCookieCodecForTest(tc.b, tc.cc)
+		})
+	}
+}
+
+func TestSetCookieCodecForTestLeavesOtherBasesAlone(t *testing.T) {
+	first := cookieBase()
+	SetCookieCodecForTest(first, testCodec())
+	second := cookieBase()
+	other := NewCookieCodec(bytes.Repeat([]byte("o"), MinCookieKeyLen))
+	SetCookieCodecForTest(second, other)
+
+	if err := cookieBase().SetSignedCookie(&http.Cookie{Name: "uid"}); !errors.Is(err, ErrNoCookieCodec) {
+		t.Errorf("a fresh Base took the codec of another: %v", err)
+	}
+	if first.codec() == second.codec() || second.codec() != other {
+		t.Error("two Bases share one codec after each got its own")
+	}
+	if defaultRouterOpts.codec != nil {
+		t.Error("SetCookieCodecForTest wrote the shared default options")
+	}
+}
+
+func TestCookieCodecOf(t *testing.T) {
+	cc := testCodec()
+	withCodec := newTestRouter()
+	withCodec.CookieCodec(cc)
+	var scope *Router[*tctx]
+	withCodec.Route("/admin", func(g *Router[*tctx]) { scope = g })
+
+	tests := []struct {
+		name string
+		h    http.Handler
+		want *CookieCodec
+	}{
+		{"a router with a codec", withCodec, cc},
+		{"a scope of that router", scope, cc},
+		{"a router without a codec", newTestRouter(), nil},
+		{"a handler that is not a router", http.NotFoundHandler(), nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CookieCodecOf(tc.h); got != tc.want {
+				t.Errorf("CookieCodecOf = %p, want %p", got, tc.want)
+			}
+		})
 	}
 }
