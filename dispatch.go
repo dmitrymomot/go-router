@@ -145,7 +145,7 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 			host, hostVals = e.hostSet.match(b.host, hostVals)
 		}
 		if host != nil {
-			b.hostIdx, b.hostPattern = host.idx, host.pattern
+			b.hostPattern = host.pattern
 			b.setRoute(nil, host.names, hostVals)
 		}
 	}
@@ -166,19 +166,12 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 	if n == nil && e.anyHostRoutes {
 		if m, v := search(e.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
 			n, vals = m, v
-			b.hostIdx, b.hostPattern = -1, ""
+			b.hostPattern = ""
 		}
 	}
 
 	switch {
 	case n != nil:
-		selectedHost := host
-		if b.hostIdx < 0 {
-			selectedHost = nil
-		}
-		if len(e.errScopes) > 0 || selectedHost != nil && selectedHost.errHandler != nil {
-			e.selectErrorTarget(b, selectedHost, trimmed, escaped)
-		}
 		if n.kind == edgeWildcard && len(vals) > 0 {
 			b.rawTail = vals[len(vals)-1]
 			b.needsCleanup = b.needsCleanup || b.rawTail != ""
@@ -188,7 +181,9 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		}
 		b.setRoute(n.rec, n.names, vals)
 		req.Pattern = n.rec.pattern
-		h := n.handler(req.Method)
+		mh := n.lookup(req.Method)
+		b.errIdx = *mh.errIdx
+		h := mh.handler
 		if handleErrors {
 			return e.owner.dispatch(c, h)
 		}
@@ -199,7 +194,7 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		if match == nil {
 			match, matched, skip = anySt.pathMatch, anySt.pathVals, 0
 			host = nil
-			b.hostIdx, b.hostPattern = -1, ""
+			b.hostPattern = ""
 		}
 		if match.kind == edgeWildcard && len(matched) > skip {
 			matched = slices.Clone(matched)
@@ -207,15 +202,13 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 				matched[len(matched)-1] = decoded
 			}
 		}
-		if len(e.errScopes) > 0 || host != nil && host.errHandler != nil {
-			e.selectErrorTarget(b, host, trimmed, escaped)
-		}
 		b.needsCleanup = true
 		b.setRoute(match.rec, match.names, matched)
 		req.Pattern = match.rec.pattern
 		b.res.Header().Set(HeaderAllow, e.allowHeader(&hostSt, &anySt))
 
-		_, _, notAllowed, options := e.fallbackChains(host, trimmed, escaped)
+		_, _, notAllowed, options, errIdx := e.fallbackChains(host, trimmed, escaped)
+		b.errIdx = errIdx
 		if req.Method == http.MethodOptions && e.autoOptions {
 			if handleErrors {
 				return e.owner.dispatch(c, options)
@@ -228,10 +221,8 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		return notAllowed(c)
 
 	default:
-		if len(e.errScopes) > 0 || host != nil && host.errHandler != nil {
-			e.selectErrorTarget(b, host, trimmed, escaped)
-		}
-		scope, notFound, _, _ := e.fallbackChains(host, trimmed, escaped)
+		scope, notFound, _, _, errIdx := e.fallbackChains(host, trimmed, escaped)
+		b.errIdx = errIdx
 		if scope != nil {
 			scope.bindPrefixParams(b, trimmed, escaped)
 		}
@@ -315,34 +306,5 @@ func (r *Router[C]) handleError(c C, err error) {
 }
 
 func (e *engine[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {
-	if !b.errorRouted {
-		return e.rootErrorHandler
-	}
-	if b.errorScopeIdx >= 0 && int(b.errorScopeIdx) < len(e.errScopes) {
-		return e.errScopes[b.errorScopeIdx].errHandler
-	}
-	var host *hostEntry[C]
-	if b.hostIdx >= 0 && e.hostSet != nil && int(b.hostIdx) < len(e.hostSet.all) {
-		host = e.hostSet.all[b.hostIdx]
-	}
-	if host != nil && host.errHandler != nil {
-		return host.errHandler
-	}
-	return e.rootErrorHandler
-}
-
-// selectErrorTarget picks the scope whose error handler owns this request. It
-// runs while the routed path is still known: a handler is free to rewrite the
-// request, and that must not change who handles its failure.
-func (e *engine[C]) selectErrorTarget(b *Base, host *hostEntry[C], path string, escaped bool) {
-	b.errorRouted = true
-	b.errorScopeIdx = -1
-	if s := scopeFor(e.errScopes, host, path, escaped); s != nil {
-		b.errorScopeIdx = s.errorIdx
-	}
-	if host != nil {
-		b.hostIdx = host.idx
-	} else {
-		b.hostIdx = -1
-	}
+	return e.errHandlers[b.errIdx]
 }

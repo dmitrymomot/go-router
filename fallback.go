@@ -14,21 +14,15 @@ type scopeFallback[C Context] struct {
 	pattern         []segment
 	depth           int
 	hostIdx         int32
-	errorIdx        int32
+	errIdx          int32
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
-	errHandler      ErrorHandlerFunc[C]
 }
 
 func (s *scopeFallback[C]) covers(path string, escaped bool) bool {
 	_, ok := s.walk(path, escaped, nil)
 	return ok
-}
-
-// coversInto is covers, keeping the parameter values it decodes on the way.
-func (s *scopeFallback[C]) coversInto(path string, escaped bool, vals []string) ([]string, bool) {
-	return s.walk(path, escaped, vals)
 }
 
 // walk matches the scope prefix against the path, collecting the value of every
@@ -95,16 +89,18 @@ func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path st
 	return nil
 }
 
+// fallbackChains picks the 404, 405 and OPTIONS answers for a path no route
+// took, and the error handler that owns them.
 func (e *engine[C]) fallbackChains(
 	host *hostEntry[C], path string, escaped bool,
-) (scope *scopeFallback[C], notFound, notAllowed, options HandlerFunc[C]) {
+) (scope *scopeFallback[C], notFound, notAllowed, options HandlerFunc[C], errIdx int32) {
 	if s := scopeFor(e.scopes, host, path, escaped); s != nil {
-		return s, s.notFoundChain, s.notAllowedChain, s.optionsChain
+		return s, s.notFoundChain, s.notAllowedChain, s.optionsChain, s.errIdx
 	}
 	if host != nil {
-		return nil, host.notFoundChain, host.notAllowedChain, host.optionsChain
+		return nil, host.notFoundChain, host.notAllowedChain, host.optionsChain, host.errIdx
 	}
-	return nil, e.notFoundChain, e.notAllowedChain, e.optionsChain
+	return nil, e.notFoundChain, e.notAllowedChain, e.optionsChain, 0
 }
 
 // bindPrefixParams gives a scope fallback the parameters of its own prefix, so
@@ -119,7 +115,7 @@ func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) 
 	if seed == nil {
 		seed = b.paramArr[:0]
 	}
-	vals, ok := s.coversInto(path, escaped, seed)
+	vals, ok := s.walk(path, escaped, seed)
 	if !ok {
 		return
 	}

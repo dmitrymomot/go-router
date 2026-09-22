@@ -1652,24 +1652,6 @@ func TestAMountedRouterKeepsTheFallbacksOfTheRoot(t *testing.T) {
 	}
 }
 
-func TestAGroupInsideAPrefixOwnsTheFallbackOfThatPrefix(t *testing.T) {
-	r := newTestRouter()
-	r.Route("/api", func(g *Router[*tctx]) {
-		g.Group(func(h *Router[*tctx]) {
-			h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "api 404") })
-			h.GET("/users", echoRoute)
-		})
-	})
-	r.GET("/health", echoRoute)
-
-	if got := do(r, http.MethodGet, "/api/typo").Body.String(); got != "api 404" {
-		t.Errorf("GET /api/typo = %q, want %q", got, "api 404")
-	}
-	if got := do(r, http.MethodGet, "/typo").Body.String(); got == "api 404" {
-		t.Errorf("GET /typo = %q, want the fallback of the root", got)
-	}
-}
-
 func TestAScopeErrorHandlerInsideAHostAnswersThatHostAlone(t *testing.T) {
 	boom := func(*tctx) error { return errors.New("boom") }
 
@@ -2064,7 +2046,10 @@ func TestScopedFallbackPrecedenceIsLexicographic(t *testing.T) {
 			if rec := do(r, http.MethodOptions, "/a/b/method"); rec.Code != http.StatusNoContent || rec.Header().Get("X-Scope") != "static-first" {
 				t.Errorf("OPTIONS = %d scope %q", rec.Code, rec.Header().Get("X-Scope"))
 			}
-			if rec := do(r, http.MethodGet, "/a/b/error"); rec.Code != http.StatusInternalServerError || rec.Body.String() != "static-first 500" {
+			// A route of the root keeps the root's handler, whatever scope
+			// covers its path.
+			if rec := do(r, http.MethodGet, "/a/b/error"); rec.Code != http.StatusInternalServerError ||
+				rec.Body.String() != http.StatusText(http.StatusInternalServerError) {
 				t.Errorf("error = %d %q", rec.Code, rec.Body.String())
 			}
 		})
@@ -2491,26 +2476,6 @@ func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
 	}
 }
 
-// A scope keyed by nothing covers everything, so it cannot own a fallback.
-func TestPrefixLessScopeCannotOwnFallbacks(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		want string
-		set  func(*Router[*tctx])
-	}{
-		{"ErrorHandler", "the error handler", func(g *Router[*tctx]) {
-			g.ErrorHandler(func(*tctx, error) error { return nil })
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := newTestRouter()
-			mustPanicContaining(t, "a scope without a prefix cannot own "+tc.want, func() {
-				r.Group(func(g *Router[*tctx]) { tc.set(g) })
-			})
-		})
-	}
-}
-
 // The root, a host scope and any prefixed scope all name a region the router
 // can match, so each keeps its own fallbacks.
 func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
@@ -2525,7 +2490,8 @@ func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
 		})
 		g.GET("/inside", func(c *tctx) error { return ErrInternalServerError })
 	})
-	// A nested Group inherits the prefix of its owner, so it may own them too.
+	// A Group owns the errors of its routes, never the 404s of the prefix
+	// around it.
 	r.Route("/deep", func(g *Router[*tctx]) {
 		g.Group(func(h *Router[*tctx]) {
 			h.ErrorHandler(func(c *tctx, err error) error {
@@ -2539,7 +2505,7 @@ func TestScopesThatNameARegionKeepTheirFallbacks(t *testing.T) {
 		{"/api/inside", "api 500"},
 		{"/nowhere", "root 404"},
 		{"/api/nowhere", "api 404"},
-		{"/deep/nowhere", "deep 404"},
+		{"/deep/nowhere", "root 404"},
 	} {
 		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
 			t.Errorf("GET %s = %q, want %q", tc.path, got, tc.want)

@@ -40,7 +40,10 @@ type hostEntry[C Context] struct {
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
-	errHandler      ErrorHandlerFunc[C]
+	// errIdx is the error handler of the host's 404 and 405 answers. scope is
+	// the host scope that decides it: the one with a handler, else the first.
+	errIdx int32
+	scope  *Router[C]
 	// redirect marks a host that RedirectHost owns: no other route may be
 	// registered for it.
 	redirect *hostClaim
@@ -540,9 +543,10 @@ func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 // A route outside any host scope answers for every host.
 //
 // The middleware of the scope also wraps the 404 and 405 answers for its hosts.
-// When several Host or Hosts calls open one pattern, the middleware of the
-// first scope wraps those answers, and each route keeps the middleware of the
-// scope that registered it.
+// When several Host or Hosts calls open one pattern, the scope that sets an
+// error handler owns those answers with its middleware, else the first scope
+// does, and each route keeps the middleware of the scope that registered it.
+// Only one scope of a pattern may set an error handler.
 //
 // Hosts panics on an empty patterns or on a pattern it cannot parse.
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {

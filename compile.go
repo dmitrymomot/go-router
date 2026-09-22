@@ -58,15 +58,16 @@ func freezeRouterGraph[C Context](r *Router[C], seen map[*Router[C]]bool) {
 }
 
 // compile turns the scope tree into the non-route half of a table: the fallback
-// chains, the scope list and the host order. Routes never come through here;
-// install puts those in the trie.
+// chains, the scope list, the host order and the error handler of every scope.
+// Routes never come through here; install puts those in the trie, and compile
+// only rewrites the error handler index they point at.
 func (r *Router[C]) compile(eng *engine[C]) {
-	eng.scopes, eng.errScopes = nil, nil
+	eng.scopes = nil
 	if eng.hostSet != nil {
 		for _, e := range eng.hostSet.all {
 			e.mws, e.haveMWs = nil, false
 			e.notFoundChain, e.notAllowedChain, e.optionsChain = nil, nil, nil
-			e.errHandler = nil
+			e.errIdx, e.scope = 0, nil
 		}
 	}
 	// A miss and a wrong method are errors like any other; only the error
@@ -74,19 +75,42 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	// runs on the way to them.
 	rootNotFound := HandlerFunc[C](defaultNotFound[C])
 	rootNotAllowed := HandlerFunc[C](defaultMethodNotAllowed[C])
-	rootErrHandler := ErrorHandlerFunc[C](DefaultErrorHandler[C])
-	if r.errHandler != nil {
-		rootErrHandler = r.errHandler
-	}
 	eng.notFoundChain = chain(rootNotFound, r.mws)
 	eng.notAllowedChain = chain(rootNotAllowed, r.mws)
 	eng.optionsChain = chain(autoOptions[C], r.mws)
-	open := make(map[*Router[C]]bool)
 
+	// The table is built fresh: a request never reads it before the router
+	// serves, and no setter runs after that.
+	rootErr := ErrorHandlerFunc[C](DefaultErrorHandler[C])
+	if r.errHandler != nil {
+		rootErr = r.errHandler
+	}
+	eng.errHandlers = []ErrorHandlerFunc[C]{rootErr}
+	owners := map[*Router[C]]int32{r: 0}
+	ownerIdx := func(rt *Router[C]) int32 {
+		idx, ok := owners[rt]
+		if !ok {
+			idx = int32(len(eng.errHandlers))
+			owners[rt] = idx
+			eng.errHandlers = append(eng.errHandlers, rt.errHandler)
+		}
+		return idx
+	}
+
+	// A choice is where a scope stands on one tree: inner is the nearest
+	// handler inside its host scope, -1 for none, and outer the one around that
+	// host scope. The host's own handler sits between them, and it is known only
+	// once every scope of the host was seen.
+	type choice struct {
+		key          errKey[C]
+		inner, outer int32
+	}
+	var choices []choice
+	open := make(map[*Router[C]]bool)
 	var pending []pendingScope[C]
 
-	var walk func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C])
-	walk = func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inherited scopeFallbacks[C]) {
+	var walk func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inner, outer int32)
+	walk = func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inner, outer int32) {
 		if open[rt] {
 			panic("router: a router is mounted inside itself")
 		}
@@ -98,48 +122,76 @@ func (r *Router[C]) compile(eng *engine[C]) {
 
 		rounds := max(len(rt.hosts), 1)
 		for i := range rounds {
-			e := host
+			e, in, out := host, inner, outer
 			if len(rt.hosts) > 0 {
 				if host != nil {
 					panic("router: a host scope cannot sit inside another host scope")
 				}
 				e = eng.mustHostEntry(rt.hosts[i])
+				if in >= 0 {
+					out = in
+				}
+				in = -1
 				if !e.haveMWs {
 					e.mws, e.haveMWs = m, true
 				}
+				if e.scope == nil {
+					e.scope = rt
+				}
 			}
-
-			own := inherited
-			switch {
-			// Only the router itself and a host scope own the root fallbacks;
-			// mustOwnFallbacks rejects the rest at the setter.
-			case rt == r || len(rt.hosts) > 0:
-				if e == nil {
-					if rt.errHandler != nil {
-						rootErrHandler = rt.errHandler
+			if rt != r && rt.errHandler != nil {
+				in = ownerIdx(rt)
+				if len(rt.hosts) > 0 {
+					if e.scope != rt && e.scope.errHandler != nil {
+						panic("router: the host " + e.pattern + " already has an error handler, set by another Host scope")
 					}
-				} else if rt.errHandler != nil {
-					e.errHandler = rt.errHandler
+					// The scope that owns the host's errors also wraps its 404s.
+					e.scope, e.mws = rt, m
 				}
-			default:
-				sets := own.take(rt)
-				if normalizePattern(rt.prefix) != "/" || sets {
-					pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m, depth: depth, fb: own})
+			}
+			choices = append(choices, choice{key: errKey[C]{rt, e}, inner: in, outer: out})
+
+			if rt != r && normalizePattern(rt.prefix) != "/" {
+				// A mount answers the 404s under its prefix as the router it
+				// holds would, with that router's middleware.
+				owner, pm := rt, m
+				if sub := rt.mounted; sub != nil {
+					owner, pm = sub, concatMiddleware(m, sub.mws)
 				}
+				pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: pm, depth: depth, owner: errKey[C]{owner, e}})
 			}
 
 			for _, ch := range rt.children {
-				walk(ch, p, m, e, depth+1, own)
+				walk(ch, p, m, e, depth+1, in, out)
 			}
 		}
 	}
-	walk(r, scopePattern{}, nil, nil, 0, scopeFallbacks[C]{})
+	walk(r, scopePattern{}, nil, nil, 0, -1, 0)
+
+	resolved := make(map[errKey[C]]int32, len(choices))
+	for _, c := range choices {
+		idx := c.outer
+		switch {
+		case c.inner >= 0:
+			idx = c.inner
+		case c.key.host != nil && c.key.host.scope.errHandler != nil:
+			idx = owners[c.key.host.scope]
+		}
+		resolved[c.key] = idx
+		if slot := eng.errSlots[c.key]; slot != nil {
+			*slot = idx
+		}
+	}
+	eng.errResolved = resolved
 
 	if len(r.preMws) > 0 {
 		r.preChain = chain(r.preTerminal, r.preMws)
 	}
 	if eng.hostSet != nil {
 		for _, e := range eng.hostSet.all {
+			if e.scope != nil {
+				e.errIdx = resolved[errKey[C]{e.scope, e}]
+			}
 			if e.optionsChain == nil {
 				e.optionsChain = chain(autoOptions[C], e.mws)
 			}
@@ -157,7 +209,7 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	for _, ps := range pending {
 		s := &scopeFallback[C]{
 			prefix: ps.prefix.text, rec: &routeRecord{pattern: ps.prefix.text}, names: ps.prefix.names, pattern: ps.prefix.segs,
-			hostIdx: -1, depth: ps.depth, errorIdx: -1,
+			hostIdx: -1, depth: ps.depth, errIdx: resolved[ps.owner],
 		}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
@@ -165,7 +217,6 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		s.notFoundChain = chain(rootNotFound, ps.mws)
 		s.notAllowedChain = chain(rootNotAllowed, ps.mws)
 		s.optionsChain = chain(autoOptions[C], ps.mws)
-		s.errHandler = ps.fb.errHandler
 		eng.scopes = append(eng.scopes, s)
 	}
 	slices.SortStableFunc(eng.scopes, func(a, b *scopeFallback[C]) int {
@@ -184,19 +235,32 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		}
 		return strings.Compare(a.prefix, b.prefix)
 	})
-	for _, s := range eng.scopes {
-		if s.errHandler != nil {
-			s.errorIdx = int32(len(eng.errScopes))
-			eng.errScopes = append(eng.errScopes, s)
-		}
+}
+
+// errSlot returns the owner index that the routes of r read on the tree of
+// host, nil for the tree of every host. A scope that compile has not seen yet,
+// such as a With scope, takes a compile now, so the route answers correctly the
+// moment it is registered; inside a Route, Group or Hosts callback the compile
+// at the end of the outermost one fills it.
+func (r *Router[C]) errSlot(eng *engine[C], host *hostEntry[C]) *int32 {
+	key := errKey[C]{r, host}
+	if slot := eng.errSlots[key]; slot != nil {
+		return slot
 	}
-	eng.rootErrorHandler = rootErrHandler
+	slot := new(int32)
+	eng.errSlots[key] = slot
+	if idx, ok := eng.errResolved[key]; ok {
+		*slot = idx
+	} else {
+		r.settingChanged()
+	}
+	return slot
 }
 
 type pendingScope[C Context] struct {
 	host   *hostEntry[C]
 	mws    []Middleware[C]
-	fb     scopeFallbacks[C]
+	owner  errKey[C]
 	prefix scopePattern
 	depth  int
 }
@@ -217,16 +281,4 @@ func (p scopePattern) join[C Context](rt *Router[C]) scopePattern {
 		segs:  slices.Concat(p.segs, segs),
 		names: slices.Concat(p.names, names),
 	}
-}
-
-type scopeFallbacks[C Context] struct {
-	errHandler ErrorHandlerFunc[C]
-}
-
-func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
-	if rt.errHandler == nil {
-		return false
-	}
-	f.errHandler = rt.errHandler
-	return true
 }

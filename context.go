@@ -70,15 +70,15 @@ type Base struct {
 	// One word rather than the fields it points to, which would push an
 	// embedder with a string of its own past 320 bytes and into the next size
 	// class.
-	deferred      *deferredState
-	resStorage    Response
-	hostIdx       int32
-	errorScopeIdx int32
-	hostKnown     bool
-	pathEscaped   bool
-	errorRouted   bool
-	needsCleanup  bool
-	errorHandled  bool
+	deferred   *deferredState
+	resStorage Response
+	// errIdx picks the error handler, in engine.errHandlers, that answers a
+	// failure of this request. 0, the root's, until routing picks one.
+	errIdx       int32
+	hostKnown    bool
+	pathEscaped  bool
+	needsCleanup bool
+	errorHandled bool
 
 	// Routing matches the path trimmed of its trailing slash, so a mounted
 	// handler has to be told the slash was there.
@@ -137,8 +137,8 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	b.route, b.rawTail = nil, ""
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
-	b.hostIdx = -1
-	b.pathEscaped, b.errorRouted, b.tailSlash = false, false, false
+	b.errIdx = 0
+	b.pathEscaped, b.tailSlash = false, false
 	b.queryCache = nil
 	b.deferred = nil
 	// clear on a map is a runtime call even when the map is nil, and most

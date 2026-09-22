@@ -251,7 +251,7 @@ func TestSetRequestDropsTheCachedHost(t *testing.T) {
 	if got := b.Host(); got != "old.example.com" {
 		t.Fatalf("Host() = %q", got)
 	}
-	b.hostPattern, b.hostIdx = "{tenant}.example.com", 3
+	b.hostPattern, b.errIdx = "{tenant}.example.com", 3
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "new.example.net"
@@ -259,7 +259,7 @@ func TestSetRequestDropsTheCachedHost(t *testing.T) {
 	if got := b.Host(); got != "new.example.net" {
 		t.Errorf("Host() after SetRequest = %q, want new.example.net", got)
 	}
-	if b.RouteHost() != "{tenant}.example.com" || b.hostIdx != 3 {
+	if b.RouteHost() != "{tenant}.example.com" || b.errIdx != 3 {
 		t.Error("SetRequest changed the already-matched route host identity")
 	}
 }

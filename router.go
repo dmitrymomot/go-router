@@ -74,6 +74,7 @@ type Router[C Context] struct {
 	hosts        []hostSpec
 	inHost       bool
 	errHandler   ErrorHandlerFunc[C]
+	mounted      *Router[C] // the router a Mount shim holds
 	preMws       []Middleware[C]
 	info         map[routeKey]routeInfo
 	classes      map[string]*matcher
@@ -87,16 +88,28 @@ type engine[C Context] struct {
 	tree    *node[C]
 	hostSet *hostSet[C]
 
-	allowCache       map[*node[C]]string
-	scopes           []*scopeFallback[C]
-	errScopes        []*scopeFallback[C]
-	notFoundChain    HandlerFunc[C]
-	notAllowedChain  HandlerFunc[C]
-	optionsChain     HandlerFunc[C]
-	rootErrorHandler ErrorHandlerFunc[C]
-	autoOptions      bool
-	redirectSlash    bool
-	anyHostRoutes    bool
+	allowCache      map[*node[C]]string
+	scopes          []*scopeFallback[C]
+	notFoundChain   HandlerFunc[C]
+	notAllowedChain HandlerFunc[C]
+	optionsChain    HandlerFunc[C]
+	// errHandlers holds every error handler the table uses; index 0 is the
+	// root's. Base.errIdx picks one per request.
+	errHandlers   []ErrorHandlerFunc[C]
+	autoOptions   bool
+	redirectSlash bool
+	anyHostRoutes bool
+
+	// Registration only: the owner index of each scope on each tree, as the
+	// routes read it, and the value compile resolved for it.
+	errSlots    map[errKey[C]]*int32
+	errResolved map[errKey[C]]int32
+}
+
+// errKey names a scope on one tree: host is nil for the tree of every host.
+type errKey[C Context] struct {
+	scope *Router[C]
+	host  *hostEntry[C]
 }
 
 func newEngine[C Context]() *engine[C] {
@@ -105,10 +118,11 @@ func newEngine[C Context]() *engine[C] {
 		allowCache:  map[*node[C]]string{},
 		autoOptions: true,
 		// A router that never calls a setter still has to answer.
-		notFoundChain:    defaultNotFound[C],
-		notAllowedChain:  defaultMethodNotAllowed[C],
-		optionsChain:     autoOptions[C],
-		rootErrorHandler: DefaultErrorHandler[C],
+		notFoundChain:   defaultNotFound[C],
+		notAllowedChain: defaultMethodNotAllowed[C],
+		optionsChain:    autoOptions[C],
+		errHandlers:     []ErrorHandlerFunc[C]{DefaultErrorHandler[C]},
+		errSlots:        map[errKey[C]]*int32{},
 	}
 }
 
@@ -229,7 +243,7 @@ func (r *Router[C]) install(reg registration[C]) {
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
 		eng.anyHostRoutes = true
-		if err := eng.tree.insert(reg.method, full, segs, names, nil, handler, eng.autoOptions, eng.allowCache); err != nil {
+		if err := eng.tree.insert(reg.method, full, segs, names, nil, handler, r.errSlot(eng, nil), eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, nil, full, meta)
@@ -248,7 +262,7 @@ func (r *Router[C]) install(reg registration[C]) {
 		case claim && !e.tree.empty():
 			panic("router: the host " + e.pattern + " already holds routes, so RedirectHost cannot own it")
 		}
-		if err := e.tree.insert(reg.method, full, segs, names, e.names, handler, eng.autoOptions, eng.allowCache); err != nil {
+		if err := e.tree.insert(reg.method, full, segs, names, e.names, handler, r.errSlot(eng, e), eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
 		if claim {
@@ -419,37 +433,33 @@ func (r *Router[C]) mustBeRoot(setter, why string) {
 	}
 }
 
-// mustOwnFallbacks rejects an error handler on a scope that cannot express one.
-// Scopes are keyed by path prefix, so a prefix-less child covers the whole tree
-// and would displace the root's. The root, a host scope and any prefixed scope
-// each name a region the router can match.
-func (r *Router[C]) mustOwnFallbacks(what string) {
-	if r == r.root || len(r.hosts) > 0 || normalizePattern(r.scopePrefix()) != "/" {
-		return
-	}
-	panic("router: a scope without a prefix cannot own " + what +
-		"; set it on the router itself, or open a Route with a prefix")
-}
-
 // ErrorHandler installs the handler that answers a request whose handler
-// returned an error. A scope with a prefix or a host may hold one of its own,
-// which covers the routes of that scope alone, so an API host takes
-// [JSONErrorHandler] rather than one handler branching on the host. Without a
-// call the router uses [DefaultErrorHandler].
+// returned an error. Any scope may hold one. It answers the routes that the
+// scope and the scopes inside it register, unless a nearer scope holds its own,
+// so an API host takes [JSONErrorHandler] rather than one handler branching on
+// the host. A route outside every scope with a handler goes to the handler of
+// its host scope, then to the router's, and without a call to
+// [DefaultErrorHandler].
+//
+// A 404 or 405 has no route. It goes to the handler that the routes of the
+// most specific scope with a prefix covering the path would get, then to the
+// one of its host scope, then to the router's. So a [Router.Group] or
+// [Router.With] scope answers the errors of its routes, and never a 404 on its
+// own. A router mounted under a prefix answers the 404s under it.
 //
 // The router logs every failure itself, skips h for a response that already
 // committed and for an error that is [context.Canceled], and answers a bare
 // 500 when h returns an error having written nothing. To give a domain error
 // its status, make it a [StatusCoder] rather than mapping it inside h.
 //
-// ErrorHandler panics if h is nil, if the scope has neither a prefix nor a
-// host, or after the router started serving.
+// ErrorHandler panics if h is nil, on a host scope whose host already has a
+// handler from another Host or Hosts scope, on a mounted router, or after the
+// router started serving.
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 	if h == nil {
 		panic("router: ErrorHandler needs a handler")
 	}
 	defer r.guard("change the error handler")()
-	r.mustOwnFallbacks("the error handler")
 	r.errHandler = h
 	r.settingChanged()
 }

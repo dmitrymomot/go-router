@@ -12,13 +12,16 @@ import (
 //
 // sub is closed to further registration afterwards, and it must be a top-level
 // router that carries no setting belonging to the router that serves, such as
-// MaxBodyBytes, a logger or a cookie codec. An error handler of sub stays with
-// its routes, and so do the classes that sub declared with [Router.ParamClass].
+// MaxBodyBytes, a logger or a cookie codec. An error handler of sub answers
+// the errors of its routes, and under a prefix other than "/" the 404 and 405
+// answers under that prefix too, wrapped in the middleware of sub. The classes
+// that sub declared with [Router.ParamClass] stay with its routes.
 //
 // Mount panics if sub is nil, is a scope of another router, is mounted inside
 // itself, or carries such a setting, if sub and this router register one
-// host pattern whose classes they declare apart, or if a [Router.RedirectHost]
-// of sub lands under a prefix or on a host that this router already uses.
+// host pattern whose classes they declare apart or that both give an error
+// handler, or if a [Router.RedirectHost] of sub lands under a prefix or on a
+// host that this router already uses.
 func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")
@@ -35,6 +38,7 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	shim := r.newChild(prefix, nil, nil)
 	defer r.guard("mount a router")()
 	shim.children = append(shim.children, sub)
+	shim.mounted = sub
 	// The subtree registers into this parent from now on, so replay what it
 	// already holds and close it: a later route would have nowhere to go.
 	sub.owner = shim
