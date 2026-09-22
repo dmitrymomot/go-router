@@ -17,14 +17,14 @@ func usersAPI(apiKey string) *router.Router[*Context] {
 	})
 
 	r.GET("/users", listUsers)
-	r.GET("/users/{id}", showUser)
+	r.GET("/users/{id:int}", showUser)
 
 	// The reads are open and the writes are not. With gives back a router that
 	// carries one more middleware and registers into the same tree.
 	write := r.With(requireAPIKey(apiKey))
 	write.POST("/users", createUser)
-	write.PUT("/users/{id}", replaceUser)
-	write.DELETE("/users/{id}", deleteUser)
+	write.PUT("/users/{id:int}", replaceUser)
+	write.DELETE("/users/{id:int}", deleteUser)
 
 	return r
 }
@@ -50,7 +50,8 @@ func createUser(c *Context) error {
 }
 
 func showUser(c *Context) error {
-	// ParamAs parses the segment, and answers 404 when it is not a number.
+	// {id:int} turns away anything that is not a number; ParamAs answers 404
+	// for one too large for an int.
 	id, err := c.ParamAs[int]("id")
 	if err != nil {
 		return err

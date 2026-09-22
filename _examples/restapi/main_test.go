@@ -95,7 +95,7 @@ func TestABadIDIsNotFound(t *testing.T) {
 func TestTheMountAppearsInTheRouteTable(t *testing.T) {
 	r := newRouter(NewStore(), testKey)
 
-	want := "GET /v1/users/{id}"
+	want := "GET /v1/users/{id:int}"
 	for _, rt := range r.Routes() {
 		if rt.Method+" "+rt.Pattern == want {
 			return
