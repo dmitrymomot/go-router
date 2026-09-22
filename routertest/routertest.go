@@ -37,9 +37,15 @@ func Host(host string) RequestOption {
 	return func(r *http.Request) { r.Host = host }
 }
 
-// HTMX marks the request as one htmx made.
+// HTMX marks the request as one htmx 4 made to swap one element: it sets
+// HX-Request and HX-Request-Type: partial. Add
+// Header(router.HeaderHXRequestType, "full") for a boosted link or a history
+// restore.
 func HTMX() RequestOption {
-	return Header(router.HeaderHXRequest, "true")
+	return func(r *http.Request) {
+		r.Header.Set(router.HeaderHXRequest, "true")
+		r.Header.Set(router.HeaderHXRequestType, "partial")
+	}
 }
 
 // A nil cookie is refused here: http.Request.AddCookie takes it and adds
