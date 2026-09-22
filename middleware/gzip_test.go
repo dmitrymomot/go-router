@@ -704,25 +704,115 @@ func TestGzipSniffsWhenContentLengthIsSetWithoutAType(t *testing.T) {
 	}
 }
 
-func TestGzipDropsRangesAndWeakensTheETag(t *testing.T) {
+func TestGzipDropsRangesAndSuffixesTheETag(t *testing.T) {
+	for etag, want := range map[string]string{
+		`"abc"`:   `"abc-gzip"`,
+		`W/"abc"`: `W/"abc-gzip"`,
+	} {
+		r := newRouter()
+		r.Use(middleware.Gzip[*appContext])
+		r.GET("/", func(c *appContext) error {
+			c.Response().Header().Set("Accept-Ranges", "bytes")
+			c.Response().Header().Set("ETag", etag)
+			return c.String(http.StatusOK, strings.Repeat("a", 4096))
+		})
+		rec := gzipGet(r, "/", "gzip")
+		if rec.Header().Get(router.HeaderContentEncoding) != "gzip" {
+			t.Fatal("not compressed")
+		}
+		if got := rec.Header().Get("Accept-Ranges"); got != "" {
+			t.Errorf("Accept-Ranges = %q, want none", got)
+		}
+		if got := rec.Header().Get("ETag"); got != want {
+			t.Errorf("ETag %s: got %q, want %q", etag, got, want)
+		}
+	}
+}
+
+// gzipContentRouter serves a document through [http.ServeContent], which
+// compares the conditional headers with the ETag of the handler.
+func gzipContentRouter(body string) *router.Router[*appContext] {
+	modified := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	r := newRouter()
 	r.Use(middleware.Gzip[*appContext])
-	r.GET("/", func(c *appContext) error {
-		c.Response().Header().Set("Accept-Ranges", "bytes")
-		c.Response().Header().Set("ETag", `"abc"`)
-		return c.String(http.StatusOK, strings.Repeat("a", 4096))
+	r.GET("/doc", func(c *appContext) error {
+		c.Response().Header().Set("ETag", `"v1"`)
+		http.ServeContent(c.Response(), c.Request(), "doc.html", modified, strings.NewReader(body))
+		return nil
 	})
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.PUT("/doc", func(c *appContext) error {
+		// The strong comparison of If-Match, as RFC 9110 section 13.1.1 asks.
+		if c.Request().Header.Get("If-Match") != `"v1"` {
+			return c.NoContent(http.StatusPreconditionFailed)
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+	return r
+}
+
+func TestGzipAnswersARevalidationWithTheETagOfTheAnswer(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		header string
+	}{
+		{"a compressed answer by If-None-Match", gzipLongBody, "If-None-Match"},
+		{"a compressed answer by If-Modified-Since", gzipLongBody, "If-Modified-Since"},
+		{"a plain answer by If-None-Match", "short", "If-None-Match"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := gzipContentRouter(tt.body)
+			first := gzipGet(r, "/doc", "gzip")
+			if first.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", first.Code)
+			}
+			etag := first.Header().Get("ETag")
+
+			req := httptest.NewRequest(http.MethodGet, "/doc", nil)
+			req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+			if tt.header == "If-None-Match" {
+				req.Header.Set("If-None-Match", etag)
+			} else {
+				req.Header.Set("If-Modified-Since", first.Header().Get("Last-Modified"))
+			}
+			rec := do(r, req)
+			if rec.Code != http.StatusNotModified {
+				t.Fatalf("status = %d, want 304 for %s", rec.Code, etag)
+			}
+			if got := rec.Header().Get("ETag"); got != etag {
+				t.Errorf("the 304 carries %q, the 200 %q; want the same", got, etag)
+			}
+		})
+	}
+}
+
+func TestGzipReadsEachTagOfIfNoneMatch(t *testing.T) {
+	r := gzipContentRouter(gzipLongBody)
+	req := httptest.NewRequest(http.MethodGet, "/doc", nil)
 	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+	req.Header.Add("If-None-Match", `"a,b", W/"v0-gzip"`)
+	req.Header.Add("If-None-Match", `W/"v1-gzip"`)
 	rec := do(r, req)
-	if rec.Header().Get(router.HeaderContentEncoding) != "gzip" {
-		t.Fatal("not compressed")
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", rec.Code)
 	}
-	if got := rec.Header().Get("Accept-Ranges"); got != "" {
-		t.Errorf("Accept-Ranges = %q, want none", got)
+	if got := rec.Header().Get("ETag"); got != `"v1-gzip"` {
+		t.Errorf("ETag = %q, want \"v1-gzip\"", got)
 	}
-	if got := rec.Header().Get("ETag"); got != `W/"abc"` {
-		t.Errorf("ETag = %q, want W/\"abc\"", got)
+}
+
+func TestGzipIfMatchWithTheSuffixedETagPasses(t *testing.T) {
+	r := gzipContentRouter(gzipLongBody)
+	etag := gzipGet(r, "/doc", "gzip").Header().Get("ETag")
+	if etag != `"v1-gzip"` {
+		t.Fatalf("ETag = %q, want \"v1-gzip\"", etag)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/doc", nil)
+	req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+	req.Header.Set("If-Match", etag)
+	if rec := do(r, req); rec.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204 for If-Match %s", rec.Code, etag)
 	}
 }
 

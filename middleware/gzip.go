@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,8 +35,14 @@ type GzipConfig[C router.Context] struct {
 // says no-transform all go out untouched.
 //
 // A compressed answer drops Accept-Ranges, since a range of the compressed
-// bytes is not a range of the resource, and its strong ETag turns weak, since
-// the bytes differ from those of the plain answer.
+// bytes is not a range of the resource. Its ETag gets the suffix "-gzip" inside
+// the quotes, so "abc" becomes "abc-gzip" and W/"abc" becomes W/"abc-gzip":
+// the compressed bytes are a representation of their own, with a tag of their
+// own. For a client that takes gzip, Gzip drops the suffix from the tags of
+// If-None-Match and If-Match before the handler reads them, so the handler
+// compares its own tags. A 304 carries the tag the client holds: the suffixed
+// one when If-None-Match named it, or, with no If-None-Match, whenever
+// Cache-Control allows a transform.
 //
 // A stream passes through: an event stream is never compressed, and a handler
 // that flushes keeps its data moving to the client.
@@ -90,6 +97,8 @@ func GzipWithConfig[C router.Context](cfg GzipConfig[C]) router.Middleware[C] {
 				min:            minLength,
 				head:           req.Method == http.MethodHead,
 			}
+			w.revalidating, w.unsuffixed = unsuffixGzipETags(req.Header, router.HeaderIfNoneMatch)
+			unsuffixGzipETags(req.Header, headerIfMatch)
 			before := res.Size
 			res.ResponseWriter = w
 
@@ -124,6 +133,11 @@ type gzipWriter struct {
 	code    int
 	state   uint8
 	head    bool
+
+	// revalidating says that the request sent If-None-Match, and unsuffixed
+	// holds its tags that carried the suffix of a compressed answer.
+	revalidating bool
+	unsuffixed   []string
 }
 
 func (w *gzipWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -139,6 +153,9 @@ func (w *gzipWriter) WriteHeader(code int) {
 	w.code = code
 
 	h := w.Header()
+	if code == http.StatusNotModified {
+		w.tagNotModified(h)
+	}
 	if !compressibleStatus(code) ||
 		h.Get(router.HeaderContentEncoding) != "" ||
 		isEventStream(h.Get(router.HeaderContentType)) ||
@@ -239,8 +256,8 @@ func (w *gzipWriter) commit(compress bool) error {
 	}
 	h.Del(router.HeaderContentLength)
 	h.Del(headerAcceptRanges)
-	if etag := h.Get(router.HeaderETag); etag != "" && !strings.HasPrefix(etag, "W/") {
-		h.Set(router.HeaderETag, "W/"+etag)
+	if etag := h.Get(router.HeaderETag); etag != "" {
+		h.Set(router.HeaderETag, suffixGzipETag(etag))
 	}
 	h.Set(router.HeaderContentEncoding, "gzip")
 
@@ -281,6 +298,22 @@ func (w *gzipWriter) finish(ok bool) {
 	}
 }
 
+// tagNotModified gives a 304 the ETag of the answer the client holds; see
+// [Gzip].
+func (w *gzipWriter) tagNotModified(h http.Header) {
+	etag := h.Get(router.HeaderETag)
+	if etag == "" || h.Get(router.HeaderContentEncoding) != "" {
+		return
+	}
+	suffix := !noTransform(h.Values(router.HeaderCacheControl))
+	if w.revalidating {
+		suffix = slices.Contains(w.unsuffixed, strings.TrimPrefix(etag, "W/"))
+	}
+	if suffix {
+		h.Set(router.HeaderETag, suffixGzipETag(etag))
+	}
+}
+
 type gzipSink struct{ w *gzipWriter }
 
 func (s gzipSink) Write(p []byte) (int, error) {
@@ -289,7 +322,67 @@ func (s gzipSink) Write(p []byte) (int, error) {
 	return n, err
 }
 
-const headerAcceptRanges = "Accept-Ranges"
+const (
+	headerAcceptRanges = "Accept-Ranges"
+	headerIfMatch      = "If-Match"
+)
+
+// gzipETagSuffix marks the ETag of a compressed answer.
+const gzipETagSuffix = "-gzip"
+
+// suffixGzipETag puts [gzipETagSuffix] inside the quotes of an entity tag. A
+// value that is not a quoted tag stays as it is.
+func suffixGzipETag(etag string) string {
+	tag := strings.TrimPrefix(etag, "W/")
+	if len(tag) < 2 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+		return etag
+	}
+	return etag[:len(etag)-1] + gzipETagSuffix + `"`
+}
+
+// unsuffixGzipETags drops [gzipETagSuffix] from each entity tag of the header
+// field name. It reports whether the field is present, and the opaque tags,
+// without W/, that lost the suffix. A field it cannot parse stays as it is.
+func unsuffixGzipETags(h http.Header, name string) (present bool, unsuffixed []string) {
+	values := h.Values(name)
+	if len(values) == 0 {
+		return false, nil
+	}
+	var tags []string
+	for _, v := range values {
+		for v = trimETagSeparators(v); v != ""; v = trimETagSeparators(v) {
+			if v[0] == '*' {
+				tags = append(tags, "*")
+				v = v[1:]
+				continue
+			}
+			weak := strings.HasPrefix(v, "W/")
+			opaque := strings.TrimPrefix(v, "W/")
+			end := strings.IndexByte(opaque[min(1, len(opaque)):], '"') + 1
+			if len(opaque) == 0 || opaque[0] != '"' || end == 0 {
+				return true, nil
+			}
+			v = opaque[end+1:]
+			opaque = opaque[:end+1]
+			if plain, ok := strings.CutSuffix(opaque, gzipETagSuffix+`"`); ok {
+				opaque = plain + `"`
+				unsuffixed = append(unsuffixed, opaque)
+			}
+			if weak {
+				opaque = "W/" + opaque
+			}
+			tags = append(tags, opaque)
+		}
+	}
+	if len(unsuffixed) > 0 {
+		h.Set(name, strings.Join(tags, ", "))
+	}
+	return true, unsuffixed
+}
+
+func trimETagSeparators(s string) string {
+	return strings.TrimLeft(s, " \t,")
+}
 
 // noTransform reports whether a Cache-Control header forbids a proxy, and so
 // this middleware, to change the encoding of the body.
