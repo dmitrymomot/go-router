@@ -10,7 +10,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -18,12 +17,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	"github.com/dmitrymomot/go-router/serve"
@@ -38,7 +37,7 @@ type server struct {
 	stopped bool
 }
 
-func start(tb testing.TB, h http.Handler, cfg serve.Config, opts ...serve.Option) *server {
+func start(tb testing.TB, h http.Handler, cfg serve.Config) *server {
 	tb.Helper()
 
 	if cfg.Addr == "" && cfg.Listener == nil {
@@ -59,7 +58,7 @@ func start(tb testing.TB, h http.Handler, cfg serve.Config, opts ...serve.Option
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &server{cancel: cancel, errc: make(chan error, 1)}
-	go func() { s.errc <- serve.Run(ctx, h, cfg, opts...) }()
+	go func() { s.errc <- serve.Run(ctx, h, cfg) }()
 
 	tb.Cleanup(func() {
 		if s.stopped {
@@ -241,6 +240,18 @@ func selfSigned(tb testing.TB) (certPEM, keyPEM []byte) {
 	return certPEM, keyPEM
 }
 
+// selfSignedCert is selfSigned read into the certificate that
+// Config.Certificates takes.
+func selfSignedCert(tb testing.TB) (certPEM []byte, cert tls.Certificate) {
+	tb.Helper()
+	certPEM, keyPEM := selfSigned(tb)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		tb.Fatalf("read the certificate: %v", err)
+	}
+	return certPEM, cert
+}
+
 func tlsClient(tb testing.TB, certPEM []byte, http2 bool) *http.Client {
 	tb.Helper()
 	pool := x509.NewCertPool()
@@ -296,36 +307,6 @@ func TestRunReportsABindFailure(t *testing.T) {
 	}
 }
 
-func TestRunReportsAnOptionFailure(t *testing.T) {
-	listened := false
-	err := serve.Run(context.Background(), ok(), serve.Config{
-		Addr:     "127.0.0.1:0",
-		Logger:   slog.New(slog.DiscardHandler),
-		OnListen: func(net.Addr) { listened = true },
-	}, serve.CertFiles("absent.pem", "absent.key"))
-	if err == nil {
-		t.Fatal("Run accepted a certificate that does not load")
-	}
-	if listened {
-		t.Error("OnListen ran for an option that failed")
-	}
-}
-
-func TestRunRejectsANilOption(t *testing.T) {
-	err := serve.Run(context.Background(), ok(), serve.Config{Addr: "127.0.0.1:0"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "option 0") {
-		t.Fatalf("err = %v, want a clear nil-option error", err)
-	}
-}
-
-func TestCertFSRejectsANilFileSystem(t *testing.T) {
-	err := serve.Run(context.Background(), ok(), serve.Config{Addr: "127.0.0.1:0"},
-		serve.CertFS(nil, "cert.pem", "key.pem"))
-	if err == nil || !strings.Contains(err.Error(), "file system") {
-		t.Fatalf("err = %v, want a clear nil-file-system error", err)
-	}
-}
-
 func TestRunReportsTheOnServerFailure(t *testing.T) {
 	boom := errors.New("boom")
 	listened := false
@@ -372,11 +353,7 @@ func TestRunReportsATLSConfigWithoutACertificate(t *testing.T) {
 }
 
 func TestOnServerCanSupplyTheCertificate(t *testing.T) {
-	certPEM, keyPEM := selfSigned(t)
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatalf("read the certificate: %v", err)
-	}
+	certPEM, cert := selfSignedCert(t)
 
 	s := start(t, ok(), serve.Config{
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
@@ -493,7 +470,7 @@ func TestTheErrorLogWritesToTheConfiguredLogger(t *testing.T) {
 	}
 }
 
-func captureServer(tb testing.TB, cfg serve.Config, opts ...serve.Option) *http.Server {
+func captureServer(tb testing.TB, cfg serve.Config) *http.Server {
 	tb.Helper()
 
 	stop := errors.New("stop before the bind")
@@ -503,7 +480,7 @@ func captureServer(tb testing.TB, cfg serve.Config, opts ...serve.Option) *http.
 		srv = s
 		return stop
 	}
-	if err := serve.Run(context.Background(), ok(), cfg, opts...); !errors.Is(err, stop) {
+	if err := serve.Run(context.Background(), ok(), cfg); !errors.Is(err, stop) {
 		tb.Fatalf("Run = %v, want the error of OnServer", err)
 	}
 	if srv == nil {
@@ -843,41 +820,28 @@ func TestServesOverTLS(t *testing.T) {
 			t.Fatalf("write %s: %v", path, err)
 		}
 	}
-	fsys := fstest.MapFS{
-		"tls/cert.pem": {Data: certPEM},
-		"tls/key.pem":  {Data: keyPEM},
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("load the certificate: %v", err)
 	}
 
-	tests := []struct {
-		opt  serve.Option
-		name string
-	}{
-		{name: "CertFiles", opt: serve.CertFiles(certPath, keyPath)},
-		{name: "CertPEM", opt: serve.CertPEM(certPEM, keyPEM)},
-		{name: "CertFS", opt: serve.CertFS(fsys, "tls/cert.pem", "tls/key.pem")},
+	s := start(t, ok(), serve.Config{Certificates: []tls.Certificate{cert}})
+
+	res := await(t, call(tlsClient(t, certPEM, false), s.url("https", "/")))
+	if res.err != nil {
+		t.Fatalf("request: %v", res.err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := start(t, ok(), serve.Config{}, tt.opt)
-
-			res := await(t, call(tlsClient(t, certPEM, false), s.url("https", "/")))
-			if res.err != nil {
-				t.Fatalf("request: %v", res.err)
-			}
-			if res.status != http.StatusOK || res.body != "ok" {
-				t.Fatalf("answer = %d %q, want 200 %q", res.status, res.body, "ok")
-			}
-		})
+	if res.status != http.StatusOK || res.body != "ok" {
+		t.Fatalf("answer = %d %q, want 200 %q", res.status, res.body, "ok")
 	}
 }
 
 func TestTLSFloorIsTLS13(t *testing.T) {
-	certPEM, keyPEM := selfSigned(t)
-	cfg := captureServer(t, serve.Config{}, serve.CertPEM(certPEM, keyPEM)).TLSConfig
+	_, cert := selfSignedCert(t)
+	cfg := captureServer(t, serve.Config{Certificates: []tls.Certificate{cert}}).TLSConfig
 
 	if cfg == nil {
-		t.Fatal("a certificate option left the server without a TLS config")
+		t.Fatal("a certificate left the server without a TLS config")
 	}
 	if cfg.MinVersion != tls.VersionTLS13 {
 		t.Errorf("MinVersion = %#x, want TLS 1.3 (%#x)", cfg.MinVersion, tls.VersionTLS13)
@@ -886,13 +850,13 @@ func TestTLSFloorIsTLS13(t *testing.T) {
 		t.Errorf("NextProtos = %v, want %v", cfg.NextProtos, want)
 	}
 	if len(cfg.Certificates) != 1 {
-		t.Errorf("certificates = %d, want the one of the option", len(cfg.Certificates))
+		t.Errorf("certificates = %d, want the one of the Config", len(cfg.Certificates))
 	}
 }
 
 func TestATLS12ClientIsRefused(t *testing.T) {
-	certPEM, keyPEM := selfSigned(t)
-	s := start(t, ok(), serve.Config{}, serve.CertPEM(certPEM, keyPEM))
+	certPEM, cert := selfSignedCert(t)
+	s := start(t, ok(), serve.Config{Certificates: []tls.Certificate{cert}})
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(certPEM) {
@@ -915,11 +879,11 @@ func TestATLS12ClientIsRefused(t *testing.T) {
 }
 
 func TestTLSOffersHTTP2(t *testing.T) {
-	certPEM, keyPEM := selfSigned(t)
+	certPEM, cert := selfSignedCert(t)
 	s := start(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		//nolint:errcheck // The assertions of the test read what arrived.
 		io.WriteString(w, r.Proto)
-	}), serve.Config{}, serve.CertPEM(certPEM, keyPEM))
+	}), serve.Config{Certificates: []tls.Certificate{cert}})
 
 	res := await(t, call(tlsClient(t, certPEM, true), s.url("https", "/")))
 	if res.err != nil {
@@ -930,11 +894,15 @@ func TestTLSOffersHTTP2(t *testing.T) {
 	}
 }
 
-func TestAnExplicitTLSConfigWins(t *testing.T) {
-	certPEM, keyPEM := selfSigned(t)
-	own := &tls.Config{MinVersion: tls.VersionTLS12}
+func TestTheCertificatesJoinAnExplicitTLSConfig(t *testing.T) {
+	_, ownCert := selfSignedCert(t)
+	_, cert := selfSignedCert(t)
+	own := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{ownCert}}
 
-	got := captureServer(t, serve.Config{TLSConfig: own}, serve.CertPEM(certPEM, keyPEM)).TLSConfig
+	got := captureServer(t, serve.Config{
+		TLSConfig:    own,
+		Certificates: []tls.Certificate{cert},
+	}).TLSConfig
 
 	if got.MinVersion != tls.VersionTLS12 {
 		t.Errorf("MinVersion = %#x, want the one of the config (%#x)", got.MinVersion, tls.VersionTLS12)
@@ -942,54 +910,18 @@ func TestAnExplicitTLSConfigWins(t *testing.T) {
 	if got.NextProtos != nil {
 		t.Errorf("NextProtos = %v, want the ones of the config", got.NextProtos)
 	}
-	if len(got.Certificates) != 1 {
-		t.Errorf("certificates = %d, want the one of the option", len(got.Certificates))
+	if len(got.Certificates) != 2 {
+		t.Errorf("certificates = %d, want the one of the TLS config and the one of the Config", len(got.Certificates))
 	}
-	if len(own.Certificates) != 0 {
-		t.Error("Run wrote the certificate onto the config of the caller")
-	}
-}
-
-func TestCertOptionsReportAFailure(t *testing.T) {
-	certPEM, keyPEM := selfSigned(t)
-	fsys := fstest.MapFS{
-		"cert.pem": {Data: certPEM},
-		"key.pem":  {Data: keyPEM},
-		"junk.pem": {Data: []byte("not a certificate")},
-	}
-
-	tests := []struct {
-		opt  serve.Option
-		name string
-	}{
-		{name: "a certificate file that is not there", opt: serve.CertFiles("absent.pem", "absent.key")},
-		{name: "PEM blocks that do not parse", opt: serve.CertPEM([]byte("cert"), []byte("key"))},
-		{name: "PEM blocks that do not match", opt: serve.CertPEM(certPEM, []byte("key"))},
-		{name: "a certificate that the file system does not hold", opt: serve.CertFS(fsys, "absent.pem", "key.pem")},
-		{name: "a key that the file system does not hold", opt: serve.CertFS(fsys, "cert.pem", "absent.key")},
-		{name: "a file that holds no certificate", opt: serve.CertFS(fsys, "junk.pem", "key.pem")},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := serve.Run(context.Background(), ok(), serve.Config{
-				Addr:   "127.0.0.1:0",
-				Logger: slog.New(slog.DiscardHandler),
-			}, tt.opt)
-			if err == nil {
-				t.Fatal("Run accepted the certificate")
-			}
-			if !strings.HasPrefix(err.Error(), "serve: ") {
-				t.Errorf("err = %v, want an error that names the package", err)
-			}
-		})
+	if len(own.Certificates) != 1 {
+		t.Error("Run wrote the certificate onto the TLS config of the caller")
 	}
 }
 
 func TestHandshakeFailuresReachTheLogger(t *testing.T) {
-	certPEM, keyPEM := selfSigned(t)
+	_, cert := selfSignedCert(t)
 	rec := newLogRecorder()
-	s := start(t, ok(), serve.Config{Logger: slog.New(rec)}, serve.CertPEM(certPEM, keyPEM))
+	s := start(t, ok(), serve.Config{Logger: slog.New(rec), Certificates: []tls.Certificate{cert}})
 
 	conn, err := net.Dial("tcp", s.addr)
 	if err != nil {
@@ -1013,41 +945,6 @@ func TestHandshakeFailuresReachTheLogger(t *testing.T) {
 	}
 }
 
-func Example() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		//nolint:errcheck // The example shows the shape of a server, not error handling.
-		fmt.Fprint(w, "ok")
-	})
-
-	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
-
-	bound := make(chan net.Addr, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- serve.Run(ctx, mux, serve.Config{
-			Addr:     "127.0.0.1:0",
-			OnListen: func(a net.Addr) { bound <- a },
-		})
-	}()
-
-	res, err := http.Get("http://" + (<-bound).String() + "/health")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	body, _ := io.ReadAll(res.Body)
-	res.Body.Close() //nolint:errcheck // The example is done with it.
-	fmt.Println(res.StatusCode, string(body))
-
-	stop()
-	fmt.Println(<-done)
-	// Output:
-	// 200 ok
-	// <nil>
-}
-
 // Run closes a caller-supplied listener when it serves, so it owns one from the
 // moment it is handed it.
 func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
@@ -1060,9 +957,6 @@ func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
 		},
 		"nil handler": func(ln net.Listener) error {
 			return serve.Run(context.Background(), nil, serve.Config{Listener: ln})
-		},
-		"nil option": func(ln net.Listener) error {
-			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{Listener: ln}, nil)
 		},
 		"negative drain delay": func(ln net.Listener) error {
 			return serve.Run(context.Background(), http.NotFoundHandler(), serve.Config{Listener: ln, DrainDelay: -1})
@@ -1221,5 +1115,61 @@ func TestRunRejectsANegativeDrainDelay(t *testing.T) {
 	}
 	if built || listened {
 		t.Error("Run went on past a negative DrainDelay")
+	}
+}
+
+func TestRunChecksTheServerForAContextAlreadyDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	built, listened := false, false
+	err := serve.Run(ctx, ok(), serve.Config{
+		Addr:      "127.0.0.1:0",
+		Logger:    slog.New(slog.DiscardHandler),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
+		OnListen:  func(net.Addr) { listened = true },
+		OnServer: func(*http.Server) error {
+			built = true
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no certificate") {
+		t.Fatalf("err = %v, want the TLS config without a certificate", err)
+	}
+	if !built {
+		t.Error("OnServer did not run for a context that is already done")
+	}
+	if listened {
+		t.Error("Run bound an address for a context that is already done")
+	}
+}
+
+// A server whose serving fails as its context ends must not drain. The test
+// holds the process to one P, so the goroutine that waits for the context only
+// runs once serving has failed, and it finds both of its cases ready.
+func TestOnDrainDoesNotRunWhenServingFailsAsTheContextEnds(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+
+	for range 100 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		serveErr := errors.New("accept failed")
+		ctx, cancel := context.WithCancel(context.Background())
+		var calls atomic.Int32
+		err = serve.Run(ctx, ok(), serve.Config{
+			Listener: acceptErrorListener{Listener: ln, err: serveErr},
+			Logger:   slog.New(slog.DiscardHandler),
+			OnListen: func(net.Addr) { cancel() },
+			OnDrain:  func() { calls.Add(1) },
+		})
+		cancel()
+		if !errors.Is(err, serveErr) {
+			t.Fatalf("err = %v, want the serving failure", err)
+		}
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("OnDrain ran %d times for a server whose serving failed", n)
+		}
 	}
 }
