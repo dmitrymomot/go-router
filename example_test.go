@@ -905,3 +905,25 @@ func ExampleHandleError() {
 	// measured 423
 	// 423 locked
 }
+
+func ExampleJSONErrorHandler() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.Host("api.example.com", func(h *router.Router[*Context]) {
+		h.ErrorHandler(router.JSONErrorHandler[*Context])
+		h.GET("/v1/users/{id}", func(c *Context) error {
+			return router.ErrNotFound.WithMessage("no user %s", c.Param("id"))
+		})
+	})
+	r.Host("example.com", func(h *router.Router[*Context]) {
+		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
+	})
+
+	fmt.Println(serveHost(r, http.MethodGet, "api.example.com", "/v1/users/9"))
+	fmt.Println(serveHost(r, http.MethodGet, "api.example.com", "/v2/users"))
+	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/missing"))
+	// Output:
+	// 404 {"error":{"status":404,"message":"no user 9"}}
+	// 404 {"error":{"status":404,"message":"Not Found"}}
+	// 404 Not Found
+}

@@ -488,6 +488,120 @@ func TestHandleErrorOutsideARouter(t *testing.T) {
 	}
 }
 
+type validatedUser struct {
+	Name string `json:"name"`
+}
+
+func (u validatedUser) Validate() error {
+	if u.Name == "" {
+		return FieldError{Field: "name", Message: "is required"}
+	}
+	return nil
+}
+
+func TestJSONErrorHandler(t *testing.T) {
+	captureLogs(t)
+
+	tests := []struct {
+		name     string
+		method   string
+		handler  HandlerFunc[*tctx]
+		body     string
+		wantCode int
+		wantBody string
+	}{
+		{"a message", http.MethodGet, func(*tctx) error { return ErrNotFound.WithMessage("no user 9") }, "",
+			http.StatusNotFound, `{"error":{"status":404,"message":"no user 9"}}`},
+		{"a Bind validation failure", http.MethodPost, func(c *tctx) error {
+			_, err := c.Bind[validatedUser]()
+			return err
+		}, `{"name":""}`,
+			http.StatusUnprocessableEntity, `{"error":{"status":422,"message":"Unprocessable Entity","details":[{"field":"name","message":"is required"}]}}`},
+		{"a StatusCoder", http.MethodGet, func(*tctx) error { return &codedError{http.StatusPaymentRequired} }, "",
+			http.StatusPaymentRequired, `{"error":{"status":402,"message":"Payment Required"}}`},
+		{"a HEAD request", http.MethodHead, func(*tctx) error { return ErrForbidden }, "",
+			http.StatusForbidden, ""},
+		{"a Content-Type the handler set", http.MethodGet, func(c *tctx) error {
+			c.Response().Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
+			return ErrConflict
+		}, "",
+			http.StatusConflict, `{"error":{"status":409,"message":"Conflict"}}`},
+		{"details that are not field errors", http.MethodGet, func(*tctx) error {
+			return ErrTooManyRequests.WithDetails(map[string]int{"retry_after": 30})
+		}, "",
+			http.StatusTooManyRequests, `{"error":{"status":429,"message":"Too Many Requests","details":{"retry_after":30}}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			r.ErrorHandler(JSONErrorHandler[*tctx])
+			r.Handle(tc.method, "/", tc.handler)
+
+			req := httptest.NewRequest(tc.method, "/", strings.NewReader(tc.body))
+			if tc.body != "" {
+				req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+			}
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %s, want %s", got, tc.wantBody)
+			}
+			if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationJSONCharsetUTF8 {
+				t.Errorf("Content-Type = %q, want %q", got, MIMEApplicationJSONCharsetUTF8)
+			}
+		})
+	}
+}
+
+// The C08 regression: an API error writer that sent err.Error() leaked the
+// cause of every 500 to the client.
+func TestJSONErrorHandlerKeepsTheCauseOutOfTheBody(t *testing.T) {
+	captureLogs(t)
+
+	for _, tc := range []struct {
+		name   string
+		fail   HandlerFunc[*tctx]
+		secret string
+	}{
+		{"a plain error", func(*tctx) error { return errors.New("db password=hunter2") }, "hunter2"},
+		{"an HTTPError with a cause", func(*tctx) error {
+			return ErrBadRequest.WithError(errors.New("db password=hunter2"))
+		}, "hunter2"},
+		{"a panic", func(*tctx) error { panic("db password=hunter2") }, "panic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			r.ErrorHandler(JSONErrorHandler[*tctx])
+			r.GET("/", tc.fail)
+
+			rec := do(r, http.MethodGet, "/")
+			if body := rec.Body.String(); strings.Contains(body, tc.secret) || strings.Contains(body, "hunter2") {
+				t.Errorf("body = %s, want no cause", body)
+			}
+		})
+	}
+}
+
+func TestJSONErrorHandlerWithUnencodableDetailsAnswers500(t *testing.T) {
+	sink := captureLogs(t)
+
+	r := newTestRouter()
+	r.ErrorHandler(JSONErrorHandler[*tctx])
+	r.GET("/", func(*tctx) error { return ErrConflict.WithDetails(make(chan int)) })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError || rec.Body.Len() != 0 {
+		t.Errorf("answer = %d %q, want a bare 500", rec.Code, rec.Body.String())
+	}
+	if len(sink.records) == 0 || sink.records[0].Level != slog.LevelError {
+		t.Errorf("records = %v, want an Error first", sink.records)
+	}
+}
+
 func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/boom", func(*tctx) error { return ErrForbidden })

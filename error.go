@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,7 +67,8 @@ func (e *HTTPError) WithMessage(format string, args ...any) *HTTPError {
 
 // WithDetails copies e with details attached. The default error handler writes
 // a []FieldError one line per field, and leaves any other type to a handler
-// that knows it.
+// that knows it. [JSONErrorHandler] writes any details as JSON, so they must
+// hold nothing private.
 func (e *HTTPError) WithDetails(details any) *HTTPError {
 	c := *e
 	c.Details = details
@@ -270,6 +272,39 @@ func DefaultErrorHandler[C Context](c C, err error) error {
 // suits a development server and leaks internals anywhere else.
 func ErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
 	return func(c C, err error) error { return writeText(c.base(), err, exposeCause) }
+}
+
+// ErrorBody is the object [JSONErrorHandler] writes under "error". Details is
+// the Details of the [HTTPError], such as the []FieldError of a failed
+// [Base.Bind], and it is left out when empty.
+type ErrorBody struct {
+	Status  int    `json:"status"`
+	Message string `json:"message"`
+	Details any    `json:"details,omitzero"`
+}
+
+type errorEnvelope struct {
+	Error ErrorBody `json:"error"`
+}
+
+// JSONErrorHandler writes err as {"error": [ErrorBody]} with the status, the
+// message and the details of [HTTPErrorOf]. The cause never reaches the body.
+// Install it on an API host or prefix with [Router.ErrorHandler], rather than
+// branching on the host inside one handler.
+func JSONErrorHandler[C Context](c C, err error) error {
+	he := HTTPErrorOf(err)
+	if he == nil {
+		return nil
+	}
+	b := c.base()
+	body := errorEnvelope{ErrorBody{Status: he.Status, Message: he.Message, Details: he.Details}}
+	data, err := json.Marshal(body, b.jsonOptions(nil)...)
+	if err != nil {
+		return ErrInternalServerError.WithError(fmt.Errorf("router: encode the error body: %w", err))
+	}
+	// The failed handler may have set a Content-Type of its own.
+	b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
+	return b.Blob(he.Status, MIMEApplicationJSONCharsetUTF8, data)
 }
 
 func writeText(b *Base, err error, exposeCause bool) error {

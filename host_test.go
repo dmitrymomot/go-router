@@ -897,3 +897,34 @@ func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {
 		})
 	})
 }
+
+func TestJSONErrorHandlerOnAHostAnswersItsMisses(t *testing.T) {
+	r := newTestRouter()
+	r.Host("api.example.com", func(h *Router[*tctx]) {
+		h.ErrorHandler(JSONErrorHandler[*tctx])
+		h.GET("/users", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
+	})
+	r.GET("/", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodGet, "/nope", nil)
+	req.Host = "api.example.com"
+	req.Header.Set(HeaderAccept, MIMETextHTML)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if got, want := rec.Body.String(), `{"error":{"status":404,"message":"Not Found"}}`; rec.Code != http.StatusNotFound || got != want {
+		t.Errorf("miss = %d %s, want 404 %s", rec.Code, got, want)
+	}
+
+	rec = doHost(r, http.MethodPost, "api.example.com", "/users")
+	if got, want := rec.Body.String(), `{"error":{"status":405,"message":"Method Not Allowed"}}`; rec.Code != http.StatusMethodNotAllowed || got != want {
+		t.Errorf("405 = %d %s, want 405 %s", rec.Code, got, want)
+	}
+	if got := rec.Header().Get(HeaderAllow); !strings.Contains(got, http.MethodGet) {
+		t.Errorf("Allow = %q, want it to name GET", got)
+	}
+
+	rec = doHost(r, http.MethodGet, "example.com", "/nope")
+	if got := rec.Header().Get(HeaderContentType); rec.Code != http.StatusNotFound || got != MIMETextPlainCharsetUTF8 {
+		t.Errorf("another host answered %d with %q, want a plain-text 404", rec.Code, got)
+	}
+}
