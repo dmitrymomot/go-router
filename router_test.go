@@ -3074,6 +3074,43 @@ func TestMountedRouterKeepsItsOwnClasses(t *testing.T) {
 	})
 }
 
+// The prefix around a mount belongs to the parent, so a class of the same name
+// in the mounted router must not decide it, for its routes or for its 404s.
+func TestMountedRouterLeavesTheParentPrefixToTheParentClasses(t *testing.T) {
+	sub := newTestRouter()
+	sub.ParamClass("code", isDigits)
+	sub.GET("/items/{n:code}", echoRoute)
+	sub.Route("/deep", func(g *Router[*tctx]) {
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "sub scope "+c.Param("c")) })
+		g.GET("/present", echoRoute)
+	})
+
+	parent := newTestRouter()
+	parent.ParamClass("code", isLetters)
+	parent.Route("/{c:code}", func(g *Router[*tctx]) {
+		g.GET("/own", echoRoute)
+		g.Mount("/x", sub)
+	})
+
+	for target, want := range map[string]int{
+		"/abc/own":       http.StatusOK,
+		"/abc/x/items/7": http.StatusOK,
+		"/123/x/items/7": http.StatusNotFound,
+		"/abc/x/items/z": http.StatusNotFound,
+		"/123/own":       http.StatusNotFound,
+	} {
+		if got := do(parent, http.MethodGet, target).Code; got != want {
+			t.Errorf("GET %s = %d, want %d", target, got, want)
+		}
+	}
+	if got := do(parent, http.MethodGet, "/abc/x/deep/missing").Body.String(); got != "sub scope abc" {
+		t.Errorf("a miss under the sub scope = %q, want the sub scope handler", got)
+	}
+	if got := do(parent, http.MethodGet, "/123/x/deep/missing").Body.String(); strings.HasPrefix(got, "sub scope") {
+		t.Errorf("a miss under a prefix the parent refuses = %q, want the root handler", got)
+	}
+}
+
 // Two declarations of one name are two classes, so a key made of the name
 // alone would put their routes in one node and run one class for both.
 func TestSameNamedClassesDoNotShareANode(t *testing.T) {
