@@ -66,11 +66,13 @@ func RunAll(ctx context.Context, servers ...Server) error {
 			return serverError{i: i, err: err}
 		}
 	}
+	defer func() {
+		for _, in := range ins {
+			in.closeOwn()
+		}
+	}()
 	for i, in := range ins {
 		if err := in.open(ctx); err != nil {
-			for _, opened := range ins[:i] {
-				opened.closeOwn()
-			}
 			return serverError{i: i, err: err}
 		}
 	}

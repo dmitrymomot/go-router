@@ -499,3 +499,31 @@ func TestRunAllReportsEveryFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestRunAllClosesItsListenersWhenOnListenPanics(t *testing.T) {
+	var addrs []net.Addr
+	onListen := func(a net.Addr) { addrs = append(addrs, a) }
+	func() {
+		defer func() { _ = recover() }()
+		_ = serve.RunAll(context.Background(),
+			serve.Server{Handler: ok(), Config: serve.Config{Addr: "127.0.0.1:0", OnListen: onListen}},
+			serve.Server{Handler: ok(), Config: serve.Config{
+				Addr: "127.0.0.1:0",
+				OnListen: func(a net.Addr) {
+					onListen(a)
+					panic("boom")
+				},
+			}},
+		)
+	}()
+
+	if len(addrs) != 2 {
+		t.Fatalf("OnListen ran %d times, want 2", len(addrs))
+	}
+	for i, a := range addrs {
+		if conn, err := net.Dial("tcp", a.String()); err == nil {
+			conn.Close() //nolint:errcheck // The test fails either way.
+			t.Errorf("server %d is still accepting after OnListen panicked", i)
+		}
+	}
+}

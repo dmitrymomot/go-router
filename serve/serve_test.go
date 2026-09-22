@@ -1091,6 +1091,28 @@ func TestRunClosesACallerListenerOnEveryPath(t *testing.T) {
 	}
 }
 
+func TestRunClosesItsListenerWhenOnListenPanics(t *testing.T) {
+	var addr net.Addr
+	func() {
+		defer func() { _ = recover() }()
+		_ = serve.Run(context.Background(), ok(), serve.Config{
+			Addr: "127.0.0.1:0",
+			OnListen: func(a net.Addr) {
+				addr = a
+				panic("boom")
+			},
+		})
+	}()
+
+	if addr == nil {
+		t.Fatal("OnListen did not run")
+	}
+	if conn, err := net.Dial("tcp", addr.String()); err == nil {
+		conn.Close() //nolint:errcheck // The test fails either way.
+		t.Error("the listener is still accepting after OnListen panicked")
+	}
+}
+
 func TestDrainDelayWaitsBeforeTheDrain(t *testing.T) {
 	const delay = 300 * time.Millisecond
 	var drainedAt time.Time

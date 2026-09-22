@@ -159,6 +159,7 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	if err := in.open(ctx); err != nil {
 		return err
 	}
+	defer in.closeOwn()
 	if cfg.OnListen != nil {
 		cfg.OnListen(in.ln.Addr())
 	}
@@ -253,8 +254,6 @@ func (in *instance) closeOwn() {
 }
 
 func (in *instance) serve(ctx context.Context) error {
-	defer in.closeOwn()
-
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
 	var drainErr error
