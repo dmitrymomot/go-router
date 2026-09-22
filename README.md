@@ -72,7 +72,7 @@ Each line links to the example that proves it.
 - [Errors that carry their own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPError.WithMessage), and one handler that writes them.
 - [Rendering](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Render), [buffered or streamed](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderStream).
 - [Server-sent events](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-ServeSSE) that send JSON, text or rendered HTML.
-- [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.HX): retarget, reswap, trigger, redirect.
+- htmx 4: [a fragment or the whole page](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderPartial) from one handler, and [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.HX): retarget, reswap, trigger, redirect.
 - [Fifteen middlewares](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware): [CSRF](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CSRF), [rate limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RateLimit), [real IP](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RealIPWithConfig), [key auth](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-KeyAuth), [CORS](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CORSWithConfig), and the rest.
 - [Fingerprinted static assets](https://pkg.go.dev/github.com/dmitrymomot/go-router/static#example-package) from an `embed.FS`.
 - [A server that drains on Ctrl-C](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-Run).

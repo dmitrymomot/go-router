@@ -19,8 +19,11 @@ type HTMXRedirectConfig struct {
 // with a Location becomes a 200 with HX-Redirect, so the browser navigates
 // rather than swapping the redirect target into the page.
 //
-// It only touches a request that wants a fragment, and it adds the htmx
-// headers to Vary. An ordinary form post keeps its redirect.
+// It only touches a request that wants a fragment, as HX-Request-Type decides
+// (see [router.HTMXWantsPartial]), and it adds HX-Request and HX-Request-Type
+// to Vary. A browser request keeps its redirect, and so does an htmx 4 full
+// request, such as a boosted link or a history restore: fetch follows the
+// redirect, and htmx puts the final URL in the history.
 func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return HTMXRedirectWithConfig[C](HTMXRedirectConfig{})(next)
 }
@@ -42,8 +45,7 @@ func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Mid
 
 			router.AddVary(res.Header(),
 				router.HeaderHXRequest,
-				router.HeaderHXBoosted,
-				router.HeaderHXHistoryRestoreRequest,
+				router.HeaderHXRequestType,
 			)
 
 			if !router.HTMXWantsPartial(c.Request()) {

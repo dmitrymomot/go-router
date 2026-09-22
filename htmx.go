@@ -6,36 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"unicode/utf8"
 )
 
 // The htmx headers that a request carries. [Base.HTMX] reads them into an
-// [HTMXRequest].
+// [HTMXRequest]. They are the headers htmx 4 sends; htmx 2 is not supported.
 const (
 	HeaderHXRequest               = "Hx-Request"
+	HeaderHXRequestType           = "Hx-Request-Type"
 	HeaderHXBoosted               = "Hx-Boosted"
 	HeaderHXCurrentURL            = "Hx-Current-Url"
 	HeaderHXHistoryRestoreRequest = "Hx-History-Restore-Request"
-	HeaderHXPrompt                = "Hx-Prompt"
+	HeaderHXSource                = "Hx-Source"
 	HeaderHXTarget                = "Hx-Target"
-	HeaderHXTriggerName           = "Hx-Trigger-Name"
-	HeaderHXTrigger               = "Hx-Trigger"
 )
 
 // The htmx headers that a response carries. [Base.HX] sets them.
 const (
-	HeaderHXLocation           = "Hx-Location"
-	HeaderHXPushURL            = "Hx-Push-Url"
-	HeaderHXRedirect           = "Hx-Redirect"
-	HeaderHXRefresh            = "Hx-Refresh"
-	HeaderHXReplaceURL         = "Hx-Replace-Url"
-	HeaderHXReswap             = "Hx-Reswap"
-	HeaderHXRetarget           = "Hx-Retarget"
-	HeaderHXReselect           = "Hx-Reselect"
-	HeaderHXTriggerAfterSettle = "Hx-Trigger-After-Settle"
-	HeaderHXTriggerAfterSwap   = "Hx-Trigger-After-Swap"
+	HeaderHXLocation   = "Hx-Location"
+	HeaderHXPushURL    = "Hx-Push-Url"
+	HeaderHXRedirect   = "Hx-Redirect"
+	HeaderHXRefresh    = "Hx-Refresh"
+	HeaderHXReplaceURL = "Hx-Replace-Url"
+	HeaderHXReswap     = "Hx-Reswap"
+	HeaderHXRetarget   = "Hx-Retarget"
+	HeaderHXReselect   = "Hx-Reselect"
+	HeaderHXTrigger    = "Hx-Trigger"
 )
 
 // The swap styles that [HXResponse.Reswap] takes.
@@ -54,13 +53,22 @@ const (
 // HTMXRequest is what the htmx headers of one request say. Request is false
 // when htmx did not make the request, and the other fields are then empty.
 //
+// RequestType is "full" when htmx swaps the whole body or selects part of the
+// answer, as for a boosted link or a history restore, and "partial" when it
+// swaps one element; it is what [Base.WantsPartial] reads. Source names the
+// element that made the request and Target the one the answer goes into, both
+// in the tag#id form htmx 4 sends, such as "ul#user-list".
+// [HTMXRequest.TargetID] and [HTMXRequest.SourceID] read the id alone.
+//
+// htmx 4 swaps a 4xx or 5xx answer into the target too, so a scope that serves
+// htmx wants an error handler that renders a fragment.
+//
 //betteralign:check
 type HTMXRequest struct {
 	CurrentURL     string
-	Prompt         string
+	RequestType    string
+	Source         string
 	Target         string
-	Trigger        string
-	TriggerName    string
 	Request        bool
 	Boosted        bool
 	HistoryRestore bool
@@ -71,33 +79,80 @@ func (b *Base) HTMX() HTMXRequest {
 	h := b.req.Header
 	return HTMXRequest{
 		CurrentURL:     h.Get(HeaderHXCurrentURL),
-		Prompt:         h.Get(HeaderHXPrompt),
+		RequestType:    h.Get(HeaderHXRequestType),
+		Source:         h.Get(HeaderHXSource),
 		Target:         h.Get(HeaderHXTarget),
-		Trigger:        h.Get(HeaderHXTrigger),
-		TriggerName:    h.Get(HeaderHXTriggerName),
 		Request:        hxTrue(h.Get(HeaderHXRequest)),
 		Boosted:        hxTrue(h.Get(HeaderHXBoosted)),
 		HistoryRestore: hxTrue(h.Get(HeaderHXHistoryRestoreRequest)),
 	}
 }
 
-// IsHTMX reports whether htmx made the request.
+// TargetID reports the id of the element the answer goes into: "user-list"
+// for the target "ul#user-list". It is "" when the target has no id.
+func (h HTMXRequest) TargetID() string { return idOf(h.Target) }
+
+// SourceID reports the id of the element that made the request: "delete-7"
+// for the source "button#delete-7". It is "" when the source has no id.
+func (h HTMXRequest) SourceID() string { return idOf(h.Source) }
+
+// idOf reads the id out of the tag#id form of htmx 4, which escapes the id
+// with encodeURI. An escape that does not decode is returned as sent.
+func idOf(v string) string {
+	_, id, ok := strings.Cut(v, "#")
+	if !ok {
+		return ""
+	}
+	if s, err := url.PathUnescape(id); err == nil {
+		return s
+	}
+	return id
+}
+
+// IsHTMX reports whether htmx made the request. It says who sent the
+// request, not what to answer: a boosted link and a history restore come from
+// htmx too and want a whole page. [Base.WantsPartial] decides that.
 func (b *Base) IsHTMX() bool { return hxTrue(b.req.Header.Get(HeaderHXRequest)) }
 
-// IsBoosted reports whether the request comes from an hx-boost link or form,
-// which wants a whole page rather than a fragment.
+// IsBoosted reports whether the request comes from an hx-boost link or form.
+// htmx 4 sends a boosted link that swaps the body as a full request, so
+// [Base.WantsPartial] answers it with the page; a boosted element that targets
+// one element is partial.
 func (b *Base) IsBoosted() bool { return hxTrue(b.req.Header.Get(HeaderHXBoosted)) }
 
-// HTMXWantsPartial reports whether r wants a fragment: htmx made it, and it is
-// neither boosted nor a history restore.
+// HTMXWantsPartial reports whether r wants a fragment: htmx made it, and its
+// HX-Request-Type is not "full". htmx 4 sends "full" for a boosted link, a
+// history restore, and a request that swaps the whole body or selects part of
+// the answer. A request without the type counts as partial. htmx 2 sends no
+// type, so it is not supported: its boosted links and history restores would
+// get fragments.
 func HTMXWantsPartial(r *http.Request) bool {
 	h := r.Header
-	return hxTrue(h.Get(HeaderHXRequest)) &&
-		!hxTrue(h.Get(HeaderHXBoosted)) &&
-		!hxTrue(h.Get(HeaderHXHistoryRestoreRequest))
+	return hxTrue(h.Get(HeaderHXRequest)) && !strings.EqualFold(h.Get(HeaderHXRequestType), "full")
 }
 
 func hxTrue(v string) bool { return strings.EqualFold(v, "true") }
+
+// hxVary lists the headers that [HTMXWantsPartial] reads. The HTMXRedirect
+// middleware names the same two, in the same order.
+var hxVary = []string{HeaderHXRequest, HeaderHXRequestType}
+
+// WantsPartial reports whether the request wants a fragment rather than a
+// whole page, as [HTMXWantsPartial] decides. It adds the headers it reads to
+// Vary, so a cache keeps the two answers apart.
+func (b *Base) WantsPartial() bool {
+	b.Vary(hxVary...)
+	return HTMXWantsPartial(b.req)
+}
+
+// RenderPartial renders partial with status for a request that wants a
+// fragment, and page for any other. See [Base.WantsPartial] and [Base.Render].
+func (b *Base) RenderPartial(status int, partial, page Component) error {
+	if b.WantsPartial() {
+		return b.Render(status, partial)
+	}
+	return b.Render(status, page)
+}
 
 // HTMXPartial picks between two handlers for one route: partial for a request
 // that wants a fragment, page for anything else. It adds the htmx headers to
@@ -109,9 +164,7 @@ func HTMXPartial[C Context](partial, page HandlerFunc[C]) HandlerFunc[C] {
 		panic("router: HTMXPartial needs both handlers")
 	}
 	return func(c C) error {
-		b := c.base()
-		b.Vary(HeaderHXRequest, HeaderHXBoosted, HeaderHXHistoryRestoreRequest)
-		if HTMXWantsPartial(b.req) {
+		if c.base().WantsPartial() {
 			return partial(c)
 		}
 		return page(c)
@@ -134,14 +187,13 @@ type HXLocation struct {
 	Select  string            `json:"select,omitzero"`
 	Source  string            `json:"source,omitzero"`
 	Event   string            `json:"event,omitzero"`
-	Handler string            `json:"handler,omitzero"`
 	Headers map[string]string `json:"headers,omitzero"`
 	Values  map[string]string `json:"values,omitzero"`
 }
 
 func (l HXLocation) isPathOnly() bool {
 	return l.Target == "" && l.Swap == "" && l.Select == "" && l.Source == "" &&
-		l.Event == "" && l.Handler == "" && len(l.Headers) == 0 && len(l.Values) == 0
+		l.Event == "" && len(l.Headers) == 0 && len(l.Values) == 0
 }
 
 // HXResponse builds an htmx answer. The header methods chain, and one of the
@@ -210,57 +262,73 @@ func (h HXResponse) Refresh() HXResponse {
 	return h.set(HeaderHXRefresh, "true")
 }
 
-// Trigger fires the named events on the client as soon as the answer arrives.
-// A name has to be ASCII, and it cannot be empty, hold a comma or a line
-// break, or repeat; use [HXResponse.TriggerEvents] for anything else.
+// Trigger fires the named events on the element that made the request, once
+// htmx has swapped the answer in. The events bubble. A name has to be ASCII,
+// and it cannot be empty, hold a comma or a line break, or repeat; use
+// [HXResponse.TriggerEvents] for anything else.
 func (h HXResponse) Trigger(names ...string) HXResponse {
-	return h.triggerNames(HeaderHXTrigger, names)
-}
-
-// TriggerAfterSwap is [HXResponse.Trigger], fired once the swap is done.
-func (h HXResponse) TriggerAfterSwap(names ...string) HXResponse {
-	return h.triggerNames(HeaderHXTriggerAfterSwap, names)
-}
-
-// TriggerAfterSettle is [HXResponse.Trigger], fired once the swap has settled.
-func (h HXResponse) TriggerAfterSettle(names ...string) HXResponse {
-	return h.triggerNames(HeaderHXTriggerAfterSettle, names)
-}
-
-// TriggerEvents fires events on the client, each with its detail as JSON. A
-// name outside ASCII is escaped, so any name that is not empty and does not
-// repeat works here.
-func (h HXResponse) TriggerEvents(events ...HXEvent) HXResponse {
-	return h.triggerEvents(HeaderHXTrigger, events)
-}
-
-// TriggerEventsAfterSwap is [HXResponse.TriggerEvents], fired once the swap is
-// done.
-func (h HXResponse) TriggerEventsAfterSwap(events ...HXEvent) HXResponse {
-	return h.triggerEvents(HeaderHXTriggerAfterSwap, events)
-}
-
-// TriggerEventsAfterSettle is [HXResponse.TriggerEvents], fired once the swap
-// has settled.
-func (h HXResponse) TriggerEventsAfterSettle(events ...HXEvent) HXResponse {
-	return h.triggerEvents(HeaderHXTriggerAfterSettle, events)
-}
-
-func (h HXResponse) triggerNames(header string, names []string) HXResponse {
 	if h.b.hxError() != nil || len(names) == 0 {
 		return h
 	}
 	for i, n := range names {
 		if err := validEventName(n); err != nil {
 			return h.fail(fmt.Errorf(
-				"router: the %s header cannot carry the event name %q: %w", header, n, err))
+				"router: the %s header cannot carry the event name %q: %w", HeaderHXTrigger, n, err))
 		}
 		if slices.Contains(names[:i], n) {
 			return h.fail(fmt.Errorf(
-				"router: the %s header names the event %q twice", header, n))
+				"router: the %s header names the event %q twice", HeaderHXTrigger, n))
 		}
 	}
-	return h.set(header, strings.Join(names, ", "))
+	return h.set(HeaderHXTrigger, strings.Join(names, ", "))
+}
+
+// TriggerEvents is [HXResponse.Trigger] with a detail for each event, sent as
+// JSON. A name outside ASCII is escaped, so any name that is not empty and
+// does not repeat works here.
+func (h HXResponse) TriggerEvents(events ...HXEvent) HXResponse {
+	if h.b.hxError() != nil || len(events) == 0 {
+		return h
+	}
+
+	var seen map[string]bool
+	if len(events) > 1 {
+		seen = make(map[string]bool, len(events))
+	}
+
+	var sb strings.Builder
+	sb.WriteByte('{')
+	for i, e := range events {
+		if e.Name == "" {
+			return h.fail(fmt.Errorf("router: the %s header holds an event without a name", HeaderHXTrigger))
+		}
+		if seen != nil {
+			if seen[e.Name] {
+				return h.fail(fmt.Errorf(
+					"router: the %s header names the event %q twice", HeaderHXTrigger, e.Name))
+			}
+			seen[e.Name] = true
+		}
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		name, err := json.Marshal(e.Name, h.b.headerJSONOptions()...)
+		if err != nil {
+			return h.fail(fmt.Errorf(
+				"router: encode the name of the %s event %q: %w", HeaderHXTrigger, e.Name, err))
+		}
+		sb.Write(name)
+		sb.WriteByte(':')
+
+		detail, err := json.Marshal(e.Detail, h.b.headerJSONOptions()...)
+		if err != nil {
+			return h.fail(fmt.Errorf(
+				"router: encode the detail of the %s event %q: %w", HeaderHXTrigger, e.Name, err))
+		}
+		sb.Write(detail)
+	}
+	sb.WriteByte('}')
+	return h.set(HeaderHXTrigger, escapeNonASCII(sb.String()))
 }
 
 func validEventName(name string) error {
@@ -289,51 +357,6 @@ func isASCII(s string) bool {
 		}
 	}
 	return true
-}
-
-func (h HXResponse) triggerEvents(header string, events []HXEvent) HXResponse {
-	if h.b.hxError() != nil || len(events) == 0 {
-		return h
-	}
-
-	var seen map[string]bool
-	if len(events) > 1 {
-		seen = make(map[string]bool, len(events))
-	}
-
-	var sb strings.Builder
-	sb.WriteByte('{')
-	for i, e := range events {
-		if e.Name == "" {
-			return h.fail(fmt.Errorf("router: the %s header holds an event without a name", header))
-		}
-		if seen != nil {
-			if seen[e.Name] {
-				return h.fail(fmt.Errorf(
-					"router: the %s header names the event %q twice", header, e.Name))
-			}
-			seen[e.Name] = true
-		}
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		name, err := json.Marshal(e.Name, h.b.headerJSONOptions()...)
-		if err != nil {
-			return h.fail(fmt.Errorf(
-				"router: encode the name of the %s event %q: %w", header, e.Name, err))
-		}
-		sb.Write(name)
-		sb.WriteByte(':')
-
-		detail, err := json.Marshal(e.Detail, h.b.headerJSONOptions()...)
-		if err != nil {
-			return h.fail(fmt.Errorf(
-				"router: encode the detail of the %s event %q: %w", header, e.Name, err))
-		}
-		sb.Write(detail)
-	}
-	sb.WriteByte('}')
-	return h.set(header, escapeNonASCII(sb.String()))
 }
 
 // A browser reads a header as one byte per character, so UTF-8 reaches the
