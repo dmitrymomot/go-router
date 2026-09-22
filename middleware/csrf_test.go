@@ -236,7 +236,7 @@ func TestCSRFSecFetchSiteDecidesFirst(t *testing.T) {
 		{"the site asked itself", "same-origin", false, http.StatusOK},
 		{"the user asked", "none", false, http.StatusOK},
 		{"another site asked", "cross-site", true, http.StatusForbidden},
-		{"a sibling subdomain asked with a token", "same-site", true, http.StatusOK},
+		{"a sibling subdomain asked with a token over HTTP", "same-site", true, http.StatusForbidden},
 		{"a sibling subdomain asked without a token", "same-site", false, http.StatusForbidden},
 		{"no metadata and a token", "", true, http.StatusOK},
 		{"no metadata and no token", "", false, http.StatusForbidden},
@@ -517,18 +517,47 @@ func TestCSRFIgnoresACookieItDidNotIssue(t *testing.T) {
 	}
 }
 
-func TestCSRFSameSiteWithATokenPasses(t *testing.T) {
-	r := newRouter()
-	r.Use(middleware.CSRF[*appContext])
-	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
-	r.POST("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
-	cookie := get(r, "/").Result().Cookies()[0]
-	req := httptest.NewRequest(http.MethodPost, "/", nil)
+func TestCSRFSameSiteWithATokenInTheHostCookiePasses(t *testing.T) {
+	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
+	cookie := csrfCookie(t, get(r, "https://app.example.com/"))
+	if cookie.Name != middleware.DefaultCSRFHostCookieName {
+		t.Fatalf("cookie = %s, want %s", cookie.Name, middleware.DefaultCSRFHostCookieName)
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://app.example.com/", nil)
 	req.AddCookie(cookie)
 	req.Header.Set(router.HeaderXCSRFToken, cookie.Value)
 	req.Header.Set(router.HeaderSecFetchSite, "same-site")
 	if rec := do(r, req); rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200 for same-site with a valid token", rec.Code)
+		t.Errorf("status = %d, want 200 for same-site with a valid token in %s",
+			rec.Code, middleware.DefaultCSRFHostCookieName)
+	}
+}
+
+// A sibling subdomain can set any cookie but a __Host- one for the parent
+// domain, so a same-site request cannot prove itself with any other.
+func TestCSRFSameSiteRefusedWithoutTheHostCookie(t *testing.T) {
+	planted := strings.Repeat("A", 43)
+	tests := []struct {
+		name   string
+		target string
+		cfg    middleware.CSRFConfig[*appContext]
+		cookie string
+	}{
+		{"a planted cookie over HTTP", "http://app.example.com/", middleware.CSRFConfig[*appContext]{}, middleware.DefaultCSRFCookieName},
+		{"a configured name over HTTPS", "https://app.example.com/", middleware.CSRFConfig[*appContext]{CookieName: "token"}, "token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := csrfRouter(tt.cfg)
+			form := url.Values{middleware.DefaultCSRFFormField: {planted}}
+			req := httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(form.Encode()))
+			req.Header.Set(router.HeaderContentType, router.MIMEApplicationForm)
+			req.AddCookie(&http.Cookie{Name: tt.cookie, Value: planted})
+			req.Header.Set(router.HeaderSecFetchSite, "same-site")
+			if rec := do(r, req); rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 for same-site without %s", rec.Code, middleware.DefaultCSRFHostCookieName)
+			}
+		})
 	}
 }
 

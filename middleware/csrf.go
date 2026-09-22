@@ -83,7 +83,12 @@ type CSRFConfig[C router.Context] struct {
 // A request that Sec-Fetch-Site marks as same-origin passes without a token,
 // which is what lets a browser that sends the header carry an ordinary form.
 // One that marks it cross-site is refused outright unless its origin is
-// trusted. A same-site request, and one with no such header, needs the token.
+// trusted. A same-site request needs the token, and only the cookie
+// [DefaultCSRFHostCookieName], which CSRF uses over HTTPS when the
+// configuration names no cookie, may carry it: a sibling subdomain can plant
+// any other cookie for the parent domain, so over plain HTTP, or with a
+// CookieName without the __Host- prefix, a same-site request is refused. A
+// request with no such header needs the token.
 //
 // [CSRFTokenFrom] reads the token for a template.
 //
@@ -119,7 +124,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig[C]) router.Middleware[C] {
 	alwaysSecure := cfg.CookieSecure || cfg.CookieSameSite == http.SameSiteNoneMode
 	trusted, _ := checkOrigins("CSRFConfig.TrustedOrigins", cfg.TrustedOrigins, false, "")
 	if cfg.AllowSecFetchSite == nil {
-		cfg.AllowSecFetchSite = secFetchSite[C](trusted)
+		cfg.AllowSecFetchSite = secFetchSite[C](trusted, cfg.CookieName)
 	}
 	maxAge := int(cfg.CookieMaxAge.Seconds())
 
@@ -132,13 +137,7 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig[C]) router.Middleware[C] {
 			router.AddVary(c.Response().Header(), router.HeaderCookie)
 
 			https := router.SchemeOf(c.Request()) == "https"
-			name := cfg.CookieName
-			if name == "" {
-				name = DefaultCSRFCookieName
-				if https {
-					name = DefaultCSRFHostCookieName
-				}
-			}
+			name := csrfCookieName(cfg.CookieName, https)
 			token := csrfCookieToken(c.Request(), name)
 			if token == "" {
 				token = newCSRFToken()
@@ -178,6 +177,18 @@ func CSRFTokenFrom(c router.Context) string {
 	return s
 }
 
+// csrfCookieName reports the name of the cookie in use: the configured one,
+// or the default for the scheme.
+func csrfCookieName(configured string, https bool) string {
+	switch {
+	case configured != "":
+		return configured
+	case https:
+		return DefaultCSRFHostCookieName
+	}
+	return DefaultCSRFCookieName
+}
+
 // csrfCookieToken reports the token of the one cookie named name, or "" when
 // there is no such cookie, more than one, or one that CSRF did not issue.
 func csrfCookieToken(r *http.Request, name string) string {
@@ -213,6 +224,15 @@ func csrfTokenMatches(c router.Context, sources []TokenSource, token string) boo
 	return false
 }
 
+// hostOnlyCSRFCookie reports whether the cookie in use carries the __Host-
+// prefix, which the browser keeps to this host, so no other host can set it.
+func hostOnlyCSRFCookie(r *http.Request, configured string) bool {
+	https := router.SchemeOf(r) == "https"
+	return https && strings.HasPrefix(csrfCookieName(configured, https), hostCookiePrefix)
+}
+
+const hostCookiePrefix = "__Host-"
+
 func newCSRFToken() string {
 	var b [csrfTokenBytes]byte
 	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program instead.
@@ -222,8 +242,10 @@ func newCSRFToken() string {
 
 // secFetchSite lets a same-origin request through, and a request from a
 // trusted origin. It refuses any other cross-site request outright, and leaves
-// a same-site request, and one without the header, to the token.
-func secFetchSite[C router.Context](trusted []string) func(C) (bool, error) {
+// one without the header to the token. A same-site request goes to the token
+// only when the cookie is a __Host- one over HTTPS, since a sibling subdomain
+// can plant any other cookie for the parent domain; otherwise it is refused.
+func secFetchSite[C router.Context](trusted []string, cookieName string) func(C) (bool, error) {
 	return func(c C) (bool, error) {
 		site := c.Request().Header.Get(router.HeaderSecFetchSite)
 		switch site {
@@ -238,7 +260,7 @@ func secFetchSite[C router.Context](trusted []string) func(C) (bool, error) {
 		}) {
 			return true, nil
 		}
-		if site == "same-site" {
+		if site == "same-site" && hostOnlyCSRFCookie(c.Request(), cookieName) {
 			return false, nil
 		}
 		return false, errCrossSite
