@@ -397,8 +397,8 @@ func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 
 // ParseValue parses s as a T. T may be any string, bool, integer, float,
 // time.Duration or time.Time, or a type that implements
-// encoding.TextUnmarshaler. A bool also takes on and off, as a checkbox sends
-// them. The error is the parse failure itself, without a status.
+// encoding.TextUnmarshaler. A bool takes what strconv.ParseBool takes, and
+// also on and off. The error is the parse failure itself, without a status.
 func ParseValue[T any](s string) (T, error) {
 	var v T
 	if err := setScalar(reflect.ValueOf(&v).Elem(), s, ""); err != nil {
