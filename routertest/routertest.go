@@ -247,7 +247,8 @@ func WithTarget(method, target string, opts ...RequestOption) ContextOption {
 // value, or fill an embedded pointer with [router.NewBase].
 //
 // Without [WithRequest] the request carries tb.Context(), which ends when the
-// test does.
+// test does. The files that a multipart body spilled to disk are removed when
+// the test ends, as a router removes them when a request is done.
 func NewContext[C router.Context](
 	tb testing.TB,
 	newCtx func(http.ResponseWriter, *http.Request) C,
@@ -277,6 +278,7 @@ func NewContext[C router.Context](
 		return c, rec
 	}
 	*b = *router.NewBase(res, req)
+	tb.Cleanup(func() { routerhook.RemoveSpilledParts(b) })
 	names, vals := paramSlices(spec.params)
 	routerhook.SetRoute(b, spec.pattern, names, vals)
 	if spec.pattern != "" {

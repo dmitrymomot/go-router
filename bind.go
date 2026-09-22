@@ -1,7 +1,7 @@
 package router
 
 import (
-	"context"
+	"encoding"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 // DefaultMaxBodyBytes is the request body that the Bind methods read before
@@ -28,11 +29,13 @@ const defaultMaxMultipartMemory int64 = 32 << 20
 // the body. A field without the tag of a source is never filled from it.
 //
 // Bind reads the body whenever the request carries one, that is when it has
-// a Content-Type or a Content-Length other than zero, whatever the method. The
+// a Content-Length above zero, or a body of unknown length, whatever the
+// method. A Content-Type without a body reads nothing. The
 // Content-Type picks the decoder: JSON for application/json and any "+json"
 // type, and a form for the two form types. JSON follows the rules of
-// [Base.BindJSON], so a field without a `json` tag takes the member of its Go
-// name. The route parameters, the query and the headers come next, so a field
+// [Base.BindJSON]: a field with no tag at all takes the member of its Go
+// name, and a field tagged for another source and not for `json` takes no
+// member. The route parameters, the query and the headers come next, so a field
 // tagged for both the body and one of them takes the value of the latter. A
 // T that implements [Validator] is validated last.
 //
@@ -75,10 +78,18 @@ func (b *Base) Bind[T any]() (T, error) {
 	return *p, validate(p)
 }
 
-// hasBody reports whether the request carries a body. An unknown length, -1,
-// counts as one.
+// hasBody reports whether the request carries a body: a Content-Length above
+// zero, or an unknown length, -1, on a body that is there. A Content-Type
+// alone does not count.
 func (b *Base) hasBody() bool {
-	return b.req.ContentLength != 0 || b.req.Header.Get(HeaderContentType) != ""
+	switch n := b.req.ContentLength; {
+	case n > 0:
+		return true
+	case n < 0:
+		return b.req.Body != nil && b.req.Body != http.NoBody
+	default:
+		return false
+	}
 }
 
 func (b *Base) decodeBody(dst any, sv reflect.Value) error {
@@ -141,6 +152,12 @@ func targetStruct[T any](p *T) reflect.Value {
 // BindJSON decodes the body as JSON into a T and validates it. opts win over
 // the options of [Router.JSONOptions]. It reports errors as [Base.Bind] does.
 //
+// A field with no tag takes the member of its Go name, as json/v2 does. A
+// field that carries a `query`, `param`, `header` or `form` tag and no `json`
+// tag takes no member, at any depth, so a client cannot set through the body
+// what the struct takes from the request. A type that implements its own
+// unmarshaling is left as it decoded itself.
+//
 // A member of the wrong JSON type, a value that its UnmarshalText or
 // UnmarshalJSON rejects, and an unknown member under RejectUnknownMembers
 // each report a 400 "invalid request" with one [FieldError] at the path of the
@@ -161,7 +178,11 @@ func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 
 func (b *Base) decodeJSON(dst any, opts []json.Options) error {
 	body := countingBody{r: b.limitedBody()}
-	if err := json.UnmarshalRead(&body, dst, b.jsonOptions(opts)...); err != nil {
+	err := json.UnmarshalRead(&body, dst, b.jsonOptions(opts)...)
+	// Even a failed decode hands back what it filled, so the fields of the
+	// other sources are cleared either way.
+	clearOtherSources(reflect.ValueOf(dst))
+	if err != nil {
 		// json/v2 reports an empty body with the same syntax error as a
 		// truncated one, so the byte count tells them apart.
 		return jsonError(err, body.read == 0)
@@ -318,8 +339,9 @@ func (b *Base) BindHeader[T any]() (T, error) {
 //
 // The first HTTPError in the tree decides before a StatusCoder, as in
 // [StatusOf], and FieldErrors beside it are not added to its Details. When
-// its status is zero, the rest of the list decides, and a nil *HTTPError
-// becomes a plain ErrUnprocessableEntity.
+// its status is zero, the rest of the list decides. A typed nil *HTTPError is
+// passed over, and a tree with no other becomes a plain
+// ErrUnprocessableEntity.
 type Validator interface {
 	Validate() error
 }
@@ -345,10 +367,13 @@ func validate[T any](v *T) error {
 	if err == nil {
 		return nil
 	}
-	he, ok := errors.AsType[*HTTPError](err)
-	if ok && he == nil {
-		// Every method of a typed nil panics, so it is not kept as the cause.
-		return ErrUnprocessableEntity
+	he, ok := httpErrorOf(err)
+	if !ok {
+		if _, isNil := errors.AsType[*HTTPError](err); isNil {
+			// A typed nil has no fields to read, so it is not kept as the
+			// cause.
+			return ErrUnprocessableEntity
+		}
 	}
 	// A status of zero would answer 500, so such an error falls through to
 	// the 422 below.
@@ -546,22 +571,141 @@ func (b *Base) readMultipart(boundary string) error {
 	}
 	b.req.MultipartForm = form
 	b.req.PostForm = url.Values(form.Value)
-	removeSpilledParts(b.req)
+	if len(form.File) > 0 {
+		d := b.deferrals()
+		d.forms = append(d.forms, form)
+	}
 	return nil
 }
 
-// net/http removes the spilled parts of the request it holds, but the router
-// may parse into a copy that Decompress or a SetRequest made, so nothing else
-// would.
-func removeSpilledParts(req *http.Request) {
-	form := req.MultipartForm
-	if form == nil || len(form.File) == 0 {
+// removeSpilledParts removes the temporary files of the multipart forms that b
+// parsed. net/http removes those of the request it holds, but the router may
+// parse into a copy that Decompress or a SetRequest made, so nothing else
+// would. The router calls it once ServeHTTP is done with the request, and not
+// when the request context ends, which can come while the handler still
+// reads the files, or never.
+func (b *Base) removeSpilledParts() {
+	if b.deferred == nil || b.deferred.forms == nil {
 		return
 	}
-	context.AfterFunc(req.Context(), func() {
+	for _, form := range b.deferred.forms {
 		//nolint:errcheck // A file that is gone already is the wanted outcome.
 		form.RemoveAll()
-	})
+	}
+	b.deferred.forms = nil
+}
+
+// otherSources are the tags that name a source other than a JSON body.
+var otherSources = [...]string{"query", "param", "header", "form"}
+
+// ofOtherSource reports a field that another source fills and a JSON body must
+// not: it carries a query, param, header or form tag, and no json tag. json/v2
+// fills such a field from the member of its Go name, which would let a client
+// set what the struct meant to take from a header or the path.
+func ofOtherSource(f reflect.StructField) bool {
+	if _, ok := f.Tag.Lookup("json"); ok {
+		return false
+	}
+	for _, tag := range otherSources {
+		if name, _, _ := strings.Cut(f.Tag.Get(tag), ","); name != "" && name != "-" {
+			return true
+		}
+	}
+	return false
+}
+
+// clearOtherSources zeroes, in the value v decoded from JSON, every field of
+// another source, at any depth. A type that decodes itself is left alone.
+func clearOtherSources(v reflect.Value) {
+	if !v.IsValid() || !reachesOtherSource(v.Type()) {
+		return
+	}
+	switch v.Kind() {
+	case reflect.Pointer:
+		if !v.IsNil() {
+			clearOtherSources(v.Elem())
+		}
+	case reflect.Struct:
+		for f, fv := range v.Fields() {
+			switch {
+			case ofOtherSource(f):
+				if fv.CanSet() {
+					fv.SetZero()
+				}
+			// The exported fields of an unexported embedded struct are
+			// still set through it, by json/v2 and by reflect alike.
+			case f.IsExported() || f.Anonymous:
+				clearOtherSources(fv)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := range v.Len() {
+			clearOtherSources(v.Index(i))
+		}
+	case reflect.Map:
+		if !v.CanInterface() {
+			return
+		}
+		for iter := v.MapRange(); iter.Next(); {
+			elem := reflect.New(v.Type().Elem()).Elem()
+			elem.Set(iter.Value())
+			clearOtherSources(elem)
+			v.SetMapIndex(iter.Key(), elem)
+		}
+	}
+}
+
+var reachCache sync.Map // reflect.Type -> bool
+
+// reachesOtherSource reports whether a value of type t can hold a field of
+// another source, so a value that cannot is not walked.
+func reachesOtherSource(t reflect.Type) bool {
+	if v, ok := reachCache.Load(t); ok {
+		return v.(bool)
+	}
+	// Only the answer for the root is cached: the answer for a type met
+	// inside a cycle is partial.
+	reach := typeReaches(t, make(map[reflect.Type]bool))
+	reachCache.Store(t, reach)
+	return reach
+}
+
+func typeReaches(t reflect.Type, seen map[reflect.Type]bool) bool {
+	if decodesItself(t) {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+		return typeReaches(t.Elem(), seen)
+	case reflect.Struct:
+		if seen[t] {
+			return false
+		}
+		seen[t] = true
+		for f := range t.Fields() {
+			if !f.IsExported() && !f.Anonymous {
+				continue
+			}
+			if ofOtherSource(f) || typeReaches(f.Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var (
+	jsonUnmarshalerType     = reflect.TypeFor[json.Unmarshaler]()
+	jsonUnmarshalerFromType = reflect.TypeFor[json.UnmarshalerFrom]()
+	textUnmarshalerType     = reflect.TypeFor[encoding.TextUnmarshaler]()
+)
+
+func decodesItself(t reflect.Type) bool {
+	if t.Kind() != reflect.Pointer {
+		t = reflect.PointerTo(t)
+	}
+	return t.Implements(jsonUnmarshalerType) || t.Implements(jsonUnmarshalerFromType) ||
+		t.Implements(textUnmarshalerType)
 }
 
 // ParamAs reads route parameter name, of the path or the host, as a T. See
@@ -735,7 +879,8 @@ func (b *Base) FormFiles(name string) ([]*multipart.FileHeader, error) {
 
 // MultipartForm reports the parsed multipart form. A body that is not
 // multipart reports an [ErrBadRequest]. A part that spilled to a temporary
-// file is removed once the request ends.
+// file is removed once the router is done with the request. On a Base from
+// [NewBase], outside a router, the caller removes them with RemoveAll.
 func (b *Base) MultipartForm() (*multipart.Form, error) {
 	if err := b.parseForm(); err != nil {
 		return nil, err

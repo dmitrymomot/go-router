@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -2312,5 +2313,194 @@ func TestBindCombinesTheSourcesByTag(t *testing.T) {
 
 	if code := do(r, http.MethodGet, "/acme?page=x").Code; code != http.StatusBadRequest {
 		t.Errorf("a malformed query: status = %d, want 400", code)
+	}
+}
+
+// A Content-Type alone is not a body: a GET that carries one reads its query.
+func TestBindReadsNoBodyFromAContentTypeAlone(t *testing.T) {
+	type input struct {
+		Page int    `query:"page"`
+		Name string `json:"name"`
+	}
+	r := newTestRouter()
+	r.Any("/x", func(c *tctx) error {
+		in, err := c.Bind[input]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, fmt.Sprintf("%d/%s", in.Page, in.Name))
+	})
+
+	for _, ct := range []string{MIMEApplicationJSON, MIMETextPlain} {
+		t.Run(ct, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/x?page=2", nil)
+			req.Header.Set(HeaderContentType, ct)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || rec.Body.String() != "2/" {
+				t.Errorf("GET = %d %q, want 200 %q", rec.Code, rec.Body.String(), "2/")
+			}
+		})
+	}
+	t.Run("chunked", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/x?page=3", strings.NewReader(`{"name":"ann"}`))
+		req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+		req.ContentLength = -1
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Body.String() != "3/ann" {
+			t.Errorf("chunked POST = %d %q, want 200 %q", rec.Code, rec.Body.String(), "3/ann")
+		}
+	})
+}
+
+type shieldedAudit struct {
+	Actor string `header:"X-Actor"`
+}
+
+type shieldedInput struct {
+	shieldedAudit
+	Tenant string `header:"X-Tenant"`
+	Page   int    `query:"page"`
+	Slug   string `param:"slug"`
+	Note   string `form:"note"`
+	Name   string `json:"name"`
+	Title  string
+	Nested struct {
+		Owner string `header:"X-Owner"`
+		Label string `json:"label"`
+	} `json:"nested"`
+	Items []struct {
+		Secret string `query:"secret"`
+		Value  string `json:"value"`
+	} `json:"items"`
+}
+
+func (in shieldedInput) String() string {
+	return fmt.Sprintf("tenant=%s page=%d slug=%s note=%s actor=%s name=%s title=%s owner=%s label=%s items=%v",
+		in.Tenant, in.Page, in.Slug, in.Note, in.Actor, in.Name, in.Title, in.Nested.Owner, in.Nested.Label, in.Items)
+}
+
+// A field tagged for another source and not for JSON never takes a member of
+// the body, or a client could set a header value by naming the Go field.
+func TestJSONBodyNeverFillsAFieldOfAnotherSource(t *testing.T) {
+	const body = `{"Tenant":"evil","Page":9,"Slug":"evil","Note":"evil","Actor":"evil","name":"ann","Title":"t",` +
+		`"nested":{"Owner":"evil","label":"l"},"items":[{"Secret":"evil","value":"v"}]}`
+	r := newTestRouter()
+	r.POST("/bind/{slug}", func(c *tctx) error {
+		in, err := c.Bind[shieldedInput]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, in.String())
+	})
+	r.POST("/json", func(c *tctx) error {
+		in, err := c.BindJSON[*shieldedInput]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, in.String())
+	})
+
+	t.Run("Bind", func(t *testing.T) {
+		rec := doBody(r, http.MethodPost, "/bind/own?page=2", MIMEApplicationJSON, body)
+		want := "tenant= page=2 slug=own note= actor= name=ann title=t owner= label=l items=[{ v}]"
+		if got := rec.Body.String(); got != want {
+			t.Errorf("body = %q, want %q", got, want)
+		}
+	})
+	t.Run("Bind with the header", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/bind/own", strings.NewReader(body))
+		req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+		req.Header.Set("X-Tenant", "acme")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		want := "tenant=acme page=0 slug=own note= actor= name=ann title=t owner= label=l items=[{ v}]"
+		if got := rec.Body.String(); got != want {
+			t.Errorf("body = %q, want %q", got, want)
+		}
+	})
+	t.Run("BindJSON", func(t *testing.T) {
+		rec := doBody(r, http.MethodPost, "/json", MIMEApplicationJSON, body)
+		want := "tenant= page=0 slug= note= actor= name=ann title=t owner= label=l items=[{ v}]"
+		if got := rec.Body.String(); got != want {
+			t.Errorf("body = %q, want %q", got, want)
+		}
+	})
+}
+
+// tempFilesAfter counts the spilled parts in dir once d has passed, or sooner
+// when the count drops to zero.
+func tempFilesAfter(dir string, d time.Duration) int {
+	deadline := time.Now().Add(d)
+	for {
+		names, _ := filepath.Glob(filepath.Join(dir, "multipart-*"))
+		if len(names) == 0 || time.Now().After(deadline) {
+			return len(names)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The spilled parts belong to the request, not to its context: they stay while
+// the handler runs, even past a cancel, and go once ServeHTTP returns.
+func TestMultipartTempFilesLastUntilServeHTTPReturns(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		router func() *Router[*tctx]
+		panics bool
+	}{
+		{name: "unpooled", router: newTestRouter},
+		{name: "pooled", router: func() *Router[*tctx] {
+			return NewPooled(func() *tctx { return new(tctx) }, func(*tctx) {})
+		}},
+		{name: "observed", router: func() *Router[*tctx] {
+			r := newTestRouter()
+			r.Observe(func(*tctx, int, int64, time.Duration, error) {})
+			return r
+		}},
+		{name: "a panic", router: newTestRouter, panics: true},
+		{name: "a panic, observed", router: func() *Router[*tctx] {
+			r := newTestRouter()
+			r.Observe(func(*tctx, int, int64, time.Duration, error) {})
+			return r
+		}, panics: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("TMPDIR", dir)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			r := tt.router()
+			r.Logger(slog.New(slog.DiscardHandler))
+			r.MaxMultipartMemory(1)
+			var during int
+			r.POST("/avatars", func(c *tctx) error {
+				if _, err := c.FormFiles("avatar"); err != nil {
+					return err
+				}
+				cancel()
+				during = tempFilesAfter(dir, 100*time.Millisecond)
+				if tt.panics {
+					panic("boom")
+				}
+				return c.NoContent(http.StatusNoContent)
+			})
+
+			body, ct := multipartBody(t, nil, upload{field: "avatar", name: "a.png", content: strings.Repeat("x", 2048)})
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/avatars", strings.NewReader(body))
+			req.Header.Set(HeaderContentType, ct)
+			r.ServeHTTP(httptest.NewRecorder(), req)
+
+			if during != 1 {
+				t.Errorf("%d temporary file(s) while the handler ran, want 1", during)
+			}
+			names, _ := filepath.Glob(filepath.Join(dir, "multipart-*"))
+			if len(names) != 0 {
+				t.Errorf("%d temporary file(s) left once ServeHTTP returned", len(names))
+			}
+		})
 	}
 }

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1288,4 +1290,53 @@ func TestFlashesRoundTripThroughFlashCookie(t *testing.T) {
 	if got, want := page.String(), "[{success user created} {info check your inbox}]"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
+}
+
+// Outside a router nothing removes the parts a multipart body spilled to disk,
+// so NewContext removes them when the test ends.
+func TestNewContextRemovesTheSpilledPartsAtCleanup(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	spilled := func() int {
+		names, _ := filepath.Glob(filepath.Join(dir, "multipart-*"))
+		return len(names)
+	}
+
+	t.Run("handler", func(t *testing.T) {
+		// Past the 32 MiB a form keeps in memory outside a router.
+		const size = 32<<20 + 1
+		pr, pw := io.Pipe()
+		mw := multipart.NewWriter(pw)
+		go func() {
+			fw, err := mw.CreateFormFile("avatar", "a.bin")
+			if err == nil {
+				_, err = io.Copy(fw, io.LimitReader(zeros{}, size))
+			}
+			if err == nil {
+				err = mw.Close()
+			}
+			pw.CloseWithError(err)
+		}()
+		req := httptest.NewRequest(http.MethodPost, "/avatars", pr)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+
+		c, _ := routertest.NewContext(t, newContext, routertest.WithRequest(req))
+		c.SetBodyLimit(0)
+		if _, err := c.FormFiles("avatar"); err != nil {
+			t.Fatalf("FormFiles: %v", err)
+		}
+		if n := spilled(); n != 1 {
+			t.Fatalf("%d spilled part(s) while the test ran, want 1", n)
+		}
+	})
+	if n := spilled(); n != 0 {
+		t.Errorf("%d spilled part(s) left after the test, want 0", n)
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }

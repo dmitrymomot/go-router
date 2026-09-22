@@ -38,15 +38,17 @@ func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
 	var err error
 	defer func() {
 		rec := recover()
+		b := c.base()
 		if rec == http.ErrAbortHandler {
+			b.removeSpilledParts()
 			panic(rec)
 		}
 		if rec != nil {
 			err = PanicError(rec, 0)
 			r.handleError(c, err)
 		}
-		b := c.base()
 		r.observer(c, ResolveStatus(b.res, err), b.res.Size, time.Since(start), err)
+		b.removeSpilledParts()
 		if rec == nil {
 			r.recycle(c)
 		}
@@ -73,16 +75,22 @@ func (r *Router[C]) acquire(w http.ResponseWriter, req *http.Request) C {
 
 // The pool lines repeat recycle: a call would cost a frame on every request
 // that answers without a panic. A panicked context is dropped, not pooled.
+// Every path removes the spilled parts of a multipart body first.
 func (r *Router[C]) release(c C) {
 	if rec := recover(); rec != nil {
 		if rec == http.ErrAbortHandler {
+			c.base().removeSpilledParts()
 			panic(rec)
 		}
 		r.handleError(c, PanicError(rec, 0))
+		c.base().removeSpilledParts()
 		return
 	}
+	b := c.base()
+	if b.deferred != nil {
+		b.removeSpilledParts()
+	}
 	if r.pool != nil {
-		b := c.base()
 		r.reset(c)
 		// The flag is lowered here rather than through the slow clear, so a 404
 		// or a 405 on a pooled router stays on the fast path.

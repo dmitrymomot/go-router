@@ -34,4 +34,9 @@ var (
 	// [http.MaxBytesReader] closes the connection after a 413 only when it is
 	// handed that writer. Package middleware caps a body with it.
 	InnermostWriter func(w http.ResponseWriter) http.ResponseWriter
+
+	// RemoveSpilledParts removes the temporary files of the multipart forms
+	// that b, a *router.Base, parsed. The router does it when a request is
+	// done; routertest does it for a context built outside a router.
+	RemoveSpilledParts func(b any)
 )

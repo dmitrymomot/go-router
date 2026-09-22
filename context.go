@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"slices"
@@ -109,6 +110,11 @@ func (b *Base) opts() *routerOpts {
 // literal that copies *NewBase(w, r) keeps writing through the Base it was
 // copied from.
 //
+// The router removes the files that a multipart body spilled to disk once it
+// is done with the request. Outside a router nothing does: call RemoveAll on
+// the form of [Base.MultipartForm] when done. routertest.NewContext does it
+// when the test ends.
+//
 // NewBase panics if w or r is nil.
 func NewBase(w http.ResponseWriter, r *http.Request) *Base {
 	if w == nil {
@@ -161,6 +167,9 @@ func (b *Base) clearRequestSlow() {
 // deferredState holds what few requests need, so Base does not carry it.
 type deferredState struct {
 	form error
+	// forms are the multipart forms whose spilled parts go once the request
+	// is done.
+	forms []*multipart.Form
 	// bodyLimit is the cap of SetBodyLimit: 0 leaves the router's, and -1
 	// lifts it.
 	bodyLimit int64
@@ -234,8 +243,7 @@ func (b *Base) SetRequest(r *http.Request) {
 // A context derived from b is fine to pass on, to a [Component] or to domain
 // code, but it must not come back as the request context: b looks up in the
 // request context what it lacks itself. Derive ctx from Request().Context(),
-// so that it still ends when the client goes away and the files that
-// [Base.Bind] spilled to disk are still removed with the request.
+// so that it still ends when the client goes away.
 //
 // SetContext panics if ctx is nil or derives from b.
 func (b *Base) SetContext(ctx context.Context) {

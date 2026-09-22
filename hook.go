@@ -10,8 +10,8 @@ import (
 
 // The hooks give the packages of this module what the public API of a Base
 // does not expose: routertest sets the route of a context built outside a
-// router, sse reads the JSON options of the router, and middleware caps a body
-// on the writer net/http created.
+// router and removes its spilled multipart parts, sse reads the JSON options
+// of the router, and middleware caps a body on the writer net/http created.
 func init() {
 	routerhook.SetRoute = func(b any, pattern string, names, vals []string) {
 		b.(*Base).setTestRoute(pattern, names, vals)
@@ -21,6 +21,7 @@ func init() {
 		return b.(*Base).jsonOptions(opts)
 	}
 	routerhook.InnermostWriter = innermostWriter
+	routerhook.RemoveSpilledParts = func(b any) { b.(*Base).removeSpilledParts() }
 }
 
 // setTestRoute gives b a route pattern and its parameters, as routing a
