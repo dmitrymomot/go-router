@@ -1128,6 +1128,7 @@ var validateCases = map[string]error{
 	"zero status":    &HTTPError{Message: "x"},
 	"server error":   ErrInternalServerError.WithMessage("x"),
 	"field and http": errors.Join(FieldError{Field: "email", Message: "is not an address"}, ErrConflict),
+	"typed nil":      (*HTTPError)(nil),
 }
 
 type chosenInvalid struct {
@@ -1158,6 +1159,7 @@ func TestValidatorKeepsTheStatusItNames(t *testing.T) {
 		{name: "zero status", wantStatus: http.StatusUnprocessableEntity, wantBody: "Unprocessable Entity"},
 		{name: "server error", wantStatus: http.StatusInternalServerError, wantBody: "x"},
 		{name: "field and http", wantStatus: http.StatusConflict, wantBody: "Conflict"},
+		{name: "typed nil", wantStatus: http.StatusUnprocessableEntity, wantBody: "Unprocessable Entity"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bindErr = nil

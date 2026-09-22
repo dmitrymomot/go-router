@@ -239,9 +239,14 @@ func validate[T any](v *T) error {
 	if err == nil {
 		return nil
 	}
+	he, ok := errors.AsType[*HTTPError](err)
+	if ok && he == nil {
+		// Every method of a typed nil panics, so it is not kept as the cause.
+		return ErrUnprocessableEntity.WithError(nil)
+	}
 	// A status of zero would answer 500, so such an error falls through to
 	// the 422 below.
-	if he, ok := errors.AsType[*HTTPError](err); ok && he.Status != 0 {
+	if ok && he.Status != 0 {
 		return err
 	}
 	if sc, ok := errors.AsType[StatusCoder](err); ok && sc.StatusCode() != 0 {
