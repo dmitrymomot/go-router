@@ -110,7 +110,7 @@ func jsonError(err error, empty bool) *HTTPError {
 	if field := jsonField(se.JSONPointer); field != "" {
 		return badFields([]FieldError{{Field: field, Message: jsonProblem(se)}}, err)
 	}
-	return ErrBadRequest.WithMessage("the request body has the wrong JSON type").WithError(err)
+	return ErrBadRequest.WithMessage("the request body %s", jsonProblem(se)).WithError(err)
 }
 
 func jsonProblem(se *json.SemanticError) string {

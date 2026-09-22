@@ -451,6 +451,10 @@ func TestBindJSONKeepsTheParserTextInTheCause(t *testing.T) {
 		_, bindErr = c.BindJSON[createUser]()
 		return bindErr
 	})
+	r.POST("/count", func(c *tctx) error {
+		_, bindErr = c.BindJSON[int]()
+		return bindErr
+	})
 
 	rec := post(r, "/users", MIMEApplicationJSON, `{"name":`)
 	if rec.Code != http.StatusBadRequest || rec.Body.String() != "malformed JSON body" {
@@ -474,6 +478,11 @@ func TestBindJSONKeepsTheParserTextInTheCause(t *testing.T) {
 	}
 	if _, ok := errors.AsType[*json.SemanticError](bindErr); !ok {
 		t.Errorf("root: error = %v, want a *json.SemanticError in it", bindErr)
+	}
+
+	rec = post(r, "/count", MIMEApplicationJSON, `1.5`)
+	if rec.Code != http.StatusBadRequest || rec.Body.String() != "the request body is not a valid value" {
+		t.Errorf("root value: answer = %d %q, want 400 %q", rec.Code, rec.Body.String(), "the request body is not a valid value")
 	}
 
 	dev := newTestRouter()
