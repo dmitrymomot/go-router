@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"testing"
 	"uuid"
 )
@@ -78,6 +79,65 @@ func FuzzUUIDClassAdmitsOnlyWhatParses(f *testing.F) {
 		}
 		if _, err := uuid.Parse(v); err != nil {
 			t.Fatalf("the class admitted %q, which uuid.Parse refused: %v", v, err)
+		}
+	})
+}
+
+func FuzzExpandRoutesBack(f *testing.F) {
+	for _, seed := range []string{"plain", "a/b", "%2F", "/evil.com", "//x", "a b", "web-api", "42", "Acme", "", "a.b", `\x`, "?#&="} {
+		f.Add(seed)
+	}
+	echoV := func(c *tctx) error {
+		return c.String(http.StatusOK, c.RoutePattern()+" v="+c.Param("v")+" q="+c.Query("v"))
+	}
+	// One router per pattern: Expand knows its own pattern and nothing of the
+	// routes it competes with.
+	paths := []string{"/v/{v}", "/t/{v}-x", "/r/{v...}", "/{v...}", "/n/{v:int}"}
+	routers := make(map[string]*Router[*tctx], len(paths))
+	for _, p := range paths {
+		routers[p] = newTestRouter()
+		routers[p].GET(p, echoV)
+	}
+	r := newTestRouter()
+	r.GET("/q", echoV)
+	r.Host("{v}.example.com", func(h *Router[*tctx]) { h.GET("/", echoV) })
+
+	f.Fuzz(func(t *testing.T, v string) {
+		for _, p := range paths {
+			out, err := Expand(p, "v", v)
+			if err != nil {
+				continue
+			}
+			if strings.HasPrefix(out, "//") {
+				t.Fatalf("Expand(%q, %q) = %q, a link to another host", p, v, out)
+			}
+			if p == "/n/{v:int}" && !isDigits(v) {
+				t.Fatalf("Expand(%q, %q) = %q, but the class admits digits alone", p, v, out)
+			}
+			rec := do(routers[p], http.MethodGet, out)
+			if want := p + " v=" + v + " q="; rec.Code != http.StatusOK || rec.Body.String() != want {
+				t.Fatalf("Expand(%q, %q) = %q, which reached %d %q, want %q", p, v, out, rec.Code, rec.Body, want)
+			}
+		}
+
+		out, err := Expand("/q?v={v}", "v", v)
+		if err != nil {
+			t.Fatalf("Expand(/q?v={v}, %q) = %v; a query value takes anything", v, err)
+		}
+		u, err := url.Parse(out)
+		if err != nil || u.Query().Get("v") != v {
+			t.Fatalf("Expand(/q?v={v}, %q) = %q, which reads back as %q (%v)", v, out, u.Query().Get("v"), err)
+		}
+		if rec := do(r, http.MethodGet, out); rec.Body.String() != "/q v= q="+v {
+			t.Fatalf("GET %q reached %q", out, rec.Body)
+		}
+
+		host, err := Expand("{v}.example.com", "v", v)
+		if err != nil {
+			return
+		}
+		if want := "/ v=" + v + " q="; doHost(r, http.MethodGet, host, "/").Body.String() != want {
+			t.Fatalf("Expand({v}.example.com, %q) = %q, which does not route back", v, host)
 		}
 	})
 }
