@@ -596,7 +596,7 @@ func TestHXRedirectCarriesTheFlash(t *testing.T) {
 				t.Fatalf("the redirect carries Set-Cookie %q, want the flash cookie", line)
 			}
 
-			got := hxDo(r, http.MethodGet, "/chat", map[string]string{HeaderCookie: line})
+			got := hxDo(r, http.MethodGet, "/chat", map[string]string{HeaderCookie: cookieHeader(t, line)})
 			if want := "[{success welcome}]"; got.Body.String() != want {
 				t.Errorf("the next page shows %q, want %q", got.Body, want)
 			}

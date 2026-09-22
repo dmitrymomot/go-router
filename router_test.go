@@ -2630,7 +2630,7 @@ func TestCookieCodecCarriesAFlashAcrossARedirect(t *testing.T) {
 				t.Fatalf("POST /users = %d, want 303; body: %s", post.Code, post.Body)
 			}
 			req := httptest.NewRequest(http.MethodGet, "/users", nil)
-			req.Header.Set("Cookie", post.Header().Get("Set-Cookie"))
+			req.Header.Set("Cookie", cookieHeader(t, post.Header().Get("Set-Cookie")))
 			rec := httptest.NewRecorder()
 			tc.r.ServeHTTP(rec, req)
 			if got, want := rec.Body.String(), "[{success saved}]"; got != want {
