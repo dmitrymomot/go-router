@@ -136,7 +136,6 @@ func TestHTMXRequestSpelling(t *testing.T) {
 		HeaderHXTrigger, HeaderHXLocation,
 		HeaderHXPushURL, HeaderHXRedirect, HeaderHXRefresh, HeaderHXReplaceURL,
 		HeaderHXReswap, HeaderHXRetarget, HeaderHXReselect,
-		HeaderHXTriggerAfterSettle, HeaderHXTriggerAfterSwap,
 	} {
 		if got := http.CanonicalHeaderKey(name); got != name {
 			t.Errorf("the constant %q is not canonical, want %q", name, got)
@@ -357,8 +356,6 @@ func TestHXHeaders(t *testing.T) {
 			Reswap(HXSwapOuterHTML).
 			Refresh().
 			Trigger("saved", "closed").
-			TriggerAfterSwap("swapped").
-			TriggerAfterSettle("settled").
 			Render(http.StatusOK, comp("<tr></tr>"))
 	})
 
@@ -377,8 +374,6 @@ func TestHXHeaders(t *testing.T) {
 		{HeaderHXReswap, "outerHTML"},
 		{HeaderHXRefresh, "true"},
 		{HeaderHXTrigger, "saved, closed"},
-		{HeaderHXTriggerAfterSwap, "swapped"},
-		{HeaderHXTriggerAfterSettle, "settled"},
 	} {
 		if got := rec.Header().Get(tc.header); got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.header, got, tc.want)
@@ -443,20 +438,13 @@ func TestHXTriggerEvents(t *testing.T) {
 				HXEvent{Name: "count", Detail: map[string]int{"rows": 7}},
 				HXEvent{Name: "plain"},
 			).
-			TriggerEventsAfterSwap(HXEvent{Name: "swapped", Detail: true}).
-			TriggerEventsAfterSettle(HXEvent{Name: "settled", Detail: 1}).
 			NoSwap()
 	})
 
-	rec := do(r, http.MethodGet, "/")
-	for _, tc := range []struct{ header, want string }{
-		{HeaderHXTrigger, `{"toast":"Gespeichert","count":{"rows":7},"plain":null}`},
-		{HeaderHXTriggerAfterSwap, `{"swapped":true}`},
-		{HeaderHXTriggerAfterSettle, `{"settled":1}`},
-	} {
-		if got := rec.Header().Get(tc.header); got != tc.want {
-			t.Errorf("%s = %q, want %q", tc.header, got, tc.want)
-		}
+	got := do(r, http.MethodGet, "/").Header().Get(HeaderHXTrigger)
+	want := `{"toast":"Gespeichert","count":{"rows":7},"plain":null}`
+	if got != want {
+		t.Errorf("%s = %q, want %q", HeaderHXTrigger, got, want)
 	}
 }
 

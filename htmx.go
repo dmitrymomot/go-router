@@ -26,17 +26,15 @@ const (
 
 // The htmx headers that a response carries. [Base.HX] sets them.
 const (
-	HeaderHXLocation           = "Hx-Location"
-	HeaderHXPushURL            = "Hx-Push-Url"
-	HeaderHXRedirect           = "Hx-Redirect"
-	HeaderHXRefresh            = "Hx-Refresh"
-	HeaderHXReplaceURL         = "Hx-Replace-Url"
-	HeaderHXReswap             = "Hx-Reswap"
-	HeaderHXRetarget           = "Hx-Retarget"
-	HeaderHXReselect           = "Hx-Reselect"
-	HeaderHXTrigger            = "Hx-Trigger"
-	HeaderHXTriggerAfterSettle = "Hx-Trigger-After-Settle"
-	HeaderHXTriggerAfterSwap   = "Hx-Trigger-After-Swap"
+	HeaderHXLocation   = "Hx-Location"
+	HeaderHXPushURL    = "Hx-Push-Url"
+	HeaderHXRedirect   = "Hx-Redirect"
+	HeaderHXRefresh    = "Hx-Refresh"
+	HeaderHXReplaceURL = "Hx-Replace-Url"
+	HeaderHXReswap     = "Hx-Reswap"
+	HeaderHXRetarget   = "Hx-Retarget"
+	HeaderHXReselect   = "Hx-Reselect"
+	HeaderHXTrigger    = "Hx-Trigger"
 )
 
 // The swap styles that [HXResponse.Reswap] takes.
@@ -263,57 +261,73 @@ func (h HXResponse) Refresh() HXResponse {
 	return h.set(HeaderHXRefresh, "true")
 }
 
-// Trigger fires the named events on the client as soon as the answer arrives.
-// A name has to be ASCII, and it cannot be empty, hold a comma or a line
-// break, or repeat; use [HXResponse.TriggerEvents] for anything else.
+// Trigger fires the named events on the element that made the request, once
+// htmx has swapped the answer in. The events bubble. A name has to be ASCII,
+// and it cannot be empty, hold a comma or a line break, or repeat; use
+// [HXResponse.TriggerEvents] for anything else.
 func (h HXResponse) Trigger(names ...string) HXResponse {
-	return h.triggerNames(HeaderHXTrigger, names)
-}
-
-// TriggerAfterSwap is [HXResponse.Trigger], fired once the swap is done.
-func (h HXResponse) TriggerAfterSwap(names ...string) HXResponse {
-	return h.triggerNames(HeaderHXTriggerAfterSwap, names)
-}
-
-// TriggerAfterSettle is [HXResponse.Trigger], fired once the swap has settled.
-func (h HXResponse) TriggerAfterSettle(names ...string) HXResponse {
-	return h.triggerNames(HeaderHXTriggerAfterSettle, names)
-}
-
-// TriggerEvents fires events on the client, each with its detail as JSON. A
-// name outside ASCII is escaped, so any name that is not empty and does not
-// repeat works here.
-func (h HXResponse) TriggerEvents(events ...HXEvent) HXResponse {
-	return h.triggerEvents(HeaderHXTrigger, events)
-}
-
-// TriggerEventsAfterSwap is [HXResponse.TriggerEvents], fired once the swap is
-// done.
-func (h HXResponse) TriggerEventsAfterSwap(events ...HXEvent) HXResponse {
-	return h.triggerEvents(HeaderHXTriggerAfterSwap, events)
-}
-
-// TriggerEventsAfterSettle is [HXResponse.TriggerEvents], fired once the swap
-// has settled.
-func (h HXResponse) TriggerEventsAfterSettle(events ...HXEvent) HXResponse {
-	return h.triggerEvents(HeaderHXTriggerAfterSettle, events)
-}
-
-func (h HXResponse) triggerNames(header string, names []string) HXResponse {
 	if h.b.hxError() != nil || len(names) == 0 {
 		return h
 	}
 	for i, n := range names {
 		if err := validEventName(n); err != nil {
 			return h.fail(fmt.Errorf(
-				"router: the %s header cannot carry the event name %q: %w", header, n, err))
+				"router: the %s header cannot carry the event name %q: %w", HeaderHXTrigger, n, err))
 		}
 		if slices.Contains(names[:i], n) {
 			return h.fail(fmt.Errorf(
-				"router: the %s header names the event %q twice", header, n))
+				"router: the %s header names the event %q twice", HeaderHXTrigger, n))
 		}
 	}
-	return h.set(header, strings.Join(names, ", "))
+	return h.set(HeaderHXTrigger, strings.Join(names, ", "))
+}
+
+// TriggerEvents is [HXResponse.Trigger] with a detail for each event, sent as
+// JSON. A name outside ASCII is escaped, so any name that is not empty and
+// does not repeat works here.
+func (h HXResponse) TriggerEvents(events ...HXEvent) HXResponse {
+	if h.b.hxError() != nil || len(events) == 0 {
+		return h
+	}
+
+	var seen map[string]bool
+	if len(events) > 1 {
+		seen = make(map[string]bool, len(events))
+	}
+
+	var sb strings.Builder
+	sb.WriteByte('{')
+	for i, e := range events {
+		if e.Name == "" {
+			return h.fail(fmt.Errorf("router: the %s header holds an event without a name", HeaderHXTrigger))
+		}
+		if seen != nil {
+			if seen[e.Name] {
+				return h.fail(fmt.Errorf(
+					"router: the %s header names the event %q twice", HeaderHXTrigger, e.Name))
+			}
+			seen[e.Name] = true
+		}
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		name, err := json.Marshal(e.Name, h.b.headerJSONOptions()...)
+		if err != nil {
+			return h.fail(fmt.Errorf(
+				"router: encode the name of the %s event %q: %w", HeaderHXTrigger, e.Name, err))
+		}
+		sb.Write(name)
+		sb.WriteByte(':')
+
+		detail, err := json.Marshal(e.Detail, h.b.headerJSONOptions()...)
+		if err != nil {
+			return h.fail(fmt.Errorf(
+				"router: encode the detail of the %s event %q: %w", HeaderHXTrigger, e.Name, err))
+		}
+		sb.Write(detail)
+	}
+	sb.WriteByte('}')
+	return h.set(HeaderHXTrigger, escapeNonASCII(sb.String()))
 }
 
 func validEventName(name string) error {
@@ -342,51 +356,6 @@ func isASCII(s string) bool {
 		}
 	}
 	return true
-}
-
-func (h HXResponse) triggerEvents(header string, events []HXEvent) HXResponse {
-	if h.b.hxError() != nil || len(events) == 0 {
-		return h
-	}
-
-	var seen map[string]bool
-	if len(events) > 1 {
-		seen = make(map[string]bool, len(events))
-	}
-
-	var sb strings.Builder
-	sb.WriteByte('{')
-	for i, e := range events {
-		if e.Name == "" {
-			return h.fail(fmt.Errorf("router: the %s header holds an event without a name", header))
-		}
-		if seen != nil {
-			if seen[e.Name] {
-				return h.fail(fmt.Errorf(
-					"router: the %s header names the event %q twice", header, e.Name))
-			}
-			seen[e.Name] = true
-		}
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		name, err := json.Marshal(e.Name, h.b.headerJSONOptions()...)
-		if err != nil {
-			return h.fail(fmt.Errorf(
-				"router: encode the name of the %s event %q: %w", header, e.Name, err))
-		}
-		sb.Write(name)
-		sb.WriteByte(':')
-
-		detail, err := json.Marshal(e.Detail, h.b.headerJSONOptions()...)
-		if err != nil {
-			return h.fail(fmt.Errorf(
-				"router: encode the detail of the %s event %q: %w", header, e.Name, err))
-		}
-		sb.Write(detail)
-	}
-	sb.WriteByte('}')
-	return h.set(header, escapeNonASCII(sb.String()))
 }
 
 // A browser reads a header as one byte per character, so UTF-8 reaches the
