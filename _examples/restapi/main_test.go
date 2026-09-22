@@ -19,34 +19,32 @@ func bearer() routertest.RequestOption {
 func TestEveryRoute(t *testing.T) {
 	r := newRouter(NewStore(), testKey)
 
-	routertest.Get(r, "/healthz").AssertStatus(t, http.StatusNoContent)
+	routertest.Get(r, "/healthz").Expect(t).Status(http.StatusNoContent)
 
 	made := routertest.Do(r, http.MethodPost, "/v1/users", bearer(),
 		routertest.JSONBody(UserInput{Name: "ann", Email: "ann@example.com"}))
-	made.AssertStatus(t, http.StatusCreated)
-	made.AssertBody(t, `{"name":"ann","email":"ann@example.com","id":1}`)
+	made.Expect(t).Status(http.StatusCreated).Body(`{"name":"ann","email":"ann@example.com","id":1}`)
 
-	routertest.Get(r, "/v1/users").AssertStatus(t, http.StatusOK)
-	routertest.Get(r, "/v1/users/1").AssertStatus(t, http.StatusOK)
+	routertest.Get(r, "/v1/users").Expect(t).Status(http.StatusOK)
+	routertest.Get(r, "/v1/users/1").Expect(t).Status(http.StatusOK)
 
 	replaced := routertest.Do(r, http.MethodPut, "/v1/users/1", bearer(),
 		routertest.JSONBody(UserInput{Name: "bob", Email: "bob@example.com"}))
-	replaced.AssertBody(t, `{"name":"bob","email":"bob@example.com","id":1}`)
+	replaced.Expect(t).Body(`{"name":"bob","email":"bob@example.com","id":1}`)
 
 	routertest.Do(r, http.MethodDelete, "/v1/users/1", bearer()).
-		AssertStatus(t, http.StatusNoContent)
-	routertest.Get(r, "/v1/users/1").AssertStatus(t, http.StatusNotFound)
+		Expect(t).Status(http.StatusNoContent)
+	routertest.Get(r, "/v1/users/1").Expect(t).Status(http.StatusNotFound)
 }
 
 func TestOnlyTheWritesNeedTheKey(t *testing.T) {
 	r := newRouter(NewStore(), testKey)
 
-	routertest.Get(r, "/v1/users").AssertStatus(t, http.StatusOK)
+	routertest.Get(r, "/v1/users").Expect(t).Status(http.StatusOK)
 
 	res := routertest.Do(r, http.MethodPost, "/v1/users",
 		routertest.JSONBody(UserInput{Name: "ann", Email: "ann@example.com"}))
-	res.AssertStatus(t, http.StatusUnauthorized)
-	res.AssertHeader(t, router.HeaderWWWAuthenticate, "Bearer")
+	res.Expect(t).Status(http.StatusUnauthorized).Header(router.HeaderWWWAuthenticate, "Bearer")
 }
 
 func TestValidationNamesTheFields(t *testing.T) {
@@ -54,7 +52,7 @@ func TestValidationNamesTheFields(t *testing.T) {
 
 	res := routertest.Do(r, http.MethodPost, "/v1/users", bearer(),
 		routertest.JSONBody(UserInput{Email: "not-an-address"}))
-	res.AssertStatus(t, http.StatusUnprocessableEntity)
+	res.Expect(t).Status(http.StatusUnprocessableEntity)
 
 	body, err := res.ErrorBody()
 	if err != nil {
@@ -77,7 +75,7 @@ func TestAMissingUserKeepsItsTextOnTheServer(t *testing.T) {
 	r := newRouter(NewStore(), testKey)
 
 	res := routertest.Get(r, "/v1/users/9")
-	res.AssertStatus(t, http.StatusNotFound)
+	res.Expect(t).Status(http.StatusNotFound)
 	body, err := res.ErrorBody()
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +87,7 @@ func TestAMissingUserKeepsItsTextOnTheServer(t *testing.T) {
 
 func TestABadIDIsNotFound(t *testing.T) {
 	r := newRouter(NewStore(), testKey)
-	routertest.Get(r, "/v1/users/abc").AssertStatus(t, http.StatusNotFound)
+	routertest.Get(r, "/v1/users/abc").Expect(t).Status(http.StatusNotFound)
 }
 
 func TestTheMountAppearsInTheRouteTable(t *testing.T) {

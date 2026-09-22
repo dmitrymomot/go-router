@@ -93,7 +93,7 @@ func TestTheApexAnswersOnItself(t *testing.T) {
 	h := newTestRouter(t)
 
 	res := routertest.Get(h, "http://"+apex+"/", routertest.Host(apex))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(res.String(), "Create a workspace") {
 		t.Errorf("the landing page has no signup link")
 	}
@@ -104,8 +104,7 @@ func TestWWWSendsEveryRequestToTheApex(t *testing.T) {
 
 	for _, target := range []string{"/", "/signup", "/signup?plan=pro&ref=a%20b", "/nothing/here"} {
 		res := routertest.Get(h, "http://www."+apex+target, routertest.Host("www."+apex))
-		res.AssertStatus(t, http.StatusMovedPermanently)
-		res.AssertHeader(t, router.HeaderLocation, "http://"+apex+target)
+		res.Expect(t).Redirect(http.StatusMovedPermanently, "http://"+apex+target)
 	}
 }
 
@@ -114,7 +113,7 @@ func TestTheApexHasNoDoorOfItsOwn(t *testing.T) {
 
 	for _, path := range []string{"/login", "/enter"} {
 		routertest.Get(h, "http://"+apex+path, routertest.Host(apex)).
-			AssertStatus(t, http.StatusNotFound)
+			Expect(t).Status(http.StatusNotFound)
 	}
 }
 
@@ -122,7 +121,7 @@ func TestSignupHandsTheOwnerToTheWorkspaceHost(t *testing.T) {
 	h := newTestRouter(t)
 
 	made := signUp(t, h, "Acme, Inc.", "ann@example.com", testPassword)
-	made.AssertStatus(t, http.StatusSeeOther)
+	made.Expect(t).Status(http.StatusSeeOther)
 
 	location := made.Header.Get(router.HeaderLocation)
 	if !strings.HasPrefix(location, "http://acme-inc."+apex+"/enter?ticket=") {
@@ -136,8 +135,7 @@ func TestSignupHandsTheOwnerToTheWorkspaceHost(t *testing.T) {
 	}
 
 	entered := enterWith(t, h, location)
-	entered.AssertStatus(t, http.StatusSeeOther)
-	entered.AssertHeader(t, router.HeaderLocation, "/")
+	entered.Expect(t).Status(http.StatusSeeOther).Header(router.HeaderLocation, "/")
 
 	// No Domain: the session belongs to this workspace host alone.
 	if got := sessionOf(t, entered); got.Domain != "" || !got.HttpOnly {
@@ -149,11 +147,11 @@ func TestATicketWorksOnceAndOnItsOwnHost(t *testing.T) {
 	h := newTestRouter(t)
 	location := signUp(t, h, "Acme", "ann@example.com", testPassword).Header.Get(router.HeaderLocation)
 
-	enterWith(t, h, location).AssertHeader(t, router.HeaderLocation, "/")
+	enterWith(t, h, location).Expect(t).Header(router.HeaderLocation, "/")
 
 	// Spent. A second visit is sent to the door instead.
 	again := enterWith(t, h, location)
-	again.AssertHeader(t, router.HeaderLocation, "/login")
+	again.Expect(t).Header(router.HeaderLocation, "/login")
 	for _, c := range again.Cookies() {
 		if c.Name == sessionCookie && c.MaxAge >= 0 {
 			t.Error("a spent ticket still started a session")
@@ -172,7 +170,7 @@ func TestATicketOfOneWorkspaceIsNoUseAtAnother(t *testing.T) {
 	}
 	stolen := "http://" + host("beta") + "/enter?" + u.RawQuery
 	res := routertest.Get(h, stolen, routertest.Host(host("beta")))
-	res.AssertHeader(t, router.HeaderLocation, "/login")
+	res.Expect(t).Header(router.HeaderLocation, "/login")
 }
 
 func TestTheWorkspaceAnswersOnItsOwnHost(t *testing.T) {
@@ -182,13 +180,13 @@ func TestTheWorkspaceAnswersOnItsOwnHost(t *testing.T) {
 
 	at := host("acme")
 	owner := routertest.Get(h, "http://"+at+"/", routertest.Host(at), routertest.Cookie(session))
-	owner.AssertStatus(t, http.StatusOK)
+	owner.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(owner.String(), "ann@example.com") {
 		t.Errorf("the dashboard does not name the signed-in account: %s", owner)
 	}
 
 	guest := routertest.Get(h, "http://"+at+"/", routertest.Host(at))
-	guest.AssertStatus(t, http.StatusOK)
+	guest.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(guest.String(), "as a guest") {
 		t.Error("an anonymous reader is not told they are a guest")
 	}
@@ -203,14 +201,13 @@ func TestLoginBelongsToTheWorkspace(t *testing.T) {
 
 	at := host("acme")
 	form := routertest.Get(h, "http://"+at+"/login", routertest.Host(at))
-	form.AssertStatus(t, http.StatusOK)
+	form.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(form.String(), "Sign in to Acme") {
 		t.Errorf("the login form does not name its workspace: %s", form)
 	}
 
 	res := logIn(t, h, "acme", "ann@example.com", testPassword)
-	res.AssertStatus(t, http.StatusSeeOther)
-	res.AssertHeader(t, router.HeaderLocation, "/")
+	res.Expect(t).Status(http.StatusSeeOther).Header(router.HeaderLocation, "/")
 	if got := sessionOf(t, res); got.Domain != "" {
 		t.Errorf("session cookie domain = %q, want none", got.Domain)
 	}
@@ -226,9 +223,9 @@ func TestAnAccountOfOneWorkspaceCannotOpenAnother(t *testing.T) {
 
 	// The same address holds two accounts, and they are two accounts.
 	logIn(t, h, "beta", "ann@example.com", "another password").
-		AssertStatus(t, http.StatusSeeOther)
+		Expect(t).Status(http.StatusSeeOther)
 	logIn(t, h, "beta", "ann@example.com", testPassword).
-		AssertStatus(t, http.StatusUnprocessableEntity)
+		Expect(t).Status(http.StatusUnprocessableEntity)
 }
 
 func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
@@ -240,7 +237,7 @@ func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 
 	// The same answer either way: the form must not say who has an account.
 	for _, res := range []*routertest.Response{wrong, unknown} {
-		res.AssertStatus(t, http.StatusUnprocessableEntity)
+		res.Expect(t).Status(http.StatusUnprocessableEntity)
 		if !strings.Contains(res.String(), "do not match") {
 			t.Errorf("the form does not refuse the credentials: %s", res)
 		}
@@ -263,7 +260,7 @@ func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 	// form that carries no token has to fail here, as it does in a browser.
 	at := host("acme")
 	page := routertest.Get(h, "http://"+at+"/", routertest.Host(at), routertest.Cookie(session))
-	page.AssertStatus(t, http.StatusOK)
+	page.Expect(t).Status(http.StatusOK)
 
 	res := routertest.Do(h, http.MethodPost, "http://"+at+"/signout",
 		routertest.Host(at),
@@ -271,8 +268,7 @@ func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 		routertest.Cookie(session),
 		routertest.FormBody(url.Values{"_csrf": {hiddenToken(t, page.String())}}))
 
-	res.AssertStatus(t, http.StatusSeeOther)
-	res.AssertHeader(t, router.HeaderLocation, "/login")
+	res.Expect(t).Status(http.StatusSeeOther).Header(router.HeaderLocation, "/login")
 	if got := sessionOf(t, res); got.MaxAge >= 0 {
 		t.Errorf("sign out left the session alive: %+v", got)
 	}
@@ -309,14 +305,14 @@ func TestAnUnknownSubdomainIsNotFound(t *testing.T) {
 
 	at := host("nope")
 	routertest.Get(h, "http://"+at+"/", routertest.Host(at)).
-		AssertStatus(t, http.StatusNotFound)
+		Expect(t).Status(http.StatusNotFound)
 }
 
 func TestAnUnknownHostSaysWhichHostsAnswer(t *testing.T) {
 	h := newTestRouter(t)
 
 	res := routertest.Get(h, "http://127.0.0.1:8080/", routertest.Host("127.0.0.1:8080"))
-	res.AssertStatus(t, http.StatusNotFound)
+	res.Expect(t).Status(http.StatusNotFound)
 	if !strings.Contains(res.String(), baseDomain) {
 		t.Errorf("the unknown-host page does not name the base domain: %s", res)
 	}
@@ -327,7 +323,7 @@ func TestSignupRefusesANameWithoutLettersAndAReservedOne(t *testing.T) {
 
 	for _, name := range []string{"!!!", "WWW"} {
 		res := signUp(t, h, name, "ann@example.com", testPassword)
-		res.AssertStatus(t, http.StatusUnprocessableEntity)
+		res.Expect(t).Status(http.StatusUnprocessableEntity)
 		if !strings.Contains(res.String(), "Pick another name") {
 			t.Errorf("%q: the form does not say why it refused: %s", name, res)
 		}
@@ -339,7 +335,7 @@ func TestSignupRefusesATakenSubdomain(t *testing.T) {
 	signUp(t, h, "Acme", "ann@example.com", testPassword)
 
 	res := signUp(t, h, "acme", "bob@example.com", testPassword)
-	res.AssertStatus(t, http.StatusUnprocessableEntity)
+	res.Expect(t).Status(http.StatusUnprocessableEntity)
 	if !strings.Contains(res.String(), "taken") {
 		t.Errorf("the form does not say the subdomain is taken: %s", res)
 	}
@@ -349,7 +345,7 @@ func TestSignupNeedsAPasswordOfEightCharacters(t *testing.T) {
 	h := newTestRouter(t)
 
 	res := signUp(t, h, "Acme", "ann@example.com", "short")
-	res.AssertStatus(t, http.StatusUnprocessableEntity)
+	res.Expect(t).Status(http.StatusUnprocessableEntity)
 	if !strings.Contains(res.String(), "at least 8 characters") {
 		t.Errorf("the form does not name the password rule: %s", res)
 	}
@@ -362,5 +358,5 @@ func TestSignupNeedsTheCSRFToken(t *testing.T) {
 		routertest.FormBody(url.Values{
 			"name": {"Acme"}, "email": {"ann@example.com"}, "password": {testPassword},
 		}))
-	res.AssertStatus(t, http.StatusForbidden)
+	res.Expect(t).Status(http.StatusForbidden)
 }
