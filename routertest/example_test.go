@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -100,6 +101,50 @@ func ExampleResponse_Expect() {
 		ContentType(router.MIMETextPlain).
 		Contains("user 7").
 		NotContains("error")
+}
+
+// A Client keeps the cookies of every answer and sends them back, as a
+// browser does, so a test can sign in once and go on as that user.
+func ExampleClient() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
+	r := router.New(newContext)
+	r.POST("/login", func(c *appContext) error {
+		c.SetCookie(c.NewCookie("session", c.FormValue("name"), time.Hour))
+		return c.Redirect(http.StatusSeeOther, "/me")
+	})
+	r.GET("/me", func(c *appContext) error {
+		return c.Stringf(http.StatusOK, "hello %s", c.Cookie("session"))
+	})
+
+	cl := routertest.NewClient(tb, r, routertest.Host("app.example.com"))
+	cl.Do(http.MethodPost, "/login", routertest.FormBody(url.Values{"name": {"ann"}})).
+		Expect(tb).Redirect(http.StatusSeeOther, "/me")
+	cl.Get("/me").Expect(tb).Body("hello ann")
+
+	if cl.Cookie("session").Value != "ann" {
+		tb.Error("the client lost the session")
+	}
+	cl.SetCookie(&http.Cookie{Name: "session", Value: "bob"})
+	cl.Get("/me").Expect(tb).Body("hello bob")
+}
+
+// Follow sends the GET that a browser sends after a redirect, with the
+// cookies the redirect set.
+func ExampleClient_Follow() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
+	r := router.New(newContext)
+	r.POST("/users", func(c *appContext) error {
+		return c.Redirect(http.StatusSeeOther, "/users/7")
+	})
+	r.GET("/users/{id}", showUser)
+
+	cl := routertest.NewClient(tb, r)
+	res := cl.Do(http.MethodPost, "/users")
+	cl.Follow(res).Expect(tb).Status(http.StatusOK).Body("user 7")
 }
 
 // SignedCookie reads a signed cookie back through the codec of the router

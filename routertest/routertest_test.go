@@ -364,6 +364,8 @@ func TestRequestHelpersRejectNilInputs(t *testing.T) {
 		{name: "body reader", call: func() { routertest.Body("text/plain", nil) }},
 		{name: "cookie", call: func() { routertest.Cookie(nil) }},
 		{name: "recorder", call: func() { routertest.Recorded(nil) }},
+		{name: "client cookie", call: func() { routertest.NewClient(t, http.NotFoundHandler()).SetCookie(nil) }},
+		{name: "client follow", call: func() { routertest.NewClient(t, http.NotFoundHandler()).Follow(nil) }},
 		{name: "context", call: func() { routertest.Context(nilContext) }},
 		{name: "cookie codec", call: func() { routertest.WithCookieCodec(nil) }},
 		{name: "Serve handler", call: func() { routertest.Serve(nil, routertest.Request(http.MethodGet, "/")) }},
@@ -485,6 +487,9 @@ func TestContextHelpersRejectNilInputs(t *testing.T) {
 	}{
 		{name: "server handler", call: func(tb *recordingTB) {
 			routertest.NewServer(tb, nil)
+		}},
+		{name: "client handler", call: func(tb *recordingTB) {
+			routertest.NewClient(tb, nil)
 		}},
 	}
 	for _, tt := range tests {
