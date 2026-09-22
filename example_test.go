@@ -344,6 +344,30 @@ func ExampleBase_SetBodyLimit() {
 	// /note 413
 }
 
+func ExampleBase_FormRequired() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/confirm", func(c *Context) error {
+		token, err := c.FormRequired("token")
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, "confirmed "+token)
+	})
+
+	for _, body := range []string{"token=abc", "token="} {
+		req := httptest.NewRequest(http.MethodPost, "/confirm", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Println(rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+	// Output:
+	// 200 confirmed abc
+	// 400 invalid request
+	// token: is required
+}
+
 func ExampleNewPooled() {
 	r := router.NewPooled(
 		func() *Context { return &Context{DB: &store{}} },

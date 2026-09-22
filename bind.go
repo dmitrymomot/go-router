@@ -431,7 +431,7 @@ func ParseValueDefault[T any](s string, def T) T {
 // FormValue reads form field name from the body, or "" when the field is
 // absent or the body does not parse. Unlike [http.Request.FormValue] it reads
 // the body alone and never the query. Use [Base.FormValues] to see the parse
-// error.
+// error, and [Base.FormRequired] for a field that must be there.
 func (b *Base) FormValue(name string) string {
 	//nolint:errcheck // The caller asked for a value, not for the parse error.
 	b.parseForm()
@@ -439,7 +439,7 @@ func (b *Base) FormValue(name string) string {
 }
 
 // FormDefault reads form field name from the body, or reports def when the
-// field is absent or empty.
+// field is absent or empty, or the body does not parse.
 func (b *Base) FormDefault(name, def string) string {
 	//nolint:errcheck // Same as FormValue.
 	b.parseForm()
@@ -447,6 +447,23 @@ func (b *Base) FormDefault(name, def string) string {
 		return v[0]
 	}
 	return def
+}
+
+// FormRequired reads form field name from the body. An absent or empty field
+// reports an [ErrBadRequest] whose Details hold one [FieldError] for name, as
+// [Base.Bind] reports one. A body that does not parse reports what
+// [Base.FormValues] reports.
+func (b *Base) FormRequired(name string) (string, error) {
+	if err := b.parseForm(); err != nil {
+		return "", err
+	}
+	if v := b.req.PostForm.Get(name); v != "" {
+		return v, nil
+	}
+	fe := FieldError{Field: name, Message: "is required"}
+	return "", ErrBadRequest.WithMessage("invalid request").
+		WithDetails([]FieldError{fe}).
+		WithError(fe)
 }
 
 // FormValues reports the parsed form of the body. The router parses it once

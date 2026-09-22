@@ -1615,3 +1615,65 @@ func TestSetBodyLimitWithoutABodyAllocatesNothing(t *testing.T) {
 		t.Error("SetBodyLimit on a request without a body kept a cap")
 	}
 }
+
+func TestFormRequired(t *testing.T) {
+	var got error
+	r := newTestRouter()
+	r.MaxBodyBytes(64)
+	r.POST("/confirm", func(c *tctx) error {
+		token, err := c.FormRequired("token")
+		got = err
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, token)
+	})
+
+	missing := []FieldError{{Field: "token", Message: "is required"}}
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		wantStatus  int
+		wantBody    string
+		wantFields  []FieldError
+	}{
+		{name: "present", contentType: MIMEApplicationForm, body: "token=abc", wantStatus: http.StatusOK, wantBody: "abc"},
+		{name: "absent", contentType: MIMEApplicationForm, body: "other=1", wantStatus: http.StatusBadRequest, wantFields: missing},
+		{name: "empty", contentType: MIMEApplicationForm, body: "token=", wantStatus: http.StatusBadRequest, wantFields: missing},
+		{name: "a JSON body", contentType: MIMEApplicationJSON, body: `{"token":"abc"}`, wantStatus: http.StatusBadRequest, wantFields: missing},
+		{
+			name: "over the limit", contentType: MIMEApplicationForm,
+			body: "token=" + strings.Repeat("x", 100), wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name: "a malformed multipart body", contentType: "multipart/form-data; boundary=B",
+			body: "not multipart", wantStatus: http.StatusBadRequest, wantBody: "malformed form body",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got = nil
+			rec := post(r, "/confirm", tt.contentType, tt.body)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), tt.wantStatus)
+			}
+			if tt.wantBody != "" && strings.TrimSpace(rec.Body.String()) != tt.wantBody {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tt.wantBody)
+			}
+			if tt.wantFields == nil {
+				return
+			}
+			he, ok := errors.AsType[*HTTPError](got)
+			if !ok {
+				t.Fatalf("error = %v, want an *HTTPError", got)
+			}
+			if he.Message != "invalid request" || !reflect.DeepEqual(he.Details, tt.wantFields) {
+				t.Errorf("error = %q %#v, want %q %#v", he.Message, he.Details, "invalid request", tt.wantFields)
+			}
+			if fe, ok := errors.AsType[FieldError](got); !ok || fe != tt.wantFields[0] {
+				t.Errorf("errors.AsType[FieldError] = %#v, %v, want %#v", fe, ok, tt.wantFields[0])
+			}
+		})
+	}
+}
