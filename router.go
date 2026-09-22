@@ -15,6 +15,7 @@ import (
 
 // Route is one entry of the table that [Router.Routes] reports.
 type Route struct {
+	// Method is "*" for a route of [Router.Any] and for a mount.
 	Method  string
 	Pattern string
 	Host    string
