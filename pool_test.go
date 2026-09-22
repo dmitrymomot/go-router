@@ -382,7 +382,7 @@ func TestPoolDoesNotCarryParametersBetweenRequests(t *testing.T) {
 			narrowBody: "one=narrow1",
 		},
 		{
-			// Six parameters against an InlineParamBudget of four: paramVals
+			// Six parameters against an inline budget of four: paramVals
 			// spills to the heap, and what stays in paramArr is whatever the
 			// trie wrote before the spill.
 			name:       "spilled",
@@ -521,7 +521,7 @@ func TestPoolDoesNotCarryRouteMetaBetweenRequests(t *testing.T) {
 			var metas [][]any
 			r := newPooledRouter()
 			if observed {
-				r.Observe(func(Context, int, int64, time.Duration, error) {})
+				r.Observe(func(*pctx, int, int64, time.Duration, error) {})
 			}
 			r.Use(func(next HandlerFunc[*pctx]) HandlerFunc[*pctx] {
 				return func(c *pctx) error {

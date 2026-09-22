@@ -16,9 +16,6 @@ type Middleware[C Context] func(next HandlerFunc[C]) HandlerFunc[C]
 
 func chain[C Context](h HandlerFunc[C], mws []Middleware[C]) HandlerFunc[C] {
 	for _, mw := range slices.Backward(mws) {
-		if mw == nil {
-			panic("router: middleware must not be nil")
-		}
 		if h = mw(h); h == nil {
 			panic("router: middleware returned a nil handler")
 		}

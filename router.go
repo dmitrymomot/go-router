@@ -26,6 +26,9 @@ type registration[C Context] struct {
 	// claim is set on the routes of a RedirectHost, which own their host in
 	// every table they are installed into, a Mount replay included.
 	claim *hostClaim
+	// rest appends a catch-all under mountParam, a name no pattern can spell,
+	// so MountHandler and RedirectHost take the rest of the path.
+	rest bool
 }
 
 // hostClaim is the hold one RedirectHost call has on its host. It is not zero
@@ -45,7 +48,7 @@ type Router[C Context] struct {
 	// route touches the trie and the fallbacks.
 	root     *Router[C]
 	started  atomic.Bool
-	observer func(c Context, status int, size int64, d time.Duration, err error)
+	observer func(c C, status int, size int64, d time.Duration, err error)
 	pool     *sync.Pool
 	preChain HandlerFunc[C]
 	newCtx   func(http.ResponseWriter, *http.Request) C
@@ -76,7 +79,6 @@ type Router[C Context] struct {
 	errHandler   ErrorHandlerFunc[C]
 	mounted      *Router[C] // the router a Mount shim holds
 	preMws       []Middleware[C]
-	info         map[routeKey]routeInfo
 	classes      map[string]*matcher
 }
 
@@ -196,10 +198,6 @@ func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 // with one already registered, or a call that arrives after the router started
 // serving.
 func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
-	r.handle(method, pattern, h, mws)
-}
-
-func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
 	r.register(registration[C]{method: method, pattern: pattern, handler: h, mws: mws})
 }
 
@@ -232,6 +230,14 @@ func (r *Router[C]) install(reg registration[C]) {
 	if err != nil {
 		panic(err.Error())
 	}
+	if reg.rest {
+		full = joinPattern(full, mountRest)
+		if n := len(segs); n > 0 && segs[n-1].kind == segWildcard {
+			panic(fmt.Sprintf("router: catch-all must be the last segment in %q", full))
+		}
+		segs = append(segs, segment{kind: segWildcard, value: mountParam})
+		names = append(names, mountParam)
+	}
 	handler := chain(reg.handler, concatMiddleware(r.scopeMiddleware(), reg.mws))
 	// Read here rather than at registration, so a route that Mount replays
 	// takes the Meta scopes above the mount too.
@@ -239,14 +245,15 @@ func (r *Router[C]) install(reg registration[C]) {
 	if len(meta) > 0 {
 		handler = withRouteMeta(handler, &routeRecord{pattern: normalizePattern(full), meta: meta})
 	}
+	mh := methodHandler[C]{method: reg.method, handler: handler, meta: meta}
 
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
 		eng.anyHostRoutes = true
-		if err := eng.tree.insert(reg.method, full, segs, names, nil, handler, r.errSlot(eng, nil), eng.autoOptions, eng.allowCache); err != nil {
+		mh.errIdx = r.errSlot(eng, nil)
+		if err := eng.tree.insert(full, segs, names, nil, mh, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
-		r.record(reg, nil, full, meta)
 		return
 	}
 	if reg.claim != nil && normalizePattern(r.scopePrefix()) != "/" {
@@ -262,13 +269,13 @@ func (r *Router[C]) install(reg registration[C]) {
 		case claim && !e.tree.empty():
 			panic("router: the host " + e.pattern + " already holds routes, so RedirectHost cannot own it")
 		}
-		if err := e.tree.insert(reg.method, full, segs, names, e.names, handler, r.errSlot(eng, e), eng.autoOptions, eng.allowCache); err != nil {
+		mh.errIdx = r.errSlot(eng, e)
+		if err := e.tree.insert(full, segs, names, e.names, mh, eng.autoOptions, eng.allowCache); err != nil {
 			panic(err.Error())
 		}
 		if claim {
 			e.redirect = reg.claim
 		}
-		r.record(reg, e, full, meta)
 	}
 }
 
@@ -317,24 +324,15 @@ func (r *Router[C]) Any(pattern string, h HandlerFunc[C], mws ...Middleware[C]) 
 
 // Match registers h for each of methods. See [Router.Handle].
 //
-// Match panics on a nil handler, an empty methods, or an empty method in it.
+// Match panics on an empty methods, and where Handle panics.
 func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
-	if h == nil {
-		panic("router: Match needs a handler for " + pattern)
-	}
 	// Without this the call registers nothing and says nothing, and the route
 	// is missing at the first request instead of at the line that wrote it.
 	if len(methods) == 0 {
 		panic("router: Match needs at least one method for " + pattern)
 	}
-	validateMiddleware(mws)
-	for _, method := range methods {
-		if method == "" {
-			panic("router: Match needs non-empty methods")
-		}
-	}
 	for _, m := range methods {
-		r.handle(m, pattern, h, mws)
+		r.Handle(m, pattern, h, mws...)
 	}
 }
 
@@ -549,10 +547,13 @@ func (r *Router[C]) RedirectTrailingSlash(on bool) {
 // took, and the error the handler returned. It suits a metric; a log line
 // belongs in a middleware, which can also read the request.
 //
-// Observe panics on a scope, on a mounted router, or after the router started
-// serving.
-func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Duration, err error)) {
+// Observe panics on a scope, if fn is nil, on a mounted router, or after the
+// router started serving.
+func (r *Router[C]) Observe(fn func(c C, status int, size int64, d time.Duration, err error)) {
 	r.mustBeRoot("Observe", "it applies to the whole router")
+	if fn == nil {
+		panic("router: Observe needs a function")
+	}
 	defer r.guard("change the observer")()
 	r.root.observer = fn
 }

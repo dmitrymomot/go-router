@@ -31,7 +31,6 @@ func everyShape() *router.Router[*appContext] {
 	r.GET("/slug/{s:slug}", echoRoute)
 	r.GET("/reports/rep-{date}.csv", echoRoute)
 	r.GET("/files/{path...}", echoRoute)
-	r.GET("/bare/*", echoRoute)
 	r.POST("/users", echoRoute)
 	r.Any("/any", echoRoute)
 	r.MountHandler("/static", mount)

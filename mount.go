@@ -101,29 +101,19 @@ func (r *Router[C]) installSubtree() {
 	}
 }
 
-// MountRouter grafts a router with a context type of its own under prefix. Use
-// it where [Router.Mount] cannot go: sub keeps its own context, middleware and
-// error handler, and it sees the path with prefix removed. The [Router.Meta]
-// values of this router do not reach its routes.
-//
-// MountRouter panics if sub is nil.
-func (r *Router[C]) MountRouter[D Context](prefix string, sub *Router[D]) {
-	if sub == nil {
-		panic("router: MountRouter needs a router")
-	}
-	r.MountHandler(prefix, sub)
-}
-
 // MountHandler gives prefix and everything under it to a standard library
 // handler. h sees the path with prefix removed, so an [http.FileServer] or a
-// third-party mux mounts as it stands.
+// third-party mux mounts as it stands. A [Router] with a context type of its
+// own mounts here too: it keeps its own context, middleware and error handler,
+// and the [Router.Meta] values of this router do not reach its routes.
+// [Router.Routes] lists the mount as two routes of method "*", prefix and
+// prefix + "/{*...}".
 //
-// MountHandler panics if h is nil.
+// MountHandler panics if h is nil or a nil *Router.
 func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
-	if h == nil {
+	if isNilHandler(h) {
 		panic("router: MountHandler needs a handler")
 	}
-	prefix = normalizePattern(prefix)
 	handler := func(c C) error {
 		b := c.base()
 		req := stripMountPrefix(b.req, b.rawTail, b.pathEscaped, b.tailSlash)
@@ -131,8 +121,23 @@ func (r *Router[C]) MountHandler(prefix string, h http.Handler) {
 		h.ServeHTTP(b.res, req)
 		return nil
 	}
-	r.handle(anyMethod, prefix, handler, nil)
-	r.handle(anyMethod, joinPattern(prefix, "/{"+mountParam+"...}"), handler, nil)
+	r.register(registration[C]{method: anyMethod, pattern: prefix, handler: handler})
+	r.register(registration[C]{method: anyMethod, pattern: prefix, handler: handler, rest: true})
+}
+
+// anyRouter is what every *Router implements, whatever its context type.
+type anyRouter interface{ isRouter() bool }
+
+func (r *Router[C]) isRouter() bool { return r != nil }
+
+// isNilHandler reports a nil h, and a nil *Router of any context type inside a
+// non-nil h, which would panic at the first request instead of here.
+func isNilHandler(h http.Handler) bool {
+	if h == nil {
+		return true
+	}
+	rt, ok := h.(anyRouter)
+	return ok && !rt.isRouter()
 }
 
 func stripMountPrefix(r *http.Request, tail string, escaped, tailSlash bool) *http.Request {

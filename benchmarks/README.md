@@ -82,7 +82,7 @@ One route, `/{a}/{b}/{c}/{d}/{e}`, with all five names read. Five crosses the fo
 | echo 5.3.1 | 93.5 | 93.2–94.8 | 0 | 0 |
 | `http.ServeMux` | 210.4 | 207.2–215.2 | 240 | 4 |
 
-The overflow costs 128 bytes and one allocation, which is the documented price of a sixth parameter and the reason `InlineParamBudget` exists.
+The overflow costs 128 bytes and one allocation, which is the documented price of a sixth parameter and the reason the router keeps four parameters inline.
 
 ## Scale
 

@@ -42,8 +42,7 @@ type Context interface {
 // under it answers without a second allocation. Host parameters count too: a
 // "{tenant}.example.com" scope spends one before the path spends any. Going
 // over is not an error, it costs one allocation per request, and on a pooled
-// router that is the difference between zero and one. Route.Params and
-// InlineParamBudget let a route table assert it stays under.
+// router that is the difference between zero and one.
 const maxInlineParams = 4
 
 // Base carries the request, the response and the route. An application

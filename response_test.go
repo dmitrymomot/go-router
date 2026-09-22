@@ -323,7 +323,7 @@ func TestWriteHeaderCommitsASwitchingProtocols(t *testing.T) {
 func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
 	r := newTestRouter()
 	got := 0
-	r.Observe(func(_ Context, status int, _ int64, _ time.Duration, _ error) { got = status })
+	r.Observe(func(_ *tctx, status int, _ int64, _ time.Duration, _ error) { got = status })
 	r.GET("/ws", func(c *tctx) error {
 		c.Response().WriteHeader(http.StatusSwitchingProtocols)
 		return nil
@@ -398,7 +398,7 @@ func TestHijackCommitsTheResponse(t *testing.T) {
 		observed = make(chan int, 1)
 	)
 	r := newTestRouter()
-	r.Observe(func(_ Context, code int, _ int64, _ time.Duration, _ error) { observed <- code })
+	r.Observe(func(_ *tctx, code int, _ int64, _ time.Duration, _ error) { observed <- code })
 	r.GET("/hj", func(c *tctx) error {
 		conn, bw, err := c.Response().Hijack()
 		if err != nil {

@@ -14,6 +14,8 @@ type methodHandler[C Context] struct {
 	// errIdx points at the index, in engine.errHandlers, of the error handler
 	// that owns the route. compile rewrites it; see engine.errSlot.
 	errIdx *int32
+	// meta holds the values of the Meta scopes around the route, for Routes.
+	meta []any
 }
 
 type node[C Context] struct {
@@ -35,10 +37,10 @@ type node[C Context] struct {
 	names       []string
 }
 
-// insert adds h under segs, which the caller parsed from pattern with names as
-// its parameters. pattern names the route in errors and in the table.
+// insert adds mh under segs, which the caller parsed from pattern with names
+// as its parameters. pattern names the route in errors and in the table.
 func (n *node[C]) insert(
-	method, pattern string, segs []segment, names, hostNames []string, h HandlerFunc[C], errIdx *int32,
+	pattern string, segs []segment, names, hostNames []string, mh methodHandler[C],
 	autoOptions bool, allow map[*node[C]]string,
 ) error {
 	if len(hostNames) > 0 {
@@ -67,13 +69,13 @@ func (n *node[C]) insert(
 		cur.rec = &routeRecord{pattern: normalizePattern(pattern)}
 		cur.names = names
 	}
-	for _, mh := range cur.routes {
-		if mh.method == method {
-			return fmt.Errorf("router: %s %q is already registered", method, normalizePattern(pattern))
+	for _, have := range cur.routes {
+		if have.method == mh.method {
+			return fmt.Errorf("router: %s %q is already registered", mh.method, normalizePattern(pattern))
 		}
 	}
-	cur.routes = append(cur.routes, methodHandler[C]{method: method, handler: h, errIdx: errIdx})
-	if method == anyMethod {
+	cur.routes = append(cur.routes, mh)
+	if mh.method == anyMethod {
 		cur.catchAll = len(cur.routes)
 	}
 	allow[cur] = strings.Join(cur.allowed(autoOptions), ", ")
@@ -364,11 +366,10 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 	return nil, nil
 }
 
-func (n *node[C]) walk(fn func(pattern, method string, params int)) {
-	if n.rec != nil {
-		for _, mh := range n.routes {
-			fn(n.rec.pattern, mh.method, len(n.names))
-		}
+// walk calls fn for every node that holds a route.
+func (n *node[C]) walk(fn func(n *node[C])) {
+	if len(n.routes) > 0 {
+		fn(n)
 	}
 	for _, c := range n.statics {
 		c.walk(fn)

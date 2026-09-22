@@ -632,7 +632,7 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 			// reply stays a 200 with no body and matches its GET. Only the
 			// observer sees the panic: the error handler is skipped for a
 			// committed response.
-			r.Observe(func(_ router.Context, _ int, _ int64, _ time.Duration, err error) { failed = err })
+			r.Observe(func(_ *appContext, _ int, _ int64, _ time.Duration, err error) { failed = err })
 			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
 			r.GET("/x", tt.handler)
 

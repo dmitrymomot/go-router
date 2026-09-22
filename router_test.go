@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,7 +80,7 @@ func TestMatch(t *testing.T) {
 		"/a/{x}/c",
 		"/a/b/d",
 		"/files/{path...}",
-		"/assets/*",
+		"/assets/{rest...}",
 		"/orders/{id:[0-9]+}",
 		"/orders/{id}/cancel",
 	} {
@@ -101,7 +102,7 @@ func TestMatch(t *testing.T) {
 		{"/a/z/c", "/a/{x}/c x=z"},
 		{"/files/a/b/c.txt", "/files/{path...} path=a/b/c.txt"},
 		{"/files", "/files/{path...} path="},
-		{"/assets/css/app.css", "/assets/* *=css/app.css"},
+		{"/assets/css/app.css", "/assets/{rest...} rest=css/app.css"},
 		{"/orders/17", "/orders/{id:[0-9]+} id=17"},
 		{"/orders/17/cancel", "/orders/{id}/cancel id=17"},
 		{"/orders/abc/cancel", "/orders/{id}/cancel id=abc"},
@@ -351,7 +352,7 @@ func TestMountHandlerStripsThePrefix(t *testing.T) {
 	}
 }
 
-func TestMountRouterWithAnotherContextType(t *testing.T) {
+func TestMountHandlerTakesARouterOfAnotherContextType(t *testing.T) {
 	type adminCtx struct {
 		Base
 		Role string
@@ -364,7 +365,7 @@ func TestMountRouterWithAnotherContextType(t *testing.T) {
 	})
 
 	r := newTestRouter()
-	r.MountRouter("/admin", admin)
+	r.MountHandler("/admin", admin)
 
 	rec := do(r, http.MethodGet, "/admin/users/9")
 	if rec.Code != http.StatusOK {
@@ -464,12 +465,20 @@ func TestRoutesIntrospection(t *testing.T) {
 	r.GET("/users", echoRoute)
 	r.POST("/users", echoRoute)
 	r.Route("/admin", func(g *Router[*tctx]) { g.GET("/stats", echoRoute) })
+	// A mount reports its prefix and the catch-all under it, which no pattern
+	// can spell.
+	r.MountHandler("/static", http.NotFoundHandler())
+	r.HostHandler("cdn.example.com", http.NotFoundHandler())
 
 	got := r.Routes()
 	want := []Route{
 		{Method: http.MethodGet, Pattern: "/admin/stats"},
+		{Method: "*", Pattern: "/static"},
+		{Method: "*", Pattern: "/static/{*...}"},
 		{Method: http.MethodGet, Pattern: "/users"},
 		{Method: http.MethodPost, Pattern: "/users"},
+		{Host: "cdn.example.com", Method: "*", Pattern: "/"},
+		{Host: "cdn.example.com", Method: "*", Pattern: "/{*...}"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
@@ -778,7 +787,21 @@ func TestErrAbortHandlerStillReachesTheServer(t *testing.T) {
 	do(r, http.MethodGet, "/")
 }
 
-func TestMountRouterDoesNotShareParameters(t *testing.T) {
+// A nil *Router in an http.Handler is not a nil handler, so without the check
+// it would panic at the first request rather than at the mount.
+func TestMountHandlerRefusesANilRouter(t *testing.T) {
+	for name, h := range map[string]http.Handler{
+		"nil":                 nil,
+		"nil router":          (*Router[*tctx])(nil),
+		"nil router of *pctx": (*Router[*pctx])(nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			mustPanicContaining(t, "MountHandler needs a handler", func() { newTestRouter().MountHandler("/x", h) })
+		})
+	}
+}
+
+func TestMountedRouterDoesNotShareParameters(t *testing.T) {
 	type adminCtx struct {
 		Base
 	}
@@ -790,7 +813,7 @@ func TestMountRouterDoesNotShareParameters(t *testing.T) {
 	})
 
 	r := newTestRouter()
-	r.MountRouter("/t/{tenant}", sub)
+	r.MountHandler("/t/{tenant}", sub)
 
 	rec := do(r, http.MethodGet, "/t/acme/users/7")
 	if rec.Code != http.StatusOK {
@@ -1117,7 +1140,7 @@ func TestRoutesReportsTheMetadata(t *testing.T) {
 	want := []Route{
 		{Method: http.MethodGet, Pattern: "/health"},
 		{Method: http.MethodPost, Pattern: "/users", Meta: []any{op{Summary: "create a user"}}},
-		{Method: http.MethodGet, Pattern: "/users/{id}", Meta: []any{op{Summary: "read a user"}}, Params: 1},
+		{Method: http.MethodGet, Pattern: "/users/{id}", Meta: []any{op{Summary: "read a user"}}},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
@@ -1335,7 +1358,7 @@ func observedRouter(t *testing.T) (*Router[*tctx], *[]record) {
 	t.Helper()
 	var got []record
 	r := newTestRouter()
-	r.Observe(func(c Context, status int, size int64, _ time.Duration, err error) {
+	r.Observe(func(c *tctx, status int, size int64, _ time.Duration, err error) {
 		e := ""
 		if err != nil {
 			e = err.Error()
@@ -1414,7 +1437,7 @@ func TestObserveReportsTheStatusTheClientSaw(t *testing.T) {
 func TestObserveMeasuresTheRequest(t *testing.T) {
 	var d time.Duration
 	r := newTestRouter()
-	r.Observe(func(_ Context, _ int, _ int64, took time.Duration, _ error) { d = took })
+	r.Observe(func(_ *tctx, _ int, _ int64, took time.Duration, _ error) { d = took })
 	r.GET("/", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
 
 	do(r, http.MethodGet, "/")
@@ -1426,7 +1449,7 @@ func TestObserveMeasuresTheRequest(t *testing.T) {
 func TestObservePoolsTheContextAfterItReads(t *testing.T) {
 	var got []string
 	r := NewPooled(func() *tctx { return new(tctx) }, func(c *tctx) { c.Tag = "" })
-	r.Observe(func(c Context, _ int, _ int64, _ time.Duration, _ error) {
+	r.Observe(func(c *tctx, _ int, _ int64, _ time.Duration, _ error) {
 		got = append(got, c.RoutePattern())
 	})
 	r.GET("/users/{id}", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
@@ -1441,7 +1464,7 @@ func TestObservePoolsTheContextAfterItReads(t *testing.T) {
 func TestObserveLetsErrAbortHandlerThrough(t *testing.T) {
 	ran := false
 	r := newTestRouter()
-	r.Observe(func(Context, int, int64, time.Duration, error) { ran = true })
+	r.Observe(func(*tctx, int, int64, time.Duration, error) { ran = true })
 	r.GET("/", func(*tctx) error { panic(http.ErrAbortHandler) })
 
 	defer func() {
@@ -1484,13 +1507,25 @@ func TestRegistrationPanics(t *testing.T) {
 		}, "Match needs at least one method"},
 		{"Match with an empty method", func() {
 			newTestRouter().Match([]string{""}, "/x", echoRoute)
-		}, "Match needs non-empty methods"},
+		}, "Handle needs a method"},
 		{"Observe after serving", func() {
 			r := newTestRouter()
 			r.GET("/", echoRoute)
 			do(r, http.MethodGet, "/")
-			r.Observe(func(Context, int, int64, time.Duration, error) {})
+			r.Observe(func(*tctx, int, int64, time.Duration, error) {})
 		}, "after the router started serving"},
+		{"Observe with nil", func() {
+			newTestRouter().Observe(nil)
+		}, "Observe needs a function"},
+		{"Route with no prefix", func() {
+			newTestRouter().Route("", func(*Router[*tctx]) {})
+		}, "use Group"},
+		{"Route with the root prefix", func() {
+			newTestRouter().Route("/", func(*Router[*tctx]) {})
+		}, "use Group"},
+		{"MountHandler under a catch-all", func() {
+			newTestRouter().MountHandler("/files/{path...}", http.NotFoundHandler())
+		}, "catch-all must be the last segment"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1856,7 +1891,7 @@ func TestObserveSeesTheAnswerOfHandleError(t *testing.T) {
 	)
 	r := newTestRouter()
 	r.ErrorHandler(func(c *tctx, err error) error { return c.String(http.StatusLocked, "locked") })
-	r.Observe(func(_ Context, status int, size int64, _ time.Duration, err error) {
+	r.Observe(func(_ *tctx, status int, size int64, _ time.Duration, err error) {
 		gotStatus, gotSize, gotErr = status, size, err
 	})
 	r.Use(measure(&status, &size))
@@ -2306,16 +2341,31 @@ func mustPanicContaining(t *testing.T, want string, fn func()) {
 	fn()
 }
 
-// Route.Params is what a route table asserts against InlineParamBudget, so the
-// count has to be exactly what the request path puts in Base: host parameters
-// and path parameters together.
-func TestRouteParamsCountsHostAndPathTogether(t *testing.T) {
+// routeParams counts the host and path parameters of every route, keyed by
+// host and pattern, as the request path puts them in Base.
+func routeParams[C Context](r *Router[C]) map[string]int {
+	out := map[string]int{}
+	add := func(host string) func(n *node[C]) {
+		return func(n *node[C]) { out[host+"|"+n.rec.pattern] = len(n.names) }
+	}
+	r.eng.tree.walk(add(""))
+	if r.eng.hostSet != nil {
+		for _, e := range r.eng.hostSet.all {
+			e.tree.walk(add(e.pattern))
+		}
+	}
+	return out
+}
+
+// The count has to be exactly what the request path puts in Base: host
+// parameters and path parameters together.
+func TestRouteParamsCountHostAndPathTogether(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/health", echoRoute)
 	r.GET("/users/{id}", echoRoute)
 	r.GET("/files/{path...}", echoRoute)
 	r.GET("/f/{name}.{ext}", echoRoute)
-	r.GET("/assets/*", echoRoute)
+	r.MountHandler("/assets", http.NotFoundHandler())
 	r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
 		h.GET("/o/{oid}/t/{tid}/m/{mid}", echoRoute)
 		h.GET("/o/{oid}/t/{tid}/m/{mid}/r/{rid}", echoRoute)
@@ -2329,42 +2379,24 @@ func TestRouteParamsCountsHostAndPathTogether(t *testing.T) {
 		"|/users/{id}":      1,
 		"|/files/{path...}": 1,
 		"|/f/{name}.{ext}":  2,
-		"|/assets/*":        1,
+		"|/assets":          0,
+		"|/assets/{*...}":   1,
 		"{tenant}.example.com|/o/{oid}/t/{tid}/m/{mid}":         4,
 		"{tenant}.example.com|/o/{oid}/t/{tid}/m/{mid}/r/{rid}": 5,
 		"{env}.{region}.{tenant}.example.net|/o/{oid}":          4,
 	}
-	for _, rt := range r.Routes() {
-		key := rt.Host + "|" + rt.Pattern
-		w, ok := want[key]
-		if !ok {
-			t.Errorf("unexpected route %q", key)
-			continue
-		}
-		if rt.Params != w {
-			t.Errorf("%s: Params = %d, want %d", key, rt.Params, w)
-		}
-		delete(want, key)
-	}
-	for key := range want {
-		t.Errorf("route %q never appeared", key)
+	if got := routeParams(r); !maps.Equal(got, want) {
+		t.Errorf("parameters = %v, want %v", got, want)
 	}
 }
 
 // The library's own fixtures must stay inside the budget too, so a change to
 // maxInlineParams that the sample tables cannot afford fails here.
 func TestSampleTablesStayInsideTheInlineBudget(t *testing.T) {
-	for name, build := range map[string]func() *Router[*tctx]{
-		"siteRouter": siteRouter,
-	} {
-		t.Run(name, func(t *testing.T) {
-			for _, rt := range build().Routes() {
-				if rt.Params > InlineParamBudget {
-					t.Errorf("%s %s%s carries %d parameters, over the budget of %d",
-						rt.Method, rt.Host, rt.Pattern, rt.Params, InlineParamBudget)
-				}
-			}
-		})
+	for route, n := range routeParams(siteRouter()) {
+		if n > maxInlineParams {
+			t.Errorf("%s carries %d parameters, over the budget of %d", route, n, maxInlineParams)
+		}
 	}
 }
 
@@ -2583,7 +2615,7 @@ func TestMountRefusesARouterCarryingRootOnlySettings(t *testing.T) {
 			s.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next })
 		}},
 		{"Observe", "an observer", func(s *Router[*tctx]) {
-			s.Observe(func(Context, int, int64, time.Duration, error) {})
+			s.Observe(func(*tctx, int, int64, time.Duration, error) {})
 		}},
 		{"HandleOPTIONS", "HandleOPTIONS(false)", func(s *Router[*tctx]) { s.HandleOPTIONS(false) }},
 		{"RedirectTrailingSlash", "RedirectTrailingSlash(true)", func(s *Router[*tctx]) { s.RedirectTrailingSlash(true) }},
@@ -2739,13 +2771,17 @@ func TestScopeCoverageDoesNotAllocate(t *testing.T) {
 	}
 }
 
-// {*} goes through the brace branch, which rejects duplicates; the bare form
-// has to do the same.
-func TestBareStarChecksForADuplicateName(t *testing.T) {
-	if err := ValidatePattern("/{*}/*"); err == nil ||
-		!strings.Contains(err.Error(), "duplicate parameter") {
-		t.Errorf("ValidatePattern(/{*}/*) = %v, want a duplicate-parameter error", err)
+// {name...} is the only catch-all, and "*" is not a parameter name: the
+// router keeps it for the catch-all of a mount.
+func TestStarIsNotAParameterName(t *testing.T) {
+	for _, p := range []string{"/*", "/assets/*", "/{*}", "/{*...}", "/{*:int}", "/x-{*}.csv", "/a*"} {
+		if err := ValidatePattern(p); err == nil || !strings.Contains(err.Error(), "{name...}") {
+			t.Errorf("ValidatePattern(%q) = %v, want an error that points to {name...}", p, err)
+		}
 	}
+	mustPanicContaining(t, "{name...}", func() {
+		newTestRouter().Host("{*}.example.com", func(*Router[*tctx]) {})
+	})
 }
 
 // Registration and the first request order against each other, so the check
@@ -3300,7 +3336,7 @@ func TestScopeMiddlewareSeesMetaOfANestedRoute(t *testing.T) {
 		seen = append(seen, "error="+string(p))
 		return c.NoContent(StatusOf(err))
 	})
-	r.Observe(func(c Context, _ int, _ int64, _ time.Duration, _ error) {
+	r.Observe(func(c *tctx, _ int, _ int64, _ time.Duration, _ error) {
 		p, _ := MetaAs[perm](c)
 		seen = append(seen, "observe="+string(p))
 	})

@@ -160,7 +160,13 @@ func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 // Route opens a scope under prefix. The patterns that fn registers are
 // relative to it, and the scope carries the middleware of its parent. Its
 // middleware also wraps the 404 and 405 answers under prefix; see [Router.Use].
+//
+// Route panics on an empty prefix or "/"; [Router.Group] opens a scope without
+// one.
 func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
+	if normalizePattern(prefix) == "/" {
+		panic("router: Route needs a prefix; use Group for a scope without one")
+	}
 	var c *Router[C]
 	r.inOneScope(func() {
 		c = r.newChild(prefix, nil, nil)
@@ -183,8 +189,8 @@ func (r *Router[C]) With(mws ...Middleware[C]) *Router[C] {
 // mounted into it, inherit the values. [Router.Routes] reports them, which lets
 // a route table drive a permission list or an OpenAPI document, and
 // [Base.RouteMeta] and [MetaAs] read them while the route answers. Values are
-// shared by every request, so keep them immutable. A router mounted with its
-// own context type (MountRouter, HostRouter) does not see them.
+// shared by every request, so keep them immutable. A router of another context
+// type, mounted with MountHandler or HostHandler, does not see them.
 //
 // Meta panics on no value, on a nil value, or after the router started serving.
 func (r *Router[C]) Meta(v ...any) *Router[C] {

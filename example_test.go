@@ -111,7 +111,7 @@ func ExampleRouter_Mount() {
 	// GET /t/{tenant}/api/users/{id}
 }
 
-func ExampleRouter_MountRouter() {
+func ExampleRouter_MountHandler() {
 	type AdminContext struct {
 		router.Base
 		Role string
@@ -125,7 +125,7 @@ func ExampleRouter_MountRouter() {
 	})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.MountRouter("/admin", admin)
+	r.MountHandler("/admin", admin)
 
 	fmt.Println(serve(r, http.MethodGet, "/admin/users/7"))
 	// Output:
@@ -185,7 +185,7 @@ func ExampleRouter_Host() {
 	// 200 ok
 }
 
-func ExampleRouter_HostRouter() {
+func ExampleRouter_HostHandler() {
 	type APIContext struct {
 		router.Base
 		Version string
@@ -202,7 +202,7 @@ func ExampleRouter_HostRouter() {
 	})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.HostRouter("api.example.com", api)
+	r.HostHandler("api.example.com", api)
 	r.Host("example.com", func(h *router.Router[*Context]) {
 		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
 	})

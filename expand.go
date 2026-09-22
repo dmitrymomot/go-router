@@ -446,31 +446,21 @@ func parseURLTemplate(pattern string) []urlPart {
 		lit   int
 	)
 	for i := 0; i < len(pattern); {
-		switch pattern[i] {
-		case '{':
-			end, ok := closingBrace(pattern, i)
-			if !ok {
-				i = len(pattern)
-				continue
-			}
-			if lit < i {
-				parts = append(parts, urlPart{lit: pattern[lit:i]})
-			}
-			name, constraint, _ := strings.Cut(pattern[i+1:end], ":")
-			name, rest := strings.CutSuffix(name, "...")
-			parts = append(parts, urlPart{name: name, constraint: constraint, rest: rest})
-			i, lit = end+1, end+1
-
-		case '*':
-			if lit < i {
-				parts = append(parts, urlPart{lit: pattern[lit:i]})
-			}
-			parts = append(parts, urlPart{name: mountParam, rest: true})
-			i, lit = i+1, i+1
-
-		default:
+		if pattern[i] != '{' {
 			i++
+			continue
 		}
+		end, ok := closingBrace(pattern, i)
+		if !ok {
+			break
+		}
+		if lit < i {
+			parts = append(parts, urlPart{lit: pattern[lit:i]})
+		}
+		name, constraint, _ := strings.Cut(pattern[i+1:end], ":")
+		name, rest := strings.CutSuffix(name, "...")
+		parts = append(parts, urlPart{name: name, constraint: constraint, rest: rest})
+		i, lit = end+1, end+1
 	}
 	if lit < len(pattern) {
 		parts = append(parts, urlPart{lit: pattern[lit:]})

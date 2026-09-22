@@ -62,7 +62,7 @@ func (r *Router[C]) Redirect(pattern string, status int, target string) {
 		panic(fmt.Sprintf("router: the redirect of %q points at itself", full))
 	}
 
-	r.handle(http.MethodGet, pattern, func(c C) error {
+	r.Handle(http.MethodGet, pattern, func(c C) error {
 		b := c.base()
 		loc, err := tmpl.expand(b.param)
 		if err != nil {
@@ -76,7 +76,7 @@ func (r *Router[C]) Redirect(pattern string, status int, target string) {
 			loc += sep + q
 		}
 		return b.Redirect(status, loc)
-	}, nil)
+	})
 }
 
 // sameShape reports whether a and b build the same path from the same values.
@@ -198,7 +198,7 @@ func (r *Router[C]) RedirectHost(pattern string, status int, target string) {
 	claim := new(hostClaim)
 	r.Host(pattern, func(g *Router[C]) {
 		g.register(registration[C]{method: anyMethod, pattern: "/", handler: h, claim: claim})
-		g.register(registration[C]{method: anyMethod, pattern: "/{" + mountParam + "...}", handler: h, claim: claim})
+		g.register(registration[C]{method: anyMethod, pattern: "/", handler: h, claim: claim, rest: true})
 	})
 }
 

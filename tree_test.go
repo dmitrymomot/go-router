@@ -55,10 +55,10 @@ func TestRadixSplitting(t *testing.T) {
 		},
 		{
 			name:     "a catch-all needs a separator in front of it",
-			patterns: []string{"/assets/*", "/assetsfoo"},
+			patterns: []string{"/assets/{rest...}", "/assetsfoo"},
 			requests: map[string]string{
-				"/assets/a/b.css": "/assets/*",
-				"/assets":         "/assets/*",
+				"/assets/a/b.css": "/assets/{rest...}",
+				"/assets":         "/assets/{rest...}",
 				"/assetsfoo":      "/assetsfoo",
 				"/assetsbar":      "",
 			},

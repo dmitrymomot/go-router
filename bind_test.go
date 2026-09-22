@@ -851,7 +851,7 @@ func TestMultipartTempFilesGoAwayWithTheRequest(t *testing.T) {
 	}
 	mounted := func() http.Handler {
 		outer := newTestRouter()
-		outer.MountRouter("/api", uploads())
+		outer.MountHandler("/api", uploads())
 		return outer
 	}
 

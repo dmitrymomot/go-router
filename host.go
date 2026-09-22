@@ -590,35 +590,17 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	return c
 }
 
-// HostRouter gives pattern to a router with a context type of its own. sub
-// answers every request for that host, and it keeps its own middleware, error
-// handler and context. The [Router.Meta] values of this router do not reach
-// its routes.
+// HostHandler gives pattern to a standard library handler, which answers every
+// request for that host. A [Router] with a context type of its own goes here
+// too: it keeps its own context, middleware and error handler, and the
+// [Router.Meta] values of this router do not reach its routes.
 //
-// HostRouter panics if sub is nil.
-func (r *Router[C]) HostRouter[D Context](pattern string, sub *Router[D]) {
-	if sub == nil {
-		panic("router: HostRouter needs a router")
-	}
-	r.HostHandler(pattern, sub)
-}
-
-// HostHandler gives pattern to a standard library handler.
-//
-// HostHandler panics if h is nil.
+// HostHandler panics if h is nil or a nil *Router.
 func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
-	if h == nil {
+	if isNilHandler(h) {
 		panic("router: HostHandler needs a handler")
 	}
 	r.Host(pattern, func(g *Router[C]) { g.MountHandler("/", h) })
-}
-
-func (e *engine[C]) mustHostEntry(spec hostSpec) *hostEntry[C] {
-	he, err := e.hostEntry(spec)
-	if err != nil {
-		panic(err.Error())
-	}
-	return he
 }
 
 func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {

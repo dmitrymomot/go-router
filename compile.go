@@ -127,7 +127,10 @@ func (r *Router[C]) compile(eng *engine[C]) {
 				if host != nil {
 					panic("router: a host scope cannot sit inside another host scope")
 				}
-				e = eng.mustHostEntry(rt.hosts[i])
+				var err error
+				if e, err = eng.hostEntry(rt.hosts[i]); err != nil {
+					panic(err.Error())
+				}
 				if in >= 0 {
 					out = in
 				}

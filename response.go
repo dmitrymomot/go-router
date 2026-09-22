@@ -209,6 +209,7 @@ func (r *Response) Capture(limit int) (stop func() Recorded) {
 	if r.Committed && r.Status != http.StatusSwitchingProtocols {
 		w.status, w.header = r.Status, r.Header().Clone()
 	}
+	// stop holds the writer beneath and puts it back.
 	r.ResponseWriter = w
 	return w.stop
 }

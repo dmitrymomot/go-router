@@ -40,6 +40,14 @@ func fillPattern(pattern string, host bool, value func(name, constraint string) 
 		b     strings.Builder
 		pairs []string
 	)
+	// Only a host starts with a wildcard label, and it has no name, so value
+	// sees it as "*".
+	if rest, ok := strings.CutPrefix(pattern, "*"); ok && host {
+		v := value("*", "")
+		pairs = append(pairs, "*", v)
+		b.WriteString(v)
+		pattern = rest
+	}
 	for _, p := range parseURLTemplate(pattern) {
 		if p.name == "" {
 			b.WriteString(p.lit)
