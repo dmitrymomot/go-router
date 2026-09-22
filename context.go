@@ -486,14 +486,6 @@ func (b *Base) QueryDefault(name, def string) string {
 // and hands back the same map, so the caller must not change it.
 func (b *Base) QueryValues() url.Values { return b.queryValues() }
 
-// Cookie reads a cookie of the request. It reports [http.ErrNoCookie] when the
-// request carries no such cookie. See [Base.SignedCookie] for a cookie the
-// client cannot forge.
-func (b *Base) Cookie(name string) (*http.Cookie, error) { return b.req.Cookie(name) }
-
-// SetCookie adds a Set-Cookie header to the response.
-func (b *Base) SetCookie(c *http.Cookie) { http.SetCookie(b.res, c) }
-
 // IsWebSocket reports whether the request asks to upgrade to a WebSocket.
 func (b *Base) IsWebSocket() bool {
 	return headerContainsToken(b.req.Header, "Connection", "upgrade") &&

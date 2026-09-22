@@ -598,6 +598,46 @@ func ExampleHTMXRequest_SourceID() {
 	// delete-7
 }
 
+func ExampleBase_NewCookie() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/theme", func(c *Context) error {
+		c.SetCookie(c.NewCookie("theme", "dark", 30*24*time.Hour))
+		return c.NoContent(http.StatusNoContent)
+	})
+	r.GET("/theme", func(c *Context) error {
+		return c.String(http.StatusOK, "theme: "+c.Cookie("theme"))
+	})
+
+	fmt.Println(serveRequest(r, httptest.NewRequest(http.MethodPost, "/theme", nil)).Header().Get("Set-Cookie"))
+
+	// Behind a proxy that ends TLS the cookie is Secure. middleware.RealIP
+	// decides whose X-Forwarded-Proto to believe.
+	req := httptest.NewRequest(http.MethodPost, "/theme", nil)
+	req.Header.Set(router.HeaderXForwardedProto, "https")
+	fmt.Println(serveRequest(r, req).Header().Get("Set-Cookie"))
+
+	req = httptest.NewRequest(http.MethodGet, "/theme", nil)
+	req.Header.Set("Cookie", "theme=dark")
+	fmt.Println(serveRequest(r, req).Body)
+	// Output:
+	// theme=dark; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
+	// theme=dark; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax
+	// theme: dark
+}
+
+func ExampleBase_ClearCookie() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/logout", func(c *Context) error {
+		c.ClearCookie("session")
+		return c.Redirect(http.StatusSeeOther, "/")
+	})
+
+	rec := serveRequest(r, httptest.NewRequest(http.MethodPost, "/logout", nil))
+	fmt.Println(rec.Code, rec.Header().Get("Set-Cookie"))
+	// Output:
+	// 303 session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax
+}
+
 func ExampleNewCookieCodec_rotation() {
 	oldKey := []byte("32-bytes-of-key-material-for-hmac")
 	newKey := []byte("32-more-bytes-of-fresh-key-material")

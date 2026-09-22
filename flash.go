@@ -30,8 +30,8 @@ type Flash struct {
 	Message string `json:"message"`
 }
 
-// AddFlash appends f to the flash cookie, which cc signs. The cookie is
-// HttpOnly, SameSite=Lax, and Secure over HTTPS.
+// AddFlash appends f to the flash cookie, which cc signs. The cookie is the one
+// [Base.NewCookie] builds: HttpOnly, SameSite=Lax, and Secure over HTTPS.
 //
 // It reports [ErrFlashTooLarge] when the messages no longer fit.
 func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
@@ -45,8 +45,7 @@ func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 
 	b.Vary(HeaderCookie)
 
-	c := b.flashTemplate()
-	c.MaxAge = int(FlashMaxAge / time.Second)
+	c := b.NewCookie(FlashCookieName, "", FlashMaxAge)
 	c.Value = cc.encode(c.Name, data, signedExpiry(cc, c, time.Now()))
 	if len(c.String()) > MaxCookieSize {
 		return ErrFlashTooLarge
@@ -63,7 +62,7 @@ func (b *Base) Flashes(cc *CookieCodec) []Flash {
 		return nil
 	}
 	b.Vary(HeaderCookie)
-	b.clearFlashCookie()
+	b.writeFlashCookie(b.NewCookie(FlashCookieName, "", -1))
 	return decodeFlashes(cc, raw)
 }
 
@@ -85,22 +84,6 @@ func decodeFlashes(cc *CookieCodec, raw string) []Flash {
 		return nil
 	}
 	return flashes
-}
-
-func (b *Base) flashTemplate() *http.Cookie {
-	return &http.Cookie{
-		Name:     FlashCookieName,
-		Path:     "/",
-		Secure:   b.Scheme() == "https",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
-}
-
-func (b *Base) clearFlashCookie() {
-	c := b.flashTemplate()
-	c.MaxAge = -1
-	b.writeFlashCookie(c)
 }
 
 // Reads the response before the request, so a second call sees what the first
