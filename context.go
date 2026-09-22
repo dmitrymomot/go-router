@@ -266,12 +266,9 @@ func (b *Base) Logger() *slog.Logger {
 }
 
 // Response reports the response writer, which records the status and the
-// number of bytes written.
+// number of bytes written. It is an [http.ResponseWriter], so a library that
+// takes one takes it as it stands.
 func (b *Base) Response() *Response { return b.res }
-
-// ResponseWriter reports the response as an [http.ResponseWriter], for a
-// library that takes one.
-func (b *Base) ResponseWriter() http.ResponseWriter { return b.res }
 
 // releasedRequest stands in for the request once the handler has returned, so a
 // Base held past its request reads as a finished context rather than
@@ -388,11 +385,6 @@ func (b *Base) Host() string {
 	return b.host
 }
 
-// IsTLS reports whether the client reached this server over TLS. It reads the
-// connection and not a header, so a request that a proxy forwarded in plain
-// HTTP reports false.
-func (b *Base) IsTLS() bool { return b.req.TLS != nil }
-
 // Scheme reports "https" or "http". See [SchemeOf].
 func (b *Base) Scheme() string { return SchemeOf(b.req) }
 
@@ -433,16 +425,15 @@ func joinAccept(r *http.Request) string {
 	return strings.Join(values, ",")
 }
 
-// Param reports the route parameter name, or "" when the route carries no such
-// parameter. Use [Base.ParamOK] to tell an empty value from a missing one.
+// Param reports the route parameter name, of the path or the host, or "" when
+// the route carries no such parameter. [Base.ParamNames] lists the names the
+// route has.
 func (b *Base) Param(name string) string {
-	v, _ := b.ParamOK(name)
+	v, _ := b.param(name)
 	return v
 }
 
-// ParamOK reports the route parameter name. ok is false when the route carries
-// no such parameter.
-func (b *Base) ParamOK(name string) (string, bool) {
+func (b *Base) param(name string) (string, bool) {
 	for i, n := range b.paramNames {
 		if n == name && i < len(b.paramVals) {
 			return b.paramVals[i], true
@@ -463,10 +454,6 @@ func (b *Base) Path() string { return b.req.URL.Path }
 
 // URL reports the URL of the request.
 func (b *Base) URL() *url.URL { return b.req.URL }
-
-// Header reports the headers that came in with the request. Write to
-// [Base.SetHeader] or to the header of [Base.Response] to answer.
-func (b *Base) Header() http.Header { return b.req.Header }
 
 // SetHeader sets a header of the response, replacing any earlier value.
 func (b *Base) SetHeader(key, value string) { b.res.Header().Set(key, value) }
@@ -497,26 +484,9 @@ func (b *Base) queryValues() url.Values {
 }
 
 // Query reports the first query parameter name, or "" when it is absent.
+// [Base.QueryAs] reads it as another type, and [Base.QueryValues] tells an
+// empty value from an absent one.
 func (b *Base) Query(name string) string { return b.queryValues().Get(name) }
-
-// QueryOK reports the first query parameter name. ok is false when the query
-// carries no such parameter.
-func (b *Base) QueryOK(name string) (string, bool) {
-	v, ok := b.queryValues()[name]
-	if !ok || len(v) == 0 {
-		return "", false
-	}
-	return v[0], true
-}
-
-// QueryDefault reports the first query parameter name, or def when it is
-// absent or empty.
-func (b *Base) QueryDefault(name, def string) string {
-	if v := b.queryValues()[name]; len(v) > 0 && v[0] != "" {
-		return v[0]
-	}
-	return def
-}
 
 // QueryValues reports the parsed query. The router parses it once per request
 // and hands back the same map, so the caller must not change it.

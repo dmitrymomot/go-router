@@ -15,15 +15,6 @@ func newBase(target string) *Base {
 	return NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
 }
 
-func TestIsTLSReadsTheConnection(t *testing.T) {
-	if b := newBase("/"); b.IsTLS() {
-		t.Error("IsTLS reported TLS on a plain request")
-	}
-	if b := newBase("https://example.com/"); !b.IsTLS() {
-		t.Error("IsTLS reported no TLS on a TLS request")
-	}
-}
-
 func TestSchemeValidatesTheForwardedProto(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -106,9 +97,6 @@ func TestRequestAndResponseAccessors(t *testing.T) {
 	if b.URL() != req.URL {
 		t.Error("URL() did not return the request URL")
 	}
-	if got := b.Header().Get("X-Test"); got != "value" {
-		t.Errorf("Header().Get(X-Test) = %q, want value", got)
-	}
 	if got := b.Cookie("session"); got != "abc" {
 		t.Fatalf("Cookie(session) = %q, want abc", got)
 	}
@@ -190,41 +178,17 @@ func TestContextConstructionRejectsNilInputs(t *testing.T) {
 	}
 }
 
-func TestQueryOKTellsAbsentFromEmpty(t *testing.T) {
-	b := newBase("/search?q=go&empty=&multi=a&multi=b")
-
-	tests := []struct {
-		name  string
-		param string
-		want  string
-		found bool
-	}{
-		{"a value", "q", "go", true},
-		{"an empty value", "empty", "", true},
-		{"the first of several", "multi", "a", true},
-		{"a parameter the query has not", "page", "", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := b.QueryOK(tc.param)
-			if got != tc.want || ok != tc.found {
-				t.Errorf("QueryOK(%q) = %q/%v, want %q/%v", tc.param, got, ok, tc.want, tc.found)
-			}
-		})
-	}
-}
-
 func TestQueryHelpersReadTheSameParse(t *testing.T) {
 	b := newBase("/search?q=go&empty=")
 
 	if got := b.Query("q"); got != "go" {
 		t.Errorf("Query(%q) = %q", "q", got)
 	}
-	if got := b.QueryDefault("empty", "all"); got != "all" {
-		t.Errorf("QueryDefault of an empty value = %q, want the default", got)
+	if got := b.QueryAsDefault("empty", "all"); got != "all" {
+		t.Errorf("QueryAsDefault of an empty value = %q, want the default", got)
 	}
-	if got := b.QueryDefault("q", "all"); got != "go" {
-		t.Errorf("QueryDefault(%q) = %q", "q", got)
+	if got := b.QueryAsDefault("q", "all"); got != "go" {
+		t.Errorf("QueryAsDefault(%q) = %q", "q", got)
 	}
 
 	b.QueryValues().Set("q", "rust")

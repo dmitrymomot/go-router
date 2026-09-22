@@ -6,25 +6,21 @@ import (
 	"net/textproto"
 	"net/url"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-func decodeValues(vals url.Values, dst any, tag string) ([]FieldError, error) {
-	rv := reflect.ValueOf(dst)
-	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return nil, fmt.Errorf("decode target must be a non-nil pointer, got %T", dst)
-	}
-	rv = rv.Elem()
-	if rv.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("decode target must point at a struct, got %s", rv.Kind())
+// decodeValues fills the struct sv from vals, through the fields that carry
+// tag. It keeps going past a field that fails, and reports every such field.
+func decodeValues(vals url.Values, sv reflect.Value, tag string) []FieldError {
+	if len(vals) == 0 || len(structFields(sv.Type(), tag)) == 0 {
+		return nil
 	}
 	var fields []FieldError
-	decodeStruct(vals, rv, tag, &fields, make(map[reflect.Type]bool))
-	return fields, nil
+	decodeStruct(vals, sv, tag, &fields, make(map[reflect.Type]bool))
+	return fields
 }
 
 func decodeStruct(
@@ -41,7 +37,7 @@ func decodeStruct(
 	active[rt] = true
 	defer delete(active, rt)
 
-	for _, f := range structFields(rv.Type(), tag) {
+	for _, f := range structFields(rt, tag) {
 		fv := rv.Field(f.index)
 
 		if f.embedded {
@@ -62,12 +58,12 @@ func decodeStruct(
 			continue
 		}
 
-		key, raw, ok := lookupValues(vals, f.keys)
+		raw, ok := vals[f.key]
 		if !ok {
 			continue
 		}
 		if err := setField(fv, raw, f.layout); err != nil {
-			*fields = append(*fields, FieldError{Field: key, Message: err.Error()})
+			*fields = append(*fields, FieldError{Field: f.key, Message: err.Error()})
 		}
 	}
 }
@@ -86,15 +82,17 @@ func structHasValue(vals url.Values, rt reflect.Type, tag string, active map[ref
 			}
 			continue
 		}
-		if _, _, ok := lookupValues(vals, f.keys); ok {
+		if _, ok := vals[f.key]; ok {
 			return true
 		}
 	}
 	return false
 }
 
+// fieldInfo is one field of a struct that a source fills. An embedded field
+// has no key: its own fields are read in its place.
 type fieldInfo struct {
-	keys     []string
+	key      string
 	layout   string
 	index    int
 	embedded bool
@@ -118,77 +116,33 @@ func structFields(rt reflect.Type, tag string) []fieldInfo {
 	return plan
 }
 
+// buildFields lists the fields of rt that tag names. A field without tag is
+// left alone, whatever its Go name or its other tags, so a client cannot
+// reach a field the struct never offered to its source. An untagged embedded
+// struct lends its fields to the outer one.
 func buildFields(rt reflect.Type, tag string) []fieldInfo {
 	plan := make([]fieldInfo, 0, rt.NumField())
 	for i := range rt.NumField() {
 		ft := rt.Field(i)
-		name, layout, tagged, skip := fieldName(ft, tag)
-		if skip {
+		v, tagged := ft.Tag.Lookup(tag)
+		name, _, _ := strings.Cut(v, ",")
+		switch {
+		case v == "-":
+			continue
+		case !tagged || name == "":
+			if ft.Anonymous && indirectType(ft.Type).Kind() == reflect.Struct {
+				plan = append(plan, fieldInfo{index: i, embedded: true})
+			}
+			continue
+		case !ft.IsExported():
 			continue
 		}
-		embedded := ft.Anonymous && !tagged && indirectType(ft.Type).Kind() == reflect.Struct
-
-		if !ft.IsExported() && !embedded {
-			continue
+		if tag == "header" {
+			name = textproto.CanonicalMIMEHeaderKey(name)
 		}
-
-		f := fieldInfo{layout: layout, index: i, embedded: embedded}
-		if !embedded {
-			f.keys = fieldKeys(name, ft.Name)
-		}
-		plan = append(plan, f)
+		plan = append(plan, fieldInfo{key: name, layout: ft.Tag.Get("format"), index: i})
 	}
 	return plan
-}
-
-func fieldKeys(name, goName string) []string {
-	keys := make([]string, 0, 6)
-	add := func(key string) {
-		if key != "" && !slices.Contains(keys, key) {
-			keys = append(keys, key)
-		}
-	}
-	for _, n := range []string{name, goName} {
-		if n == "" {
-			continue
-		}
-		add(n)
-		add(strings.ToLower(n))
-		add(textproto.CanonicalMIMEHeaderKey(n))
-	}
-	return keys
-}
-
-func fieldName(ft reflect.StructField, tag string) (name, layout string, tagged, skip bool) {
-	layout = ft.Tag.Get("format")
-	for _, key := range []string{tag, "json"} {
-		v, ok := ft.Tag.Lookup(key)
-		if !ok {
-			continue
-		}
-		name, opts, hasOpts := strings.Cut(v, ",")
-		if name == "-" && !hasOpts {
-			return "", layout, true, true
-		}
-		if name != "" {
-			return name, layout, true, false
-		}
-		// encoding/json reads `json:",omitempty"` as "this field, under its Go
-		// name": it is tagged, only the name is defaulted.
-		if hasOpts && opts != "" {
-			return ft.Name, layout, true, false
-		}
-	}
-	return ft.Name, layout, false, false
-}
-
-func lookupValues(vals url.Values, keys []string) (string, []string, bool) {
-	for _, k := range keys {
-		if v, ok := vals[k]; ok {
-			return k, v, true
-		}
-	}
-	return "", nil, false
 }
 
 func indirectType(t reflect.Type) reflect.Type {

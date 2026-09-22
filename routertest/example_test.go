@@ -19,7 +19,7 @@ import (
 
 // showUser is the handler the examples below drive.
 func showUser(c *appContext) error {
-	return c.Stringf(http.StatusOK, "user %s", c.Param("id"))
+	return c.String(http.StatusOK, fmt.Sprintf("user %s", c.Param("id")))
 }
 
 func Example() {
@@ -30,7 +30,7 @@ func Example() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusCreated, "created %s", in.Name)
+		return c.String(http.StatusCreated, fmt.Sprintf("created %s", in.Name))
 	})
 
 	got := routertest.Get(r, "/users/7")
@@ -85,7 +85,7 @@ type tenantKey struct{}
 func ExampleContext() {
 	r := router.New(newContext)
 	r.GET("/whoami", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "tenant %v", c.Value(tenantKey{}))
+		return c.String(http.StatusOK, fmt.Sprintf("tenant %v", c.Value(tenantKey{})))
 	})
 
 	ctx := context.WithValue(context.Background(), tenantKey{}, "acme")
@@ -135,7 +135,7 @@ func ExampleClient() {
 		return c.Redirect(http.StatusSeeOther, "/me")
 	})
 	r.GET("/me", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "hello %s", c.Cookie("session"))
+		return c.String(http.StatusOK, fmt.Sprintf("hello %s", c.Cookie("session")))
 	})
 
 	cl := routertest.NewClient(tb, r, routertest.Host("app.example.com"))
@@ -242,7 +242,7 @@ func ExampleFlashCookie() {
 	codec := cookie.NewCodec([]byte("32-bytes-of-key-material-for-hmac"))
 	r := router.New(newContext)
 	r.GET("/users", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "%v", codec.Flashes(c))
+		return c.String(http.StatusOK, fmt.Sprintf("%v", codec.Flashes(c)))
 	})
 
 	routertest.Get(r, "/users", routertest.FlashCookie(tb, codec, cookie.Flash{Kind: "success", Message: "user created"})).

@@ -36,8 +36,8 @@ func newContext(http.ResponseWriter, *http.Request) *appContext {
 }
 
 type user struct {
-	Name string `json:"name"`
-	Age  int    `json:"age"`
+	Name string `json:"name" form:"name"`
+	Age  int    `json:"age" form:"age"`
 }
 
 type upload struct {
@@ -676,8 +676,8 @@ func TestNewContextNamesEveryParameter(t *testing.T) {
 	if got := c.Param("tab"); got != "orders" {
 		t.Errorf("tab = %q, want orders", got)
 	}
-	if _, ok := c.ParamOK("absent"); ok {
-		t.Error("ParamOK reported a parameter that the options never named")
+	if _, err := c.ParamAs[string]("absent"); router.StatusOf(err) != http.StatusInternalServerError {
+		t.Errorf("ParamAs of a parameter that the options never named = %v, want a 500", err)
 	}
 }
 
@@ -1133,7 +1133,7 @@ func flashingRouter(r *router.Router[*appContext]) *router.Router[*appContext] {
 		return c.Redirect(http.StatusSeeOther, "/users")
 	})
 	r.GET("/users", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "%v", codec.Flashes(c))
+		return c.String(http.StatusOK, fmt.Sprintf("%v", codec.Flashes(c)))
 	})
 	return r
 }

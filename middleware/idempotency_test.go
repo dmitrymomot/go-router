@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -139,7 +140,7 @@ func (p *payments) pay(c *appContext) error {
 	}
 	c.Response().Header().Set(htmx.HeaderRedirect, "/receipts/"+strconv.Itoa(int(n)))
 	http.SetCookie(c.Response(), &http.Cookie{Name: "_flash", Value: "paid"})
-	return c.Stringf(http.StatusCreated, "payment %d of %s", n, c.FormValue("amount"))
+	return c.String(http.StatusCreated, fmt.Sprintf("payment %d of %s", n, c.FormValue("amount")))
 }
 
 func amount(v string) url.Values { return url.Values{"amount": {v}} }

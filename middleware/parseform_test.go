@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,7 @@ func parseFormRouter(ran *int, mw ...router.Middleware[*appContext]) *router.Rou
 	r.Use(middleware.ParseForm[*appContext])
 	r.POST("/toggle", func(c *appContext) error {
 		*ran++
-		return c.Stringf(http.StatusOK, "%v", c.FormValue("on") == "on")
+		return c.String(http.StatusOK, fmt.Sprintf("%v", c.FormValue("on") == "on"))
 	})
 	return r
 }
@@ -91,7 +92,7 @@ func TestParseFormLeavesAJSONBodyAlone(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", len(b))
+		return c.String(http.StatusOK, fmt.Sprintf("%d", len(b)))
 	})
 
 	rec := do(r, postBody("/raw", router.MIMEApplicationJSON, strings.Repeat("x", 100)))

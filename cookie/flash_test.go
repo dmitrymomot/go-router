@@ -3,6 +3,7 @@ package cookie
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -439,7 +440,7 @@ func flashRoutes(r *router.Router[*appCtx]) {
 		return c.Redirect(http.StatusSeeOther, "/users")
 	})
 	r.GET("/users", func(c *appCtx) error {
-		return c.Stringf(http.StatusOK, "%v", c.Cookies.Flashes(c))
+		return c.String(http.StatusOK, fmt.Sprintf("%v", c.Cookies.Flashes(c)))
 	})
 }
 
@@ -481,7 +482,7 @@ func TestHXRedirectCarriesTheFlash(t *testing.T) {
 		}
 		return htmx.NewResponse(c).Redirect("/chat")
 	})
-	r.GET("/chat", func(c *appCtx) error { return c.Stringf(http.StatusOK, "%v", c.Cookies.Flashes(c)) })
+	r.GET("/chat", func(c *appCtx) error { return c.String(http.StatusOK, fmt.Sprintf("%v", c.Cookies.Flashes(c))) })
 
 	for _, tc := range []struct {
 		name   string

@@ -92,7 +92,7 @@ func ExampleRouter_Mount() {
 
 	api := router.New(newCtx)
 	api.GET("/users/{id}", func(c *Context) error {
-		return c.Stringf(http.StatusOK, "tenant=%s user=%s", c.Param("tenant"), c.Param("id"))
+		return c.String(http.StatusOK, fmt.Sprintf("tenant=%s user=%s", c.Param("tenant"), c.Param("id")))
 	})
 
 	r := router.New(newCtx)
@@ -121,7 +121,7 @@ func ExampleRouter_MountRouter() {
 		return &AdminContext{Role: "root"}
 	})
 	admin.GET("/users/{id}", func(c *AdminContext) error {
-		return c.Stringf(http.StatusOK, "%s sees user %s at %s", c.Role, c.Param("id"), c.Path())
+		return c.String(http.StatusOK, fmt.Sprintf("%s sees user %s at %s", c.Role, c.Param("id"), c.Path()))
 	})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
@@ -147,14 +147,14 @@ func ExampleRouter_Host() {
 		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
 		h.Route("/blog", func(b *router.Router[*Context]) {
 			b.GET("/{slug}", func(c *Context) error {
-				return c.Stringf(http.StatusOK, "post %s", c.Param("slug"))
+				return c.String(http.StatusOK, fmt.Sprintf("post %s", c.Param("slug")))
 			})
 		})
 	})
 
 	r.Host("api.example.com", func(h *router.Router[*Context]) {
 		h.GET("/v1/users/{id}", func(c *Context) error {
-			return c.Stringf(http.StatusOK, "user %s", c.Param("id"))
+			return c.String(http.StatusOK, fmt.Sprintf("user %s", c.Param("id")))
 		})
 	})
 
@@ -164,7 +164,7 @@ func ExampleRouter_Host() {
 			if tenant == "" {
 				tenant = "domain:" + c.Host()
 			}
-			return c.Stringf(http.StatusOK, "dashboard of %s", tenant)
+			return c.String(http.StatusOK, fmt.Sprintf("dashboard of %s", tenant))
 		})
 	})
 
@@ -195,10 +195,10 @@ func ExampleRouter_HostRouter() {
 		return &APIContext{Version: "v1"}
 	})
 	api.ErrorHandler(func(c *APIContext, err error) error {
-		return c.Stringf(router.StatusOf(err), "%s: no such endpoint", c.Version)
+		return c.String(router.StatusOf(err), fmt.Sprintf("%s: no such endpoint", c.Version))
 	})
 	api.GET("/users/{id}", func(c *APIContext) error {
-		return c.Stringf(http.StatusOK, "%s user %s", c.Version, c.Param("id"))
+		return c.String(http.StatusOK, fmt.Sprintf("%s user %s", c.Version, c.Param("id")))
 	})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
@@ -228,7 +228,7 @@ func ExampleBase_Bind() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusCreated, "%s is %d", in.Name, in.Age)
+		return c.String(http.StatusCreated, fmt.Sprintf("%s is %d", in.Name, in.Age))
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/users",
@@ -254,7 +254,7 @@ func ExampleBase_BindForm() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s %t", in.Name, in.Newsletter)
+		return c.String(http.StatusOK, fmt.Sprintf("%s %t", in.Name, in.Newsletter))
 	})
 
 	for _, body := range []string{"name=ann&newsletter=on", "name=bo"} {
@@ -369,11 +369,11 @@ func ExampleBase_SetBodyLimit() {
 	// /note 413
 }
 
-func ExampleBase_FormRequired() {
+func ExampleBase_FormAs() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.Logger(slog.New(slog.DiscardHandler))
 	r.POST("/confirm", func(c *Context) error {
-		token, err := c.FormRequired("token")
+		token, err := c.FormAs[string]("token")
 		if err != nil {
 			return err
 		}
@@ -389,7 +389,7 @@ func ExampleBase_FormRequired() {
 	}
 	// Output:
 	// 200 confirmed abc
-	// 400 invalid request
+	// 400 missing form field "token"
 	// token: is required
 }
 
@@ -425,10 +425,10 @@ func ExampleRouter_GET_partialSegment() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "report for %d", date)
+		return c.String(http.StatusOK, fmt.Sprintf("report for %d", date))
 	})
 	r.GET("/files/{name}.{ext}", func(c *Context) error {
-		return c.Stringf(http.StatusOK, "name=%s ext=%s", c.Param("name"), c.Param("ext"))
+		return c.String(http.StatusOK, fmt.Sprintf("name=%s ext=%s", c.Param("name"), c.Param("ext")))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/reports/rep-20260102.csv"))
@@ -446,14 +446,14 @@ func ExampleRouter_GET_paramClass() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "agent %s", id)
+		return c.String(http.StatusOK, fmt.Sprintf("agent %s", id))
 	})
 	r.GET("/pages/{n:int}", func(c *Context) error {
 		n, err := c.ParamAs[int]("n")
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "page %d", n)
+		return c.String(http.StatusOK, fmt.Sprintf("page %d", n))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/agents/0198c5b6-3f0e-7b3a-9c1d-2f4e6a8b0c1d"))
@@ -473,7 +473,7 @@ func ExampleRouter_ParamClass() {
 	// A plain func works as well, and a fast one keeps routing fast.
 	r.ParamClass("sku", regexp.MustCompile(`^[A-Z]{3}-[0-9]{4}$`).MatchString)
 	r.GET("/products/{sku:sku}", func(c *Context) error {
-		return c.Stringf(http.StatusOK, "product %s", c.Param("sku"))
+		return c.String(http.StatusOK, fmt.Sprintf("product %s", c.Param("sku")))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/products/ABC-1234"))
@@ -492,7 +492,7 @@ func ExampleBase_ParamAs() {
 			return err
 		}
 		page := c.QueryAsDefault("page", 1)
-		return c.Stringf(http.StatusOK, "user %d page %d", id, page)
+		return c.String(http.StatusOK, fmt.Sprintf("user %d page %d", id, page))
 	})
 
 	fmt.Println(serve(r, http.MethodGet, "/users/7?page=2"))
@@ -732,7 +732,7 @@ func ExampleFieldErrorsOf() {
 	r.POST("/signup", func(c *Context) error {
 		in, err := c.BindForm[Signup]()
 		if err == nil {
-			return c.Stringf(http.StatusCreated, "welcome %s", in.Email)
+			return c.String(http.StatusCreated, fmt.Sprintf("welcome %s", in.Email))
 		}
 		// Show the form again with what the client typed and a message
 		// under each field that failed.
@@ -740,7 +740,7 @@ func ExampleFieldErrorsOf() {
 		for _, f := range router.FieldErrorsOf(err) {
 			problems[f.Field] = f.Message
 		}
-		return c.Stringf(router.StatusOf(err), "email=%s age: %s", in.Email, problems["age"])
+		return c.String(router.StatusOf(err), fmt.Sprintf("email=%s age: %s", in.Email, problems["age"]))
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader("email=ann@example.com&age=old"))
@@ -775,7 +775,7 @@ func ExampleValidator() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusAccepted, "%d events", len(in.Events))
+		return c.String(http.StatusAccepted, fmt.Sprintf("%d events", len(in.Events)))
 	})
 
 	for _, body := range []string{
@@ -801,7 +801,7 @@ func ExampleExpand() {
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.POST(suspendAgent, func(c *Context) error {
-		return c.Stringf(http.StatusOK, "suspended %s", c.Param("agent"))
+		return c.String(http.StatusOK, fmt.Sprintf("suspended %s", c.Param("agent")))
 	})
 
 	link, _ := router.Expand(suspendAgent, "agent", "a b")

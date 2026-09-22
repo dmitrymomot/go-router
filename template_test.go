@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -80,7 +81,7 @@ func TestPartialSegmentParamAs(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", date+1)
+		return c.String(http.StatusOK, fmt.Sprintf("%d", date+1))
 	})
 
 	if got := do(r, http.MethodGet, "/reports/rep-20260102.csv").Body.String(); got != "20260103" {

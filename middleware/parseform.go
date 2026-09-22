@@ -24,7 +24,7 @@ type ParseFormConfig struct {
 // before the handler decides anything. Skip a route that streams its body
 // through MultipartReader.
 //
-// As in net/http, a URL-encoded body is read only for POST, PUT and PATCH.
+// It reads the body of any method, as the form readers of the router do.
 //
 // See Order in the package doc for where it goes.
 func ParseForm[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {

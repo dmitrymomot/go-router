@@ -215,7 +215,7 @@ func TestTokenSourceNilPanics(t *testing.T) {
 	})
 }
 
-func TestFromFormReadsTheMethodsThatNetHTTPParses(t *testing.T) {
+func TestFromFormReadsEveryMethod(t *testing.T) {
 	r := newRouter()
 	h := func(c *appContext) error {
 		return c.String(http.StatusOK, strings.Join(middleware.FromForm("_csrf")(c), ","))
@@ -228,25 +228,16 @@ func TestFromFormReadsTheMethodsThatNetHTTPParses(t *testing.T) {
 		"--b", `Content-Disposition: form-data; name="_csrf"`, "", "tok", "--b--", "",
 	}, "\r\n")
 
-	tests := []struct {
-		method string
-		want   string
-	}{
-		{http.MethodPost, "tok"},
-		{http.MethodPut, "tok"},
-		{http.MethodPatch, "tok"},
-		{http.MethodDelete, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.method, func(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
 			body := url.Values{"_csrf": {"tok"}}.Encode()
-			req := httptest.NewRequest(tt.method, "/", strings.NewReader(body))
+			req := httptest.NewRequest(method, "/", strings.NewReader(body))
 			req.Header.Set(router.HeaderContentType, router.MIMEApplicationForm)
-			if got := do(r, req).Body.String(); got != tt.want {
-				t.Errorf("urlencoded token = %q, want %q", got, tt.want)
+			if got := do(r, req).Body.String(); got != "tok" {
+				t.Errorf("urlencoded token = %q, want %q", got, "tok")
 			}
 
-			req = httptest.NewRequest(tt.method, "/", strings.NewReader(multipart))
+			req = httptest.NewRequest(method, "/", strings.NewReader(multipart))
 			req.Header.Set(router.HeaderContentType, `multipart/form-data; boundary=b`)
 			if got := do(r, req).Body.String(); got != "tok" {
 				t.Errorf("multipart token = %q, want %q", got, "tok")

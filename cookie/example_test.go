@@ -100,7 +100,7 @@ func ExampleCodec_AddFlash() {
 	})
 	r.GET("/users", func(c *Context) error {
 		// Flashes reads once: it clears the cookie on the way out.
-		return c.Stringf(http.StatusOK, "%v", c.Cookies.Flashes(c))
+		return c.String(http.StatusOK, fmt.Sprintf("%v", c.Cookies.Flashes(c)))
 	})
 
 	created := serveRequest(r, httptest.NewRequest(http.MethodPost, "/users", nil))

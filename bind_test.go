@@ -30,8 +30,10 @@ type createUser struct {
 }
 
 type formUser struct {
-	createUser
-	TTL time.Duration `form:"ttl"`
+	Name  string        `form:"name"`
+	Age   int           `form:"age"`
+	Admin bool          `form:"admin"`
+	TTL   time.Duration `form:"ttl"`
 }
 
 func TestBindJSON(t *testing.T) {
@@ -148,7 +150,7 @@ func TestBindForm(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%d/%v/%v", in.Name, in.Age, in.Admin, in.TTL)
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%d/%v/%v", in.Name, in.Age, in.Admin, in.TTL))
 	})
 
 	body := url.Values{"name": {"bo"}, "age": {"7"}, "admin": {"true"}, "ttl": {"90s"}}
@@ -164,10 +166,10 @@ func TestBindForm(t *testing.T) {
 
 func TestBindQuery(t *testing.T) {
 	type filter struct {
-		Page  int      `query:"page"`
-		Limit int      `query:"limit"`
-		Sort  []string `query:"sort"`
-		Since time.Time
+		Page  int       `query:"page"`
+		Limit int       `query:"limit"`
+		Sort  []string  `query:"sort"`
+		Since time.Time `query:"since"`
 	}
 
 	r := newTestRouter()
@@ -176,8 +178,8 @@ func TestBindQuery(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d/%d/%v/%s",
-			in.Page, in.Limit, in.Sort, in.Since.Format(time.RFC3339))
+		return c.String(http.StatusOK, fmt.Sprintf("%d/%d/%v/%s",
+			in.Page, in.Limit, in.Sort, in.Since.Format(time.RFC3339)))
 	})
 
 	rec := do(r, http.MethodGet, "/search?page=2&limit=&sort=a&sort=b&since=2026-01-02T03:04:05Z")
@@ -208,36 +210,6 @@ func TestBindQueryReportsAParseError(t *testing.T) {
 	}
 }
 
-func TestBindQueryKeepsADecoderFaultOffTheWire(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/s", func(c *tctx) error {
-		_, err := c.BindQuery[[]string]()
-		return err
-	})
-
-	rec := do(r, http.MethodGet, "/s?a=1")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), "decode target") {
-		t.Errorf("body = %s, want no word of the decoder in it", rec.Body)
-	}
-
-	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/s", nil))
-	var target []string
-	err := b.decodeInto(url.Values{"a": {"1"}}, &target, "query")
-	he, ok := errors.AsType[*HTTPError](err)
-	if !ok {
-		t.Fatalf("decodeInto = %v, want an HTTPError", err)
-	}
-	if he.Message != http.StatusText(http.StatusBadRequest) {
-		t.Errorf("Message = %q, want the standard text of the status", he.Message)
-	}
-	if he.Err == nil || !strings.Contains(he.Err.Error(), "decode target") {
-		t.Errorf("Err = %v, want the decoder fault as the internal cause", he.Err)
-	}
-}
-
 func TestBindQueryLeavesAnOptionalFieldNilForAnEmptyValue(t *testing.T) {
 	type filter struct {
 		Page *int `query:"page"`
@@ -251,7 +223,7 @@ func TestBindQueryLeavesAnOptionalFieldNilForAnEmptyValue(t *testing.T) {
 		if in.Page == nil {
 			return c.String(http.StatusOK, "unset")
 		}
-		return c.Stringf(http.StatusOK, "%d", *in.Page)
+		return c.String(http.StatusOK, fmt.Sprintf("%d", *in.Page))
 	})
 
 	for _, tt := range []struct{ target, want string }{
@@ -303,7 +275,7 @@ func TestParamAsAndQueryAs(t *testing.T) {
 			return err
 		}
 		limit := c.QueryAsDefault("limit", 25)
-		return c.Stringf(http.StatusOK, "%d/%d", id, limit)
+		return c.String(http.StatusOK, fmt.Sprintf("%d/%d", id, limit))
 	})
 
 	if got, want := do(r, http.MethodGet, "/users/9").Body.String(), "9/25"; got != want {
@@ -331,7 +303,7 @@ func TestParamAsAnswers404ForAMalformedValue(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", id)
+		return c.String(http.StatusOK, fmt.Sprintf("%d", id))
 	})
 	r.GET("/agents/{agent}", func(c *tctx) error {
 		id, err := c.ParamAs[uuid.UUID]("agent")
@@ -395,7 +367,7 @@ func TestParamAsReadsAHostParameter(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return c.Stringf(http.StatusOK, "%d", n)
+			return c.String(http.StatusOK, fmt.Sprintf("%d", n))
 		})
 	})
 
@@ -417,11 +389,7 @@ func TestDecodeValuesFlattensEmbeddedStructs(t *testing.T) {
 	}
 
 	var got query
-	fields, err := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query")
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(fields) != 0 {
+	if fields := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, reflect.ValueOf(&got).Elem(), "query"); len(fields) != 0 {
 		t.Fatalf("fields = %v, want none", fields)
 	}
 	if got.Offset != 40 || got.Term != "go" {
@@ -702,7 +670,7 @@ func TestBindFormReadsAMultipartBody(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%d", in.Name, in.Age)
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%d", in.Name, in.Age))
 	})
 
 	body, ct := multipartBody(t, url.Values{"name": {"bo"}, "age": {"7"}})
@@ -722,7 +690,7 @@ func TestParseFormReadsTheBodyOnce(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%s/%s", first.Name, second.Name, c.FormValue("name"))
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%s/%s", first.Name, second.Name, c.FormValue("name")))
 	})
 
 	rec := postForm(r, "/users", url.Values{"name": {"bo"}})
@@ -762,7 +730,7 @@ func TestFormFileReadsTheUpload(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%d/%s", h.Filename, h.Size, content)
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%d/%s", h.Filename, h.Size, content))
 	})
 
 	body, ct := multipartBody(t, nil, upload{field: "avatar", name: "a.png", content: "hello"})
@@ -848,7 +816,7 @@ func TestBindFormUsesTheMultipartMemoryOfTheRouter(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				return c.Stringf(http.StatusOK, "%d", len(content))
+				return c.String(http.StatusOK, fmt.Sprintf("%d", len(content)))
 			})
 
 			body, ct := multipartBody(t, nil, upload{field: "avatar", name: "a.png", content: strings.Repeat("x", 2048)})
@@ -952,7 +920,7 @@ func TestMultipartFormReadsValuesAndFiles(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%d", form.Value["name"][0], len(form.File["photo"]))
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%d", form.Value["name"][0], len(form.File["photo"])))
 	})
 
 	body, ct := multipartBody(t, url.Values{"name": {"bo"}},
@@ -980,9 +948,9 @@ func TestMultipartFormRejectsABodyThatIsNotMultipart(t *testing.T) {
 func TestFormValueReadsTheBodyAndNotTheQuery(t *testing.T) {
 	r := newTestRouter()
 	r.POST("/users", func(c *tctx) error {
-		return c.Stringf(http.StatusOK, "%s/%s/%s/%s",
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%s/%s/%s",
 			c.FormValue("name"), c.FormValue("role"),
-			c.FormDefault("role", "user"), c.FormDefault("name", "anon"))
+			c.FormAsDefault("role", "user"), c.FormAsDefault("name", "anon")))
 	})
 
 	rec := postForm(r, "/users?role=admin", url.Values{"name": {"bo"}})
@@ -997,7 +965,7 @@ func TestFormValueSwallowsAParseError(t *testing.T) {
 	r.POST("/users", func(c *tctx) error {
 		name := c.FormValue("name")
 		_, err := c.FormValues()
-		return c.Stringf(http.StatusOK, "%q/%v", name, err != nil)
+		return c.String(http.StatusOK, fmt.Sprintf("%q/%v", name, err != nil))
 	})
 
 	rec := postForm(r, "/users", url.Values{"name": {strings.Repeat("x", 100)}})
@@ -1013,7 +981,7 @@ func TestFormValuesReturnsTheBody(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%v/%d", vals["tag"], len(vals))
+		return c.String(http.StatusOK, fmt.Sprintf("%v/%d", vals["tag"], len(vals)))
 	})
 
 	rec := postForm(r, "/users?q=1", url.Values{"tag": {"a", "b"}})
@@ -1033,11 +1001,8 @@ func TestFormAs(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		missing, err := c.FormAs[int]("missing")
-		if err != nil {
-			return err
-		}
-		return c.Stringf(http.StatusOK, "%d/%v/%d", age, ttl, missing)
+		missing := c.FormAsDefault("missing", 0)
+		return c.String(http.StatusOK, fmt.Sprintf("%d/%v/%d", age, ttl, missing))
 	})
 
 	rec := postForm(r, "/users", url.Values{"age": {"7"}, "ttl": {"90s"}})
@@ -1063,7 +1028,7 @@ func TestBindPath(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%s/%d", in.Org, in.Repo, in.Page)
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%s/%d", in.Org, in.Repo, in.Page))
 	})
 
 	if got, want := do(r, http.MethodGet, "/go/router").Body.String(), "go/router/0"; got != want {
@@ -1113,7 +1078,7 @@ func TestBindHeader(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%v/%q", in.RequestID, in.Wait, in.Missing)
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%v/%q", in.RequestID, in.Wait, in.Missing))
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
@@ -1422,7 +1387,7 @@ func TestQueryAs(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", page)
+		return c.String(http.StatusOK, fmt.Sprintf("%d", page))
 	})
 
 	for _, tt := range []struct {
@@ -1431,48 +1396,16 @@ func TestQueryAs(t *testing.T) {
 		code   int
 	}{
 		{target: "/search?page=2", want: "2", code: http.StatusOK},
-		{target: "/search?page=", want: "0", code: http.StatusOK},
-		{target: "/search", want: "0", code: http.StatusOK},
-		{target: "/search?page=abc", code: http.StatusBadRequest},
+		{target: "/search?page=", want: `missing query parameter "page"`, code: http.StatusBadRequest},
+		{target: "/search", want: `missing query parameter "page"`, code: http.StatusBadRequest},
+		{target: "/search?page=abc", want: "query parameter page: ", code: http.StatusBadRequest},
 	} {
 		t.Run(tt.target, func(t *testing.T) {
 			rec := do(r, http.MethodGet, tt.target)
 			if rec.Code != tt.code {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.code)
 			}
-			if rec.Code == http.StatusOK && rec.Body.String() != tt.want {
-				t.Errorf("body = %q, want %q", rec.Body.String(), tt.want)
-			}
-		})
-	}
-}
-
-func TestQueryAsOK(t *testing.T) {
-	r := newTestRouter()
-	r.GET("/search", func(c *tctx) error {
-		page, ok, err := c.QueryAsOK[int]("page")
-		if err != nil {
-			return err
-		}
-		return c.Stringf(http.StatusOK, "%d/%v", page, ok)
-	})
-
-	for _, tt := range []struct {
-		target string
-		want   string
-		code   int
-	}{
-		{target: "/search?page=2", want: "2/true", code: http.StatusOK},
-		{target: "/search?page=", want: "0/true", code: http.StatusOK},
-		{target: "/search", want: "0/false", code: http.StatusOK},
-		{target: "/search?page=abc", code: http.StatusBadRequest},
-	} {
-		t.Run(tt.target, func(t *testing.T) {
-			rec := do(r, http.MethodGet, tt.target)
-			if rec.Code != tt.code {
-				t.Fatalf("status = %d, want %d", rec.Code, tt.code)
-			}
-			if tt.want != "" && rec.Code == http.StatusOK && rec.Body.String() != tt.want {
+			if !strings.HasPrefix(rec.Body.String(), tt.want) {
 				t.Errorf("body = %q, want %q", rec.Body.String(), tt.want)
 			}
 		})
@@ -1486,7 +1419,7 @@ func TestQueryAllAs(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%v/%d", ids, len(ids))
+		return c.String(http.StatusOK, fmt.Sprintf("%v/%d", ids, len(ids)))
 	})
 
 	if got, want := do(r, http.MethodGet, "/search?id=1&id=2").Body.String(), "[1 2]/2"; got != want {
@@ -1503,8 +1436,8 @@ func TestQueryAllAs(t *testing.T) {
 func TestParamAsDefault(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/users/{id}", func(c *tctx) error {
-		return c.Stringf(http.StatusOK, "%d/%d",
-			c.ParamAsDefault("id", 7), c.ParamAsDefault("missing", 3))
+		return c.String(http.StatusOK, fmt.Sprintf("%d/%d",
+			c.ParamAsDefault("id", 7), c.ParamAsDefault("missing", 3)))
 	})
 
 	if got, want := do(r, http.MethodGet, "/users/9").Body.String(), "9/3"; got != want {
@@ -1526,13 +1459,9 @@ func TestParseValue(t *testing.T) {
 	if _, ok := errors.AsType[*HTTPError](func() error { _, err := ParseValue[int]("abc"); return err }()); ok {
 		t.Error("ParseValue returned an HTTPError, which is the caller's choice to make")
 	}
-	empty, err := ParseValue[int]("")
-	if err != nil || empty != 0 {
-		t.Errorf("ParseValue of an empty string = %d, %v", empty, err)
-	}
 	unset, err := ParseValue[*int]("")
-	if err != nil || unset != nil {
-		t.Errorf("ParseValue[*int] of an empty string = %v, %v", unset, err)
+	if err == nil || unset != nil {
+		t.Errorf("ParseValue[*int] of an empty string = %v, %v, want nil and an error", unset, err)
 	}
 	when, err := ParseValue[time.Time]("2026-01-02T03:04:05Z")
 	if err != nil || when.Year() != 2026 {
@@ -1540,18 +1469,27 @@ func TestParseValue(t *testing.T) {
 	}
 }
 
-func TestParseValueDefault(t *testing.T) {
+func TestAsDefaultFallsBack(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/{ttl}", func(c *tctx) error {
+		return c.String(http.StatusOK, fmt.Sprintf("%v/%v/%v/%v",
+			c.ParamAsDefault("ttl", time.Minute),
+			c.ParamAsDefault("missing", time.Minute),
+			c.QueryAsDefault("ttl", time.Minute),
+			c.FormAsDefault("ttl", time.Minute)))
+	})
+
 	for _, tt := range []struct {
-		in   string
-		want time.Duration
+		name, target, body, want string
 	}{
-		{in: "90s", want: 90 * time.Second},
-		{in: "", want: time.Minute},
-		{in: "nope", want: time.Minute},
+		{name: "a value", target: "/90s?ttl=90s", body: "ttl=90s", want: "1m30s/1m0s/1m30s/1m30s"},
+		{name: "a malformed value", target: "/nope?ttl=nope", body: "ttl=nope", want: "1m0s/1m0s/1m0s/1m0s"},
+		{name: "an empty value", target: "/nope?ttl=", body: "ttl=", want: "1m0s/1m0s/1m0s/1m0s"},
+		{name: "no value", target: "/nope", want: "1m0s/1m0s/1m0s/1m0s"},
 	} {
-		t.Run(tt.in, func(t *testing.T) {
-			if got := ParseValueDefault(tt.in, time.Minute); got != tt.want {
-				t.Errorf("ParseValueDefault(%q) = %v, want %v", tt.in, got, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			if got := post(r, tt.target, MIMEApplicationForm, tt.body).Body.String(); got != tt.want {
+				t.Errorf("body = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -1651,7 +1589,7 @@ func TestOversizedBodyClosesTheConnection(t *testing.T) {
 	r := newTestRouter()
 	r.MaxBodyBytes(16)
 	r.POST("/b", func(c *tctx) error {
-		_, err := c.Bind[map[string]any]()
+		_, err := c.BindJSON[map[string]any]()
 		return err
 	})
 
@@ -1708,7 +1646,7 @@ func TestBindFormReadsACheckbox(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%v/%v", in.Accept, in.News)
+		return c.String(http.StatusOK, fmt.Sprintf("%v/%v", in.Accept, in.News))
 	})
 
 	tests := []struct {
@@ -1738,7 +1676,7 @@ func TestBindQueryReadsACheckbox(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%v", in.Open)
+		return c.String(http.StatusOK, fmt.Sprintf("%v", in.Open))
 	})
 
 	for target, want := range map[string]string{
@@ -1760,7 +1698,7 @@ func TestFormAsReadsACheckbox(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%v", on)
+		return c.String(http.StatusOK, fmt.Sprintf("%v", on))
 	})
 
 	rec := postForm(r, "/prefs", url.Values{"accept": {"on"}})
@@ -1795,7 +1733,7 @@ func TestFormReadersIgnoreAMalformedQuery(t *testing.T) {
 		if _, err := c.FormValues(); err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%s", in.Name, c.Request().FormValue("name"))
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%s", in.Name, c.Request().FormValue("name")))
 	})
 	r.POST("/upload", func(c *tctx) error {
 		name := c.FormValue("name")
@@ -1807,7 +1745,7 @@ func TestFormReadersIgnoreAMalformedQuery(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%s/%s/%d", name, fh.Filename, len(form.File))
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%s/%d", name, fh.Filename, len(form.File)))
 	})
 
 	rec := post(r, "/users?q=%zz&a;b", MIMEApplicationForm, "name=bo")
@@ -1861,7 +1799,7 @@ func TestOversizedBodyClosesTheConnectionBehindAWrappedWriter(t *testing.T) {
 		}
 	})
 	r.POST("/b", func(c *tctx) error {
-		_, err := c.Bind[map[string]any]()
+		_, err := c.BindJSON[map[string]any]()
 		return err
 	})
 
@@ -1893,7 +1831,7 @@ func setBodyLimitRouter(limit int64) *Router[*tctx] {
 	r.MaxBodyBytes(16)
 	r.POST("/bind", func(c *tctx) error {
 		c.SetBodyLimit(limit)
-		in, err := c.Bind[map[string]string]()
+		in, err := c.BindJSON[map[string]string]()
 		if err != nil {
 			return err
 		}
@@ -1908,7 +1846,7 @@ func setBodyLimitRouter(limit int64) *Router[*tctx] {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", n)
+		return c.String(http.StatusOK, fmt.Sprintf("%d", n))
 	})
 	return r
 }
@@ -1940,7 +1878,7 @@ func TestSetBodyLimitLowersTheCapOfTheRouter(t *testing.T) {
 	r := newTestRouter()
 	r.POST("/bind", func(c *tctx) error {
 		c.SetBodyLimit(16)
-		_, err := c.Bind[map[string]string]()
+		_, err := c.BindJSON[map[string]string]()
 		return err
 	})
 	r.POST("/read", func(c *tctx) error {
@@ -1978,7 +1916,7 @@ func TestSetBodyLimitKeepsASmallerCapOnTheBody(t *testing.T) {
 	r.POST("/bind", func(c *tctx) error {
 		c.SetBodyLimit(16)
 		c.SetBodyLimit(0)
-		_, err := c.Bind[map[string]string]()
+		_, err := c.BindJSON[map[string]string]()
 		return err
 	})
 
@@ -1997,7 +1935,7 @@ func TestSetBodyLimitReachesTheFormReaders(t *testing.T) {
 		}
 	})
 	r.POST("/form", func(c *tctx) error {
-		return c.Stringf(http.StatusOK, "%d", len(c.FormValue("name")))
+		return c.String(http.StatusOK, fmt.Sprintf("%d", len(c.FormValue("name"))))
 	})
 	r.POST("/upload", func(c *tctx) error {
 		form, err := c.MultipartForm()
@@ -2008,7 +1946,7 @@ func TestSetBodyLimitReachesTheFormReaders(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d/%d", len(form.File), fh.Size)
+		return c.String(http.StatusOK, fmt.Sprintf("%d/%d", len(form.File), fh.Size))
 	})
 
 	rec := postForm(r, "/form", url.Values{"name": {strings.Repeat("x", 1000)}})
@@ -2033,12 +1971,12 @@ func TestSetBodyLimitWithoutABodyAllocatesNothing(t *testing.T) {
 	}
 }
 
-func TestFormRequired(t *testing.T) {
+func TestFormAsReportsAMissingField(t *testing.T) {
 	var got error
 	r := newTestRouter()
 	r.MaxBodyBytes(64)
 	r.POST("/confirm", func(c *tctx) error {
-		token, err := c.FormRequired("token")
+		token, err := c.FormAs[string]("token")
 		got = err
 		if err != nil {
 			return err
@@ -2085,8 +2023,8 @@ func TestFormRequired(t *testing.T) {
 			if !ok {
 				t.Fatalf("error = %v, want an *HTTPError", got)
 			}
-			if he.Message != "invalid request" || !reflect.DeepEqual(he.Details, tt.wantFields) {
-				t.Errorf("error = %q %#v, want %q %#v", he.Message, he.Details, "invalid request", tt.wantFields)
+			if want := `missing form field "token"`; he.Message != want || !reflect.DeepEqual(he.Details, tt.wantFields) {
+				t.Errorf("error = %q %#v, want %q %#v", he.Message, he.Details, want, tt.wantFields)
 			}
 			if fe, ok := errors.AsType[FieldError](got); !ok || fe != tt.wantFields[0] {
 				t.Errorf("errors.AsType[FieldError] = %#v, %v, want %#v", fe, ok, tt.wantFields[0])
@@ -2095,5 +2033,284 @@ func TestFormRequired(t *testing.T) {
 				t.Errorf("FieldErrorsOf = %#v, want exactly %#v", fields, tt.wantFields)
 			}
 		})
+	}
+}
+
+func TestBindFormLeavesAFieldOfAnotherSourceAlone(t *testing.T) {
+	type input struct {
+		ID      string `param:"id"`
+		IsAdmin bool
+	}
+	r := newTestRouter()
+	r.POST("/users", func(c *tctx) error {
+		in, err := c.BindForm[input]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, fmt.Sprintf("%q/%v", in.ID, in.IsAdmin))
+	})
+
+	rec := postForm(r, "/users", url.Values{"id": {"evil"}, "isadmin": {"on"}})
+	if got, want := rec.Body.String(), `""/false`; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// Each struct tags Own for the source under test, Other for another source,
+// JSON for JSON alone, and leaves Untagged bare.
+type (
+	formSourced struct {
+		Own      string `form:"own"`
+		Other    string `query:"other"`
+		JSON     string `json:"json"`
+		Untagged string
+	}
+	querySourced struct {
+		Own      string `query:"own"`
+		Other    string `form:"other"`
+		JSON     string `json:"json"`
+		Untagged string
+	}
+	paramSourced struct {
+		Own      string `param:"own"`
+		Other    string `header:"other"`
+		JSON     string `json:"json"`
+		Untagged string
+	}
+	headerSourced struct {
+		Own      string `header:"own"`
+		Other    string `param:"other"`
+		JSON     string `json:"json"`
+		Untagged string
+	}
+)
+
+func sourcedString(own, other, json, untagged string) string {
+	return fmt.Sprintf("%q/%q/%q/%q", own, other, json, untagged)
+}
+
+func TestBindFillsOnlyTheFieldsTaggedForItsSource(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/form", func(c *tctx) error {
+		in, err := c.BindForm[formSourced]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, sourcedString(in.Own, in.Other, in.JSON, in.Untagged))
+	})
+	r.GET("/query", func(c *tctx) error {
+		in, err := c.BindQuery[querySourced]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, sourcedString(in.Own, in.Other, in.JSON, in.Untagged))
+	})
+	r.GET("/path/{own}/{other}/{json}/{untagged}/{Untagged}/{JSON}", func(c *tctx) error {
+		in, err := c.BindPath[paramSourced]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, sourcedString(in.Own, in.Other, in.JSON, in.Untagged))
+	})
+	r.GET("/header", func(c *tctx) error {
+		in, err := c.BindHeader[headerSourced]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, sourcedString(in.Own, in.Other, in.JSON, in.Untagged))
+	})
+
+	every := url.Values{
+		"own": {"v"}, "other": {"v"}, "json": {"v"}, "JSON": {"v"},
+		"untagged": {"v"}, "Untagged": {"v"},
+	}
+	want := sourcedString("v", "", "", "")
+
+	t.Run("form", func(t *testing.T) {
+		if got := postForm(r, "/form", every).Body.String(); got != want {
+			t.Errorf("body = %s, want %s", got, want)
+		}
+	})
+	t.Run("query", func(t *testing.T) {
+		if got := do(r, http.MethodGet, "/query?"+every.Encode()).Body.String(); got != want {
+			t.Errorf("body = %s, want %s", got, want)
+		}
+	})
+	t.Run("path", func(t *testing.T) {
+		if got := do(r, http.MethodGet, "/path/v/v/v/v/v/v").Body.String(); got != want {
+			t.Errorf("body = %s, want %s", got, want)
+		}
+	})
+	t.Run("header", func(t *testing.T) {
+		headers := map[string]string{"Own": "v", "Other": "v", "Json": "v", "Untagged": "v"}
+		if got := doWithHeaders(r, http.MethodGet, "/header", headers).Body.String(); got != want {
+			t.Errorf("body = %s, want %s", got, want)
+		}
+	})
+}
+
+func TestBindReadsTheBodyOfEveryMethod(t *testing.T) {
+	type input struct {
+		Name string `form:"name" json:"name"`
+	}
+	r := newTestRouter()
+	bind := func(c *tctx) error {
+		in, err := c.Bind[input]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, in.Name+"/"+c.FormValue("name"))
+	}
+	r.Handle(MethodQuery, "/x", bind)
+	r.DELETE("/x", bind)
+
+	for _, method := range []string{MethodQuery, http.MethodDelete} {
+		t.Run(method+" form", func(t *testing.T) {
+			rec := doBody(r, method, "/x", MIMEApplicationForm, "name=ann")
+			if got, want := rec.Body.String(), "ann/ann"; got != want {
+				t.Errorf("body = %q, want %q", got, want)
+			}
+		})
+		t.Run(method+" json", func(t *testing.T) {
+			rec := doBody(r, method, "/x", MIMEApplicationJSON, `{"name":"ann"}`)
+			if got, want := rec.Body.String(), "ann/"; got != want {
+				t.Errorf("body = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestFormReadersApplyTheBodyLimitToEveryMethod(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(8)
+	r.DELETE("/x", func(c *tctx) error {
+		_, err := c.FormValues()
+		return err
+	})
+
+	rec := doBody(r, http.MethodDelete, "/x", MIMEApplicationForm, "name="+strings.Repeat("a", 64))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestBindTakesAPointerToAStruct(t *testing.T) {
+	type input struct {
+		Name string `form:"name" query:"name" param:"name" header:"X-Name" json:"name"`
+	}
+	r := newTestRouter()
+	reply := func(c *tctx, in *input, err error) error {
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, in.Name)
+	}
+	r.GET("/query", func(c *tctx) error { in, err := c.BindQuery[*input](); return reply(c, in, err) })
+	r.POST("/form", func(c *tctx) error { in, err := c.BindForm[*input](); return reply(c, in, err) })
+	r.GET("/path/{name}", func(c *tctx) error { in, err := c.BindPath[*input](); return reply(c, in, err) })
+	r.GET("/header", func(c *tctx) error { in, err := c.BindHeader[*input](); return reply(c, in, err) })
+	r.GET("/bind", func(c *tctx) error { in, err := c.Bind[*input](); return reply(c, in, err) })
+	r.POST("/json", func(c *tctx) error { in, err := c.BindJSON[*input](); return reply(c, in, err) })
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"query":  do(r, http.MethodGet, "/query?name=ann"),
+		"form":   postForm(r, "/form", url.Values{"name": {"ann"}}),
+		"path":   do(r, http.MethodGet, "/path/ann"),
+		"header": doWithHeaders(r, http.MethodGet, "/header", map[string]string{"X-Name": "ann"}),
+		"bind":   do(r, http.MethodGet, "/bind?name=ann"),
+		"json":   post(r, "/json", MIMEApplicationJSON, `{"name":"ann"}`),
+	} {
+		if rec.Code != http.StatusOK || rec.Body.String() != "ann" {
+			t.Errorf("%s: %d %q, want 200 ann", name, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestBindAnswers500ForATargetThatIsNotAStruct(t *testing.T) {
+	var seen error
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) error {
+		seen = err
+		return DefaultErrorHandler(c, err)
+	})
+	r.GET("/query", func(c *tctx) error { _, err := c.BindQuery[[]string](); return err })
+	r.POST("/form", func(c *tctx) error { _, err := c.BindForm[*int](); return err })
+	r.GET("/path/{a}", func(c *tctx) error { _, err := c.BindPath[map[string]string](); return err })
+	r.GET("/header", func(c *tctx) error { _, err := c.BindHeader[string](); return err })
+	r.GET("/bind", func(c *tctx) error { _, err := c.Bind[**struct{}](); return err })
+
+	for name, rec := range map[string]func() *httptest.ResponseRecorder{
+		"query":  func() *httptest.ResponseRecorder { return do(r, http.MethodGet, "/query?a=1") },
+		"form":   func() *httptest.ResponseRecorder { return postForm(r, "/form", url.Values{"a": {"1"}}) },
+		"path":   func() *httptest.ResponseRecorder { return do(r, http.MethodGet, "/path/1") },
+		"header": func() *httptest.ResponseRecorder { return do(r, http.MethodGet, "/header") },
+		"bind":   func() *httptest.ResponseRecorder { return do(r, http.MethodGet, "/bind?a=1") },
+	} {
+		seen = nil
+		got := rec()
+		if got.Code != http.StatusInternalServerError {
+			t.Errorf("%s: status = %d, want 500", name, got.Code)
+		}
+		if strings.Contains(got.Body.String(), "struct") {
+			t.Errorf("%s: body = %q, want no word of the decoder in it", name, got.Body)
+		}
+		if he, ok := errors.AsType[*HTTPError](seen); !ok || he.Err == nil {
+			t.Errorf("%s: error = %v, want an HTTPError with the cause", name, seen)
+		}
+	}
+}
+
+func TestParseValueRejectsAnEmptyValue(t *testing.T) {
+	if _, err := ParseValue[int](""); err == nil {
+		t.Error(`ParseValue[int]("") reported no error`)
+	}
+	if _, err := ParseValue[*bool](""); err == nil {
+		t.Error(`ParseValue[*bool]("") reported no error`)
+	}
+	if v, err := ParseValue[string](""); err != nil || v != "" {
+		t.Errorf(`ParseValue[string]("") = %q, %v, want "", nil`, v, err)
+	}
+}
+
+func TestBindCombinesTheSourcesByTag(t *testing.T) {
+	type input struct {
+		Org     string `param:"org"`
+		Page    int    `query:"page"`
+		Trace   string `header:"X-Trace"`
+		Name    string `json:"name" form:"name"`
+		ID      string `json:"id" form:"id" param:"org"`
+		IsAdmin bool
+	}
+	r := newTestRouter()
+	bind := func(c *tctx) error {
+		in, err := c.Bind[input]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, fmt.Sprintf("%s/%d/%s/%s/%s/%v",
+			in.Org, in.Page, in.Trace, in.Name, in.ID, in.IsAdmin))
+	}
+	r.GET("/{org}", bind)
+	r.POST("/{org}", bind)
+
+	req := httptest.NewRequest(http.MethodGet, "/acme?page=2&name=q&isadmin=on&IsAdmin=on", nil)
+	req.Header.Set("X-Trace", "t1")
+	if got, want := doReq(r, req).Body.String(), "acme/2/t1//acme/false"; got != want {
+		t.Errorf("GET: body = %q, want %q", got, want)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/acme?page=3", strings.NewReader(`{"name":"ann","id":"evil","IsAdmin":true}`))
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	if got, want := doReq(r, req).Body.String(), "acme/3//ann/acme/true"; got != want {
+		t.Errorf("POST JSON: body = %q, want %q", got, want)
+	}
+
+	rec := doBody(r, http.MethodPost, "/acme", MIMEApplicationForm, "name=ann&id=evil&IsAdmin=on&isadmin=on")
+	if got, want := rec.Body.String(), "acme/0//ann/acme/false"; got != want {
+		t.Errorf("POST form: body = %q, want %q", got, want)
+	}
+
+	if code := do(r, http.MethodGet, "/acme?page=x").Code; code != http.StatusBadRequest {
+		t.Errorf("a malformed query: status = %d, want 400", code)
 	}
 }

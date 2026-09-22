@@ -41,10 +41,35 @@ func writeFiles(t *testing.T, dir string, files map[string]string) {
 	}
 }
 
+// fileRouter serves name from the working directory, through an os.Root as
+// the doc of File advises.
 func fileRouter(name string) *Router[*tctx] {
 	r := newTestRouter()
-	r.GET("/f", func(c *tctx) error { return c.File(name) })
+	r.GET("/f", func(c *tctx) error {
+		root, err := os.OpenRoot(".")
+		if err != nil {
+			return err
+		}
+		//nolint:errcheck // The root is read only.
+		defer root.Close()
+		return c.File(root.FS(), name)
+	})
 	return r
+}
+
+// cwdFS is the working directory as an os.Root.
+func cwdFS(t *testing.T) fs.FS {
+	t.Helper()
+	root, err := os.OpenRoot(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return root.FS()
 }
 
 func TestFileServesTheContent(t *testing.T) {
@@ -141,7 +166,9 @@ func TestFileNameOutsideTheRootAnswersNotFound(t *testing.T) {
 		{"a dot segment in the middle", "sub/../../secret.txt"},
 		{"an empty name", ""},
 		{"the root itself", "."},
+		{"the root with a slash", "./"},
 		{"a directory", "sub"},
+		{"a directory with a slash", "sub/"},
 		{"a file that nothing holds", "nope.txt"},
 	}
 	for _, tc := range tests {
@@ -184,20 +211,20 @@ func TestFileSymlinkOutOfTheRootAnswersNotFound(t *testing.T) {
 	}
 }
 
-func TestFileFS(t *testing.T) {
+func TestFileReadsAnFS(t *testing.T) {
 	fsys := fstest.MapFS{
 		"docs/readme.txt": &fstest.MapFile{Data: []byte("from the tree")},
 		"secret.txt":      &fstest.MapFile{Data: []byte("secret")},
 	}
 	r := newTestRouter()
-	r.GET("/f", func(c *tctx) error { return c.FileFS("docs/readme.txt", fsys) })
-	r.GET("/miss", func(c *tctx) error { return c.FileFS("nope.txt", fsys) })
-	r.GET("/escape", func(c *tctx) error { return c.FileFS("../secret.txt", fsys) })
-	r.GET("/middle", func(c *tctx) error { return c.FileFS("docs/../secret.txt", fsys) })
-	r.GET("/absolute", func(c *tctx) error { return c.FileFS("/secret.txt", fsys) })
-	r.GET("/backslash", func(c *tctx) error { return c.FileFS(`docs\..\secret.txt`, fsys) })
-	r.GET("/encoded", func(c *tctx) error { return c.FileFS("docs%2F..%2Fsecret.txt", fsys) })
-	r.GET("/nil", func(c *tctx) error { return c.FileFS("docs/readme.txt", nil) })
+	r.GET("/f", func(c *tctx) error { return c.File(fsys, "docs/readme.txt") })
+	r.GET("/miss", func(c *tctx) error { return c.File(fsys, "nope.txt") })
+	r.GET("/escape", func(c *tctx) error { return c.File(fsys, "../secret.txt") })
+	r.GET("/middle", func(c *tctx) error { return c.File(fsys, "docs/../secret.txt") })
+	r.GET("/absolute", func(c *tctx) error { return c.File(fsys, "/secret.txt") })
+	r.GET("/backslash", func(c *tctx) error { return c.File(fsys, `docs\..\secret.txt`) })
+	r.GET("/encoded", func(c *tctx) error { return c.File(fsys, "docs%2F..%2Fsecret.txt") })
+	r.GET("/nil", func(c *tctx) error { return c.File(nil, "docs/readme.txt") })
 
 	rec := do(r, http.MethodGet, "/f")
 	if rec.Code != http.StatusOK {
@@ -278,12 +305,12 @@ func (i plainInfo) ModTime() time.Time { return i.modTime }
 func (i plainInfo) IsDir() bool        { return false }
 func (i plainInfo) Sys() any           { return nil }
 
-func TestFileFSUnreadableFileWritesNoBody(t *testing.T) {
+func TestFileUnreadableFileWritesNoBody(t *testing.T) {
 	captureLogs(t)
 
 	fsys := plainFS{files: map[string]string{"page.html": "<h1>hi</h1>"}, failing: true}
 	r := newTestRouter()
-	r.GET("/f", func(c *tctx) error { return c.FileFS("page.html", fsys) })
+	r.GET("/f", func(c *tctx) error { return c.File(fsys, "page.html") })
 
 	rec := do(r, http.MethodGet, "/f")
 	if rec.Code != http.StatusInternalServerError {
@@ -296,6 +323,7 @@ func TestFileFSUnreadableFileWritesNoBody(t *testing.T) {
 
 func TestAttachmentFileStreamsTheFile(t *testing.T) {
 	serveDir(t, map[string]string{"exports/report.csv": "a,b\n1,2\n"})
+	fsys := cwdFS(t)
 
 	tests := []struct {
 		name     string
@@ -308,7 +336,7 @@ func TestAttachmentFileStreamsTheFile(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTestRouter()
-			r.GET("/f", func(c *tctx) error { return c.AttachmentFile("exports/report.csv", tc.filename) })
+			r.GET("/f", func(c *tctx) error { return c.AttachmentFile(fsys, "exports/report.csv", tc.filename) })
 
 			rec := do(r, http.MethodGet, "/f")
 			if rec.Code != http.StatusOK {
@@ -329,9 +357,10 @@ func TestAttachmentFileStreamsTheFile(t *testing.T) {
 
 func TestInlineFile(t *testing.T) {
 	serveDir(t, map[string]string{"invoice.pdf": "%PDF-1.7"})
+	fsys := cwdFS(t)
 
 	r := newTestRouter()
-	r.GET("/f", func(c *tctx) error { return c.InlineFile("invoice.pdf", "") })
+	r.GET("/f", func(c *tctx) error { return c.InlineFile(fsys, "invoice.pdf", "") })
 
 	rec := do(r, http.MethodGet, "/f")
 	if got := rec.Header().Get(HeaderContentDisposition); got != `inline; filename="invoice.pdf"` {
@@ -344,9 +373,10 @@ func TestInlineFile(t *testing.T) {
 
 func TestAttachmentFileMissWritesNoDisposition(t *testing.T) {
 	serveDir(t, map[string]string{"exports/report.csv": "a,b\n"})
+	fsys := cwdFS(t)
 
 	r := newTestRouter()
-	r.GET("/f", func(c *tctx) error { return c.AttachmentFile("exports/nope.csv", "orders.csv") })
+	r.GET("/f", func(c *tctx) error { return c.AttachmentFile(fsys, "exports/nope.csv", "orders.csv") })
 
 	rec := do(r, http.MethodGet, "/f")
 	if rec.Code != http.StatusNotFound {
@@ -463,30 +493,6 @@ func TestContentDisposition(t *testing.T) {
 			}
 			if strings.ContainsAny(got, "\r\n") {
 				t.Errorf("the header value holds a line break: %q", got)
-			}
-		})
-	}
-}
-
-func TestCleanFileName(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"a plain name", "docs/readme.txt", "docs/readme.txt"},
-		{"a leading slash", "/docs/readme.txt", "docs/readme.txt"},
-		{"a parent segment", "../../etc/passwd", "etc/passwd"},
-		{"a parent segment in the middle", "docs/../../etc/passwd", "etc/passwd"},
-		{"a dot segment", "./docs/./readme.txt", "docs/readme.txt"},
-		{"a double slash", "docs//readme.txt", "docs/readme.txt"},
-		{"an empty name", "", ""},
-		{"the root", "/", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := cleanFileName(tc.in); got != tc.want {
-				t.Errorf("cleanFileName(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

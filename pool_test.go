@@ -54,7 +54,7 @@ func TestPoolResetsApplicationFields(t *testing.T) {
 		return c.NoContent(http.StatusNoContent)
 	})
 	r.GET("/read", func(c *pctx) error {
-		return c.Stringf(http.StatusOK, "user=%q hits=%d", c.User, c.Hits)
+		return c.String(http.StatusOK, fmt.Sprintf("user=%q hits=%d", c.User, c.Hits))
 	})
 
 	do(r, http.MethodGet, "/set")
@@ -71,8 +71,8 @@ func TestPoolResetsTheRequestState(t *testing.T) {
 	})
 	r.GET("/plain", func(c *pctx) error {
 		tenant, ok := c.Get("tenant")
-		return c.Stringf(http.StatusOK, "id=%q pattern=%q tenant=%v/%v status=%d",
-			c.Param("id"), c.RoutePattern(), tenant, ok, c.Response().Status)
+		return c.String(http.StatusOK, fmt.Sprintf("id=%q pattern=%q tenant=%v/%v status=%d",
+			c.Param("id"), c.RoutePattern(), tenant, ok, c.Response().Status))
 	})
 
 	do(r, http.MethodGet, "/users/7")
@@ -100,8 +100,8 @@ func TestPoolResetsTheCachedRequestState(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "q=%q host=%q routeHost=%q name=%q",
-			c.Query("q"), c.Host(), c.RouteHost(), vals.Get("name"))
+		return c.String(http.StatusOK, fmt.Sprintf("q=%q host=%q routeHost=%q name=%q",
+			c.Query("q"), c.Host(), c.RouteHost(), vals.Get("name")))
 	})
 
 	first := httptest.NewRequest(http.MethodPost, "/first?q=one",
@@ -130,7 +130,7 @@ func TestPoolForgetsTheBodyLimitOfAnEarlierRequest(t *testing.T) {
 	r := NewPooled(func() *pctx { return new(pctx) }, resetPctx)
 	r.MaxBodyBytes(16)
 	bind := func(c *pctx) error {
-		if _, err := c.Bind[map[string]string](); err != nil {
+		if _, err := c.BindJSON[map[string]string](); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -510,8 +510,8 @@ func TestReleasedBaseReadsItsRequestFields(t *testing.T) {
 	if c.URL() == nil {
 		t.Error("URL() on a released context is nil")
 	}
-	if c.Header() == nil {
-		t.Error("Header() on a released context is nil")
+	if c.Request().Header == nil {
+		t.Error("the header of a released context is nil")
 	}
 }
 

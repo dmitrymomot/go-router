@@ -2,6 +2,7 @@ package middleware_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -26,7 +27,7 @@ func bodyLimitRouter(cfg middleware.BodyLimitConfig, ran *bool) *router.Router[*
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", n)
+		return c.String(http.StatusOK, fmt.Sprintf("%d", n))
 	})
 	r.POST("/bind", func(c *appContext) error {
 		*ran = true
@@ -139,11 +140,11 @@ func TestBodyLimitSkip(t *testing.T) {
 }
 
 func bindHandler(c *appContext) error {
-	in, err := c.Bind[map[string]string]()
+	in, err := c.BindJSON[map[string]string]()
 	if err != nil {
 		return err
 	}
-	return c.Stringf(http.StatusOK, "%d", len(in["k"]))
+	return c.String(http.StatusOK, fmt.Sprintf("%d", len(in["k"])))
 }
 
 func jsonOfLength(n int) string {
@@ -173,7 +174,7 @@ func TestBodyLimitRaisesTheCapForAnUpload(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", fh.Size)
+		return c.String(http.StatusOK, fmt.Sprintf("%d", fh.Size))
 	}
 	r.With(middleware.BodyLimit[*appContext](4<<10)).POST("/uploads", upload)
 	r.POST("/notes", upload)

@@ -143,7 +143,7 @@ func headCases() []headCase {
 			name: "File",
 			setup: func(t *testing.T, r *Router[*tctx]) {
 				dir, name := writeTempFile(t, body)
-				r.GET("/x", func(c *tctx) error { return c.FileFS(name, os.DirFS(dir)) })
+				r.GET("/x", func(c *tctx) error { return c.File(os.DirFS(dir), name) })
 			},
 			check: wantResponseHeader("Accept-Ranges", "bytes"),
 		},

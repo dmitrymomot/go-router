@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -48,12 +49,12 @@ func decompressRouter(cfg middleware.DecompressConfig) *router.Router[*appContex
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", len(body))
+		return c.String(http.StatusOK, fmt.Sprintf("%d", len(body)))
 	})
 	r.POST("/headers", func(c *appContext) error {
 		req := c.Request()
-		return c.Stringf(http.StatusOK, "%q %d",
-			req.Header.Get(router.HeaderContentEncoding), req.ContentLength)
+		return c.String(http.StatusOK, fmt.Sprintf("%q %d",
+			req.Header.Get(router.HeaderContentEncoding), req.ContentLength))
 	})
 	return r
 }
@@ -104,7 +105,7 @@ func TestDecompressLeavesTheRequestThatCameInAlone(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusOK, "%d", len(body))
+		return c.String(http.StatusOK, fmt.Sprintf("%d", len(body)))
 	})
 
 	if rec := do(r, decompressPost("/read", gzipped(t, "0123456789"))); rec.Code != http.StatusOK {

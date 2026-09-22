@@ -3,7 +3,6 @@ package router
 import (
 	"bytes"
 	"context"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -54,11 +53,6 @@ func (b *Base) String(status int, s string) error {
 	return err
 }
 
-// Stringf writes the text that format and args build, as [Base.String] does.
-func (b *Base) Stringf(status int, format string, args ...any) error {
-	return b.String(status, fmt.Sprintf(format, args...))
-}
-
 // HTML writes html as text/html with status. The string goes out as it
 // stands, so anything built from user input has to be escaped first; see
 // [Base.Render] for a template or a component.
@@ -90,11 +84,6 @@ func (b *Base) jsonOptions(opts []json.Options) []json.Options {
 	out := make([]json.Options, 0, len(def)+len(opts))
 	out = append(out, def...)
 	return append(out, opts...)
-}
-
-// JSONPretty is [Base.JSON] with a line per field and indent per level.
-func (b *Base) JSONPretty(status int, v any, indent string) error {
-	return b.JSON(status, v, jsontext.Multiline(true), jsontext.WithIndent(indent))
 }
 
 // Stream copies r to the response with contentType and status. It sets no
@@ -137,9 +126,16 @@ func isRedirectStatus(code int) bool {
 }
 
 // Attachment writes data as a download named filename, through a
-// Content-Disposition header. See [Base.File] to send a file from disk.
+// Content-Disposition header. See [Base.AttachmentFile] to send a file.
 func (b *Base) Attachment(status int, contentType, filename string, data []byte) error {
 	b.res.Header().Set(HeaderContentDisposition, contentDisposition(dispositionAttachment, filename))
+	return b.Blob(status, contentType, data)
+}
+
+// Inline writes data for the browser to display rather than save, under
+// filename. See [Base.InlineFile] to send a file.
+func (b *Base) Inline(status int, contentType, filename string, data []byte) error {
+	b.res.Header().Set(HeaderContentDisposition, contentDisposition(dispositionInline, filename))
 	return b.Blob(status, contentType, data)
 }
 

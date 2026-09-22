@@ -60,7 +60,7 @@ func requireUser(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
 	return func(c Ctx) error {
 		name, ok := readUser(c)
 		if !ok {
-			if strings.Contains(c.Header().Get(router.HeaderAccept), router.MIMETextEventStream) {
+			if strings.Contains(c.Request().Header.Get(router.HeaderAccept), router.MIMETextEventStream) {
 				return router.ErrUnauthorized
 			}
 			return htmx.NewResponse(c).Redirect("/")

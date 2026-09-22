@@ -45,8 +45,8 @@ func ExampleCSRF() {
 	// The token reaches the page through the context, and comes back in the
 	// _csrf form field. It is also the value of the _csrf cookie.
 	r.GET("/form", func(c *Context) error {
-		return c.Stringf(http.StatusOK, `<input name="_csrf" value=%q>`,
-			middleware.CSRFTokenFrom(c))
+		return c.String(http.StatusOK, fmt.Sprintf(`<input name="_csrf" value=%q>`,
+			middleware.CSRFTokenFrom(c)))
 	})
 	r.POST("/save", sayOK)
 
@@ -253,7 +253,7 @@ func ExampleParseForm() {
 		calls++
 		// Without ParseForm, an oversized form would read as empty here and
 		// switch the setting off.
-		return c.Stringf(http.StatusOK, "on=%t", c.FormValue("on") == "on")
+		return c.String(http.StatusOK, fmt.Sprintf("on=%t", c.FormValue("on") == "on"))
 	})
 
 	for _, body := range []string{"on=on", "on=on&note=" + strings.Repeat("x", 64)} {
@@ -273,7 +273,7 @@ func ExampleBodyLimit() {
 	// The default for every route, and more for the one that takes uploads.
 	r.MaxBodyBytes(64)
 	save := func(c *Context) error {
-		if _, err := c.Bind[map[string]string](); err != nil {
+		if _, err := c.BindJSON[map[string]string](); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusOK)
@@ -304,7 +304,7 @@ func ExampleDecompress() {
 		}),
 	)
 	r.POST("/echo", func(c *Context) error {
-		body, err := c.Bind[map[string]string]()
+		body, err := c.BindJSON[map[string]string]()
 		if err != nil {
 			return err
 		}
@@ -424,7 +424,7 @@ func ExampleIdempotency() {
 	charges := 0
 	r.With(middleware.Idempotency(store)).POST("/pay", func(c *Context) error {
 		charges++
-		return c.Stringf(http.StatusCreated, "payment %d", charges)
+		return c.String(http.StatusCreated, fmt.Sprintf("payment %d", charges))
 	})
 
 	// The client lost the first answer and sent the same request again.
@@ -452,7 +452,7 @@ func ExampleIdempotencyWithConfig() {
 		Required: true,
 	})).POST("/pay", func(c *Context) error {
 		charges++
-		return c.Stringf(http.StatusOK, "paid %s", c.FormValue("amount"))
+		return c.String(http.StatusOK, fmt.Sprintf("paid %s", c.FormValue("amount")))
 	})
 
 	submit := func(form url.Values) {
@@ -507,7 +507,7 @@ func ExampleIdempotencyFormFingerprint() {
 		if err != nil {
 			return err
 		}
-		return c.Stringf(http.StatusCreated, "paid %d", in.Amount)
+		return c.String(http.StatusCreated, fmt.Sprintf("paid %d", in.Amount))
 	})
 
 	for _, body := range []string{`{"amount":5}`, `{"amount":5}`, `{"amount":9}`} {
@@ -548,7 +548,7 @@ func ExampleNewIdempotencyMemoryStoreWithConfig() {
 		Scope: func(c *Context) (string, error) { return signedIn(c), nil },
 	}))
 	r.POST("/orders", func(c *Context) error {
-		return c.Stringf(http.StatusCreated, "order for %s", signedIn(c))
+		return c.String(http.StatusCreated, fmt.Sprintf("order for %s", signedIn(c)))
 	})
 
 	for _, user := range []string{"alice", "bob"} {

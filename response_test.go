@@ -195,7 +195,8 @@ func TestWriteHeaderKeepsAnInformationalStatusOutOfTheAnswer(t *testing.T) {
 func TestHijackTakesOverTheConnection(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
-		hj, ok := c.ResponseWriter().(http.Hijacker)
+		var w http.ResponseWriter = c.Response()
+		hj, ok := w.(http.Hijacker)
 		if !ok {
 			return ErrInternalServerError.WithMessage("the response writer is no http.Hijacker")
 		}
@@ -589,7 +590,7 @@ func TestCaptureKeepsA413ClosingTheConnection(t *testing.T) {
 	r.MaxBodyBytes(16)
 	r.POST("/b", func(c *tctx) error {
 		c.Response().Capture(64)
-		_, err := c.Bind[map[string]any]()
+		_, err := c.BindJSON[map[string]any]()
 		return err
 	})
 

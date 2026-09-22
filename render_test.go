@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"io"
 	"net/http"
@@ -193,7 +194,7 @@ func TestRenderStreamHEADWritesNoBody(t *testing.T) {
 	}
 }
 
-func TestJSONPretty(t *testing.T) {
+func TestJSONTakesIndentOptions(t *testing.T) {
 	type payload struct {
 		Name string `json:"name"`
 		Age  int    `json:"age"`
@@ -201,7 +202,7 @@ func TestJSONPretty(t *testing.T) {
 
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
-		return c.JSONPretty(http.StatusAccepted, payload{Name: "Ada", Age: 37}, "\t")
+		return c.JSON(http.StatusAccepted, payload{Name: "Ada", Age: 37}, jsontext.Multiline(true), jsontext.WithIndent("\t"))
 	})
 
 	rec := do(r, http.MethodGet, "/")

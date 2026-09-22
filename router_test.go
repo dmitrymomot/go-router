@@ -780,8 +780,8 @@ func TestMountRouterDoesNotShareParameters(t *testing.T) {
 
 	sub := New(func(http.ResponseWriter, *http.Request) *adminCtx { return new(adminCtx) })
 	sub.GET("/users/{id}", func(c *adminCtx) error {
-		return c.Stringf(http.StatusOK, "tenant=%q id=%q path=%q",
-			c.Param("tenant"), c.Param("id"), c.Path())
+		return c.String(http.StatusOK, fmt.Sprintf("tenant=%q id=%q path=%q",
+			c.Param("tenant"), c.Param("id"), c.Path()))
 	})
 
 	r := newTestRouter()
@@ -3206,7 +3206,7 @@ func (p perm) String() string { return "perm " + string(p) }
 // metaOf is a handler that reports the Meta values of its route.
 func metaOf(c *tctx) error {
 	p, ok := MetaAs[perm](c)
-	return c.Stringf(http.StatusOK, "%v %q/%v", c.RouteMeta(), string(p), ok)
+	return c.String(http.StatusOK, fmt.Sprintf("%v %q/%v", c.RouteMeta(), string(p), ok))
 }
 
 func TestMetaAccumulatesAcrossScopes(t *testing.T) {

@@ -64,7 +64,7 @@ func (r *Router[C]) Redirect(pattern, target string, status int) {
 
 	r.handle(http.MethodGet, pattern, func(c C) error {
 		b := c.base()
-		loc, err := tmpl.expand(b.ParamOK)
+		loc, err := tmpl.expand(b.param)
 		if err != nil {
 			return ErrNotFound.WithError(err)
 		}
@@ -174,7 +174,7 @@ func (r *Router[C]) RedirectHost(pattern, target string, status int) {
 	}
 	h := func(c C) error {
 		b := c.base()
-		to, err := tmpl.expand(b.ParamOK)
+		to, err := tmpl.expand(b.param)
 		if err != nil {
 			return ErrNotFound.WithError(err)
 		}

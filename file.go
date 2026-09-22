@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -17,54 +16,49 @@ const (
 	dispositionInline     = "inline"
 )
 
-// File sends a file from the working directory. name is a relative slash
-// path, and it stays inside that directory: an absolute path, a "..", or a
-// symbolic link that points out reports [ErrNotFound].
+// File sends file name from fsys, such as an embed.FS or the FS of an
+// [os.Root]. name is a relative slash path: an absolute path, a backslash or
+// a ".." reports [ErrNotFound], and so does a directory. The files of fsys
+// have to seek, which those of embed.FS and os.Root do.
+//
+// fsys decides what a symbolic link may reach. [os.DirFS] follows one out of
+// its directory, and the FS of an [os.Root] does not, so use
+// os.OpenRoot(dir) and its FS for a directory on disk.
 //
 // The answer carries a content type from the extension, and it honours
 // If-Modified-Since and Range.
-func (b *Base) File(name string) error {
-	return b.serveFile(name, nil, "", "")
+func (b *Base) File(fsys fs.FS, name string) error {
+	return b.serveFile(fsys, name, "", "")
 }
 
-// FileFS is [Base.File] from fsys, such as an embed.FS or an [os.DirFS].
-// The files of fsys have to seek, which the two above do.
-func (b *Base) FileFS(name string, fsys fs.FS) error {
-	if fsys == nil {
-		return ErrInternalServerError.WithError(errors.New("router: FileFS needs a file system"))
-	}
-	return b.serveFile(name, fsys, "", "")
+// AttachmentFile sends file name from fsys as a download named filename. An
+// empty filename takes the base name of name. See [Base.File].
+func (b *Base) AttachmentFile(fsys fs.FS, name, filename string) error {
+	return b.serveFile(fsys, name, dispositionAttachment, filename)
 }
 
-// AttachmentFile sends a file as a download named filename. An empty filename
-// takes the base name of name. See [Base.File].
-func (b *Base) AttachmentFile(name, filename string) error {
-	return b.serveFile(name, nil, dispositionAttachment, filename)
-}
-
-// InlineFile sends a file for the browser to display rather than save. See
+// InlineFile sends file name from fsys for the browser to display rather than
+// save, under filename. An empty filename takes the base name of name. See
 // [Base.File].
-func (b *Base) InlineFile(name, filename string) error {
-	return b.serveFile(name, nil, dispositionInline, filename)
+func (b *Base) InlineFile(fsys fs.FS, name, filename string) error {
+	return b.serveFile(fsys, name, dispositionInline, filename)
 }
 
-// Inline writes data for the browser to display rather than save, under
-// filename. See [Base.Attachment] for the download.
-func (b *Base) Inline(status int, contentType, filename string, data []byte) error {
-	b.res.Header().Set(HeaderContentDisposition, contentDisposition(dispositionInline, filename))
-	return b.Blob(status, contentType, data)
-}
-
-func (b *Base) serveFile(name string, fsys fs.FS, kind, filename string) error {
+func (b *Base) serveFile(fsys fs.FS, name, kind, filename string) error {
+	if fsys == nil {
+		return ErrInternalServerError.WithError(errors.New("router: serving a file needs a file system"))
+	}
 	if !safeFileName(name) {
 		return ErrNotFound
 	}
-	clean := cleanFileName(name)
-	if clean == "." || !fs.ValidPath(clean) {
+	// safeFileName let no ".." or leading slash through, so what Clean
+	// returns is a valid fs path, or "." for a name such as "./".
+	clean := path.Clean(name)
+	if clean == "." {
 		return ErrNotFound
 	}
 
-	f, err := openFileIn(clean, fsys)
+	f, err := fsys.Open(clean)
 	if err != nil {
 		return fileNotFound(err)
 	}
@@ -86,14 +80,6 @@ func (b *Base) serveFile(name string, fsys fs.FS, kind, filename string) error {
 		b.res.Header().Set(HeaderContentDisposition, contentDisposition(kind, filename))
 	}
 	return b.sendFile(clean, f, info)
-}
-
-// os.Root refuses a path that leaves the directory, symbolic links included.
-func openFileIn(name string, fsys fs.FS) (fs.File, error) {
-	if fsys != nil {
-		return fsys.Open(name)
-	}
-	return os.OpenInRoot(".", filepath.FromSlash(name))
 }
 
 func fileNotFound(err error) error {
@@ -127,13 +113,6 @@ func safeFileName(name string) bool {
 		}
 	}
 	return true
-}
-
-func cleanFileName(name string) string {
-	if len(name) > 0 && name[0] == '/' {
-		return strings.TrimPrefix(path.Clean(name), "/")
-	}
-	return strings.TrimPrefix(path.Clean("/"+name), "/")
 }
 
 func contentDisposition(kind, filename string) string {
