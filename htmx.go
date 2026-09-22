@@ -115,8 +115,9 @@ func idOf(v string) string {
 func (b *Base) IsHTMX() bool { return hxTrue(b.req.Header.Get(HeaderHXRequest)) }
 
 // IsBoosted reports whether the request comes from an hx-boost link or form.
-// htmx 4 sends such a request as a full one, so [Base.WantsPartial] already
-// answers it with the page.
+// htmx 4 sends a boosted link that swaps the body as a full request, so
+// [Base.WantsPartial] answers it with the page; a boosted element that targets
+// one element is partial.
 func (b *Base) IsBoosted() bool { return hxTrue(b.req.Header.Get(HeaderHXBoosted)) }
 
 // HTMXWantsPartial reports whether r wants a fragment: htmx made it, and its
