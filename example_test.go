@@ -1175,3 +1175,35 @@ func ExampleValidator() {
 	// 422 "the batch holds 3 events, 2 at most\nevents: too many"
 	// 400 "invalid request\nevents: has the wrong JSON type"
 }
+
+func ExampleExpand() {
+	const suspendAgent = "/agents/{agent}/suspend"
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST(suspendAgent, func(c *Context) error {
+		return c.Stringf(http.StatusOK, "suspended %s", c.Param("agent"))
+	})
+
+	link, _ := router.Expand(suspendAgent, "agent", "a b")
+	fmt.Println(link)
+	fmt.Println(serve(r, http.MethodPost, link))
+
+	login, _ := router.Expand("/login/link?token={token}", "token", "k=v&x")
+	fmt.Println(login)
+
+	_, err := router.Expand(suspendAgent)
+	fmt.Println(err)
+	// Output:
+	// /agents/a%20b/suspend
+	// 200 suspended a b
+	// /login/link?token=k%3Dv%26x
+	// router: "/agents/{agent}/suspend" needs a value for "agent"
+}
+
+func ExampleMustExpand() {
+	fmt.Println(router.MustExpand("{tenant}.example.com", "tenant", "acme"))
+	fmt.Println(router.MustExpand("/files/{path...}", "path", "docs/read me.txt"))
+	// Output:
+	// acme.example.com
+	// /files/docs/read%20me.txt
+}

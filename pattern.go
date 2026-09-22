@@ -100,8 +100,8 @@ func parsePattern(pattern string, classes classLookup) ([]segment, []string, err
 		case raw == "*":
 			// {*} spells the same name through the brace branch, which checks
 			// for duplicates. This one did not, so "/{*}/*" registered with two
-			// parameters called "*": Param returned only the first and URL
-			// expansion failed on the second.
+			// parameters called "*": Param returned only the first, and Expand
+			// could fill only one of them.
 			if slices.Contains(names, mountParam) {
 				return nil, nil, fmt.Errorf("router: duplicate parameter %q in %q", mountParam, pattern)
 			}
