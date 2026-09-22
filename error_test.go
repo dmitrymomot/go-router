@@ -510,26 +510,56 @@ func TestJSONErrorHandler(t *testing.T) {
 		wantCode int
 		wantBody string
 	}{
-		{"a message", http.MethodGet, func(*tctx) error { return ErrNotFound.WithMessage("no user 9") }, "",
-			http.StatusNotFound, `{"error":{"status":404,"message":"no user 9"}}`},
-		{"a Bind validation failure", http.MethodPost, func(c *tctx) error {
-			_, err := c.Bind[validatedUser]()
-			return err
-		}, `{"name":""}`,
-			http.StatusUnprocessableEntity, `{"error":{"status":422,"message":"Unprocessable Entity","details":[{"field":"name","message":"is required"}]}}`},
-		{"a StatusCoder", http.MethodGet, func(*tctx) error { return &codedError{http.StatusPaymentRequired} }, "",
-			http.StatusPaymentRequired, `{"error":{"status":402,"message":"Payment Required"}}`},
-		{"a HEAD request", http.MethodHead, func(*tctx) error { return ErrForbidden }, "",
-			http.StatusForbidden, ""},
-		{"a Content-Type the handler set", http.MethodGet, func(c *tctx) error {
-			c.Response().Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
-			return ErrConflict
-		}, "",
-			http.StatusConflict, `{"error":{"status":409,"message":"Conflict"}}`},
-		{"details that are not field errors", http.MethodGet, func(*tctx) error {
-			return ErrTooManyRequests.WithDetails(map[string]int{"retry_after": 30})
-		}, "",
-			http.StatusTooManyRequests, `{"error":{"status":429,"message":"Too Many Requests","details":{"retry_after":30}}}`},
+		{
+			name:     "a message",
+			method:   http.MethodGet,
+			handler:  func(*tctx) error { return ErrNotFound.WithMessage("no user 9") },
+			wantCode: http.StatusNotFound,
+			wantBody: `{"error":{"status":404,"message":"no user 9"}}`,
+		},
+		{
+			name:   "a Bind validation failure",
+			method: http.MethodPost,
+			handler: func(c *tctx) error {
+				_, err := c.Bind[validatedUser]()
+				return err
+			},
+			body:     `{"name":""}`,
+			wantCode: http.StatusUnprocessableEntity,
+			wantBody: `{"error":{"status":422,"message":"Unprocessable Entity","details":[{"field":"name","message":"is required"}]}}`,
+		},
+		{
+			name:     "a StatusCoder",
+			method:   http.MethodGet,
+			handler:  func(*tctx) error { return &codedError{http.StatusPaymentRequired} },
+			wantCode: http.StatusPaymentRequired,
+			wantBody: `{"error":{"status":402,"message":"Payment Required"}}`,
+		},
+		{
+			name:     "a HEAD request",
+			method:   http.MethodHead,
+			handler:  func(*tctx) error { return ErrForbidden },
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:   "a Content-Type the handler set",
+			method: http.MethodGet,
+			handler: func(c *tctx) error {
+				c.Response().Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
+				return ErrConflict
+			},
+			wantCode: http.StatusConflict,
+			wantBody: `{"error":{"status":409,"message":"Conflict"}}`,
+		},
+		{
+			name:   "details that are not field errors",
+			method: http.MethodGet,
+			handler: func(*tctx) error {
+				return ErrTooManyRequests.WithDetails(map[string]int{"retry_after": 30})
+			},
+			wantCode: http.StatusTooManyRequests,
+			wantBody: `{"error":{"status":429,"message":"Too Many Requests","details":{"retry_after":30}}}`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
