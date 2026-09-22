@@ -1736,6 +1736,205 @@ func TestPreDispatchesEachErrorOnce(t *testing.T) {
 	}
 }
 
+// measure is a middleware that answers the error itself and records what the
+// client got.
+func measure(status *int, size *int64) Middleware[*tctx] {
+	return func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			err := next(c)
+			HandleError(c, err)
+			*status, *size = c.Response().Status, c.Response().Size
+			return err
+		}
+	}
+}
+
+func TestHandleErrorLetsAMiddlewareReadTheAnswer(t *testing.T) {
+	captureLogs(t)
+
+	var (
+		status int
+		size   int64
+		calls  int
+	)
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) error {
+		calls++
+		return c.String(http.StatusLocked, "locked")
+	})
+	r.Use(measure(&status, &size))
+	r.GET("/", func(*tctx) error { return errors.New("the row is locked") })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusLocked || rec.Body.String() != "locked" {
+		t.Errorf("answer = %d %q, want 423 %q", rec.Code, rec.Body.String(), "locked")
+	}
+	if status != http.StatusLocked || size != int64(len("locked")) {
+		t.Errorf("the middleware read %d and %d bytes, want 423 and %d", status, size, len("locked"))
+	}
+	if calls != 1 {
+		t.Errorf("the error handler ran %d times, want 1", calls)
+	}
+}
+
+func TestHandleErrorIsANoOpForNilAndASecondCall(t *testing.T) {
+	captureLogs(t)
+
+	calls := 0
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) error {
+		calls++
+		// An error handler that calls HandleError must not recurse.
+		HandleError(c, err)
+		return c.String(StatusOf(err), "first")
+	})
+	r.GET("/nil", func(c *tctx) error {
+		HandleError(c, nil)
+		return nil
+	})
+	r.GET("/twice", func(c *tctx) error {
+		HandleError(c, ErrConflict)
+		HandleError(c, ErrGone)
+		return ErrGone
+	})
+
+	if rec := do(r, http.MethodGet, "/nil"); rec.Code != http.StatusOK || rec.Body.Len() != 0 || calls != 0 {
+		t.Errorf("HandleError(c, nil) answered %d %q with %d handler calls, want an empty 200", rec.Code, rec.Body.String(), calls)
+	}
+	rec := do(r, http.MethodGet, "/twice")
+	if rec.Code != http.StatusConflict || rec.Body.String() != "first" {
+		t.Errorf("answer = %d %q, want 409 %q", rec.Code, rec.Body.String(), "first")
+	}
+	if calls != 1 {
+		t.Errorf("the error handler ran %d times, want 1", calls)
+	}
+}
+
+func TestHandleErrorPanicsOnAForeignContext(t *testing.T) {
+	var msg any
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		defer func() { msg = recover() }()
+		HandleError(&c.Base, ErrConflict)
+		return nil
+	})
+	do(r, http.MethodGet, "/")
+
+	s, ok := msg.(string)
+	if !ok || !strings.Contains(s, "*router.Base") {
+		t.Errorf("panic = %v, want one that names *router.Base", msg)
+	}
+}
+
+func TestObserveSeesTheAnswerOfHandleError(t *testing.T) {
+	captureLogs(t)
+
+	var (
+		gotStatus int
+		gotSize   int64
+		gotErr    error
+		status    int
+		size      int64
+	)
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(http.StatusLocked, "locked") })
+	r.Observe(func(_ Context, status int, size int64, _ time.Duration, err error) {
+		gotStatus, gotSize, gotErr = status, size, err
+	})
+	r.Use(measure(&status, &size))
+	r.GET("/", func(*tctx) error { return ErrConflict })
+
+	do(r, http.MethodGet, "/")
+	if gotStatus != http.StatusLocked || gotSize != int64(len("locked")) {
+		t.Errorf("the observer saw %d and %d bytes, want 423 and %d", gotStatus, gotSize, len("locked"))
+	}
+	if !errors.Is(gotErr, ErrConflict) {
+		t.Errorf("the observer saw err = %v, want ErrConflict", gotErr)
+	}
+}
+
+func TestHandleErrorUsesTheScopeThatOwnsTheRequest(t *testing.T) {
+	captureLogs(t)
+
+	var (
+		status int
+		size   int64
+	)
+	api := newTestRouter()
+	api.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "mounted") })
+	api.GET("/boom", func(*tctx) error { return ErrConflict })
+
+	r := newTestRouter()
+	r.Use(measure(&status, &size))
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "root") })
+	r.Route("/admin", func(g *Router[*tctx]) {
+		g.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "admin") })
+		g.GET("/boom", func(*tctx) error { return ErrConflict })
+	})
+	r.Host("api.example.com", func(h *Router[*tctx]) {
+		h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "host") })
+		h.GET("/boom", func(*tctx) error { return ErrConflict })
+	})
+	r.Mount("/v1", api)
+	r.GET("/boom", func(*tctx) error { return ErrConflict })
+
+	for _, tc := range []struct {
+		host, method, path string
+		wantStatus         int
+		wantBody           string
+	}{
+		{"example.com", http.MethodGet, "/boom", http.StatusConflict, "root"},
+		{"example.com", http.MethodGet, "/admin/boom", http.StatusConflict, "admin"},
+		{"example.com", http.MethodGet, "/admin/missing", http.StatusNotFound, "admin"},
+		{"example.com", http.MethodPost, "/admin/boom", http.StatusMethodNotAllowed, "admin"},
+		{"api.example.com", http.MethodGet, "/boom", http.StatusConflict, "host"},
+		{"api.example.com", http.MethodGet, "/missing", http.StatusNotFound, "host"},
+		{"example.com", http.MethodGet, "/v1/boom", http.StatusConflict, "mounted"},
+	} {
+		t.Run(tc.host+" "+tc.method+" "+tc.path, func(t *testing.T) {
+			rec := doHost(r, tc.method, tc.host, tc.path)
+			if rec.Code != tc.wantStatus || rec.Body.String() != tc.wantBody {
+				t.Errorf("answer = %d %q, want %d %q", rec.Code, rec.Body.String(), tc.wantStatus, tc.wantBody)
+			}
+			if status != tc.wantStatus {
+				t.Errorf("the middleware read %d, want %d", status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestHandleErrorInsidePreRunsTheHandlerOnce(t *testing.T) {
+	captureLogs(t)
+
+	calls := 0
+	r := newTestRouter()
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			err := next(c)
+			HandleError(c, err)
+			return err
+		}
+	})
+	r.Route("/api", func(g *Router[*tctx]) {
+		g.ErrorHandler(func(c *tctx, err error) error {
+			calls++
+			return c.String(StatusOf(err), "api")
+		})
+		g.GET("/fail", func(*tctx) error { return ErrConflict })
+	})
+
+	for _, path := range []string{"/api/fail", "/api/missing"} {
+		before := calls
+		rec := do(r, http.MethodGet, path)
+		if calls != before+1 {
+			t.Errorf("GET %s invoked the error handler %d times, want 1", path, calls-before)
+		}
+		if rec.Body.String() != "api" {
+			t.Errorf("GET %s body = %q, want %q", path, rec.Body.String(), "api")
+		}
+	}
+}
+
 func TestErrorScopeIsSelectedByRouting(t *testing.T) {
 	r := newTestRouter()
 	r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "root") })

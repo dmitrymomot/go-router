@@ -65,8 +65,8 @@ type Base struct {
 	paramVals   []string
 	ropts       *routerOpts
 
-	// One word rather than two error fields, which would push Base from 360 to
-	// 384 bytes and its embedder into the next size class.
+	// One word rather than two error fields, which would push an embedder
+	// with a string of its own past 320 bytes and into the next size class.
 	deferred      *deferredErrors
 	resStorage    Response
 	hostIdx       int32
@@ -75,6 +75,7 @@ type Base struct {
 	pathEscaped   bool
 	errorRouted   bool
 	needsCleanup  bool
+	errorHandled  bool
 
 	// Routing matches the path trimmed of its trailing slash, so a mounted
 	// handler has to be told the slash was there.
@@ -85,6 +86,7 @@ type routerOpts struct {
 	jsonOpts     []json.Options
 	logger       *slog.Logger
 	codec        *CookieCodec
+	answer       func(c Context, err error) // HandleError's way to the router that serves
 	maxBody      int64
 	maxMultipart int64
 }
@@ -149,7 +151,7 @@ func (b *Base) clearRequestSlow() {
 	}
 	b.deferred = nil
 	b.host, b.rawTail = "", ""
-	b.needsCleanup = false
+	b.needsCleanup, b.errorHandled = false, false
 }
 
 type deferredErrors struct {

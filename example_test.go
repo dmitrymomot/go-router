@@ -876,3 +876,32 @@ func ExampleHTTPError_WithMessage() {
 	// 404 Not Found
 	// 422 [name: is required]
 }
+
+func ExampleHandleError() {
+	errLocked := errors.New("the row is locked")
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.ErrorHandler(func(c *Context, err error) error {
+		if errors.Is(err, errLocked) {
+			return c.String(http.StatusLocked, "locked")
+		}
+		return router.DefaultErrorHandler(c, err)
+	})
+	// A metrics middleware answers the error itself, so it reads the status
+	// the error handler wrote rather than guessing it from err.
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			err := next(c)
+			router.HandleError(c, err)
+			fmt.Println("measured", c.Response().Status)
+			return err
+		}
+	})
+	r.GET("/rows/{id}", func(*Context) error { return errLocked })
+
+	fmt.Println(serve(r, http.MethodGet, "/rows/7"))
+	// Output:
+	// measured 423
+	// 423 locked
+}

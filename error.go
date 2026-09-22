@@ -304,10 +304,37 @@ func writeText(b *Base, err error, exposeCause bool) error {
 	return nil
 }
 
+// HandleError answers err now with the error handler that owns the request,
+// so a middleware that calls it after next reads the final Response.Status
+// and Size. The router then skips its own call. A nil err, or a call after the
+// error was answered, does nothing. Outside a router, on a context from
+// [NewBase], it answers with [DefaultErrorHandler].
+//
+// Like the router, HandleError logs the failure, and skips the error handler
+// for a response that already committed and for [context.Canceled].
+//
+// HandleError panics if c is not the context type of the router that serves
+// it, such as the *Base inside an application context.
+func HandleError(c Context, err error) {
+	b := c.base()
+	if err == nil || b.errorHandled {
+		return
+	}
+	if answer := b.opts().answer; answer != nil {
+		answer(c, err)
+		return
+	}
+	answerError(c, err, DefaultErrorHandler[Context])
+}
+
 // answerError is the error pipeline of a request: the guard, the handler,
 // then the log.
 func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	b := c.base()
+	// The flag goes up before h runs, so an h that calls HandleError does not
+	// recurse. needsCleanup takes a pooled context through the slow clear,
+	// which lowers the flag again.
+	b.errorHandled, b.needsCleanup = true, true
 	committedBefore := b.res.Committed
 	if !committedBefore && !errors.Is(err, context.Canceled) {
 		runErrorHandler(c, err, h)

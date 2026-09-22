@@ -141,6 +141,13 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	}
 	r.root = r
 	r.eng.owner = r
+	r.ropts.answer = func(c Context, err error) {
+		cc, ok := c.(C)
+		if !ok {
+			panic(fmt.Sprintf("router: HandleError got a %T, which is not the context type of the router that serves it", c))
+		}
+		r.handleError(cc, err)
+	}
 	return r
 }
 
@@ -1583,7 +1590,7 @@ func canonicalEscapedPath(path string) string {
 
 func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
 	err := h(c)
-	if err != nil {
+	if err != nil && !c.base().errorHandled {
 		r.handleError(c, err)
 	}
 	return err

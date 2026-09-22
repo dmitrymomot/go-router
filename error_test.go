@@ -467,6 +467,27 @@ func TestEveryErrorHandlerIsLoggedByThePolicy(t *testing.T) {
 	}
 }
 
+func TestHandleErrorOutsideARouter(t *testing.T) {
+	captureLogs(t)
+
+	rec := httptest.NewRecorder()
+	b := NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	HandleError(b, ErrNotFound)
+	if rec.Code != http.StatusNotFound || rec.Body.String() != "Not Found" {
+		t.Errorf("answer = %d %q, want 404 %q", rec.Code, rec.Body.String(), "Not Found")
+	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMETextPlainCharsetUTF8 {
+		t.Errorf("Content-Type = %q, want %q", got, MIMETextPlainCharsetUTF8)
+	}
+
+	rec = httptest.NewRecorder()
+	b = NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	HandleError(b, context.Canceled)
+	if b.Response().Committed || rec.Body.Len() != 0 {
+		t.Errorf("a canceled error wrote %d %q, want nothing", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/boom", func(*tctx) error { return ErrForbidden })
