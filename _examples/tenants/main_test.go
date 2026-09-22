@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
@@ -16,9 +17,13 @@ const (
 	testPassword = "correct horse"
 )
 
+// testCodec signs the session cookie of every test router, so a test can read
+// the session back.
+var testCodec = cookie.NewCodec([]byte(strings.Repeat("k", cookie.MinKeyLen)))
+
 func newTestRouter(t *testing.T) *router.Router[Ctx] {
 	t.Helper()
-	return newRouter(NewStore(), router.NewCookieCodec([]byte(strings.Repeat("k", 32))))
+	return newRouter(NewStore(), testCodec)
 }
 
 func host(slug string) string { return slug + "." + apex }
@@ -195,7 +200,7 @@ func TestLoginBelongsToTheWorkspace(t *testing.T) {
 	if got := sessionOf(t, res); got.Domain != "" {
 		t.Errorf("session cookie domain = %q, want none", got.Domain)
 	}
-	if email, ok := routertest.SignedCookie(res, sessionCookie); !ok || email != "ann@example.com" {
+	if email, ok := routertest.SignedCookie(t, res, testCodec, sessionCookie); !ok || email != "ann@example.com" {
 		t.Errorf("the session carries %q, %v, want ann@example.com", email, ok)
 	}
 }

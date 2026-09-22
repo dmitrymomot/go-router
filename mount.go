@@ -12,10 +12,10 @@ import (
 //
 // sub is closed to further registration afterwards, and it must be a top-level
 // router that carries no setting belonging to the router that serves, such as
-// MaxBodyBytes, a logger or a cookie codec. An error handler of sub answers
-// the errors of its routes, and under a prefix other than "/" the 404 and 405
-// answers under that prefix too, wrapped in the middleware of sub. The classes
-// that sub declared with [Router.ParamClass] stay with its routes.
+// MaxBodyBytes or a logger. An error handler of sub answers the errors of its
+// routes, and under a prefix other than "/" the 404 and 405 answers under that
+// prefix too, wrapped in the middleware of sub. The classes that sub declared
+// with [Router.ParamClass] stay with its routes.
 //
 // Mount panics if sub is nil, is a scope of another router, is mounted inside
 // itself, or carries such a setting, if sub and this router register one
@@ -85,8 +85,6 @@ func (r *Router[C]) mustNotCarryRootOnlySettings() {
 		lost = "a logger"
 	case len(r.ropts.jsonOpts) > 0:
 		lost = "JSONOptions"
-	case r.ropts.codec != nil:
-		lost = "a cookie codec"
 	default:
 		return
 	}

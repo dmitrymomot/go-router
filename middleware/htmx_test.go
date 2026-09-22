@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
@@ -245,11 +246,11 @@ func TestHTMXRedirectComposesWithHX(t *testing.T) {
 }
 
 func TestHTMXRedirectKeepsTheFlashCookie(t *testing.T) {
+	cc := cookie.NewCodec([]byte(strings.Repeat("k", cookie.MinKeyLen)))
 	r := newRouter()
-	r.CookieCodec(router.NewCookieCodec([]byte(strings.Repeat("k", router.MinCookieKeyLen))))
 	r.Use(middleware.HTMXRedirect[*appContext])
 	r.POST("/join", func(c *appContext) error {
-		if err := c.AddFlash(router.Flash{Kind: "success", Message: "welcome"}); err != nil {
+		if err := cc.AddFlash(c, cookie.Flash{Kind: "success", Message: "welcome"}); err != nil {
 			return err
 		}
 		return c.Redirect(http.StatusSeeOther, "/chat")
@@ -265,7 +266,7 @@ func TestHTMXRedirectKeepsTheFlashCookie(t *testing.T) {
 	if got := rec.Header().Get(router.HeaderHXRedirect); got != "/chat" {
 		t.Errorf("%s = %q, want %q", router.HeaderHXRedirect, got, "/chat")
 	}
-	if line := rec.Header().Get("Set-Cookie"); !strings.HasPrefix(line, router.FlashCookieName+"=") {
+	if line := rec.Header().Get("Set-Cookie"); !strings.HasPrefix(line, cookie.FlashName+"=") {
 		t.Errorf("the converted redirect carries Set-Cookie %q, want the flash cookie", line)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func hxDo(h http.Handler, method, target string, headers map[string]string) *httptest.ResponseRecorder {
@@ -567,16 +568,13 @@ func TestHXRedirect(t *testing.T) {
 	})
 }
 
-func TestHXRedirectCarriesTheFlash(t *testing.T) {
+func TestHXRedirectCarriesACookie(t *testing.T) {
 	r := newTestRouter()
-	r.CookieCodec(testCodec())
 	r.POST("/join", func(c *tctx) error {
-		if err := c.AddFlash(Flash{Kind: "success", Message: "welcome"}); err != nil {
-			return err
-		}
+		c.SetCookie(c.NewCookie("seen", "welcome", time.Hour))
 		return c.HX().Redirect("/chat")
 	})
-	r.GET("/chat", func(c *tctx) error { return c.Stringf(http.StatusOK, "%v", c.Flashes()) })
+	r.GET("/chat", func(c *tctx) error { return c.String(http.StatusOK, c.Cookie("seen")) })
 
 	for _, tc := range []struct {
 		name    string
@@ -592,12 +590,12 @@ func TestHXRedirectCarriesTheFlash(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
 			}
 			line := rec.Header().Get("Set-Cookie")
-			if !strings.HasPrefix(line, FlashCookieName+"=") {
-				t.Fatalf("the redirect carries Set-Cookie %q, want the flash cookie", line)
+			if !strings.HasPrefix(line, "seen=") {
+				t.Fatalf("the redirect carries Set-Cookie %q, want the cookie the handler set", line)
 			}
 
 			got := hxDo(r, http.MethodGet, "/chat", map[string]string{HeaderCookie: cookieHeader(t, line)})
-			if want := "[{success welcome}]"; got.Body.String() != want {
+			if want := "welcome"; got.Body.String() != want {
 				t.Errorf("the next page shows %q, want %q", got.Body, want)
 			}
 		})

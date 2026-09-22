@@ -531,24 +531,6 @@ func (r *Router[C]) JSONOptions(opts ...json.Options) {
 	r.root.ropts.jsonOpts = slices.Clone(opts)
 }
 
-// CookieCodec sets the codec that signs [Base.SetSignedCookie],
-// [Base.SignedCookie] and the flash cookie of [Base.AddFlash]. It applies to
-// the whole router. A router given to
-// [Router.MountRouter] or [Router.HostRouter] serves with settings of its own
-// and needs its own call. [NewCookieCodec] takes the previous keys that rotate
-// out.
-//
-// CookieCodec panics if cc is nil or was not built by NewCookieCodec, on a
-// scope, on a mounted router, or after the router started serving.
-func (r *Router[C]) CookieCodec(cc *CookieCodec) {
-	mustBeBuiltCodec(cc, "router: CookieCodec")
-	r.mustBeRoot("CookieCodec", "it applies to the whole router")
-	defer r.guard("change the cookie codec")()
-	r.root.ropts.codec = cc
-}
-
-func (r *Router[C]) cookieCodec() *CookieCodec { return r.root.ropts.codec }
-
 // RedirectTrailingSlash decides whether a request whose path differs from a
 // route by a trailing slash gets a redirect to the route: 301 for GET and
 // HEAD, 308 for anything else. It is off by default, and such a request

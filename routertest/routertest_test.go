@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
@@ -367,7 +368,6 @@ func TestRequestHelpersRejectNilInputs(t *testing.T) {
 		{name: "client cookie", call: func() { routertest.NewClient(t, http.NotFoundHandler()).SetCookie(nil) }},
 		{name: "client follow", call: func() { routertest.NewClient(t, http.NotFoundHandler()).Follow(nil) }},
 		{name: "context", call: func() { routertest.Context(nilContext) }},
-		{name: "cookie codec", call: func() { routertest.WithCookieCodec(nil) }},
 		{name: "Serve handler", call: func() { routertest.Serve(nil, routertest.Request(http.MethodGet, "/")) }},
 		{name: "Serve request", call: func() { routertest.Serve(http.NotFoundHandler(), nil) }},
 	}
@@ -1010,11 +1010,14 @@ func (tb *recordingTB) Errorf(format string, args ...any) {
 	tb.errors = append(tb.errors, fmt.Sprintf(format, args...))
 }
 
-var cookieKey = []byte(strings.Repeat("k", router.MinCookieKeyLen))
+var (
+	cookieKey = []byte(strings.Repeat("k", cookie.MinKeyLen))
+	codec     = cookie.NewCodec(cookieKey)
+)
 
 func signingRouter(r *router.Router[*appContext]) *router.Router[*appContext] {
 	r.POST("/signin", func(c *appContext) error {
-		if err := c.SetSignedCookie(c.NewCookie("session", "ann", time.Hour)); err != nil {
+		if err := codec.Set(c, c.NewCookie("session", "ann", time.Hour)); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -1031,10 +1034,9 @@ func TestSignedCookieReadsWhatTheRouterSigned(t *testing.T) {
 		{"NewPooled", router.NewPooled(func() *appContext { return new(appContext) }, func(c *appContext) { c.DB = "" })},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.r.CookieCodec(router.NewCookieCodec(cookieKey))
 			res := routertest.Do(signingRouter(tc.r), http.MethodPost, "/signin")
 
-			if v, ok := routertest.SignedCookie(res, "session"); !ok || v != "ann" {
+			if v, ok := routertest.SignedCookie(t, res, codec, "session"); !ok || v != "ann" {
 				t.Errorf("SignedCookie = %q, %v, want ann, true", v, ok)
 			}
 		})
@@ -1042,7 +1044,7 @@ func TestSignedCookieReadsWhatTheRouterSigned(t *testing.T) {
 }
 
 func TestSignedCookieReportsNothing(t *testing.T) {
-	other := router.NewCookieCodec([]byte(strings.Repeat("o", router.MinCookieKeyLen)))
+	other := cookie.NewCodec([]byte(strings.Repeat("o", cookie.MinKeyLen)))
 	tests := []struct {
 		name   string
 		handle func(c *appContext) error
@@ -1057,14 +1059,12 @@ func TestSignedCookieReportsNothing(t *testing.T) {
 			return nil
 		}},
 		{"the cookie is signed with another codec", func(c *appContext) error {
-			c.SetCookie(c.NewCookie("session", other.Encode("session", []byte("ann")), time.Hour))
-			return nil
+			return other.Set(c, c.NewCookie("session", "ann", time.Hour))
 		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := router.New(newContext)
-			r.CookieCodec(router.NewCookieCodec(cookieKey))
 			r.POST("/signin", func(c *appContext) error {
 				if err := tc.handle(c); err != nil {
 					return err
@@ -1073,7 +1073,7 @@ func TestSignedCookieReportsNothing(t *testing.T) {
 			})
 			res := routertest.Do(r, http.MethodPost, "/signin")
 
-			if v, ok := routertest.SignedCookie(res, "session"); ok {
+			if v, ok := routertest.SignedCookie(t, res, codec, "session"); ok {
 				t.Errorf("SignedCookie = %q, true, want false", v)
 			}
 		})
@@ -1081,12 +1081,9 @@ func TestSignedCookieReportsNothing(t *testing.T) {
 
 	t.Run("the cookie has expired", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			cc := router.NewCookieCodec(cookieKey)
-			cc.MaxAge = time.Minute
 			r := router.New(newContext)
-			r.CookieCodec(cc)
 			r.POST("/signin", func(c *appContext) error {
-				if err := c.SetSignedCookie(c.NewCookie("session", "ann", 0)); err != nil {
+				if err := codec.Set(c, c.NewCookie("session", "ann", time.Minute)); err != nil {
 					return err
 				}
 				return c.NoContent(http.StatusNoContent)
@@ -1095,68 +1092,46 @@ func TestSignedCookieReportsNothing(t *testing.T) {
 
 			time.Sleep(2 * time.Minute)
 
-			if v, ok := routertest.SignedCookie(res, "session"); ok {
+			if v, ok := routertest.SignedCookie(t, res, codec, "session"); ok {
 				t.Errorf("SignedCookie = %q, true, want false", v)
 			}
 		})
 	})
 }
 
-func TestSignedCookiePanicsWithoutACodec(t *testing.T) {
+func TestCookieHelpersFailWithoutACodec(t *testing.T) {
+	res := routertest.Do(signingRouter(router.New(newContext)), http.MethodPost, "/signin")
 	tests := []struct {
 		name string
-		h    http.Handler
+		want string
+		call func(tb testing.TB)
 	}{
-		{"a router without a codec", router.New(newContext)},
-		{"a handler that is not a router", http.NotFoundHandler()},
+		{"SignedCookie", "SignedCookie needs a codec", func(tb testing.TB) { routertest.SignedCookie(tb, res, nil, "session") }},
+		{"Flashes", "Flashes needs a codec", func(tb testing.TB) { routertest.Flashes(tb, res, nil) }},
+		{"FlashCookie", "FlashCookie needs a codec", func(tb testing.TB) { routertest.FlashCookie(tb, nil) }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res := routertest.Get(tc.h, "/")
-			defer func() {
-				msg, _ := recover().(string)
-				if !strings.Contains(msg, "CookieCodec") {
-					t.Errorf("panic = %q, want one that names CookieCodec", msg)
-				}
-			}()
-			routertest.SignedCookie(res, "session")
+			tb := new(recordingTB)
+			tc.call(tb)
+			if !tb.failed || !strings.Contains(tb.msg, tc.want) {
+				t.Errorf("the helper reported %q, failed %v, want a failure that holds %q", tb.msg, tb.failed, tc.want)
+			}
 		})
 	}
 }
 
-func TestWithCookieCodecGivesTheContextTheCodec(t *testing.T) {
-	cc := router.NewCookieCodec(cookieKey)
-	c, rec := routertest.NewContext(t, newContext, routertest.WithCookieCodec(cc))
-
-	if err := c.SetSignedCookie(c.NewCookie("session", "ann", time.Hour)); err != nil {
-		t.Fatalf("SetSignedCookie: %v", err)
-	}
-	ck, err := http.ParseSetCookie(rec.Header().Get("Set-Cookie"))
-	if err != nil {
-		t.Fatalf("the Set-Cookie does not parse: %v", err)
-	}
-	if v, err := cc.Decode("session", ck.Value); err != nil || string(v) != "ann" {
-		t.Errorf("Decode = %q, %v, want ann", v, err)
-	}
-
-	bare, _ := routertest.NewContext(t, newContext)
-	if err := bare.SetSignedCookie(bare.NewCookie("session", "ann", time.Hour)); !errors.Is(err, router.ErrNoCookieCodec) {
-		t.Errorf("SetSignedCookie without the option = %v, want %v", err, router.ErrNoCookieCodec)
-	}
-}
-
 func flashingRouter(r *router.Router[*appContext]) *router.Router[*appContext] {
-	r.CookieCodec(router.NewCookieCodec(cookieKey))
 	r.POST("/users", func(c *appContext) error {
-		for _, f := range []router.Flash{{Kind: "success", Message: "user created"}, {Kind: "info", Message: "check your inbox"}} {
-			if err := c.AddFlash(f); err != nil {
+		for _, f := range []cookie.Flash{{Kind: "success", Message: "user created"}, {Kind: "info", Message: "check your inbox"}} {
+			if err := codec.AddFlash(c, f); err != nil {
 				return err
 			}
 		}
 		return c.Redirect(http.StatusSeeOther, "/users")
 	})
 	r.GET("/users", func(c *appContext) error {
-		return c.Stringf(http.StatusOK, "%v", c.Flashes())
+		return c.Stringf(http.StatusOK, "%v", codec.Flashes(c))
 	})
 	return r
 }
@@ -1172,8 +1147,8 @@ func TestFlashesReadsWhatTheHandlerFlashed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			res := routertest.Do(flashingRouter(tc.r), http.MethodPost, "/users")
 
-			got := routertest.Flashes(res)
-			want := []router.Flash{{Kind: "success", Message: "user created"}, {Kind: "info", Message: "check your inbox"}}
+			got := routertest.Flashes(t, res, codec)
+			want := []cookie.Flash{{Kind: "success", Message: "user created"}, {Kind: "info", Message: "check your inbox"}}
 			if !slices.Equal(got, want) {
 				t.Errorf("Flashes = %+v, want %+v", got, want)
 			}
@@ -1182,8 +1157,7 @@ func TestFlashesReadsWhatTheHandlerFlashed(t *testing.T) {
 }
 
 func TestFlashesReportsNothing(t *testing.T) {
-	cc := router.NewCookieCodec(cookieKey)
-	other := router.NewCookieCodec([]byte(strings.Repeat("o", router.MinCookieKeyLen)))
+	other := cookie.NewCodec([]byte(strings.Repeat("o", cookie.MinKeyLen)))
 	tests := []struct {
 		name string
 		res  func(r *router.Router[*appContext]) *routertest.Response
@@ -1192,85 +1166,62 @@ func TestFlashesReportsNothing(t *testing.T) {
 			return routertest.Get(r, "/users")
 		}},
 		{"the cookie is cleared", func(r *router.Router[*appContext]) *routertest.Response {
-			return routertest.Get(r, "/users", routertest.FlashCookie(cc, router.Flash{Kind: "info", Message: "seen"}))
+			return routertest.Get(r, "/users", routertest.FlashCookie(t, codec, cookie.Flash{Kind: "info", Message: "seen"}))
 		}},
 		{"the cookie is signed with another codec", func(r *router.Router[*appContext]) *routertest.Response {
-			return routertest.Get(r, "/planted", routertest.FlashCookie(other, router.Flash{Kind: "info", Message: "planted"}))
+			return routertest.Get(r, "/planted", routertest.FlashCookie(t, other, cookie.Flash{Kind: "info", Message: "planted"}))
 		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := flashingRouter(router.New(newContext))
 			r.GET("/planted", func(c *appContext) error {
-				ck, err := c.Request().Cookie(router.FlashCookieName)
+				ck, err := c.Request().Cookie(cookie.FlashName)
 				if err != nil {
 					return err
 				}
-				c.SetCookie(c.NewCookie(router.FlashCookieName, ck.Value, time.Minute))
+				c.SetCookie(c.NewCookie(cookie.FlashName, ck.Value, time.Minute))
 				return c.NoContent(http.StatusNoContent)
 			})
 
-			if got := routertest.Flashes(tc.res(r)); got != nil {
+			if got := routertest.Flashes(t, tc.res(r), codec); got != nil {
 				t.Errorf("Flashes = %+v, want nothing", got)
 			}
 		})
 	}
 }
 
-func TestFlashesPanicsWithoutACodec(t *testing.T) {
-	res := routertest.Get(router.New(newContext), "/")
-	defer func() {
-		msg, _ := recover().(string)
-		if !strings.Contains(msg, "CookieCodec") {
-			t.Errorf("panic = %q, want one that names CookieCodec", msg)
-		}
-	}()
-	routertest.Flashes(res)
-}
-
 func TestFlashCookieSeedsThePage(t *testing.T) {
 	r := flashingRouter(router.New(newContext))
 
-	res := routertest.Get(r, "/users", routertest.FlashCookie(router.NewCookieCodec(cookieKey), router.Flash{Kind: "error", Message: "try again"}))
+	res := routertest.Get(r, "/users", routertest.FlashCookie(t, codec, cookie.Flash{Kind: "error", Message: "try again"}))
 
 	if got, want := res.String(), "[{error try again}]"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 	var cleared bool
 	for _, c := range res.Cookies() {
-		cleared = cleared || (c.Name == router.FlashCookieName && c.MaxAge < 0)
+		cleared = cleared || (c.Name == cookie.FlashName && c.MaxAge < 0)
 	}
 	if !cleared {
 		t.Errorf("the page did not clear the flash cookie: %q", res.Header.Values("Set-Cookie"))
 	}
 }
 
-func TestFlashCookiePanics(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-		call func()
-	}{
-		{"a nil codec", "FlashCookie needs a codec", func() { routertest.FlashCookie(nil) }},
-		{"messages that do not fit", "do not fit", func() {
-			routertest.FlashCookie(router.NewCookieCodec(cookieKey), router.Flash{Kind: "info", Message: strings.Repeat("x", router.MaxCookieSize)})
-		}},
+func TestFlashCookieFailsOnMessagesThatDoNotFit(t *testing.T) {
+	tb := new(recordingTB)
+	opt := routertest.FlashCookie(tb, codec, cookie.Flash{Kind: "info", Message: strings.Repeat("x", cookie.MaxSize)})
+
+	if !tb.failed || !strings.Contains(tb.msg, cookie.ErrTooLarge.Error()) {
+		t.Errorf("FlashCookie reported %q, failed %v, want a failure that names %q", tb.msg, tb.failed, cookie.ErrTooLarge)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				msg, _ := recover().(string)
-				if !strings.Contains(msg, tc.want) {
-					t.Errorf("panic = %q, want one that contains %q", msg, tc.want)
-				}
-			}()
-			tc.call()
-		})
+	if req := routertest.Request(http.MethodGet, "/", opt); req.Header.Get("Cookie") != "" {
+		t.Errorf("the request carries Cookie %q after a failure, want none", req.Header.Get("Cookie"))
 	}
 }
 
 func TestFlashCookieWithoutMessagesAddsNoCookie(t *testing.T) {
-	req := routertest.Request(http.MethodGet, "/", routertest.FlashCookie(router.NewCookieCodec(cookieKey)))
+	req := routertest.Request(http.MethodGet, "/", routertest.FlashCookie(t, codec))
 
 	if got := req.Header.Get("Cookie"); got != "" {
 		t.Errorf("the request carries Cookie %q, want none", got)
@@ -1278,11 +1229,10 @@ func TestFlashCookieWithoutMessagesAddsNoCookie(t *testing.T) {
 }
 
 func TestFlashesRoundTripThroughFlashCookie(t *testing.T) {
-	cc := router.NewCookieCodec(cookieKey)
 	r := flashingRouter(router.New(newContext))
 
 	created := routertest.Do(r, http.MethodPost, "/users")
-	page := routertest.Get(r, "/users", routertest.FlashCookie(cc, routertest.Flashes(created)...))
+	page := routertest.Get(r, "/users", routertest.FlashCookie(t, codec, routertest.Flashes(t, created, codec)...))
 
 	if got, want := page.String(), "[{success user created} {info check your inbox}]"; got != want {
 		t.Errorf("body = %q, want %q", got, want)

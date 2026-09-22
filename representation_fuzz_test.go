@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 func FuzzNegotiate(f *testing.F) {
@@ -43,53 +42,6 @@ func FuzzNegotiate(f *testing.F) {
 		}
 		if strings.TrimSpace(accept) != "" && acceptQuality(accept, got) <= 0 {
 			t.Fatalf("negotiate(%q) returned refused offer %q", accept, got)
-		}
-	})
-}
-
-func FuzzCookieCodecRoundTripAndMutation(f *testing.F) {
-	f.Add("uid", []byte("alice"))
-	f.Add("flash", []byte(`[{"kind":"info","message":"saved"}]`))
-	f.Add("", []byte(nil))
-
-	old := bytes.Repeat([]byte("k"), MinCookieKeyLen)
-	cc := NewCookieCodec(old)
-	rotated := NewCookieCodec(bytes.Repeat([]byte("n"), MinCookieKeyLen), old)
-	f.Fuzz(func(t *testing.T, name string, value []byte) {
-		if len(name) > 1<<10 || len(value) > 16<<10 {
-			t.Skip()
-		}
-		signed := cc.encode(name, value, time.Now().Add(time.Hour).Unix())
-		got, err := cc.Decode(name, signed)
-		if err != nil {
-			t.Fatalf("Decode(Encode()) = %v", err)
-		}
-		if !bytes.Equal(got, value) {
-			t.Fatalf("Decode(Encode()) = %q, want %q", got, value)
-		}
-		got, err = rotated.Decode(name, signed)
-		if err != nil {
-			t.Fatalf("a rotated codec refused the previous key: %v", err)
-		}
-		if !bytes.Equal(got, value) {
-			t.Fatalf("a rotated codec decoded %q, want %q", got, value)
-		}
-
-		firstDot := strings.IndexByte(signed, cookieSep)
-		if firstDot < 0 || firstDot+1 >= len(signed) {
-			t.Fatalf("encoded cookie has no expiry: %q", signed)
-		}
-		mutated := []byte(signed)
-		if mutated[firstDot+1] == '9' {
-			mutated[firstDot+1] = '8'
-		} else {
-			mutated[firstDot+1] = '9'
-		}
-		if _, err := cc.Decode(name, string(mutated)); err == nil {
-			t.Fatalf("Decode accepted a mutated expiry: %q", mutated)
-		}
-		if _, err := rotated.Decode(name, string(mutated)); err == nil {
-			t.Fatalf("a rotated codec accepted a mutated expiry: %q", mutated)
 		}
 	})
 }

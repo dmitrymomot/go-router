@@ -89,7 +89,7 @@ Skip: func(c router.Context) bool {
 },
 ```
 
-`MaxBodyBytes` belongs to the root router. `Mount` refuses a sub-router that carries it, or a cookie codec, because there is one default body limit and one key to sign with. A route that needs another limit, above or below the default, takes the `BodyLimit` middleware.
+`MaxBodyBytes` belongs to the root router. `Mount` refuses a sub-router that carries it, because there is one default body limit. A route that needs another limit, above or below the default, takes the `BodyLimit` middleware.
 
 ## The files
 

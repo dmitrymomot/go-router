@@ -31,11 +31,11 @@ const sessionMaxAge = 12 * time.Hour
 // belongs to the host that set it and to no other: signing in at acme.lvh.me
 // leaves beta.lvh.me signed out.
 func writeSession(c Ctx, email string) error {
-	return c.SetSignedCookie(c.NewCookie(sessionCookie, email, sessionMaxAge))
+	return c.Cookies.Set(c, c.NewCookie(sessionCookie, email, sessionMaxAge))
 }
 
 func readSession(c Ctx) (string, bool) {
-	v, err := c.SignedCookie(sessionCookie)
+	v, err := c.Cookies.Get(c, sessionCookie)
 	if err != nil {
 		return "", false
 	}

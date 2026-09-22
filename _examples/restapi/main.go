@@ -57,7 +57,7 @@ func newRouter(store *Store, apiKey string) *router.Router[*Context] {
 
 	// Every failure, from a bad body to a panic, ends up here as JSON. The
 	// body limit belongs to the root: Mount refuses a sub-router that carries
-	// one, as it does one with a cookie codec.
+	// one.
 	r.ErrorHandler(router.JSONErrorHandler[*Context])
 	r.MaxBodyBytes(1 << 20)
 

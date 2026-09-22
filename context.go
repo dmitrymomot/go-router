@@ -88,7 +88,6 @@ type Base struct {
 type routerOpts struct {
 	jsonOpts     []json.Options
 	logger       *slog.Logger
-	codec        *CookieCodec
 	answer       func(c Context, err error) // HandleError's way to the router that serves
 	maxBody      int64
 	maxMultipart int64
@@ -104,8 +103,7 @@ func (b *Base) opts() *routerOpts {
 }
 
 // NewBase builds a Base outside a router, for a test or for a handler that the
-// router never calls. The route, its parameters and the host stay empty, and
-// the Base has no cookie codec.
+// router never calls. The route, its parameters and the host stay empty.
 //
 // To test a handler of your own context type, let routertest.NewContext build
 // the whole context. It fills an embedded Base in place, whereas a struct

@@ -2574,7 +2574,6 @@ func TestMountRefusesARouterCarryingRootOnlySettings(t *testing.T) {
 		{"MaxBodyBytes", "MaxBodyBytes", func(s *Router[*tctx]) { s.MaxBodyBytes(1 << 10) }},
 		{"MaxMultipartMemory", "MaxMultipartMemory", func(s *Router[*tctx]) { s.MaxMultipartMemory(1 << 10) }},
 		{"JSONOptions", "JSONOptions", func(s *Router[*tctx]) { s.JSONOptions(json.Deterministic(true)) }},
-		{"CookieCodec", "a cookie codec", func(s *Router[*tctx]) { s.CookieCodec(testCodec()) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := newTestRouter()
@@ -2795,67 +2794,6 @@ func TestLiteralCharsetIsEnforced(t *testing.T) {
 	}
 }
 
-func signingRoutes(r *Router[*tctx]) {
-	r.POST("/signin", func(c *tctx) error {
-		if err := c.SetSignedCookie(c.NewCookie("uid", "ann", time.Hour)); err != nil {
-			return err
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-	r.GET("/me", func(c *tctx) error {
-		uid, err := c.SignedCookie("uid")
-		if err != nil {
-			return c.String(http.StatusUnauthorized, err.Error())
-		}
-		return c.String(http.StatusOK, uid)
-	})
-}
-
-func TestCookieCodecSignsAcrossRequests(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		r    *Router[*tctx]
-	}{
-		{"New", newTestRouter()},
-		{"NewPooled", NewPooled(func() *tctx { return new(tctx) }, func(c *tctx) { c.Tag = "" })},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.r.CookieCodec(testCodec())
-			signingRoutes(tc.r)
-
-			signin := do(tc.r, http.MethodPost, "/signin")
-			if signin.Code != http.StatusNoContent {
-				t.Fatalf("POST /signin = %d, want 204; body: %s", signin.Code, signin.Body)
-			}
-			line := signin.Header().Get("Set-Cookie")
-			c, err := http.ParseSetCookie(line)
-			if err != nil {
-				t.Fatalf("the Set-Cookie does not parse: %q: %v", line, err)
-			}
-
-			for _, sub := range []struct {
-				name  string
-				value string
-				code  int
-				body  string
-			}{
-				{"the signed value", c.Value, http.StatusOK, "ann"},
-				{"a tampered value", "YWRtaW4" + c.Value[strings.IndexByte(c.Value, '.'):], http.StatusUnauthorized, ErrCookieInvalid.Error()},
-			} {
-				t.Run(sub.name, func(t *testing.T) {
-					req := httptest.NewRequest(http.MethodGet, "/me", nil)
-					req.AddCookie(&http.Cookie{Name: "uid", Value: sub.value})
-					rec := httptest.NewRecorder()
-					tc.r.ServeHTTP(rec, req)
-					if rec.Code != sub.code || rec.Body.String() != sub.body {
-						t.Errorf("GET /me = %d %q, want %d %q", rec.Code, rec.Body, sub.code, sub.body)
-					}
-				})
-			}
-		})
-	}
-}
-
 // A setting of the whole router called on a scope used to change the root
 // silently, as if the scope owned it.
 func TestRootSettingsPanicOnAScope(t *testing.T) {
@@ -2865,7 +2803,6 @@ func TestRootSettingsPanicOnAScope(t *testing.T) {
 		"MaxMultipartMemory":    func(g *Router[*tctx]) { g.MaxMultipartMemory(1) },
 		"Logger":                func(g *Router[*tctx]) { g.Logger(nil) },
 		"JSONOptions":           func(g *Router[*tctx]) { g.JSONOptions() },
-		"CookieCodec":           func(g *Router[*tctx]) { g.CookieCodec(testCodec()) },
 		"RedirectTrailingSlash": func(g *Router[*tctx]) { g.RedirectTrailingSlash(true) },
 		"Observe":               func(g *Router[*tctx]) { g.Observe(nil) },
 	}
@@ -2882,96 +2819,6 @@ func TestUseOnAMountedRouterPanics(t *testing.T) {
 	r, sub := newTestRouter(), newTestRouter()
 	r.Mount("/api", sub)
 	mustPanicContaining(t, "on a mounted router", func() { sub.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next }) })
-}
-
-func TestCookieCodecPanics(t *testing.T) {
-	t.Run("a nil codec", func(t *testing.T) {
-		mustPanicContaining(t, "CookieCodec needs a codec", func() { newTestRouter().CookieCodec(nil) })
-	})
-	t.Run("a codec that NewCookieCodec did not build", func(t *testing.T) {
-		mustPanicContaining(t, "built by NewCookieCodec", func() { newTestRouter().CookieCodec(&CookieCodec{}) })
-	})
-	t.Run("after the first request", func(t *testing.T) {
-		r := newTestRouter()
-		r.GET("/", echoRoute)
-		do(r, http.MethodGet, "/")
-		mustPanicContaining(t, "after the router started serving", func() { r.CookieCodec(testCodec()) })
-	})
-	t.Run("a mounted router", func(t *testing.T) {
-		sub := newTestRouter()
-		sub.GET("/a", echoRoute)
-		newTestRouter().Mount("/api", sub)
-		mustPanicContaining(t, "on a mounted router", func() { sub.CookieCodec(testCodec()) })
-	})
-}
-
-func TestSignedCookieWithoutACodecAnswers500(t *testing.T) {
-	r := newTestRouter()
-	signingRoutes(r)
-
-	rec := do(r, http.MethodPost, "/signin")
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("POST /signin = %d, want 500", rec.Code)
-	}
-	if got := rec.Header().Get("Set-Cookie"); got != "" {
-		t.Errorf("a router without a codec set a cookie: %q", got)
-	}
-}
-
-func flashRoutes(r *Router[*tctx]) {
-	r.POST("/users", func(c *tctx) error {
-		if err := c.AddFlash(Flash{Kind: "success", Message: "saved"}); err != nil {
-			return err
-		}
-		return c.Redirect(http.StatusSeeOther, "/users")
-	})
-	r.GET("/users", func(c *tctx) error {
-		return c.Stringf(http.StatusOK, "%v", c.Flashes())
-	})
-}
-
-func TestCookieCodecCarriesAFlashAcrossARedirect(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		r    *Router[*tctx]
-	}{
-		{"New", newTestRouter()},
-		{"NewPooled", NewPooled(func() *tctx { return new(tctx) }, func(c *tctx) { c.Tag = "" })},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.r.CookieCodec(testCodec())
-			flashRoutes(tc.r)
-
-			post := do(tc.r, http.MethodPost, "/users")
-			if post.Code != http.StatusSeeOther {
-				t.Fatalf("POST /users = %d, want 303; body: %s", post.Code, post.Body)
-			}
-			req := httptest.NewRequest(http.MethodGet, "/users", nil)
-			req.Header.Set("Cookie", cookieHeader(t, post.Header().Get("Set-Cookie")))
-			rec := httptest.NewRecorder()
-			tc.r.ServeHTTP(rec, req)
-			if got, want := rec.Body.String(), "[{success saved}]"; got != want {
-				t.Errorf("GET /users with the cookie = %q, want %q", got, want)
-			}
-
-			if got := do(tc.r, http.MethodGet, "/users").Body.String(); got != "[]" {
-				t.Errorf("GET /users without the cookie = %q, want []", got)
-			}
-		})
-	}
-}
-
-func TestAddFlashWithoutACodecAnswers500(t *testing.T) {
-	r := newTestRouter()
-	flashRoutes(r)
-
-	rec := do(r, http.MethodPost, "/users")
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("POST /users = %d, want 500", rec.Code)
-	}
-	if got := rec.Header().Get("Set-Cookie"); got != "" {
-		t.Errorf("a router without a codec set a cookie: %q", got)
-	}
 }
 
 func isSKU(s string) bool {
