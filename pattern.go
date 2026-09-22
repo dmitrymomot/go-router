@@ -12,7 +12,7 @@ type segKind uint8
 const (
 	segStatic segKind = iota
 	segTemplate
-	segRegex
+	segConstraint
 	segParam
 	segWildcard
 )
@@ -20,14 +20,22 @@ const (
 type segment struct {
 	kind  segKind
 	value string
-	re    *regexp.Regexp
+	m     *matcher
 	parts []segPart
 }
 
 type segPart struct {
 	lit  string
 	name string
-	re   *regexp.Regexp
+	m    *matcher
+}
+
+// matcher is the constraint of one parameter, a regular expression or a class.
+// key tells two constraints apart, so two routes share a node only when they
+// constrain alike.
+type matcher struct {
+	match func(value string) bool
+	key   string
 }
 
 const mountParam = "*"
@@ -109,11 +117,11 @@ func parsePattern(pattern string) ([]segment, []string, error) {
 			case wildcard:
 				segs = append(segs, segment{kind: segWildcard, value: name})
 			case expr != "":
-				re, err := regexp.Compile("^(?:" + expr + ")$")
+				m, err := constraintOf(name, expr, pattern)
 				if err != nil {
-					return nil, nil, fmt.Errorf("router: bad regular expression for %q in %q: %w", name, pattern, err)
+					return nil, nil, err
 				}
-				segs = append(segs, segment{kind: segRegex, value: name, re: re})
+				segs = append(segs, segment{kind: segConstraint, value: name, m: m})
 			default:
 				segs = append(segs, segment{kind: segParam, value: name})
 			}
@@ -259,20 +267,16 @@ func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
 			return nil, nil, fmt.Errorf("router: a catch-all must span a whole segment, but %q does not in %q", raw, pattern)
 		}
 
-		var re *regexp.Regexp
-		if expr != "" {
-			compiled, err := regexp.Compile("^(?:" + expr + ")$")
-			if err != nil {
-				return nil, nil, fmt.Errorf("router: bad regular expression for %q in %q: %w", name, pattern, err)
-			}
-			re = compiled
+		m, err := constraintOf(name, expr, pattern)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		flush()
 		if n := len(parts); n > 0 && parts[n-1].lit == "" {
 			return nil, nil, fmt.Errorf("router: %q puts two parameters side by side in %q; separate them with text", raw, pattern)
 		}
-		parts = append(parts, segPart{name: name, re: re})
+		parts = append(parts, segPart{name: name, m: m})
 		names = append(names, name)
 	}
 	flush()
@@ -343,7 +347,7 @@ func matchTemplate(out []string, parts []segPart, seg string) bool {
 }
 
 func setTemplateValue(dst []string, i int, p segPart, value string) bool {
-	if value == "" || (p.re != nil && !p.re.MatchString(value)) {
+	if value == "" || (p.m != nil && !p.m.match(value)) {
 		return false
 	}
 	dst[i] = value
@@ -356,8 +360,8 @@ func segmentMatches(seg segment, value string) bool {
 		return value == seg.value
 	case segTemplate:
 		return matchTemplate(make([]string, templateArity(seg.parts)), seg.parts, value)
-	case segRegex:
-		return seg.re.MatchString(value)
+	case segConstraint:
+		return seg.m.match(value)
 	case segParam:
 		return value != ""
 	default:
@@ -371,7 +375,7 @@ func segmentSpecificity(kind segKind) int {
 		return 4
 	case segTemplate:
 		return 3
-	case segRegex:
+	case segConstraint:
 		return 2
 	case segParam:
 		return 1
@@ -388,8 +392,8 @@ func templateSkeleton(parts []segPart) string {
 			continue
 		}
 		b.WriteByte(0)
-		if p.re != nil {
-			b.WriteString(p.re.String())
+		if p.m != nil {
+			b.WriteString(p.m.key)
 		}
 		b.WriteByte(0)
 	}
@@ -431,12 +435,25 @@ func parseBraceSegment(raw, pattern string) (name, expr string, wildcard bool, e
 	return body, "", false, nil
 }
 
+// constraintOf builds the matcher of the constraint expr that parameter name
+// carries, or nil when it carries none.
+func constraintOf(name, expr, pattern string) (*matcher, error) {
+	if expr == "" {
+		return nil, nil
+	}
+	re, err := regexp.Compile("^(?:" + expr + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("router: bad regular expression for %q in %q: %w", name, pattern, err)
+	}
+	return &matcher{key: re.String(), match: re.MatchString}, nil
+}
+
 type edgeKind uint8
 
 const (
 	edgeLiteral edgeKind = iota
 	edgeTemplate
-	edgeRegex
+	edgeConstraint
 	edgeParam
 	edgeWildcard
 )
@@ -445,7 +462,7 @@ type edge struct {
 	kind  edgeKind
 	lit   string
 	name  string
-	re    *regexp.Regexp
+	m     *matcher
 	parts []segPart
 	raw   string
 }
@@ -477,9 +494,9 @@ func patternEdges(segs []segment) []edge {
 		case segTemplate:
 			flush()
 			edges = append(edges, edge{kind: edgeTemplate, name: sg.value, parts: sg.parts, raw: sg.value})
-		case segRegex:
+		case segConstraint:
 			flush()
-			edges = append(edges, edge{kind: edgeRegex, name: sg.value, re: sg.re})
+			edges = append(edges, edge{kind: edgeConstraint, name: sg.value, m: sg.m})
 		default:
 			flush()
 			edges = append(edges, edge{kind: edgeParam, name: sg.value})
