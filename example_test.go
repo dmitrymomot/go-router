@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1246,4 +1247,87 @@ func ExampleRouter_RedirectHost() {
 	// 301 http://example.com/pricing?plan=pro
 	// 308 http://acme.example.com:8080/orders
 	// 200 pricing
+}
+
+type permission string
+
+type public struct{}
+
+func ExampleRouter_Meta() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	ok := func(c *Context) error { return c.NoContent(http.StatusNoContent) }
+
+	r.Meta(public{}).GET("/login", ok)
+	r.Meta(permission("staff")).Route("/admin", func(g *router.Router[*Context]) {
+		g.GET("/users", ok)
+		g.Meta(permission("billing")).GET("/invoices", ok)
+	})
+
+	for _, rt := range r.Routes() {
+		fmt.Println(rt.Method, rt.Pattern, rt.Meta)
+	}
+	// Output:
+	// GET /admin/invoices [staff billing]
+	// GET /admin/users [staff]
+	// GET /login [{}]
+}
+
+func ExampleMetaAs() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
+		return &Context{User: &User{Name: "ann"}}
+	})
+	grants := map[string][]permission{"ann": {"staff"}}
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			if _, ok := router.MetaAs[public](c); ok {
+				return next(c)
+			}
+			need, ok := router.MetaAs[permission](c)
+			if !ok || !slices.Contains(grants[c.User.Name], need) {
+				return router.ErrForbidden
+			}
+			return next(c)
+		}
+	})
+	ok := func(c *Context) error { return c.String(http.StatusOK, c.RoutePattern()) }
+	r.Meta(public{}).GET("/login", ok)
+	r.Meta(permission("staff")).GET("/admin", ok)
+	r.Meta(permission("billing")).GET("/invoices", ok)
+	r.GET("/untagged", ok)
+
+	for _, path := range []string{"/login", "/admin", "/invoices", "/untagged"} {
+		fmt.Println(serve(r, http.MethodGet, path))
+	}
+	// Output:
+	// 200 /login
+	// 200 /admin
+	// 403 Forbidden
+	// 403 Forbidden
+}
+
+func ExampleBase_RouteMeta() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
+		return &Context{User: &User{Name: "ann"}}
+	})
+	grants := map[string][]permission{"ann": {"staff"}}
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			for _, v := range c.RouteMeta() {
+				if need, ok := v.(permission); ok && !slices.Contains(grants[c.User.Name], need) {
+					return router.ErrForbidden.WithMessage("needs %s", need)
+				}
+			}
+			return next(c)
+		}
+	})
+	r.Meta(permission("staff")).Route("/admin", func(g *router.Router[*Context]) {
+		g.GET("/users", func(c *Context) error { return c.String(http.StatusOK, "users") })
+		g.Meta(permission("billing")).GET("/invoices", func(c *Context) error { return c.String(http.StatusOK, "invoices") })
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/admin/users"))
+	fmt.Println(serve(r, http.MethodGet, "/admin/invoices"))
+	// Output:
+	// 200 users
+	// 403 needs billing
 }
