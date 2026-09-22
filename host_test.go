@@ -439,6 +439,9 @@ func TestHostPanics(t *testing.T) {
 		{"partial wildcard", func() {
 			newTestRouter().Host("x*.example.com", nil)
 		}},
+		{"wildcard is not first", func() {
+			newTestRouter().Host("api.*.example.com", nil)
+		}},
 		{"catch-all is not first", func() {
 			newTestRouter().Host("example.{sub...}.com", nil)
 		}},

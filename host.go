@@ -162,7 +162,9 @@ func parseHostPattern(pattern string, classes classLookup) (hostSpec, error) {
 		if err != nil {
 			return hostSpec{}, err
 		}
-		if l.rest && i != 0 {
+		// Expand can fill only a leading wildcard, so one elsewhere names a host
+		// no link can reach.
+		if (l.rest || text == "*") && i != 0 {
 			return hostSpec{}, fmt.Errorf("router: %q must be the first label in %q", text, pattern)
 		}
 		for _, n := range names {
