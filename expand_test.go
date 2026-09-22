@@ -388,6 +388,15 @@ func TestMustExpandPanicsOnAMistake(t *testing.T) {
 }
 
 func TestExpandCacheStaysBounded(t *testing.T) {
+	t.Cleanup(func() {
+		templateCache.Range(func(k, _ any) bool {
+			if strings.HasPrefix(k.(string), "/cache-test/") {
+				templateCache.Delete(k)
+				cachedPatterns.Add(-1)
+			}
+			return true
+		})
+	})
 	for i := range maxCachedTemplates + 10 {
 		p := fmt.Sprintf("/cache-test/%d/{id}", i)
 		if got := MustExpand(p, "id", "7"); got != fmt.Sprintf("/cache-test/%d/7", i) {
