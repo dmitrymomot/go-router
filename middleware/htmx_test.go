@@ -170,6 +170,43 @@ func TestHTMXRedirectLeavesEveryOtherAnswerAlone(t *testing.T) {
 	}
 }
 
+// An error handler that sends an expired session to the sign-in page answers
+// after the handler returns, and its redirect needs turning as much as one the
+// handler wrote.
+func TestHTMXRedirectTurnsARedirectOfTheErrorHandler(t *testing.T) {
+	r := newRouter()
+	r.ErrorHandler(func(c *appContext, err error) error {
+		if router.StatusOf(err) == http.StatusUnauthorized {
+			return c.Redirect(http.StatusSeeOther, "/login")
+		}
+		return router.DefaultErrorHandler(c, err)
+	})
+	calls := 0
+	r.Use(func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+		return func(c *appContext) error {
+			err := next(c)
+			router.HandleError(c, err)
+			calls++
+			return err
+		}
+	}, middleware.HTMXRedirect[*appContext])
+	r.GET("/private", func(c *appContext) error { return router.ErrUnauthorized })
+
+	rec := hxGet(r, "/private", map[string]string{router.HeaderHXRequest: "true", router.HeaderHXRequestType: "partial"})
+	if rec.Code != http.StatusOK || rec.Header().Get(router.HeaderHXRedirect) != "/login" || rec.Header().Get(router.HeaderLocation) != "" {
+		t.Errorf("partial = %d, HX-Redirect %q, Location %q; want 200 with HX-Redirect /login",
+			rec.Code, rec.Header().Get(router.HeaderHXRedirect), rec.Header().Get(router.HeaderLocation))
+	}
+	if calls != 1 {
+		t.Errorf("the outer middleware ran %d times, want 1", calls)
+	}
+
+	rec = hxGet(r, "/private", nil)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get(router.HeaderLocation) != "/login" {
+		t.Errorf("browser = %d to %q, want 303 to /login", rec.Code, rec.Header().Get(router.HeaderLocation))
+	}
+}
+
 func TestHTMXRedirectReportsTheStatusThatWentOut(t *testing.T) {
 	var logged int
 	watch := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {

@@ -25,6 +25,11 @@ type HTMXRedirectConfig struct {
 // request, such as a boosted link or a history restore: fetch follows the
 // redirect, and htmx puts the final URL in the history.
 //
+// It answers an error of a partial request itself, through
+// [router.HandleError], so a redirect that the error handler writes is turned
+// as well. That commits the answer, so a middleware inside it that replaces an
+// error after next still works, and one outside it no longer does.
+//
 // Put it outside [Idempotency], so a replayed redirect is turned for the
 // request that asks again; see Order in the package doc.
 func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -64,7 +69,12 @@ func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Mid
 				}
 			}()
 
-			return next(c)
+			// The error handler answers here, while the writer is in place, so a
+			// redirect it writes, such as one to a sign-in page, is turned too.
+			// The router and Logger then skip their own call.
+			err := next(c)
+			router.HandleError(c, err)
+			return err
 		}
 	}
 }
