@@ -33,12 +33,6 @@ func main() {
 	defer stop()
 
 	rm := newRoom()
-	// Every open stream is blocked on the room, so the room has to close
-	// before the drain starts. A drain that waits for a stream never ends.
-	go func() {
-		<-ctx.Done()
-		rm.close()
-	}()
 
 	if err := serve.Run(ctx, newRouter(rm), serve.Config{
 		Addr:              addr,
@@ -48,6 +42,9 @@ func main() {
 		ShutdownTimeout:   5 * time.Second,
 		// No WriteTimeout: it would cut every stream at the deadline.
 		OnListen: func(a net.Addr) { slog.Info("chat is listening", "url", "http://"+a.String()) },
+		// Every open stream is blocked on the room, so the room closes when
+		// the drain begins. A drain that waits for a stream never ends.
+		OnDrain: rm.close,
 		// Config carries what a server usually needs. OnServer reaches the
 		// rest of http.Server.
 		OnServer: func(srv *http.Server) error {
