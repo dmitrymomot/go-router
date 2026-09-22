@@ -139,6 +139,20 @@ func TestSetRouteForTestPublishesRouteState(t *testing.T) {
 	}
 }
 
+func TestRouteMetaIsNilWithoutARouter(t *testing.T) {
+	for name, b := range map[string]*Base{"NewBase": newBase("/"), "SetRouteForTest": newBase("/users/7")} {
+		if name == "SetRouteForTest" {
+			SetRouteForTest(b, "/users/{id}", []string{"id"}, []string{"7"})
+		}
+		if got := b.RouteMeta(); got != nil {
+			t.Errorf("%s: RouteMeta() = %v, want nil", name, got)
+		}
+		if v, ok := MetaAs[string](b); ok {
+			t.Errorf("%s: MetaAs[string] = %q, true; want false", name, v)
+		}
+	}
+}
+
 func TestSetRouteForTestWithNoPatternLeavesNoRoute(t *testing.T) {
 	b := newBase("/users/7")
 	SetRouteForTest(b, "/users/{id}", nil, nil)

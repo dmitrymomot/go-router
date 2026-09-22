@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -397,7 +398,7 @@ func TestHostRoutes(t *testing.T) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if !reflect.DeepEqual(got[i], want[i]) {
 			t.Errorf("route %d = %v, want %v", i, got[i], want[i])
 		}
 	}

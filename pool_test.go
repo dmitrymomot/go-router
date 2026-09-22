@@ -3,11 +3,13 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -208,17 +210,20 @@ func TestPoolUnderConcurrentRequests(t *testing.T) {
 }
 
 func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
-	var seen *pctx
+	var (
+		seen      *pctx
+		seenRoute *routeRecord
+	)
 	r := newPooledRouter()
 	r.ErrorHandler(func(c *pctx, err error) error {
-		seen = c
+		seen, seenRoute = c, c.route
 		return c.NoContent(StatusOf(err))
 	})
 	r.GET("/backtrack/{value}/wanted", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
 	r.GET("/method/{value}", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
-	r.Host("{tenant}.example.com", func(h *Router[*pctx]) {
+	r.Meta("m").Host("{tenant}.example.com", func(h *Router[*pctx]) {
 		h.GET("/{a}/{b}/{c}/{d}/{e}/{f}/{g}/{h}/{tail...}", func(c *pctx) error {
-			seen = c
+			seen, seenRoute = c, c.route
 			req := c.Request()
 			c.Set("request", req)
 			c.Query("q")
@@ -248,6 +253,11 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 		}
 		if b.errorHandled {
 			t.Fatal("pooled context retained the handled-error flag")
+		}
+		// The route record belongs to the router, not to the request, and init
+		// resets it before the next request reads it.
+		if b.route != nil && b.route != seenRoute {
+			t.Fatal("pooled context points at a route record the request did not match")
 		}
 		for i, value := range b.paramArr {
 			if value != "" {
@@ -338,6 +348,18 @@ func BenchmarkPooledStatic(b *testing.B) {
 	r := NewPooled(func() *pctx { return new(pctx) }, resetPctx)
 	r.GET("/users/settings", func(c *pctx) error { return c.NoContent(http.StatusOK) })
 	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/users/settings")
+}
+
+func BenchmarkMetaRoute(b *testing.B) {
+	type permission string
+	r := NewPooled(func() *pctx { return new(pctx) }, resetPctx)
+	r.Meta(permission("admin")).GET("/users/{id}", func(c *pctx) error {
+		if p, ok := MetaAs[permission](c); !ok || p != "admin" {
+			return ErrForbidden
+		}
+		return c.NoContent(http.StatusOK)
+	})
+	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/users/42")
 }
 
 // A pooled context must not carry a parameter from the request before it: not
@@ -490,5 +512,35 @@ func TestReleasedBaseReadsItsRequestFields(t *testing.T) {
 	}
 	if c.Header() == nil {
 		t.Error("Header() on a released context is nil")
+	}
+}
+
+func TestPoolDoesNotCarryRouteMetaBetweenRequests(t *testing.T) {
+	for _, observed := range []bool{false, true} {
+		t.Run(fmt.Sprint("observed=", observed), func(t *testing.T) {
+			var metas [][]any
+			r := newPooledRouter()
+			if observed {
+				r.Observe(func(Context, int, int64, time.Duration, error) {})
+			}
+			r.Use(func(next HandlerFunc[*pctx]) HandlerFunc[*pctx] {
+				return func(c *pctx) error {
+					metas = append(metas, c.RouteMeta())
+					return next(c)
+				}
+			})
+			r.Meta("secret").GET("/a", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
+			r.GET("/b", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
+
+			for range 3 {
+				metas = nil
+				do(r, http.MethodGet, "/a")
+				do(r, http.MethodGet, "/missing")
+				do(r, http.MethodGet, "/b")
+				if len(metas) != 3 || metas[0] == nil || metas[1] != nil || metas[2] != nil {
+					t.Fatalf("RouteMeta across requests = %v, want [[secret] [] []]", metas)
+				}
+			}
+		})
 	}
 }

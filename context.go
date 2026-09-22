@@ -31,6 +31,7 @@ type Context interface {
 	Get(key string) (any, bool)
 	Param(name string) string
 	RoutePattern() string
+	RouteMeta() []any
 	Host() string
 	RouteHost() string
 
@@ -204,6 +205,7 @@ func (b *Base) setHXError(err error) {
 // embedder with a string of its own in the 320-byte size class.
 type routeRecord struct {
 	pattern string
+	meta    []any
 }
 
 func (b *Base) setRoute(rec *routeRecord, names, vals []string) {
@@ -381,6 +383,34 @@ func (b *Base) RoutePattern() string {
 		return ""
 	}
 	return b.route.pattern
+}
+
+// RouteMeta reports the values that [Router.Meta] attached to the matched
+// route, outermost scope first, or nil when no route matched (a 404, a 405, an
+// automatic OPTIONS answer, Pre middleware before next) or the route carries
+// none. Every request of the route shares the slice, so the caller must not
+// change it.
+func (b *Base) RouteMeta() []any {
+	if b.route == nil {
+		return nil
+	}
+	return b.route.meta
+}
+
+// MetaAs reports the value of type T nearest to the matched route: an inner
+// scope wins over an outer one, and a later Meta call over an earlier one. ok
+// is false when the route carries no such value or no route matched. To
+// enforce every value of a type, range over [Base.RouteMeta]. It is a function
+// rather than a method so that code holding only a Context, such as the Skip
+// callback of a middleware, can call it.
+func MetaAs[T any](c Context) (T, bool) {
+	for _, v := range slices.Backward(c.base().RouteMeta()) {
+		if t, ok := v.(T); ok {
+			return t, true
+		}
+	}
+	var zero T
+	return zero, false
 }
 
 // RouteHost reports the host pattern that matched, such as

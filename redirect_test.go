@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -193,14 +194,24 @@ func TestRedirectAnswers404WhenTheTargetRefusesTheValue(t *testing.T) {
 	}
 }
 
-func TestRedirectRunsScopeMiddleware(t *testing.T) {
+func TestRedirectRunsScopeMiddlewareAndCarriesMeta(t *testing.T) {
 	r := newTestRouter()
-	r.Use(setHeader("X-Root", "root"))
-	r.With(setHeader("X-With", "with")).Redirect("/old", "/new", http.StatusFound)
+	r.Use(setHeader("X-Root", "root"), func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			if p, ok := MetaAs[perm](c); ok {
+				c.Response().Header().Set("X-Perm", string(p))
+			}
+			return next(c)
+		}
+	})
+	r.With(setHeader("X-With", "with")).Meta(perm("legacy")).Redirect("/old", "/new", http.StatusFound)
 
 	rec := do(r, http.MethodGet, "/old")
-	if rec.Header().Get("X-Root") != "root" || rec.Header().Get("X-With") != "with" {
-		t.Errorf("headers = %v, want the middleware of every scope around the redirect", rec.Header())
+	if rec.Header().Get("X-Root") != "root" || rec.Header().Get("X-With") != "with" || rec.Header().Get("X-Perm") != "legacy" {
+		t.Errorf("headers = %v, want the middleware of every scope around the redirect, and its Meta", rec.Header())
+	}
+	if got := r.Routes()[0].Meta; !reflect.DeepEqual(got, []any{perm("legacy")}) {
+		t.Errorf("Routes()[0].Meta = %v, want [perm legacy]", got)
 	}
 }
 
