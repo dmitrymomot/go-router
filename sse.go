@@ -173,7 +173,9 @@ func (s *SSEWriter) SendJSON(name string, v any, opts ...json.Options) error {
 }
 
 // SendComponent writes an event called name whose data is c rendered as HTML,
-// which is what htmx reads from a stream.
+// which is what htmx reads from a stream. The hx-sse extension of htmx 4 swaps
+// an unnamed event into the element that holds hx-sse:connect and dispatches a
+// named one as a DOM event, so pass "" as name for a swap.
 func (s *SSEWriter) SendComponent(name string, c Component) error {
 	ok, err := s.begin(Event{Name: name})
 	if !ok {
@@ -384,7 +386,8 @@ func SSEText[T any](name string) SSESender[T] {
 }
 
 // SSEComponent renders each value through view and sends the HTML, in an event
-// called name.
+// called name. Pass "" as name for the hx-sse extension of htmx 4 to swap the
+// HTML in; see [SSEWriter.SendComponent].
 //
 // SSEComponent panics if view is nil.
 func SSEComponent[T any, C Component](name string, view func(T) C) SSESender[T] {
