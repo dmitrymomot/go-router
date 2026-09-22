@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
@@ -136,7 +137,7 @@ func (p *payments) pay(c *appContext) error {
 	if p.gate != nil {
 		<-p.gate
 	}
-	c.Response().Header().Set(router.HeaderHXRedirect, "/receipts/"+strconv.Itoa(int(n)))
+	c.Response().Header().Set(htmx.HeaderRedirect, "/receipts/"+strconv.Itoa(int(n)))
 	http.SetCookie(c.Response(), &http.Cookie{Name: "_flash", Value: "paid"})
 	return c.Stringf(http.StatusCreated, "payment %d of %s", n, c.FormValue("amount"))
 }
@@ -148,7 +149,7 @@ func sameAnswer(t *testing.T, a, b *httptest.ResponseRecorder) {
 	if a.Code != b.Code || a.Body.String() != b.Body.String() {
 		t.Errorf("answers differ: %d %q and %d %q", a.Code, a.Body, b.Code, b.Body)
 	}
-	for _, k := range []string{router.HeaderHXRedirect, "Set-Cookie"} {
+	for _, k := range []string{htmx.HeaderRedirect, "Set-Cookie"} {
 		if got, want := b.Header().Values(k), a.Header().Values(k); strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
@@ -883,19 +884,19 @@ func TestIdempotencyUnderAnOuterHTMXRedirect(t *testing.T) {
 		return c.Redirect(http.StatusSeeOther, "/receipt")
 	})
 
-	send := func(htmx bool) *httptest.ResponseRecorder {
+	send := func(hx bool) *httptest.ResponseRecorder {
 		req := idempotentRequest(http.MethodPost, "/pay", "k", amount("5"))
-		if htmx {
-			req.Header.Set(router.HeaderHXRequest, "true")
+		if hx {
+			req.Header.Set(htmx.HeaderRequest, "true")
 		}
 		return do(r, req)
 	}
-	for i, htmx := range []bool{true, true, false} {
-		rec := send(htmx)
-		if htmx && (rec.Code != http.StatusOK || rec.Header().Get(router.HeaderHXRedirect) != "/receipt") {
-			t.Errorf("request %d: %d HX-Redirect %q, want 200 to /receipt", i, rec.Code, rec.Header().Get(router.HeaderHXRedirect))
+	for i, hx := range []bool{true, true, false} {
+		rec := send(hx)
+		if hx && (rec.Code != http.StatusOK || rec.Header().Get(htmx.HeaderRedirect) != "/receipt") {
+			t.Errorf("request %d: %d HX-Redirect %q, want 200 to /receipt", i, rec.Code, rec.Header().Get(htmx.HeaderRedirect))
 		}
-		if !htmx && (rec.Code != http.StatusSeeOther || rec.Header().Get(router.HeaderLocation) != "/receipt") {
+		if !hx && (rec.Code != http.StatusSeeOther || rec.Header().Get(router.HeaderLocation) != "/receipt") {
 			t.Errorf("request %d: %d Location %q, want 303 to /receipt", i, rec.Code, rec.Header().Get(router.HeaderLocation))
 		}
 	}

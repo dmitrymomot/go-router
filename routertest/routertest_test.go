@@ -21,6 +21,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
@@ -224,15 +225,15 @@ func TestRequestOptionsSetHostCookieAndBody(t *testing.T) {
 
 func TestHTMXOption(t *testing.T) {
 	r := newRouter()
-	r.GET("/panel", router.HTMXPartial(
+	r.GET("/panel", htmx.Partial(
 		func(c *appContext) error { return c.String(http.StatusOK, "fragment") },
 		func(c *appContext) error { return c.String(http.StatusOK, "page") },
 	))
-	r.GET("/type", func(c *appContext) error { return c.String(http.StatusOK, c.HTMX().RequestType) })
+	r.GET("/type", func(c *appContext) error { return c.String(http.StatusOK, htmx.RequestOf(c.Request()).RequestType) })
 
 	routertest.Get(r, "/panel", routertest.HTMX()).Expect(t).Body("fragment")
 	routertest.Get(r, "/panel").Expect(t).Body("page")
-	routertest.Get(r, "/panel", routertest.HTMX(), routertest.Header(router.HeaderHXRequestType, "full")).
+	routertest.Get(r, "/panel", routertest.HTMX(), routertest.Header(htmx.HeaderRequestType, "full")).
 		Expect(t).Body("page")
 	routertest.Get(r, "/type", routertest.HTMX()).Expect(t).Body("partial")
 }
@@ -647,7 +648,7 @@ func TestNewContextWithTarget(t *testing.T) {
 	if body, _ := io.ReadAll(f); string(body) != "png" {
 		t.Errorf("logo = %q, want png", body)
 	}
-	if c.Request().Header.Get(router.HeaderHXRequest) != "true" {
+	if c.Request().Header.Get(htmx.HeaderRequest) != "true" {
 		t.Error("the htmx header is missing")
 	}
 	if c.Request().Context() != t.Context() {

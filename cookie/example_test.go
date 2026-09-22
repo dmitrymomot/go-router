@@ -10,6 +10,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/htmx"
 )
 
 // Context is the context of the app. It keeps the codec, which the factory
@@ -142,7 +143,7 @@ func ExampleCodec_Flashes() {
 		if err := c.Cookies.AddFlash(c, cookie.Flash{Kind: "success", Message: "user created"}); err != nil {
 			return err
 		}
-		if !c.WantsPartial() {
+		if !htmx.WantsPartial(c) {
 			return c.Redirect(http.StatusSeeOther, "/users")
 		}
 		// Render buffers, so toasts may call Flashes before the headers go out.
@@ -154,11 +155,11 @@ func ExampleCodec_Flashes() {
 		}))
 	})
 
-	for _, htmx := range []bool{true, false} {
+	for _, hx := range []bool{true, false} {
 		req := httptest.NewRequest(http.MethodPost, "/users", nil)
-		if htmx {
-			req.Header.Set(router.HeaderHXRequest, "true")
-			req.Header.Set(router.HeaderHXRequestType, "partial")
+		if hx {
+			req.Header.Set(htmx.HeaderRequest, "true")
+			req.Header.Set(htmx.HeaderRequestType, "partial")
 		}
 		rec := serveRequest(r, req)
 		fmt.Println(rec.Code, len(rec.Header().Values("Set-Cookie")), rec.Header().Get("Location")+rec.Body.String())

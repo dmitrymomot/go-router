@@ -9,6 +9,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
@@ -33,10 +34,10 @@ func TestHTMXRedirect(t *testing.T) {
 	r := redirectRouter(middleware.HTMXRedirect[*appContext])
 
 	const (
-		hxRequest = router.HeaderHXRequest
-		hxType    = router.HeaderHXRequestType
-		hxBoosted = router.HeaderHXBoosted
-		hxRestore = router.HeaderHXHistoryRestoreRequest
+		hxRequest = htmx.HeaderRequest
+		hxType    = htmx.HeaderRequestType
+		hxBoosted = htmx.HeaderBoosted
+		hxRestore = htmx.HeaderHistoryRestoreRequest
 	)
 	tests := []struct {
 		name     string
@@ -100,8 +101,8 @@ func TestHTMXRedirect(t *testing.T) {
 			if rec.Code != tc.status {
 				t.Errorf("status = %d, want %d", rec.Code, tc.status)
 			}
-			if got := rec.Header().Get(router.HeaderHXRedirect); got != tc.hx {
-				t.Errorf("%s = %q, want %q", router.HeaderHXRedirect, got, tc.hx)
+			if got := rec.Header().Get(htmx.HeaderRedirect); got != tc.hx {
+				t.Errorf("%s = %q, want %q", htmx.HeaderRedirect, got, tc.hx)
 			}
 			if got := rec.Header().Get(router.HeaderLocation); got != tc.location {
 				t.Errorf("%s = %q, want %q", router.HeaderLocation, got, tc.location)
@@ -118,15 +119,15 @@ func TestHTMXRedirectLocationConfig(t *testing.T) {
 	r := redirectRouter(middleware.HTMXRedirectWithConfig[*appContext](
 		middleware.HTMXRedirectConfig{Location: true}))
 
-	rec := hxGet(r, "/go", map[string]string{router.HeaderHXRequest: "true"})
+	rec := hxGet(r, "/go", map[string]string{htmx.HeaderRequest: "true"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if got := rec.Header().Get(router.HeaderHXLocation); got != "/there" {
-		t.Errorf("%s = %q, want %q", router.HeaderHXLocation, got, "/there")
+	if got := rec.Header().Get(htmx.HeaderLocation); got != "/there" {
+		t.Errorf("%s = %q, want %q", htmx.HeaderLocation, got, "/there")
 	}
-	if got := rec.Header().Get(router.HeaderHXRedirect); got != "" {
-		t.Errorf("%s = %q, want no header", router.HeaderHXRedirect, got)
+	if got := rec.Header().Get(htmx.HeaderRedirect); got != "" {
+		t.Errorf("%s = %q, want no header", htmx.HeaderRedirect, got)
 	}
 }
 
@@ -134,7 +135,7 @@ func TestHTMXRedirectSkip(t *testing.T) {
 	r := redirectRouter(middleware.HTMXRedirectWithConfig[*appContext](
 		middleware.HTMXRedirectConfig{Skip: skipPath("/go")}))
 
-	rec := hxGet(r, "/go", map[string]string{router.HeaderHXRequest: "true"})
+	rec := hxGet(r, "/go", map[string]string{htmx.HeaderRequest: "true"})
 	if rec.Code != http.StatusSeeOther {
 		t.Errorf("status = %d, want 303", rec.Code)
 	}
@@ -160,12 +161,12 @@ func TestHTMXRedirectLeavesEveryOtherAnswerAlone(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.target, func(t *testing.T) {
-			rec := hxGet(r, tc.target, map[string]string{router.HeaderHXRequest: "true"})
+			rec := hxGet(r, tc.target, map[string]string{htmx.HeaderRequest: "true"})
 			if rec.Code != tc.status {
 				t.Errorf("status = %d, want %d", rec.Code, tc.status)
 			}
-			if got := rec.Header().Get(router.HeaderHXRedirect); got != "" {
-				t.Errorf("%s = %q, want no header", router.HeaderHXRedirect, got)
+			if got := rec.Header().Get(htmx.HeaderRedirect); got != "" {
+				t.Errorf("%s = %q, want no header", htmx.HeaderRedirect, got)
 			}
 		})
 	}
@@ -193,10 +194,10 @@ func TestHTMXRedirectTurnsARedirectOfTheErrorHandler(t *testing.T) {
 	}, middleware.HTMXRedirect[*appContext])
 	r.GET("/private", func(c *appContext) error { return router.ErrUnauthorized })
 
-	rec := hxGet(r, "/private", map[string]string{router.HeaderHXRequest: "true", router.HeaderHXRequestType: "partial"})
-	if rec.Code != http.StatusOK || rec.Header().Get(router.HeaderHXRedirect) != "/login" || rec.Header().Get(router.HeaderLocation) != "" {
+	rec := hxGet(r, "/private", map[string]string{htmx.HeaderRequest: "true", htmx.HeaderRequestType: "partial"})
+	if rec.Code != http.StatusOK || rec.Header().Get(htmx.HeaderRedirect) != "/login" || rec.Header().Get(router.HeaderLocation) != "" {
 		t.Errorf("partial = %d, HX-Redirect %q, Location %q; want 200 with HX-Redirect /login",
-			rec.Code, rec.Header().Get(router.HeaderHXRedirect), rec.Header().Get(router.HeaderLocation))
+			rec.Code, rec.Header().Get(htmx.HeaderRedirect), rec.Header().Get(router.HeaderLocation))
 	}
 	if calls != 1 {
 		t.Errorf("the outer middleware ran %d times, want 1", calls)
@@ -222,7 +223,7 @@ func TestHTMXRedirectReportsTheStatusThatWentOut(t *testing.T) {
 	r.Use(watch, middleware.HTMXRedirect[*appContext])
 	r.GET("/go", func(c *appContext) error { return c.Redirect(http.StatusSeeOther, "/there") })
 
-	hxGet(r, "/go", map[string]string{router.HeaderHXRequest: "true"})
+	hxGet(r, "/go", map[string]string{htmx.HeaderRequest: "true"})
 	if logged != http.StatusOK {
 		t.Errorf("the recorded status = %d, want 200", logged)
 	}
@@ -231,17 +232,17 @@ func TestHTMXRedirectReportsTheStatusThatWentOut(t *testing.T) {
 func TestHTMXRedirectComposesWithHX(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.HTMXRedirect[*appContext])
-	r.POST("/join", func(c *appContext) error { return c.HX().Redirect("/chat") })
+	r.POST("/join", func(c *appContext) error { return htmx.NewResponse(c).Redirect("/chat") })
 
 	req := httptest.NewRequest(http.MethodPost, "/join", nil)
-	req.Header.Set(router.HeaderHXRequest, "true")
+	req.Header.Set(htmx.HeaderRequest, "true")
 	rec := do(r, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
-	if got := rec.Header().Get(router.HeaderHXRedirect); got != "/chat" {
-		t.Errorf("%s = %q, want %q", router.HeaderHXRedirect, got, "/chat")
+	if got := rec.Header().Get(htmx.HeaderRedirect); got != "/chat" {
+		t.Errorf("%s = %q, want %q", htmx.HeaderRedirect, got, "/chat")
 	}
 }
 
@@ -257,14 +258,14 @@ func TestHTMXRedirectKeepsTheFlashCookie(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/join", nil)
-	req.Header.Set(router.HeaderHXRequest, "true")
+	req.Header.Set(htmx.HeaderRequest, "true")
 	rec := do(r, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
-	if got := rec.Header().Get(router.HeaderHXRedirect); got != "/chat" {
-		t.Errorf("%s = %q, want %q", router.HeaderHXRedirect, got, "/chat")
+	if got := rec.Header().Get(htmx.HeaderRedirect); got != "/chat" {
+		t.Errorf("%s = %q, want %q", htmx.HeaderRedirect, got, "/chat")
 	}
 	if line := rec.Header().Get("Set-Cookie"); !strings.HasPrefix(line, cookie.FlashName+"=") {
 		t.Errorf("the converted redirect carries Set-Cookie %q, want the flash cookie", line)
@@ -282,7 +283,7 @@ func TestHTMXRedirectKeepsTheStreamFlushable(t *testing.T) {
 		return s.Send(router.Event{Name: "tick", Data: "one"})
 	})
 
-	rec := hxGet(r, "/events", map[string]string{router.HeaderHXRequest: "true"})
+	rec := hxGet(r, "/events", map[string]string{htmx.HeaderRequest: "true"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body)
 	}
@@ -295,18 +296,18 @@ func TestHTMXRedirectKeepsTheStreamFlushable(t *testing.T) {
 func TestHTMXRedirectVariesLikeWantsPartial(t *testing.T) {
 	r := newRouter()
 	r.GET("/plain", func(c *appContext) error {
-		c.WantsPartial()
+		htmx.WantsPartial(c)
 		return c.NoContent(http.StatusOK)
 	})
 	r.Group(func(r *router.Router[*appContext]) {
 		r.Use(middleware.HTMXRedirect[*appContext])
 		r.GET("/both", func(c *appContext) error {
-			c.WantsPartial()
+			htmx.WantsPartial(c)
 			return c.NoContent(http.StatusOK)
 		})
 	})
 
-	headers := map[string]string{router.HeaderHXRequest: "true"}
+	headers := map[string]string{htmx.HeaderRequest: "true"}
 	want := hxGet(r, "/plain", headers).Header().Values(router.HeaderVary)
 	got := hxGet(r, "/both", headers).Header().Values(router.HeaderVary)
 	if !slices.Equal(got, want) {

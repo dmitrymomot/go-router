@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
@@ -75,7 +76,7 @@ func clientHandler() http.Handler {
 	mux.HandleFunc("/go", redirect)
 	mux.HandleFunc("/a/go", redirect)
 	mux.HandleFunc("GET /hx", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(router.HeaderHXRedirect, "/me")
+		w.Header().Set(htmx.HeaderRedirect, "/me")
 	})
 	method := func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, r.Method+" "+r.URL.RequestURI()+" "+r.Host+" "+router.SchemeOf(r))

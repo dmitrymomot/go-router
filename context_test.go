@@ -537,14 +537,11 @@ func TestNewSettingsAfterServingPanic(t *testing.T) {
 	}
 }
 
-func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
+func TestDeferredStateDoesNotClobberItself(t *testing.T) {
 	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if got := b.formError(); got != nil {
-		t.Errorf("formError() = %v, want nil before either is set", got)
-	}
-	if got := b.hxError(); got != nil {
-		t.Errorf("hxError() = %v, want nil before either is set", got)
+		t.Errorf("formError() = %v, want nil before it is set", got)
 	}
 	if b.deferred != nil {
 		t.Error("deferred is allocated before any failure")
@@ -554,23 +551,47 @@ func TestDeferredErrorsDoNotClobberEachOther(t *testing.T) {
 	if got := b.setFormError(form); !errors.Is(got, form) {
 		t.Errorf("setFormError returned %v, want the failure it recorded", got)
 	}
-	b.setHXError(ErrInternalServerError.WithMessage("hx"))
+	b.deferrals().bodyLimit = 5
 
 	if got := b.formError(); !errors.Is(got, form) {
 		t.Errorf("formError() = %v, want the form failure", got)
 	}
-	if got := b.hxError(); got == nil || got.Error() != ErrInternalServerError.WithMessage("hx").Error() {
-		t.Errorf("hxError() = %v, want the htmx failure", got)
-	}
-
-	b.setHXError(ErrInternalServerError.WithMessage("second"))
-	if got := b.hxError(); got.Error() != ErrInternalServerError.WithMessage("hx").Error() {
-		t.Errorf("hxError() = %v, want the first failure kept", got)
+	if got := b.deferred.bodyLimit; got != 5 {
+		t.Errorf("bodyLimit = %d, want 5", got)
 	}
 
 	b.init(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
-	if b.deferred != nil || b.formError() != nil || b.hxError() != nil {
+	if b.deferred != nil || b.formError() != nil {
 		t.Error("init left a deferred failure behind, which a pooled context would carry on")
+	}
+}
+
+func TestVary(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		c.Vary("Hx-Request", "")
+		c.Vary("hx-request")
+		c.Vary(HeaderAccept)
+		return c.NoContent(http.StatusOK)
+	})
+
+	got := do(r, http.MethodGet, "/").Header().Values(HeaderVary)
+	want := []string{"Hx-Request", HeaderAccept}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Vary = %v, want %v", got, want)
+	}
+}
+
+func TestVarySeesAListThatOneHeaderHolds(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		c.SetHeader(HeaderVary, "Accept, HX-Request")
+		c.Vary("Hx-Request")
+		return c.NoContent(http.StatusOK)
+	})
+
+	if got := do(r, http.MethodGet, "/").Header().Values(HeaderVary); len(got) != 1 {
+		t.Errorf("Vary = %v, want the one header that the handler set", got)
 	}
 }
 

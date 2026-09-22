@@ -43,6 +43,17 @@ func do(h http.Handler, method, target string) *httptest.ResponseRecorder {
 	return rec
 }
 
+// doWithHeaders is do with request headers.
+func doWithHeaders(h http.Handler, method, target string, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 // doBody is do with a request body. An empty contentType sends none, which is
 // its own case: a body method that does not say what it carries.
 func doBody(h http.Handler, method, target, contentType, body string) *httptest.ResponseRecorder {

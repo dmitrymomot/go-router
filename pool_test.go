@@ -227,7 +227,7 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 			req := c.Request()
 			c.Set("request", req)
 			c.Query("q")
-			c.setHXError(ErrBadRequest)
+			_ = c.setFormError(ErrBadRequest)
 			c.Response().Before(func() { _ = req.Method })
 			return c.NoContent(http.StatusNoContent)
 		})

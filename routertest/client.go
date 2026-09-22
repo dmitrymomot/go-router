@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 )
 
 // Client sends requests to one handler in process, as a browser would. Every
@@ -83,7 +84,7 @@ func (c *Client) Follow(res *Response) *Response {
 	if res == nil {
 		panic("routertest: Follow needs a response")
 	}
-	loc := cmp.Or(res.Header.Get(router.HeaderLocation), res.Header.Get(router.HeaderHXRedirect))
+	loc := cmp.Or(res.Header.Get(router.HeaderLocation), res.Header.Get(htmx.HeaderRedirect))
 	if loc == "" {
 		panic("routertest: Follow needs a Location or an HX-Redirect, and the " +
 			strconv.Itoa(res.StatusCode) + " answer has neither")

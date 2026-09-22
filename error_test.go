@@ -644,11 +644,11 @@ func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 	}{
 		{"JSON", nil},
 		{"text", map[string]string{HeaderAccept: MIMETextPlain}},
-		{"HTMX", map[string]string{HeaderAccept: "*/*", HeaderHXRequest: "true"}},
+		{"HTMX", map[string]string{HeaderAccept: "*/*", "Hx-Request": "true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			get := hxDo(r, http.MethodGet, "/boom", tc.headers)
-			head := hxDo(r, http.MethodHead, "/boom", tc.headers)
+			get := doWithHeaders(r, http.MethodGet, "/boom", tc.headers)
+			head := doWithHeaders(r, http.MethodHead, "/boom", tc.headers)
 
 			if head.Code != get.Code {
 				t.Errorf("HEAD status = %d, GET status = %d", head.Code, get.Code)

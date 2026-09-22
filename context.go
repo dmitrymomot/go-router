@@ -162,7 +162,6 @@ func (b *Base) clearRequestSlow() {
 // deferredState holds what few requests need, so Base does not carry it.
 type deferredState struct {
 	form error
-	hx   error
 	// bodyLimit is the cap of SetBodyLimit: 0 leaves the router's, and -1
 	// lifts it.
 	bodyLimit int64
@@ -186,19 +185,6 @@ func (b *Base) formError() error {
 func (b *Base) setFormError(err error) error {
 	b.deferrals().form = err
 	return err
-}
-
-func (b *Base) hxError() error {
-	if b.deferred == nil {
-		return nil
-	}
-	return b.deferred.hx
-}
-
-func (b *Base) setHXError(err error) {
-	if d := b.deferrals(); d.hx == nil {
-		d.hx = err
-	}
 }
 
 // routeRecord is what a matched route publishes to its Base. Registration

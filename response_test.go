@@ -680,7 +680,7 @@ func (w *redirectToOK) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w *redirectToOK) WriteHeader(code int) {
 	if loc := w.Header().Get(HeaderLocation); loc != "" {
 		w.Header().Del(HeaderLocation)
-		w.Header().Set(HeaderHXRedirect, loc)
+		w.Header().Set("Hx-Redirect", loc)
 		code = http.StatusOK
 	}
 	w.ResponseWriter.WriteHeader(code)
@@ -711,7 +711,7 @@ func TestCaptureSeesWhatAnInnerWriterMakesOfTheAnswer(t *testing.T) {
 	if rec.Code != http.StatusOK || got.Status != http.StatusOK {
 		t.Fatalf("client got %d, recorded %d; want 200 for both", rec.Code, got.Status)
 	}
-	if got.Header.Get(HeaderHXRedirect) != "/next" || got.Header.Get(HeaderLocation) != "" {
+	if got.Header.Get("Hx-Redirect") != "/next" || got.Header.Get(HeaderLocation) != "" {
 		t.Errorf("recorded header = %v, want HX-Redirect and no Location", got.Header)
 	}
 }

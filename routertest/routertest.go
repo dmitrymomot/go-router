@@ -30,6 +30,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
@@ -65,12 +66,12 @@ func RemoteAddr(addr string) RequestOption {
 
 // HTMX marks the request as one htmx 4 made to swap one element: it sets
 // HX-Request and HX-Request-Type: partial. Add
-// Header(router.HeaderHXRequestType, "full") for a boosted link or a history
+// Header(htmx.HeaderRequestType, "full") for a boosted link or a history
 // restore.
 func HTMX() RequestOption {
 	return func(r *http.Request) {
-		r.Header.Set(router.HeaderHXRequest, "true")
-		r.Header.Set(router.HeaderHXRequestType, "partial")
+		r.Header.Set(htmx.HeaderRequest, "true")
+		r.Header.Set(htmx.HeaderRequestType, "partial")
 	}
 }
 

@@ -22,17 +22,6 @@ func setCookies(t *testing.T, b *Base) []*http.Cookie {
 	return out
 }
 
-// cookieHeader turns a Set-Cookie line into the name=value pair a browser
-// sends back, without the attributes.
-func cookieHeader(t *testing.T, line string) string {
-	t.Helper()
-	c, err := http.ParseSetCookie(line)
-	if err != nil {
-		t.Fatalf("the Set-Cookie does not parse: %q: %v", line, err)
-	}
-	return (&http.Cookie{Name: c.Name, Value: c.Value}).String()
-}
-
 func TestCookieReportsTheValue(t *testing.T) {
 	tests := []struct {
 		name   string

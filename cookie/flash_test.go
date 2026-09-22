@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 )
 
 var flashCodec = testCodec()
@@ -478,7 +479,7 @@ func TestHXRedirectCarriesTheFlash(t *testing.T) {
 		if err := c.Cookies.AddFlash(c, Flash{Kind: "success", Message: "welcome"}); err != nil {
 			return err
 		}
-		return c.HX().Redirect("/chat")
+		return htmx.NewResponse(c).Redirect("/chat")
 	})
 	r.GET("/chat", func(c *appCtx) error { return c.Stringf(http.StatusOK, "%v", c.Cookies.Flashes(c)) })
 
@@ -493,7 +494,7 @@ func TestHXRedirectCarriesTheFlash(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/join", nil)
 			if tc.htmx {
-				req.Header.Set(router.HeaderHXRequest, "true")
+				req.Header.Set(htmx.HeaderRequest, "true")
 			}
 			rec := httptest.NewRecorder()
 			r.ServeHTTP(rec, req)

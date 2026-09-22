@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 )
 
 // HTMXRedirectConfig configures [HTMXRedirectWithConfig]. Location sends
@@ -19,11 +20,11 @@ type HTMXRedirectConfig struct {
 // with a Location becomes a 200 with HX-Redirect, so the browser navigates
 // rather than swapping the redirect target into the page.
 //
-// It only touches a request that wants a fragment, as HX-Request-Type decides
-// (see [router.HTMXWantsPartial]), and it adds HX-Request and HX-Request-Type
-// to Vary. A browser request keeps its redirect, and so does an htmx 4 full
-// request, such as a boosted link or a history restore: fetch follows the
-// redirect, and htmx puts the final URL in the history.
+// It only touches a request that wants a fragment, as [htmx.WantsPartial]
+// decides, and like it, it adds HX-Request and HX-Request-Type to Vary. A
+// browser request keeps its redirect, and so does an htmx 4 full request, such
+// as a boosted link or a history restore: fetch follows the redirect, and htmx
+// puts the final URL in the history.
 //
 // It answers an error of a partial request itself, through
 // [router.HandleError], so a redirect that the error handler writes is turned
@@ -38,9 +39,9 @@ func HTMXRedirect[C router.Context](next router.HandlerFunc[C]) router.HandlerFu
 
 // HTMXRedirectWithConfig is [HTMXRedirect] with a configuration.
 func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Middleware[C] {
-	header := router.HeaderHXRedirect
+	header := htmx.HeaderRedirect
 	if cfg.Location {
-		header = router.HeaderHXLocation
+		header = htmx.HeaderLocation
 	}
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -49,16 +50,11 @@ func HTMXRedirectWithConfig[C router.Context](cfg HTMXRedirectConfig) router.Mid
 				return next(c)
 			}
 
-			res := c.Response()
-
-			router.AddVary(res.Header(),
-				router.HeaderHXRequest,
-				router.HeaderHXRequestType,
-			)
-
-			if !router.HTMXWantsPartial(c.Request()) {
+			if !htmx.WantsPartial(c) {
 				return next(c)
 			}
+
+			res := c.Response()
 
 			w := &hxRedirectWriter{ResponseWriter: res.ResponseWriter, header: header}
 			res.ResponseWriter = w

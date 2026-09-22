@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
@@ -49,7 +50,7 @@ func postMessage(c Ctx) error {
 
 	text := cleanText(in.Text)
 	if text == "" {
-		return c.HX().NoSwap()
+		return htmx.NewResponse(c).NoSwap()
 	}
 	c.Room.broadcast(message{
 		Kind:   kindMessage,
@@ -58,7 +59,7 @@ func postMessage(c Ctx) error {
 		At:     time.Now(),
 	})
 
-	return c.HX().Trigger("message-sent").NoSwap()
+	return htmx.NewResponse(c).Trigger("message-sent").NoSwap()
 }
 
 func events(c Ctx) error {
