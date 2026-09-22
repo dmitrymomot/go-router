@@ -24,6 +24,7 @@ const (
 	HeaderCookie                          = "Cookie"
 	HeaderETag                            = "ETag"
 	HeaderForwarded                       = "Forwarded"
+	HeaderIdempotencyKey                  = "Idempotency-Key"
 	HeaderIfNoneMatch                     = "If-None-Match"
 	HeaderLastEventID                     = "Last-Event-Id"
 	HeaderLocation                        = "Location"
