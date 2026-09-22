@@ -19,13 +19,9 @@ import (
 //betteralign:check
 type Response struct {
 	http.ResponseWriter
-	before    []func()
 	Status    int
 	Size      int64
 	Committed bool
-	// committing is up while the callbacks of Before run, so a write from
-	// inside one does not run them again.
-	committing bool
 }
 
 // Unwrap reports the writer underneath, which lets
@@ -33,27 +29,9 @@ type Response struct {
 // wrapper.
 func (r *Response) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-// Before registers fn to run just before the header goes out, which is the
-// last moment a header can still be set. Callbacks run in the order they were
-// added. A callback that panics drops the callbacks, and the panic goes on up
-// to the recovery of the router, which answers 500.
-//
-// Before panics if fn is nil.
-func (r *Response) Before(fn func()) {
-	if fn == nil {
-		panic("router: Response.Before needs a callback")
-	}
-	r.before = append(r.before, fn)
-}
-
-// WriteHeader writes the status and commits the response, after it runs the
-// callbacks of [Response.Before]. A 1xx other than 101 passes through as an
-// informational response and commits nothing. A second call is dropped and
-// logged at debug level.
-//
-// A callback that writes commits the response on the spot with the status
-// being written and the header as it stands, and the callbacks do not run
-// again.
+// WriteHeader writes the status and commits the response. A 1xx other than
+// 101 passes through as an informational response and commits nothing. A
+// second call is dropped and logged at debug level.
 func (r *Response) WriteHeader(code int) {
 	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		r.ResponseWriter.WriteHeader(code)
@@ -63,43 +41,9 @@ func (r *Response) WriteHeader(code int) {
 		r.dropStatus(code)
 		return
 	}
-	if r.committing {
-		// A callback wrote. The status on its way out wins over the one
-		// this write asks for.
-		if code != r.Status {
-			r.dropStatus(code)
-		}
-		r.ResponseWriter.WriteHeader(r.Status)
-		r.Committed = true
-		return
-	}
-	prev := r.Status
 	r.Status = code
-	r.runBefore(prev)
-	if !r.Committed {
-		r.ResponseWriter.WriteHeader(code)
-		r.Committed = true
-	}
-}
-
-// runBefore runs the callbacks of Before. A callback that panics leaves the
-// response uncommitted with the status it had before, and drops every
-// callback, so the error answer that follows does not run one twice. The
-// panic goes on up.
-func (r *Response) runBefore(prev int) {
-	r.committing = true
-	done := false
-	defer func() {
-		r.committing = false
-		if !done && !r.Committed {
-			r.before = nil
-			r.Status = prev
-		}
-	}()
-	for _, fn := range r.before {
-		fn()
-	}
-	done = true
+	r.ResponseWriter.WriteHeader(code)
+	r.Committed = true
 }
 
 func (r *Response) dropStatus(code int) {
@@ -187,8 +131,8 @@ func (r *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 //
 //betteralign:check
 type Recorded struct {
-	// Header is the header that went out with the status, after the callbacks
-	// of [Response.Before] ran. It is nil when no status went out.
+	// Header is the header that went out with the status. It is nil when no
+	// status went out.
 	Header http.Header
 	// Body holds the body up to the limit of the capture.
 	Body []byte

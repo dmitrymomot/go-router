@@ -96,7 +96,7 @@ func (r *Router[C]) release(c C) {
 		// or a 405 on a pooled router stays on the fast path.
 		b.req, b.res, b.errorHandled = releasedRequest, nil, false
 		b.resStorage.ResponseWriter = nil
-		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
+		if b.needsCleanup || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()
 		} else {
 			b.paramArr = [maxInlineParams]string{}
@@ -113,7 +113,7 @@ func (r *Router[C]) recycle(c C) {
 		// or a 405 on a pooled router stays on the fast path.
 		b.req, b.res, b.errorHandled = releasedRequest, nil, false
 		b.resStorage.ResponseWriter = nil
-		if b.needsCleanup || b.resStorage.before != nil || cap(b.paramVals) > len(b.paramArr) {
+		if b.needsCleanup || cap(b.paramVals) > len(b.paramArr) {
 			b.clearRequestSlow()
 		} else {
 			b.paramArr = [maxInlineParams]string{}

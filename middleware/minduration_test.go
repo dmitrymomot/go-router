@@ -257,11 +257,12 @@ func TestMinDurationKeepsTheHeadersOfOtherHooks(t *testing.T) {
 		})
 	})
 
-	t.Run("a hook of the handler", func(t *testing.T) {
+	t.Run("a writer of the handler", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := quietRouter()
 			r.With(floored).GET("/login", func(c *appContext) error {
-				c.Response().Before(func() { c.Response().Header().Set("X-Late", "yes") })
+				res := c.Response()
+				res.ResponseWriter = &lateHeaderWriter{ResponseWriter: res.ResponseWriter}
 				return c.String(http.StatusOK, "ok")
 			})
 
@@ -274,6 +275,91 @@ func TestMinDurationKeepsTheHeadersOfOtherHooks(t *testing.T) {
 			}
 		})
 	})
+}
+
+// lateHeaderWriter sets a header at the last moment, as the header goes out.
+type lateHeaderWriter struct {
+	http.ResponseWriter
+}
+
+func (w *lateHeaderWriter) WriteHeader(code int) {
+	w.Header().Set("X-Late", "yes")
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func TestMinDurationStacksWithGzip(t *testing.T) {
+	floored := middleware.MinDuration[*appContext](floor)
+	long := func(c *appContext) error { return c.HTML(http.StatusOK, gzipLongBody) }
+	tests := []struct {
+		name  string
+		chain []router.Middleware[*appContext]
+	}{
+		{"gzip in front", []router.Middleware[*appContext]{middleware.Gzip[*appContext], floored}},
+		{"gzip behind", []router.Middleware[*appContext]{floored, middleware.Gzip[*appContext]}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := quietRouter()
+				r.With(tt.chain...).GET("/login", long)
+
+				req := httptest.NewRequest(http.MethodGet, "/login", nil)
+				req.Header.Set(router.HeaderAcceptEncoding, "gzip")
+				rec, took := serveTimed(t, r, req)
+				if got := rec.Header().Get(router.HeaderContentEncoding); got != "gzip" {
+					t.Fatalf("Content-Encoding = %q, want gzip", got)
+				}
+				if got := ungzip(t, rec.ResponseRecorder); got != gzipLongBody {
+					t.Errorf("body = %q, want the long body", got)
+				}
+				if took != floor {
+					t.Errorf("the header left after %v, want %v", took, floor)
+				}
+			})
+		})
+	}
+}
+
+func TestMinDurationStacksWithCapture(t *testing.T) {
+	var got router.Recorded
+	capture := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+		return func(c *appContext) error {
+			stop := c.Response().Capture(1 << 10)
+			err := next(c)
+			got = stop()
+			return err
+		}
+	}
+	floored := middleware.MinDuration[*appContext](floor)
+	tests := []struct {
+		name  string
+		chain []router.Middleware[*appContext]
+	}{
+		{"capture in front", []router.Middleware[*appContext]{capture, floored}},
+		{"capture behind", []router.Middleware[*appContext]{floored, capture}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				got = router.Recorded{}
+				r := quietRouter()
+				r.With(tt.chain...).GET("/login", func(c *appContext) error {
+					return c.String(http.StatusCreated, "sent")
+				})
+
+				rec, took := getTimed(t, r, "/login")
+				if rec.Code != http.StatusCreated || rec.Body.String() != "sent" {
+					t.Errorf("answer = %d %q, want 201 sent", rec.Code, rec.Body.String())
+				}
+				if got.Status != http.StatusCreated || string(got.Body) != "sent" {
+					t.Errorf("recorded = %d %q, want 201 sent", got.Status, got.Body)
+				}
+				if took != floor {
+					t.Errorf("the header left after %v, want %v", took, floor)
+				}
+			})
+		})
+	}
 }
 
 func TestMinDurationSkip(t *testing.T) {

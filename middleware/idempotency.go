@@ -145,10 +145,8 @@ func Idempotency[C router.Context](store IdempotencyStore) router.Middleware[C] 
 // A replay carries the header fields the handler set or removed, and the
 // Set-Cookie lines it added, on top of what the middleware in front set for the
 // repeat. A recorded cookie is left out when the repeat sets one of the same
-// name. The header is recorded after the callbacks of [router.Response.Before]
-// ran, those of the middleware in front included, so a cookie that such a
-// callback sets only on the first request goes out again with the replay. A
-// replay never calls the error handler itself: an error goes back up the chain.
+// name. A replay never calls the error handler itself: an error goes back up
+// the chain.
 //
 // Put [ParseForm] in front: the form source drops a form that does not parse,
 // and ParseForm refuses it first. See Order in the package doc.
@@ -354,9 +352,8 @@ func replayIdempotent(res *router.Response, rec *router.Recorded) error {
 		}
 	}
 	if cookies := rec.Header[router.HeaderSetCookie]; len(cookies) > 0 {
-		// The callbacks of the middleware in front were added first, so they
-		// run before this one, and a cookie they set for the repeat wins.
-		res.Before(func() { addMissingCookies(res.Header(), cookies) })
+		// A cookie the middleware in front already set for the repeat wins.
+		addMissingCookies(res.Header(), cookies)
 	}
 	res.WriteHeader(rec.Status)
 	if len(rec.Body) == 0 {
@@ -701,9 +698,8 @@ func setCookieName(line string) string {
 }
 
 // idempotencyHeaderDelta reports what changed in the header while the handler
-// ran, the callbacks of [router.Response.Before] included: the fields that
-// changed, the Set-Cookie lines that were added, and a field with no value for
-// each one that was removed.
+// ran: the fields that changed, the Set-Cookie lines that were added, and a
+// field with no value for each one that was removed.
 func idempotencyHeaderDelta(before, after http.Header) http.Header {
 	delta := make(http.Header, len(after))
 	for k := range before {

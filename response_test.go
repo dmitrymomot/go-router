@@ -68,35 +68,11 @@ func captureLogs(t *testing.T) *recordSink {
 	return sink
 }
 
-func TestBeforeHookSeesTheStatusThatGoesOut(t *testing.T) {
-	w := &statusWriter{ResponseWriter: httptest.NewRecorder()}
-	res := &Response{ResponseWriter: w}
-
-	var seen []int
-	res.Before(func() {
-		seen = append(seen, res.Status)
-		res.Header().Set("X-Status", fmt.Sprint(res.Status))
-	})
-	res.WriteHeader(http.StatusTeapot)
-
-	if len(seen) != 1 || seen[0] != http.StatusTeapot {
-		t.Errorf("the hook saw %v, want [418]; a hook that reads the status runs after it is set", seen)
-	}
-	if got := res.Header().Get("X-Status"); got != "418" {
-		t.Errorf("X-Status = %q, want %q", got, "418")
-	}
-	if len(w.codes) != 1 || w.codes[0] != http.StatusTeapot {
-		t.Errorf("the writer saw %v, want [418]", w.codes)
-	}
-}
-
 func TestWriteHeaderDropsASecondStatusAndLogsIt(t *testing.T) {
 	sink := captureLogs(t)
 
 	w := &statusWriter{ResponseWriter: httptest.NewRecorder()}
 	res := &Response{ResponseWriter: w}
-	hooks := 0
-	res.Before(func() { hooks++ })
 
 	res.WriteHeader(http.StatusOK)
 	res.WriteHeader(http.StatusInternalServerError)
@@ -106,9 +82,6 @@ func TestWriteHeaderDropsASecondStatusAndLogsIt(t *testing.T) {
 	}
 	if len(w.codes) != 1 {
 		t.Errorf("the writer saw %v, want one status", w.codes)
-	}
-	if hooks != 1 {
-		t.Errorf("the hooks ran %d times, want 1", hooks)
 	}
 	if len(sink.records) != 1 {
 		t.Fatalf("logged %d records, want 1 that names the dropped status", len(sink.records))
@@ -128,23 +101,19 @@ func TestWriteHeaderKeepsAnInformationalStatusOutOfTheAnswer(t *testing.T) {
 	type answer struct {
 		status    int
 		committed bool
-		hooks     int
 	}
 	got := make(chan answer, 1)
 
 	r := newTestRouter()
 	r.GET("/", func(c *tctx) error {
 		res := c.Response()
-		hooks := 0
-		res.Before(func() { hooks++ })
-
 		res.Header().Set("Link", "</app.css>; rel=preload")
 		res.WriteHeader(http.StatusEarlyHints)
 		if res.Committed || res.Status != 0 {
 			return ErrInternalServerError.WithMessage("103 committed the response")
 		}
 		err := c.String(http.StatusOK, "page")
-		got <- answer{res.Status, res.Committed, hooks}
+		got <- answer{res.Status, res.Committed}
 		return err
 	})
 
@@ -186,9 +155,6 @@ func TestWriteHeaderKeepsAnInformationalStatusOutOfTheAnswer(t *testing.T) {
 	a := <-got
 	if a.status != http.StatusOK || !a.committed {
 		t.Errorf("Status/Committed = %d/%v, want 200/true", a.status, a.committed)
-	}
-	if a.hooks != 1 {
-		t.Errorf("the hooks ran %d times, want 1; a 103 runs none of them", a.hooks)
 	}
 }
 
@@ -304,16 +270,11 @@ func TestUnwrapResponseReadsTheStatusAndTheSize(t *testing.T) {
 func TestWriteHeaderCommitsASwitchingProtocols(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
-	hooks := 0
-	res.Before(func() { hooks++ })
 
 	res.WriteHeader(http.StatusSwitchingProtocols)
 
 	if res.Status != http.StatusSwitchingProtocols || !res.Committed {
 		t.Errorf("Status/Committed = %d/%v, want 101/true", res.Status, res.Committed)
-	}
-	if hooks != 1 {
-		t.Errorf("the hooks ran %d times, want 1", hooks)
 	}
 	if rec.Code != http.StatusSwitchingProtocols {
 		t.Errorf("the client saw %d, want 101", rec.Code)
@@ -339,14 +300,12 @@ func TestObserveReportsAnUpgradeAsAnUpgrade(t *testing.T) {
 func TestFlushCommitsTheResponse(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
-	ran := false
-	res.Before(func() { ran = true })
 
 	res.Flush()
 
-	if res.Status != http.StatusOK || !res.Committed || !ran {
-		t.Errorf("after Flush: Status = %d, Committed = %v, hook ran = %v; want 200, true, true",
-			res.Status, res.Committed, ran)
+	if res.Status != http.StatusOK || !res.Committed || rec.Code != http.StatusOK {
+		t.Errorf("after Flush: Status = %d, Committed = %v, client saw %d; want 200, true, 200",
+			res.Status, res.Committed, rec.Code)
 	}
 }
 
@@ -379,15 +338,6 @@ func TestReadFromReachesTheWriterUnderneath(t *testing.T) {
 	if _, err := io.Copy(res, src()); err != nil || res.Size != 5 {
 		t.Errorf("fallback: Size = %d, err = %v; want 5, nil", res.Size, err)
 	}
-}
-
-func TestResponseBeforeRejectsNil(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic")
-		}
-	}()
-	new(Response).Before(nil)
 }
 
 // After a hijack the caller owns the wire, so the router must not write on it
@@ -450,7 +400,6 @@ func TestHijackCommitsTheResponse(t *testing.T) {
 func TestCaptureRecordsTheAnswerAndPassesItOn(t *testing.T) {
 	rec := httptest.NewRecorder()
 	res := &Response{ResponseWriter: rec}
-	res.Before(func() { res.Header().Set("X-Hook", "ran") })
 
 	stop := res.Capture(64)
 	res.Header().Set(HeaderContentType, MIMETextPlain)
@@ -469,8 +418,8 @@ func TestCaptureRecordsTheAnswerAndPassesItOn(t *testing.T) {
 	if got.Status != http.StatusOK || string(got.Body) != "abc" || got.Truncated {
 		t.Errorf("recorded %d %q truncated=%v, want 200 %q false", got.Status, got.Body, got.Truncated, "abc")
 	}
-	if got.Header.Get("X-Hook") != "ran" || got.Header.Get(HeaderContentType) != MIMETextPlain {
-		t.Errorf("recorded header = %v, want the hook's and the handler's", got.Header)
+	if got.Header.Get(HeaderContentType) != MIMETextPlain {
+		t.Errorf("recorded header = %v, want the handler's", got.Header)
 	}
 	if got.Header.Get("X-Late") != "" {
 		t.Error("the recorded header changed after the status went out")
@@ -835,39 +784,6 @@ func TestCaptureRejectsANegativeLimit(t *testing.T) {
 	new(Response).Capture(-1)
 }
 
-func TestBeforeCallbackThatWritesRunsOnce(t *testing.T) {
-	w := &statusWriter{ResponseWriter: httptest.NewRecorder()}
-	res := &Response{ResponseWriter: w}
-	calls := 0
-	res.Before(func() {
-		calls++
-		if calls > 3 {
-			return // Stop a runaway recursion so the test can report it.
-		}
-		res.Header().Set("X-Early", "yes")
-		_, _ = res.WriteString("early ")
-	})
-	later := 0
-	res.Before(func() { later++ })
-
-	res.WriteHeader(http.StatusAccepted)
-	_, _ = res.WriteString("body")
-
-	if calls != 1 || later != 1 {
-		t.Errorf("the callbacks ran %d and %d times, want once each", calls, later)
-	}
-	if len(w.codes) != 1 {
-		t.Errorf("the writer saw %v, want one status", w.codes)
-	}
-	rec := w.ResponseWriter.(*httptest.ResponseRecorder)
-	if got := rec.Body.String(); got != "early body" {
-		t.Errorf("body = %q, want %q", got, "early body")
-	}
-	if !res.Committed {
-		t.Error("the response is not committed")
-	}
-}
-
 type failingFlusher struct {
 	http.ResponseWriter
 	err error
@@ -888,48 +804,5 @@ func TestFlushErrorReportsTheWriterError(t *testing.T) {
 	// http.NewResponseController finds FlushError on Response itself.
 	if err := http.NewResponseController(res).Flush(); !errors.Is(err, gone) {
 		t.Errorf("ResponseController.Flush = %v, want %v", err, gone)
-	}
-}
-
-// A Before callback that panics must not leave the response half committed:
-// the recovered panic answers 500 and is logged as a failure.
-func TestBeforeCallbackThatPanicsAnswers500(t *testing.T) {
-	for _, pooled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("pooled=%v", pooled), func(t *testing.T) {
-			sink := &recordSink{}
-			r := newTestRouter()
-			if pooled {
-				r = NewPooled(func() *tctx { return new(tctx) }, func(*tctx) {})
-			}
-			r.Logger(slog.New(sink))
-			ran := 0
-			r.GET("/", func(c *tctx) error {
-				c.Response().Before(func() {
-					ran++
-					panic("boom")
-				})
-				return c.String(http.StatusOK, "ok")
-			})
-
-			rec := do(r, http.MethodGet, "/")
-			if rec.Code != http.StatusInternalServerError {
-				t.Errorf("status = %d, want 500", rec.Code)
-			}
-			if ran != 1 {
-				t.Errorf("the callback ran %d times, want 1", ran)
-			}
-			failed := 0
-			for _, rec := range sink.records {
-				if rec.Message == "router: request failed" {
-					failed++
-					if got, _ := intAttr(rec, "status"); got != http.StatusInternalServerError {
-						t.Errorf("logged status = %d, want 500", got)
-					}
-				}
-			}
-			if failed != 1 {
-				t.Errorf("logged %d failures, want 1", failed)
-			}
-		})
 	}
 }

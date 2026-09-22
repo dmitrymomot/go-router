@@ -810,16 +810,14 @@ func TestIdempotencyReplaysOnlyTheCookiesTheHandlerSet(t *testing.T) {
 	}
 }
 
-// Regression: a replay sent the session cookie that a callback in front set on
-// the first request, next to the one it set for the repeat.
-func TestIdempotencyDoesNotReplayACookieAnOuterCallbackSet(t *testing.T) {
+// Regression: a replay sent the session cookie that a middleware in front set
+// on the first request, next to the one it set for the repeat.
+func TestIdempotencyDoesNotReplayACookieAnOuterMiddlewareSet(t *testing.T) {
 	var sessions atomic.Int32
 	session := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
 		return func(c *appContext) error {
 			sid := strconv.Itoa(int(sessions.Add(1)))
-			c.Response().Before(func() {
-				http.SetCookie(c.Response(), &http.Cookie{Name: "sid", Value: sid})
-			})
+			http.SetCookie(c.Response(), &http.Cookie{Name: "sid", Value: sid})
 			return next(c)
 		}
 	}

@@ -151,7 +151,6 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Base) clearRequestSlow() {
-	b.resStorage.before = nil
 	clear(b.paramArr[:])
 	clear(b.paramVals[:cap(b.paramVals)])
 	b.paramVals = nil
@@ -198,7 +197,7 @@ func (b *Base) setFormError(err error) error {
 // routeRecord is what a matched route publishes to its Base. Registration
 // builds it, and every request of the route shares it, so it never changes.
 // Base holds one pointer to it rather than the pattern string, which keeps an
-// embedder with a string of its own in the 320-byte size class.
+// embedder with a string of its own in the 288-byte size class.
 type routeRecord struct {
 	pattern string
 	meta    []any

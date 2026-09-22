@@ -228,7 +228,6 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 			c.Set("request", req)
 			c.Query("q")
 			_ = c.setFormError(ErrBadRequest)
-			c.Response().Before(func() { _ = req.Method })
 			return c.NoContent(http.StatusNoContent)
 		})
 	})
@@ -245,7 +244,7 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 		if b.req != releasedRequest || b.res != nil || b.queryCache != nil || b.deferred != nil {
 			t.Fatal("pooled context retained completed request state")
 		}
-		if len(b.store) != 0 || b.resStorage.ResponseWriter != nil || b.resStorage.before != nil {
+		if len(b.store) != 0 || b.resStorage.ResponseWriter != nil {
 			t.Fatal("pooled context retained request-owned references")
 		}
 		if b.host != "" || b.rawTail != "" || cap(b.paramVals) > len(b.paramArr) {
@@ -316,16 +315,16 @@ func TestPoolClearsTheHandledErrorFlag(t *testing.T) {
 }
 
 // betteralign keeps the fields in order but does not stop Base from growing.
-// Base and a string of the application share a 320-byte size class.
+// Base and a string of the application share a 288-byte size class.
 func TestBaseStaysInItsSizeClass(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) != 8 {
 		t.Skip("the size classes are those of a 64-bit platform")
 	}
-	if got := unsafe.Sizeof(Base{}); got != 296 {
-		t.Errorf("unsafe.Sizeof(Base{}) = %d, want 296", got)
+	if got := unsafe.Sizeof(Base{}); got != 272 {
+		t.Errorf("unsafe.Sizeof(Base{}) = %d, want 272", got)
 	}
-	if got := unsafe.Sizeof(tctx{}); got > 320 {
-		t.Errorf("a Base plus a string is %d bytes, want at most 320", got)
+	if got := unsafe.Sizeof(tctx{}); got > 288 {
+		t.Errorf("a Base plus a string is %d bytes, want at most 288", got)
 	}
 }
 
