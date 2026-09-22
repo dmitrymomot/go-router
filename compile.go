@@ -65,9 +65,9 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	eng.scopes = nil
 	if eng.hostSet != nil {
 		for _, e := range eng.hostSet.all {
-			e.mws, e.haveMWs = nil, false
+			e.mws = nil
 			e.notFoundChain, e.notAllowedChain, e.optionsChain = nil, nil, nil
-			e.errIdx, e.scope = 0, nil
+			e.errIdx, e.scope, e.handler = 0, nil, nil
 		}
 	}
 	// A miss and a wrong method are errors like any other; only the error
@@ -109,8 +109,8 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	open := make(map[*Router[C]]bool)
 	var pending []pendingScope[C]
 
-	var walk func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inner, outer int32)
-	walk = func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], depth int, inner, outer int32) {
+	var walk func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], mount *mountPath[C], depth int, inner, outer int32)
+	walk = func(rt *Router[C], prefix scopePattern, mws []Middleware[C], host *hostEntry[C], mount *mountPath[C], depth int, inner, outer int32) {
 		if open[rt] {
 			panic("router: a router is mounted inside itself")
 		}
@@ -119,6 +119,12 @@ func (r *Router[C]) compile(eng *engine[C]) {
 
 		p := prefix.join(rt)
 		m := concatMiddleware(mws, rt.mws)
+		atRoot := normalizePattern(p.text) == "/"
+		// The scopes inside a Mount shim sit one mount deeper.
+		below := mount
+		if rt.mounted != nil {
+			below = eng.mountIn(mount, rt)
+		}
 
 		rounds := max(len(rt.hosts), 1)
 		for i := range rounds {
@@ -135,41 +141,44 @@ func (r *Router[C]) compile(eng *engine[C]) {
 					out = in
 				}
 				in = -1
-				if !e.haveMWs {
-					e.mws, e.haveMWs = m, true
-				}
-				if e.scope == nil {
-					e.scope = rt
+				// A host scope at the root answers the paths of its host that
+				// no prefix covers: the one with a handler, else the first.
+				if atRoot && e.scope == nil {
+					e.scope, e.mws, e.errIdx = rt, m, out
 				}
 			}
 			if rt != r && rt.errHandler != nil {
 				in = ownerIdx(rt)
 				if len(rt.hosts) > 0 {
-					if e.scope != rt && e.scope.errHandler != nil {
+					if e.handler != nil && e.handler != rt {
 						panic("router: the host " + e.pattern + " already has an error handler, set by another Host scope")
 					}
-					// The scope that owns the host's errors also wraps its 404s.
-					e.scope, e.mws = rt, m
+					e.handler = rt
+					if atRoot {
+						e.scope, e.mws, e.errIdx = rt, m, in
+					}
 				}
 			}
-			choices = append(choices, choice{key: errKey[C]{rt, e}, inner: in, outer: out})
+			choices = append(choices, choice{key: errKey[C]{rt, e, mount}, inner: in, outer: out})
 
-			if rt != r && normalizePattern(rt.prefix) != "/" {
+			// A scope with a prefix answers the 404s under it, and so does a
+			// host scope under one, on its host.
+			if rt != r && (normalizePattern(rt.prefix) != "/" || len(rt.hosts) > 0 && !atRoot) {
 				// A mount answers the 404s under its prefix as the router it
 				// holds would, with that router's middleware.
-				owner, pm := rt, m
+				owner, pm := errKey[C]{rt, e, mount}, m
 				if sub := rt.mounted; sub != nil {
-					owner, pm = sub, concatMiddleware(m, sub.mws)
+					owner, pm = errKey[C]{sub, e, below}, concatMiddleware(m, sub.mws)
 				}
-				pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: pm, depth: depth, owner: errKey[C]{owner, e}})
+				pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: pm, depth: depth, owner: owner})
 			}
 
 			for _, ch := range rt.children {
-				walk(ch, p, m, e, depth+1, in, out)
+				walk(ch, p, m, e, below, depth+1, in, out)
 			}
 		}
 	}
-	walk(r, scopePattern{}, nil, nil, 0, -1, 0)
+	walk(r, scopePattern{}, nil, nil, nil, 0, -1, 0)
 
 	resolved := make(map[errKey[C]]int32, len(choices))
 	for _, c := range choices {
@@ -177,8 +186,8 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		switch {
 		case c.inner >= 0:
 			idx = c.inner
-		case c.key.host != nil && c.key.host.scope.errHandler != nil:
-			idx = owners[c.key.host.scope]
+		case c.key.host != nil && c.key.host.handler != nil:
+			idx = owners[c.key.host.handler]
 		}
 		resolved[c.key] = idx
 		if slot := eng.errSlots[c.key]; slot != nil {
@@ -192,8 +201,9 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	}
 	if eng.hostSet != nil {
 		for _, e := range eng.hostSet.all {
-			if e.scope != nil {
-				e.errIdx = resolved[errKey[C]{e.scope, e}]
+			if e.scope == nil {
+				// No host scope sits at the root: the router answers.
+				e.mws = r.mws
 			}
 			if e.optionsChain == nil {
 				e.optionsChain = chain(autoOptions[C], e.mws)
@@ -242,22 +252,55 @@ func (r *Router[C]) compile(eng *engine[C]) {
 
 // errSlot returns the owner index that the routes of r read on the tree of
 // host, nil for the tree of every host. A scope that compile has not seen yet,
-// such as a With scope, takes a compile now, so the route answers correctly the
-// moment it is registered; inside a Route, Group or Hosts callback the compile
-// at the end of the outermost one fills it.
+// such as a With scope, takes the index of the nearest owner that compile saw,
+// so the route answers correctly the moment it is registered. Only a scope
+// with a handler or a host of its own in between takes a compile now; inside a
+// Route, Group or Hosts callback the compile at the end of the outermost one
+// fills it.
 func (r *Router[C]) errSlot(eng *engine[C], host *hostEntry[C]) *int32 {
-	key := errKey[C]{r, host}
+	lineage := r.lineage()
+	mounts := eng.mountPathsOf(lineage)
+	key := errKey[C]{r, host, mounts[0]}
 	if slot := eng.errSlots[key]; slot != nil {
 		return slot
 	}
 	slot := new(int32)
 	eng.errSlots[key] = slot
-	if idx, ok := eng.errResolved[key]; ok {
+	if idx, ok := eng.inheritedOwner(lineage, mounts, host); ok {
 		*slot = idx
 	} else {
 		r.settingChanged()
 	}
 	return slot
+}
+
+// mountPathsOf returns the mount path of each scope of lineage, which lists a
+// scope and its owners nearest first.
+func (e *engine[C]) mountPathsOf(lineage []*Router[C]) []*mountPath[C] {
+	out := make([]*mountPath[C], len(lineage))
+	var p *mountPath[C]
+	for i, s := range slices.Backward(lineage) {
+		out[i] = p
+		if s.mounted != nil {
+			p = e.mountIn(p, s)
+		}
+	}
+	return out
+}
+
+// inheritedOwner resolves a scope that compile has not seen. A scope with no
+// handler and no host of its own resolves as its owner does on the same tree,
+// so the first resolved scope up the lineage answers for it.
+func (e *engine[C]) inheritedOwner(lineage []*Router[C], mounts []*mountPath[C], host *hostEntry[C]) (int32, bool) {
+	for i, s := range lineage {
+		if idx, ok := e.errResolved[errKey[C]{s, host, mounts[i]}]; ok {
+			return idx, true
+		}
+		if s.errHandler != nil || len(s.hosts) > 0 {
+			return 0, false
+		}
+	}
+	return 0, false
 }
 
 type pendingScope[C Context] struct {

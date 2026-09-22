@@ -35,15 +35,17 @@ type hostEntry[C Context] struct {
 	hostSpec
 	tree            *node[C]
 	mws             []Middleware[C]
-	haveMWs         bool
 	idx             int32
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
-	// errIdx is the error handler of the host's 404 and 405 answers. scope is
-	// the host scope that decides it: the one with a handler, else the first.
-	errIdx int32
-	scope  *Router[C]
+	// errIdx is the error handler of the host's 404 and 405 answers outside
+	// every prefix. scope is the host scope at the root that decides it and
+	// wraps them: the one with a handler, else the first. handler is the host
+	// scope, at any prefix, that set an error handler for the host.
+	errIdx  int32
+	scope   *Router[C]
+	handler *Router[C]
 	// redirect marks a host that RedirectHost owns: no other route may be
 	// registered for it.
 	redirect *hostClaim
@@ -543,10 +545,12 @@ func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 // A route outside any host scope answers for every host.
 //
 // The middleware of the scope also wraps the 404 and 405 answers for its hosts.
-// When several Host or Hosts calls open one pattern, the scope that sets an
-// error handler owns those answers with its middleware, else the first scope
-// does, and each route keeps the middleware of the scope that registered it.
-// Only one scope of a pattern may set an error handler.
+// When several Host or Hosts calls open one pattern, the scope at the root
+// prefix that sets an error handler owns those answers with its middleware,
+// else the first one at the root prefix does, and each route keeps the
+// middleware of the scope that registered it. A scope opened under a prefix
+// answers only the paths under that prefix. Only one scope of a pattern may
+// set an error handler.
 //
 // Hosts panics on an empty patterns or on a pattern it cannot parse.
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {

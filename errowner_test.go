@@ -3,7 +3,9 @@ package router
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // These tests pin which error handler answers: a matched route goes to the
@@ -254,4 +256,106 @@ func TestASubMountedIntoTwoParentsKeepsEachParentsOwners(t *testing.T) {
 
 	wantOwners(t, left, [][4]string{{http.MethodGet, "", "/l/m/x", "left"}})
 	wantOwners(t, right, [][4]string{{http.MethodGet, "", "/r/m/x", "right"}})
+}
+
+func TestASubMountedTwiceIntoOneParentKeepsEachMountsOwner(t *testing.T) {
+	sub := newTestRouter()
+	sub.GET("/x", failRoute)
+	r := newTestRouter()
+	r.ErrorHandler(tagHandler("root"))
+	r.Route("/a", func(g *Router[*tctx]) {
+		g.ErrorHandler(tagHandler("A"))
+		g.Mount("/m", sub)
+	})
+	r.Route("/b", func(g *Router[*tctx]) {
+		g.ErrorHandler(tagHandler("B"))
+		g.Mount("/m", sub)
+	})
+
+	wantOwners(t, r, [][4]string{
+		{http.MethodGet, "", "/a/m/x", "A"},
+		{http.MethodGet, "", "/a/m/nope", "A"},
+		{http.MethodGet, "", "/b/m/x", "B"},
+		{http.MethodGet, "", "/b/m/nope", "B"},
+	})
+}
+
+func TestANestedSubMountedTwiceKeepsEachMountsOwner(t *testing.T) {
+	inner := newTestRouter()
+	inner.GET("/x", failRoute)
+	mid := newTestRouter()
+	mid.Mount("/in", inner)
+	r := newTestRouter()
+	r.Route("/a", func(g *Router[*tctx]) {
+		g.ErrorHandler(tagHandler("A"))
+		g.Mount("/m", mid)
+	})
+	r.Route("/b", func(g *Router[*tctx]) {
+		g.ErrorHandler(tagHandler("B"))
+		g.Mount("/m", mid)
+	})
+
+	wantOwners(t, r, [][4]string{
+		{http.MethodGet, "", "/a/m/in/x", "A"},
+		{http.MethodGet, "", "/a/m/in/nope", "A"},
+		{http.MethodGet, "", "/b/m/in/x", "B"},
+		{http.MethodGet, "", "/b/m/in/nope", "B"},
+	})
+}
+
+func TestAHostScopeUnderAPrefixOwnsOnlyThatPrefix(t *testing.T) {
+	r := newTestRouter()
+	r.ErrorHandler(tagHandler("root"))
+	r.Route("/v1", func(v1 *Router[*tctx]) {
+		v1.ErrorHandler(tagHandler("V1"))
+		v1.Host("api.test", func(h *Router[*tctx]) { h.GET("/a", failRoute) })
+	})
+
+	wantOwners(t, r, [][4]string{
+		{http.MethodGet, "api.test", "/v1/a", "V1"},
+		{http.MethodGet, "api.test", "/v1/zzz", "V1"},
+		{http.MethodGet, "api.test", "/zzz", "root"},
+		{http.MethodGet, "other.test", "/zzz", "root"},
+	})
+}
+
+func TestTheHostWideAnswerComesFromTheHostScopeAtTheRoot(t *testing.T) {
+	r := newTestRouter()
+	r.ErrorHandler(tagHandler("root"))
+	r.Route("/v1", func(v1 *Router[*tctx]) {
+		v1.ErrorHandler(tagHandler("V1"))
+		v1.Host("api.test", func(h *Router[*tctx]) { h.GET("/a", failRoute) })
+	})
+	r.Group(func(g *Router[*tctx]) {
+		g.ErrorHandler(tagHandler("group"))
+		g.Host("api.test", func(h *Router[*tctx]) { h.GET("/b", failRoute) })
+	})
+
+	wantOwners(t, r, [][4]string{
+		{http.MethodGet, "api.test", "/v1/zzz", "V1"},
+		{http.MethodGet, "api.test", "/b", "group"},
+		{http.MethodGet, "api.test", "/zzz", "group"},
+	})
+}
+
+func TestRegisteringWithRoutesStaysLinear(t *testing.T) {
+	mw := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next }
+	build := func(n int) time.Duration {
+		start := time.Now()
+		r := newTestRouter()
+		r.ErrorHandler(tagHandler("root"))
+		api := r.Route("/api", nil)
+		api.ErrorHandler(tagHandler("api"))
+		for i := range n {
+			api.With(mw).GET("/r"+strconv.Itoa(i), failRoute)
+		}
+		wantOwners(t, r, [][4]string{{http.MethodGet, "", "/api/r0", "api"}})
+		return time.Since(start)
+	}
+	build(100) // warm up
+	small, large := build(1000), build(4000)
+	// Linear is a ratio near 4; a compile per route makes it near 16.
+	if large > 10*small {
+		t.Errorf("4000 With routes took %v, 1000 took %v; want linear growth", large, small)
+	}
 }

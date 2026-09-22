@@ -106,12 +106,39 @@ type engine[C Context] struct {
 	// routes read it, and the value compile resolved for it.
 	errSlots    map[errKey[C]]*int32
 	errResolved map[errKey[C]]int32
+	mountPaths  map[mountPath[C]]*mountPath[C]
 }
 
-// errKey names a scope on one tree: host is nil for the tree of every host.
+// errKey names a scope on one tree: host is nil for the tree of every host,
+// and mount is the path of Mount shims above the scope, nil outside every
+// mount.
 type errKey[C Context] struct {
 	scope *Router[C]
 	host  *hostEntry[C]
+	mount *mountPath[C]
+}
+
+// mountPath names one place a mounted router sits: its Mount shim and the path
+// of the mounts around that shim. A router mounted twice into one tree has two
+// paths, so each copy keeps the error handlers around its own mount.
+type mountPath[C Context] struct {
+	shim  *Router[C]
+	outer *mountPath[C]
+}
+
+// mountIn returns the one path for shim inside outer, so a key built at install
+// and a key built by compile compare equal.
+func (e *engine[C]) mountIn(outer *mountPath[C], shim *Router[C]) *mountPath[C] {
+	k := mountPath[C]{shim: shim, outer: outer}
+	if p := e.mountPaths[k]; p != nil {
+		return p
+	}
+	if e.mountPaths == nil {
+		e.mountPaths = map[mountPath[C]]*mountPath[C]{}
+	}
+	p := &k
+	e.mountPaths[k] = p
+	return p
 }
 
 func newEngine[C Context]() *engine[C] {
@@ -443,7 +470,11 @@ func (r *Router[C]) mustBeRoot(setter, why string) {
 // most specific scope with a prefix covering the path would get, then to the
 // one of its host scope, then to the router's. So a [Router.Group] or
 // [Router.With] scope answers the errors of its routes, and never a 404 on its
-// own. A router mounted under a prefix answers the 404s under it.
+// own. A router mounted under a prefix answers the 404s under it, and a host
+// scope under a prefix answers those of its hosts under it. A path of a host
+// that no such prefix covers goes to the host scope at the root prefix that
+// holds a handler, then to the scopes without a prefix around those host
+// scopes, then to the router's.
 //
 // The router logs every failure itself, skips h for a response that already
 // committed and for an error that is [context.Canceled], and answers a bare
