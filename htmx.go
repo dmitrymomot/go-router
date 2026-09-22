@@ -55,10 +55,10 @@ const (
 //
 // RequestType is "full" when htmx swaps the whole body or selects part of the
 // answer, as for a boosted link or a history restore, and "partial" when it
-// swaps one element; it is what [Base.WantsPartial] reads. Source names the element that made the request
-// and Target the one the answer goes into, both in the tag#id form htmx 4
-// sends, such as "ul#user-list". [HTMXRequest.TargetID] and
-// [HTMXRequest.SourceID] read the id alone.
+// swaps one element; it is what [Base.WantsPartial] reads. Source names the
+// element that made the request and Target the one the answer goes into, both
+// in the tag#id form htmx 4 sends, such as "ul#user-list".
+// [HTMXRequest.TargetID] and [HTMXRequest.SourceID] read the id alone.
 //
 // htmx 4 swaps a 4xx or 5xx answer into the target too, so a scope that serves
 // htmx wants an error handler that renders a fragment.
@@ -123,8 +123,9 @@ func (b *Base) IsBoosted() bool { return hxTrue(b.req.Header.Get(HeaderHXBoosted
 // HTMXWantsPartial reports whether r wants a fragment: htmx made it, and its
 // HX-Request-Type is not "full". htmx 4 sends "full" for a boosted link, a
 // history restore, and a request that swaps the whole body or selects part of
-// the answer. A request without the type counts as partial. htmx 2 sends no type, so it is not
-// supported: its boosted links and history restores would get fragments.
+// the answer. A request without the type counts as partial. htmx 2 sends no
+// type, so it is not supported: its boosted links and history restores would
+// get fragments.
 func HTMXWantsPartial(r *http.Request) bool {
 	h := r.Header
 	return hxTrue(h.Get(HeaderHXRequest)) && !strings.EqualFold(h.Get(HeaderHXRequestType), "full")
