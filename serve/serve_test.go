@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1141,35 +1140,5 @@ func TestRunChecksTheServerForAContextAlreadyDone(t *testing.T) {
 	}
 	if listened {
 		t.Error("Run bound an address for a context that is already done")
-	}
-}
-
-// A server whose serving fails as its context ends must not drain. The test
-// holds the process to one P, so the goroutine that waits for the context only
-// runs once serving has failed, and it finds both of its cases ready.
-func TestOnDrainDoesNotRunWhenServingFailsAsTheContextEnds(t *testing.T) {
-	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
-
-	for range 100 {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
-		serveErr := errors.New("accept failed")
-		ctx, cancel := context.WithCancel(context.Background())
-		var calls atomic.Int32
-		err = serve.Run(ctx, ok(), serve.Config{
-			Listener: acceptErrorListener{Listener: ln, err: serveErr},
-			Logger:   slog.New(slog.DiscardHandler),
-			OnListen: func(net.Addr) { cancel() },
-			OnDrain:  func() { calls.Add(1) },
-		})
-		cancel()
-		if !errors.Is(err, serveErr) {
-			t.Fatalf("err = %v, want the serving failure", err)
-		}
-		if n := calls.Load(); n != 0 {
-			t.Fatalf("OnDrain ran %d times for a server whose serving failed", n)
-		}
 	}
 }

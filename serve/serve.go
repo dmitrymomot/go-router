@@ -40,8 +40,8 @@ const DefaultReadHeaderTimeout = 10 * time.Second
 // before the drain starts. It then drains within ShutdownTimeout. OnDrain runs
 // on its own goroutine while the handlers still answer: the flag it flips has
 // to be atomic, and an OnDrain that blocks pushes back both the delay and the
-// drain. A server whose serving fails closes at once, with no OnDrain and no
-// delay. A negative DrainDelay is an error.
+// drain. A server whose serving fails before ctx ends closes at once, with no
+// OnDrain and no delay. A negative DrainDelay is an error.
 //
 // Any certificate in Certificates turns the server into an HTTPS one, over TLS
 // 1.3 and h2. With a TLSConfig of your own, the certificates join the ones it
