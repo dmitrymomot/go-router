@@ -109,9 +109,8 @@ func TestRequestAndResponseAccessors(t *testing.T) {
 	if got := b.Header().Get("X-Test"); got != "value" {
 		t.Errorf("Header().Get(X-Test) = %q, want value", got)
 	}
-	cookie, err := b.Cookie("session")
-	if err != nil || cookie.Value != "abc" {
-		t.Fatalf("Cookie(session) = %#v, %v", cookie, err)
+	if got := b.Cookie("session"); got != "abc" {
+		t.Fatalf("Cookie(session) = %q, want abc", got)
 	}
 	if !b.IsWebSocket() {
 		t.Error("IsWebSocket() rejected case-insensitive upgrade tokens")

@@ -35,7 +35,6 @@ const maxBodyBytes = 8 << 10
 type Context struct {
 	router.Base
 	Store     *Store
-	Codec     *router.CookieCodec
 	Email     string
 	Workspace Workspace
 }
@@ -67,10 +66,11 @@ func main() {
 
 func newRouter(store *Store, codec *router.CookieCodec) *router.Router[Ctx] {
 	r := router.New(func(http.ResponseWriter, *http.Request) Ctx {
-		return &Context{Store: store, Codec: codec}
+		return &Context{Store: store}
 	})
 
 	r.ErrorHandler(renderError)
+	r.CookieCodec(codec)
 	r.MaxBodyBytes(maxBodyBytes)
 
 	r.Use(

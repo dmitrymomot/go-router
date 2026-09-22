@@ -52,7 +52,7 @@ if !ok {
 }
 ```
 
-**A session that belongs to one host.** `SetSignedCookie` signs the email with an HMAC, and the cookie names no `Domain`, so it belongs to the host that set it and to no other. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out.
+**A session that belongs to one host.** The router holds the codec, set once with `r.CookieCodec`. `NewCookie` gives the session cookie the router's defaults and no `Domain`, and `SetSignedCookie` signs the email with an HMAC, so the cookie belongs to the host that set it and to no other. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out.
 
 **A ticket to cross the hosts.** Signup runs on the apex, and no server may set a cookie for a host below its own, so the apex cannot start the session it just earned. It hands over a ticket instead: one random id, good for one minute and one visit.
 
@@ -72,7 +72,7 @@ func passwordMatches(password string, salt, want []byte) bool {
 
 An address with no account in this workspace derives against a throwaway salt before it is refused, so it cannot answer faster than a known one with the wrong password, and both get the same sentence. A signup form has to say that a subdomain is taken; a login form must not say who has an account.
 
-`NewCookieCodec` panics on a key under 32 bytes, so `SESSION_KEY` is either long enough or ignored for one this run generates. A service that can take a dependency should prefer argon2id from `golang.org/x/crypto`. This example takes none.
+`NewCookieCodec` panics on a key under 32 bytes, so `SESSION_KEY` is either long enough or ignored for one this run generates. `NewCookieCodec(newKey, oldKey)` rotates the key: it signs with the new one and still reads what the old one signed. A service that can take a dependency should prefer argon2id from `golang.org/x/crypto`. This example takes none.
 
 ## The files
 

@@ -206,6 +206,9 @@ func TestLoginBelongsToTheWorkspace(t *testing.T) {
 	if got := sessionOf(t, res); got.Domain != "" {
 		t.Errorf("session cookie domain = %q, want none", got.Domain)
 	}
+	if email, ok := routertest.SignedCookie(res, sessionCookie); !ok || email != "ann@example.com" {
+		t.Errorf("the session carries %q, %v, want ann@example.com", email, ok)
+	}
 }
 
 func TestAnAccountOfOneWorkspaceCannotOpenAnother(t *testing.T) {

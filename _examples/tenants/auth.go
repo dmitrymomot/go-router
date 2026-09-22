@@ -83,7 +83,9 @@ func enter(c Ctx) error {
 	if !ok || t.workspace != c.Workspace.Slug {
 		return c.Redirect(http.StatusSeeOther, "/login")
 	}
-	writeSession(c, t.email)
+	if err := writeSession(c, t.email); err != nil {
+		return err
+	}
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
@@ -113,7 +115,9 @@ func login(c Ctx) error {
 		return refuse(c, "login", page, "That email and password do not match.")
 	}
 
-	writeSession(c, email)
+	if err := writeSession(c, email); err != nil {
+		return err
+	}
 
 	return c.Redirect(http.StatusSeeOther, "/")
 }

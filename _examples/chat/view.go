@@ -5,7 +5,6 @@ import (
 	"embed"
 	"html/template"
 	"io"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -54,11 +53,7 @@ func clean(s string, limit int) string {
 const cookieName = "chat_user"
 
 func readUser(c Ctx) (string, bool) {
-	ck, err := c.Cookie(cookieName)
-	if err != nil {
-		return "", false
-	}
-	name, err := url.QueryUnescape(ck.Value)
+	name, err := url.QueryUnescape(c.Cookie(cookieName))
 	if err != nil {
 		return "", false
 	}
@@ -67,25 +62,9 @@ func readUser(c Ctx) (string, bool) {
 }
 
 func writeUser(c Ctx, name string) {
-	c.SetCookie(&http.Cookie{
-		Name:     cookieName,
-		Value:    url.QueryEscape(name),
-		Path:     "/",
-		MaxAge:   int(12 * time.Hour / time.Second),
-		Secure:   router.SchemeOf(c.Request()) == "https",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	c.SetCookie(c.NewCookie(cookieName, url.QueryEscape(name), 12*time.Hour))
 }
 
 func clearUser(c Ctx) {
-	c.SetCookie(&http.Cookie{
-		Name:     cookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		Secure:   router.SchemeOf(c.Request()) == "https",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	c.ClearCookie(cookieName)
 }

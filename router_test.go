@@ -2315,6 +2315,7 @@ func TestMountRefusesARouterCarryingRootOnlySettings(t *testing.T) {
 		{"MaxBodyBytes", "MaxBodyBytes", func(s *Router[*tctx]) { s.MaxBodyBytes(1 << 10) }},
 		{"MaxMultipartMemory", "MaxMultipartMemory", func(s *Router[*tctx]) { s.MaxMultipartMemory(1 << 10) }},
 		{"JSONOptions", "JSONOptions", func(s *Router[*tctx]) { s.JSONOptions(json.Deterministic(true)) }},
+		{"CookieCodec", "a cookie codec", func(s *Router[*tctx]) { s.CookieCodec(testCodec()) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := newTestRouter()
@@ -2490,5 +2491,112 @@ func TestLiteralCharsetIsEnforced(t *testing.T) {
 		if err := ValidatePattern(pattern); err != nil {
 			t.Errorf("ValidatePattern(%q) = %v, want nil", pattern, err)
 		}
+	}
+}
+
+func signingRoutes(r *Router[*tctx]) {
+	r.POST("/signin", func(c *tctx) error {
+		if err := c.SetSignedCookie(c.NewCookie("uid", "ann", time.Hour)); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+	r.GET("/me", func(c *tctx) error {
+		uid, err := c.SignedCookie("uid")
+		if err != nil {
+			return c.String(http.StatusUnauthorized, err.Error())
+		}
+		return c.String(http.StatusOK, uid)
+	})
+}
+
+func TestCookieCodecSignsAcrossRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    *Router[*tctx]
+	}{
+		{"New", newTestRouter()},
+		{"NewPooled", NewPooled(func() *tctx { return new(tctx) }, func(c *tctx) { c.Tag = "" })},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.r.CookieCodec(testCodec())
+			signingRoutes(tc.r)
+
+			signin := do(tc.r, http.MethodPost, "/signin")
+			if signin.Code != http.StatusNoContent {
+				t.Fatalf("POST /signin = %d, want 204; body: %s", signin.Code, signin.Body)
+			}
+			line := signin.Header().Get("Set-Cookie")
+			c, err := http.ParseSetCookie(line)
+			if err != nil {
+				t.Fatalf("the Set-Cookie does not parse: %q: %v", line, err)
+			}
+
+			for _, sub := range []struct {
+				name  string
+				value string
+				code  int
+				body  string
+			}{
+				{"the signed value", c.Value, http.StatusOK, "ann"},
+				{"a tampered value", "YWRtaW4" + c.Value[strings.IndexByte(c.Value, '.'):], http.StatusUnauthorized, ErrCookieInvalid.Error()},
+			} {
+				t.Run(sub.name, func(t *testing.T) {
+					req := httptest.NewRequest(http.MethodGet, "/me", nil)
+					req.AddCookie(&http.Cookie{Name: "uid", Value: sub.value})
+					rec := httptest.NewRecorder()
+					tc.r.ServeHTTP(rec, req)
+					if rec.Code != sub.code || rec.Body.String() != sub.body {
+						t.Errorf("GET /me = %d %q, want %d %q", rec.Code, rec.Body, sub.code, sub.body)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCookieCodecFromAScopeCoversTheRouter(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/admin", func(g *Router[*tctx]) {
+		g.CookieCodec(testCodec())
+	})
+	signingRoutes(r)
+
+	if rec := do(r, http.MethodPost, "/signin"); rec.Code != http.StatusNoContent {
+		t.Errorf("POST /signin = %d, want 204; body: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCookieCodecPanics(t *testing.T) {
+	t.Run("a nil codec", func(t *testing.T) {
+		mustPanicContaining(t, "CookieCodec needs a codec", func() { newTestRouter().CookieCodec(nil) })
+	})
+	t.Run("a codec that NewCookieCodec did not build", func(t *testing.T) {
+		mustPanicContaining(t, "built by NewCookieCodec", func() { newTestRouter().CookieCodec(&CookieCodec{}) })
+	})
+	t.Run("after the first request", func(t *testing.T) {
+		r := newTestRouter()
+		r.GET("/", echoRoute)
+		do(r, http.MethodGet, "/")
+		mustPanicContaining(t, "after the router started serving", func() { r.CookieCodec(testCodec()) })
+	})
+	t.Run("a mounted router", func(t *testing.T) {
+		sub := newTestRouter()
+		sub.GET("/a", echoRoute)
+		newTestRouter().Mount("/api", sub)
+		mustPanicContaining(t, "on a mounted router", func() { sub.CookieCodec(testCodec()) })
+	})
+}
+
+func TestSignedCookieWithoutACodecAnswers500(t *testing.T) {
+	r := newTestRouter()
+	signingRoutes(r)
+
+	rec := do(r, http.MethodPost, "/signin")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("POST /signin = %d, want 500", rec.Code)
+	}
+	if got := rec.Header().Get("Set-Cookie"); got != "" {
+		t.Errorf("a router without a codec set a cookie: %q", got)
 	}
 }
