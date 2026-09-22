@@ -47,13 +47,14 @@ func ExampleNewContext() {
 	var tb testing.TB
 
 	c, rec := routertest.NewContext(tb, newContext,
+		routertest.WithTarget(http.MethodGet, "/users/7", routertest.Header("Accept", router.MIMETextPlain)),
 		routertest.WithPattern("/users/{id}"),
 		routertest.WithParams(map[string]string{"id": "7"}),
 	)
-	_ = showUser(c)
-	if got := rec.Body.String(); got != "user 7" {
-		tb.Errorf("body = %q, want %q", got, "user 7")
+	if err := showUser(c); err != nil {
+		tb.Fatal(err)
 	}
+	routertest.Recorded(rec).Expect(tb).Status(http.StatusOK).Body("user 7")
 }
 
 type tenantKey struct{}

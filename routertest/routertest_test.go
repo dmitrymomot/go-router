@@ -538,6 +538,32 @@ func TestNewContextOptions(t *testing.T) {
 			wantPath:   "/users/7",
 		},
 		{
+			name: "a target",
+			opts: []routertest.ContextOption{
+				routertest.WithTarget(http.MethodPut, "/users/7?tab=orders"),
+			},
+			wantMethod: http.MethodPut,
+			wantPath:   "/users/7",
+		},
+		{
+			name: "WithRequest then WithTarget",
+			opts: []routertest.ContextOption{
+				routertest.WithRequest(routertest.Request(http.MethodPost, "/request")),
+				routertest.WithTarget(http.MethodPut, "/target"),
+			},
+			wantMethod: http.MethodPut,
+			wantPath:   "/target",
+		},
+		{
+			name: "WithTarget then WithRequest",
+			opts: []routertest.ContextOption{
+				routertest.WithTarget(http.MethodPut, "/target"),
+				routertest.WithRequest(routertest.Request(http.MethodPost, "/request")),
+			},
+			wantMethod: http.MethodPost,
+			wantPath:   "/request",
+		},
+		{
 			name: "all of them",
 			opts: []routertest.ContextOption{
 				routertest.WithPattern("/users/{id}"),
@@ -571,6 +597,68 @@ func TestNewContextOptions(t *testing.T) {
 				t.Errorf("path = %q, want %q", got, tt.wantPath)
 			}
 		})
+	}
+}
+
+func TestNewContextCarriesTheContextOfTheTest(t *testing.T) {
+	c, _ := routertest.NewContext(t, newContext)
+	if c.Request().Context() != t.Context() {
+		t.Error("the request does not carry t.Context()")
+	}
+
+	var inner context.Context
+	t.Run("subtest", func(t *testing.T) {
+		c, _ := routertest.NewContext(t, newContext)
+		inner = c.Request().Context()
+		if inner.Err() != nil {
+			t.Errorf("context ended while the test runs: %v", inner.Err())
+		}
+	})
+	if inner.Err() == nil {
+		t.Error("the context of a subtest is still live after the subtest returned")
+	}
+}
+
+func TestNewContextWithTarget(t *testing.T) {
+	c, _ := routertest.NewContext(t, newContext,
+		routertest.WithTarget(http.MethodPost, "/onboarding/?step=2",
+			routertest.Host("acme.example.com"),
+			routertest.MultipartBody(url.Values{"name": {"acme"}},
+				routertest.FilePart{Field: "logo", Content: []byte("png")}),
+			routertest.HTMX(),
+		))
+
+	if c.Method() != http.MethodPost || c.Path() != "/onboarding/" || c.Query("step") != "2" {
+		t.Errorf("request = %s %s ?step=%s", c.Method(), c.Path(), c.Query("step"))
+	}
+	if c.Host() != "acme.example.com" {
+		t.Errorf("host = %q", c.Host())
+	}
+	if got := c.FormValue("name"); got != "acme" {
+		t.Errorf("name = %q, want acme", got)
+	}
+	f, _, err := c.FormFile("logo")
+	if err != nil {
+		t.Fatalf("FormFile: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if body, _ := io.ReadAll(f); string(body) != "png" {
+		t.Errorf("logo = %q, want png", body)
+	}
+	if c.Request().Header.Get(router.HeaderHXRequest) != "true" {
+		t.Error("the htmx header is missing")
+	}
+	if c.Request().Context() != t.Context() {
+		t.Error("the request does not carry t.Context()")
+	}
+}
+
+func TestWithTargetTakesAContextOfItsOwn(t *testing.T) {
+	ctx := context.WithValue(t.Context(), ctxKey{}, "own")
+	c, _ := routertest.NewContext(t, newContext,
+		routertest.WithTarget(http.MethodGet, "/", routertest.Context(ctx)))
+	if c.Request().Context() != ctx {
+		t.Error("the context of the option lost to t.Context()")
 	}
 }
 
@@ -904,6 +992,10 @@ type recordingTB struct {
 }
 
 func (tb *recordingTB) Helper() {}
+
+// Context stands in for the context of the test, which NewContext reads before
+// it can report anything.
+func (tb *recordingTB) Context() context.Context { return context.Background() }
 
 func (tb *recordingTB) Fatalf(format string, args ...any) {
 	tb.failed = true

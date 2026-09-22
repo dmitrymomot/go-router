@@ -191,7 +191,7 @@ func Request(method, target string, opts ...RequestOption) *http.Request {
 }
 
 type contextSpec struct {
-	req     *http.Request
+	newReq  func(context.Context) *http.Request
 	params  map[string]string
 	codec   *router.CookieCodec
 	pattern string
@@ -213,9 +213,24 @@ func WithPattern(pattern string) ContextOption {
 }
 
 // WithRequest gives the context a request of your own, from [Request] or from
-// httptest. Without it the context answers a GET of "/".
+// httptest, with the context it carries. Without it or [WithTarget] the context
+// answers a GET of "/". The last of WithRequest and WithTarget wins.
 func WithRequest(req *http.Request) ContextOption {
-	return func(s *contextSpec) { s.req = req }
+	return func(s *contextSpec) {
+		s.newReq = func(context.Context) *http.Request { return req }
+	}
+}
+
+// WithTarget gives the context the request that [Request] builds from method,
+// target and opts. The request carries the context of the test unless opts
+// give one. The last of WithRequest and WithTarget wins.
+func WithTarget(method, target string, opts ...RequestOption) ContextOption {
+	opts = slices.Clone(opts)
+	return func(s *contextSpec) {
+		s.newReq = func(ctx context.Context) *http.Request {
+			return Request(method, target, slices.Concat([]RequestOption{Context(ctx)}, opts)...)
+		}
+	}
 }
 
 // WithCookieCodec gives the context the codec that [router.Router.CookieCodec]
@@ -235,6 +250,9 @@ func WithCookieCodec(cc *router.CookieCodec) ContextOption {
 // newCtx is the factory of the application, the same one [router.New] takes.
 // It has to return a context whose [router.Base] is usable: embed Base by
 // value, or fill an embedded pointer with [router.NewBase].
+//
+// Without [WithRequest] the request carries tb.Context(), which ends when the
+// test does.
 func NewContext[C router.Context](
 	tb testing.TB,
 	newCtx func(http.ResponseWriter, *http.Request) C,
@@ -246,10 +264,13 @@ func NewContext[C router.Context](
 	for _, opt := range opts {
 		opt(&spec)
 	}
-	req := spec.req
-	if req == nil {
-		req = httptest.NewRequest(http.MethodGet, "/", nil)
+	newReq := spec.newReq
+	if newReq == nil {
+		newReq = func(ctx context.Context) *http.Request {
+			return Request(http.MethodGet, "/", Context(ctx))
+		}
 	}
+	req := newReq(tb.Context())
 	rec := httptest.NewRecorder()
 	res := &router.Response{ResponseWriter: rec}
 
