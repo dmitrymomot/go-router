@@ -9,9 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
@@ -439,6 +441,70 @@ func ExampleRouter_GET_partialSegment() {
 	// Output:
 	// 200 report for 20260102
 	// 200 name=notes.v2 ext=txt
+}
+
+func ExampleRouter_GET_paramClass() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.GET("/agents/{agent:uuid}", func(c *Context) error {
+		id, err := c.ParamAs[uuid.UUID]("agent")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "agent %s", id)
+	})
+	r.GET("/pages/{n:int}", func(c *Context) error {
+		n, err := c.ParamAs[int]("n")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "page %d", n)
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/agents/0198c5b6-3f0e-7b3a-9c1d-2f4e6a8b0c1d"))
+	fmt.Println(serve(r, http.MethodGet, "/agents/new"))
+	fmt.Println(serve(r, http.MethodGet, "/pages/3"))
+	fmt.Println(serve(r, http.MethodGet, "/pages/three"))
+	// Output:
+	// 200 agent 0198c5b6-3f0e-7b3a-9c1d-2f4e6a8b0c1d
+	// 404 Not Found
+	// 200 page 3
+	// 404 Not Found
+}
+
+func ExampleRouter_ParamClass() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	// A plain func works as well, and a fast one keeps routing fast.
+	r.ParamClass("sku", regexp.MustCompile(`^[A-Z]{3}-[0-9]{4}$`).MatchString)
+	r.GET("/products/{sku:sku}", func(c *Context) error {
+		return c.Stringf(http.StatusOK, "product %s", c.Param("sku"))
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/products/ABC-1234"))
+	fmt.Println(serve(r, http.MethodGet, "/products/abc"))
+	// Output:
+	// 200 product ABC-1234
+	// 404 Not Found
+}
+
+func ExampleBase_ParamAs() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.GET("/users/{id}", func(c *Context) error {
+		id, err := c.ParamAs[int]("id")
+		if err != nil {
+			return err
+		}
+		page := c.QueryAsDefault("page", 1)
+		return c.Stringf(http.StatusOK, "user %d page %d", id, page)
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/users/7?page=2"))
+	fmt.Println(serve(r, http.MethodGet, "/users/ann"))
+	// Output:
+	// 200 user 7 page 2
+	// 404 Not Found
 }
 
 func page(title string) router.ComponentFunc {
