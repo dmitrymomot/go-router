@@ -52,9 +52,10 @@ func newRouter(store *Store, apiKey string) *router.Router[*Context] {
 		return &Context{Store: store}
 	})
 
-	// Every failure, from a bad body to a panic, ends up here. These settings
-	// belong to the root: a mounted router is refused if it carries them.
-	r.ErrorHandler(writeError)
+	// Every failure, from a bad body to a panic, ends up here as JSON. The
+	// body limit belongs to the root: Mount refuses a sub-router that carries
+	// one, as it does one with a cookie codec.
+	r.ErrorHandler(router.JSONErrorHandler[*Context])
 	r.MaxBodyBytes(1 << 20)
 
 	// The order is the order of the request: recover the panic, name the

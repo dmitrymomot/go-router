@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
@@ -53,9 +55,36 @@ func TestValidationNamesTheFields(t *testing.T) {
 	res := routertest.Do(r, http.MethodPost, "/v1/users", bearer(),
 		routertest.JSONBody(UserInput{Email: "not-an-address"}))
 	res.AssertStatus(t, http.StatusUnprocessableEntity)
-	res.AssertBody(t,
-		`{"error":"Unprocessable Entity","fields":[{"field":"name","message":"is required"},`+
-			`{"field":"email","message":"must be an address"}]}`)
+
+	body, err := res.ErrorBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, ok := body.Details.([]router.FieldError)
+	if body.Status != http.StatusUnprocessableEntity || !ok {
+		t.Fatalf("body = %+v, want a 422 that names the fields", body)
+	}
+	var names []string
+	for _, f := range fields {
+		names = append(names, f.Field)
+	}
+	if !slices.Equal(names, []string{"name", "email"}) {
+		t.Errorf("fields = %v, want [name email]", names)
+	}
+}
+
+func TestAMissingUserKeepsItsTextOnTheServer(t *testing.T) {
+	r := newRouter(NewStore(), testKey)
+
+	res := routertest.Get(r, "/v1/users/9")
+	res.AssertStatus(t, http.StatusNotFound)
+	body, err := res.ErrorBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Message != "Not Found" || strings.Contains(res.String(), "no user") {
+		t.Errorf("body = %s, want the standard text and not the error of the store", res.Body)
+	}
 }
 
 func TestABadIDIsARejection(t *testing.T) {

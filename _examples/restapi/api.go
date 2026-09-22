@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"errors"
 	"net/http"
 	"strconv"
@@ -39,26 +38,4 @@ func (in UserInput) Validate() error {
 		errs = append(errs, router.FieldError{Field: "email", Message: "must be an address"})
 	}
 	return errors.Join(errs...)
-}
-
-type ErrorBody struct {
-	Error  string              `json:"error"`
-	Fields []router.FieldError `json:"fields,omitempty"`
-}
-
-// writeError answers every failure as JSON. The router writes plain text by
-// default, which no API client wants to parse.
-func writeError(c *Context, err error) error {
-	status := router.StatusOf(err)
-	body := ErrorBody{Error: err.Error()}
-
-	if he, ok := errors.AsType[*router.HTTPError](err); ok {
-		body.Error = cmp.Or(he.Message, http.StatusText(status))
-		// Bind puts the failed fields here, and they are the useful half.
-		if fields, ok := he.Details.([]router.FieldError); ok {
-			body.Fields = fields
-		}
-	}
-
-	return c.JSON(status, body)
 }
