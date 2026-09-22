@@ -2,6 +2,7 @@ package routertest_test
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -133,4 +134,30 @@ func ExampleEvents() {
 	// Output:
 	// user ann
 	// user bob
+}
+
+// ErrorBody reads an answer of router.JSONErrorHandler back, with the fields
+// that failed validation.
+func ExampleResponse_ErrorBody() {
+	r := router.New(newContext)
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.POST("/signup", func(c *appContext) error {
+		_, err := c.Bind[signup]()
+		return err
+	})
+
+	res := routertest.Do(r, http.MethodPost, "/signup", routertest.JSONBody(signup{Name: "ann"}))
+	body, err := res.ErrorBody()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(body.Status, body.Message)
+	for _, f := range body.Details.([]router.FieldError) {
+		fmt.Println(f.Field, f.Message)
+	}
+	// Output:
+	// 422 Unprocessable Entity
+	// email is required
 }

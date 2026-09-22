@@ -61,7 +61,7 @@ const (
 // [HTMXRequest.TargetID] and [HTMXRequest.SourceID] read the id alone.
 //
 // htmx 4 swaps a 4xx or 5xx answer into the target too, so a scope that serves
-// htmx wants an error handler that renders a fragment.
+// htmx wants an error handler that renders a fragment from [HTTPErrorOf].
 //
 //betteralign:check
 type HTMXRequest struct {

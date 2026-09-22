@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 )
 
 type pctx struct {
@@ -177,9 +178,9 @@ func TestPoolUnderConcurrentRequests(t *testing.T) {
 func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 	var seen *pctx
 	r := newPooledRouter()
-	r.ErrorHandler(func(c *pctx, err error) {
+	r.ErrorHandler(func(c *pctx, err error) error {
 		seen = c
-		_ = c.NoContent(StatusOf(err))
+		return c.NoContent(StatusOf(err))
 	})
 	r.GET("/backtrack/{value}/wanted", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
 	r.GET("/method/{value}", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
@@ -213,6 +214,9 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 		if b.host != "" || b.rawTail != "" || cap(b.paramVals) > len(b.paramArr) {
 			t.Fatal("pooled context retained matched request data")
 		}
+		if b.errorHandled {
+			t.Fatal("pooled context retained the handled-error flag")
+		}
 		for i, value := range b.paramArr {
 			if value != "" {
 				t.Errorf("paramArr[%d] retained %q", i, value)
@@ -233,6 +237,54 @@ func TestPoolDropsCompletedRequestReferencesBeforePut(t *testing.T) {
 	seen = nil
 	do(r, http.MethodPost, "/method/value")
 	assertCleared()
+}
+
+// A flag left up by HandleError would make the next request on the context
+// skip its error handler and answer an empty 200.
+func TestPoolClearsTheHandledErrorFlag(t *testing.T) {
+	captureLogs(t)
+
+	calls := 0
+	r := newPooledRouter()
+	r.ErrorHandler(func(c *pctx, err error) error {
+		calls++
+		return c.String(StatusOf(err), "handled")
+	})
+	r.Use(func(next HandlerFunc[*pctx]) HandlerFunc[*pctx] {
+		return func(c *pctx) error {
+			err := next(c)
+			if c.RoutePattern() == "/early" {
+				HandleError(c, err)
+			}
+			return err
+		}
+	})
+	r.GET("/early", func(*pctx) error { return ErrConflict })
+	r.GET("/late", func(*pctx) error { return ErrConflict })
+
+	for range 5 {
+		do(r, http.MethodGet, "/early")
+		calls = 0
+		rec := do(r, http.MethodGet, "/late")
+		if rec.Code != http.StatusConflict || rec.Body.String() != "handled" || calls != 1 {
+			t.Fatalf("after HandleError, the next request answered %d %q with %d handler calls, want 409 %q with 1",
+				rec.Code, rec.Body.String(), calls, "handled")
+		}
+	}
+}
+
+// betteralign keeps the fields in order but does not stop Base from growing.
+// Base and a string of the application share a 320-byte size class.
+func TestBaseStaysInItsSizeClass(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		t.Skip("the size classes are those of a 64-bit platform")
+	}
+	if got := unsafe.Sizeof(Base{}); got != 304 {
+		t.Errorf("unsafe.Sizeof(Base{}) = %d, want 304", got)
+	}
+	if got := unsafe.Sizeof(tctx{}); got > 320 {
+		t.Errorf("a Base plus a string is %d bytes, want at most 320", got)
+	}
 }
 
 func TestNewPooledPanicsWithoutAResetFunction(t *testing.T) {

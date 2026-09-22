@@ -2,11 +2,16 @@ package middleware_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
@@ -42,6 +47,84 @@ func TestLoggerReportsTheStatusOfAFailedHandler(t *testing.T) {
 	if !strings.Contains(buf.String(), "status=200") {
 		t.Errorf("record = %q, want status=200", buf.String())
 	}
+}
+
+// The C06 regression: Logger read StatusOf(err), a 500 for a plain error,
+// while the error handler answered the client with something else.
+func TestLoggerReportsTheStatusTheErrorHandlerWrote(t *testing.T) {
+	errLocked := errors.New("the row is locked")
+
+	var buf bytes.Buffer
+	calls := 0
+	r := newRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.ErrorHandler(func(c *appContext, err error) error {
+		calls++
+		if errors.Is(err, errLocked) {
+			return c.String(http.StatusLocked, "locked")
+		}
+		return router.DefaultErrorHandler(c, err)
+	})
+	r.Use(middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}))
+	r.GET("/rows/{id}", func(*appContext) error { return errLocked })
+
+	rec := get(r, "/rows/7")
+	if rec.Code != http.StatusLocked || rec.Body.String() != "locked" {
+		t.Errorf("answer = %d %q, want 423 %q", rec.Code, rec.Body.String(), "locked")
+	}
+	for _, want := range []string{"level=WARN", "status=423", "bytes=6"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("record = %q, want %s", buf.String(), want)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("the error handler ran %d times, want 1", calls)
+	}
+}
+
+func TestLoggerReportsACancelledRequestAs499(t *testing.T) {
+	r, buf := loggerRouter(middleware.LoggerConfig{})
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.GET("/gone-away", func(c *appContext) error {
+		ctx, cancel := context.WithCancel(c.Request().Context())
+		c.SetContext(ctx)
+		cancel()
+		return ctx.Err()
+	})
+
+	get(r, "/gone-away")
+	for _, want := range []string{"level=WARN", "status=499", "bytes=0"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("record = %q, want %s", buf.String(), want)
+		}
+	}
+}
+
+func TestLoggerOutsideTimeoutLogsThe503(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		r := newRouter()
+		r.Logger(slog.New(slog.DiscardHandler))
+		r.Use(
+			middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+				Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+			}),
+			middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: 20 * time.Millisecond}),
+		)
+		r.GET("/slow", func(c *appContext) error {
+			<-c.Done()
+			return c.Err()
+		})
+
+		if rec := get(r, "/slow"); rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", rec.Code)
+		}
+		if !strings.Contains(buf.String(), "status=503") {
+			t.Errorf("record = %q, want status=503", buf.String())
+		}
+	})
 }
 
 func TestLoggerSkip(t *testing.T) {
@@ -199,5 +282,33 @@ func TestLoggerLevelsMoveAtRunTime(t *testing.T) {
 	get(r, "/boom")
 	if !strings.Contains(buf.String(), "level=DEBUG") {
 		t.Errorf("record = %q, want level=DEBUG after the level moved", buf.String())
+	}
+}
+
+// A handler that reads an oversized body itself returns an
+// *http.MaxBytesError. Logger inside BodyLimit answers before BodyLimit sees
+// it, and the client still gets a 413.
+func TestLoggerInsideBodyLimitAnswersAnOversizedBodyWith413(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRouter()
+	r.Use(
+		middleware.BodyLimit[*appContext](4),
+		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+			Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		}),
+	)
+	r.POST("/read", func(c *appContext) error {
+		_, err := io.ReadAll(c.Request().Body)
+		return err
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/read", strings.NewReader("more than four bytes"))
+	req.ContentLength = -1
+	rec := do(r, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if !strings.Contains(buf.String(), "status=413") {
+		t.Errorf("record = %q, want status=413", buf.String())
 	}
 }

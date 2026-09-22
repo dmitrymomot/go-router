@@ -3,9 +3,11 @@ package routertest
 
 import (
 	"bytes"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/fs"
 	"iter"
@@ -303,6 +305,38 @@ func (r *Response) JSON[T any](opts ...json.Options) (T, error) {
 	var v T
 	err := json.Unmarshal(r.Body, &v, opts...)
 	return v, err
+}
+
+// ErrorBody decodes an answer that [router.JSONErrorHandler] wrote. Details
+// comes back as []router.FieldError when it has that shape, and as decoded
+// JSON otherwise. It reports an error when the body is not JSON or carries no
+// {"error": ...} envelope.
+func (r *Response) ErrorBody() (router.ErrorBody, error) {
+	var env struct {
+		Error struct {
+			Details jsontext.Value `json:"details"`
+			Message string         `json:"message"`
+			Status  int            `json:"status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(r.Body, &env); err != nil {
+		return router.ErrorBody{}, fmt.Errorf("routertest: decode the error body: %w", err)
+	}
+	if env.Error.Status == 0 {
+		return router.ErrorBody{}, fmt.Errorf("routertest: the body %q carries no error envelope", r.Body)
+	}
+	body := router.ErrorBody{Status: env.Error.Status, Message: env.Error.Message}
+	details := env.Error.Details
+	if len(details) == 0 || details.Kind() == 'n' {
+		return body, nil
+	}
+	var fields []router.FieldError
+	if json.Unmarshal(details, &fields, json.RejectUnknownMembers(true)) == nil {
+		body.Details = fields
+		return body, nil
+	}
+	err := json.Unmarshal(details, &body.Details)
+	return body, err
 }
 
 // SignedCookie reports the value of the last cookie called name that r sets,

@@ -55,6 +55,7 @@ func TestStatusOf(t *testing.T) {
 		{ErrGone, http.StatusGone},
 		{fmt.Errorf("wrapped: %w", ErrTooManyRequests), http.StatusTooManyRequests},
 		{errors.New("boom"), http.StatusInternalServerError},
+		{fmt.Errorf("read body: %w", &http.MaxBytesError{Limit: 4}), http.StatusRequestEntityTooLarge},
 	}
 	for _, tc := range tests {
 		if got := StatusOf(tc.err); got != tc.want {
@@ -79,6 +80,34 @@ func TestStatusOfReadsAStatusCoder(t *testing.T) {
 		{"wrapped by fmt", fmt.Errorf("charge: %w", &codedError{http.StatusConflict}), http.StatusConflict},
 		{"a status of zero", &codedError{0}, http.StatusInternalServerError},
 		{"an HTTPError wins", ErrGone.WithError(&codedError{http.StatusConflict}), http.StatusGone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StatusOf(tc.err); got != tc.want {
+				t.Errorf("StatusOf(%v) = %d, want %d", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// canceledCoder names its own status for a cause that is context.Canceled.
+type canceledCoder struct{}
+
+func (canceledCoder) Error() string   { return "the upstream call was canceled" }
+func (canceledCoder) StatusCode() int { return http.StatusBadGateway }
+func (canceledCoder) Unwrap() error   { return context.Canceled }
+
+func TestStatusOfReportsACancelledRequestAs499(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"context.Canceled", context.Canceled, 499},
+		{"wrapped by fmt", fmt.Errorf("load user: %w", context.Canceled), 499},
+		{"an HTTPError around it keeps its status", ErrServiceUnavailable.WithError(context.Canceled), http.StatusServiceUnavailable},
+		{"a StatusCoder around it keeps its status", canceledCoder{}, http.StatusBadGateway},
+		{"a deadline is not a disconnect", context.DeadlineExceeded, http.StatusInternalServerError},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,6 +150,7 @@ func TestResolveStatus(t *testing.T) {
 		{"the handler wrote one and failed after", committed(http.StatusOK), ErrConflict, http.StatusOK},
 		{"the error decides", &Response{}, ErrNotFound, http.StatusNotFound},
 		{"an internal error", &Response{}, errors.New("boom"), http.StatusInternalServerError},
+		{"the client went away", &Response{}, context.Canceled, 499},
 		{"neither", &Response{}, nil, http.StatusOK},
 		{"no response at all", nil, ErrForbidden, http.StatusForbidden},
 	}
@@ -130,6 +160,56 @@ func TestResolveStatus(t *testing.T) {
 				t.Errorf("ResolveStatus = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestHTTPErrorOf(t *testing.T) {
+	plain := errors.New("db: connection refused")
+	coder := &codedError{http.StatusPaymentRequired}
+	bare := &HTTPError{}
+	teapot := &HTTPError{Status: http.StatusTeapot}
+
+	tests := []struct {
+		name        string
+		err         error
+		wantStatus  int
+		wantMessage string
+		wantCause   error
+	}{
+		{"a sentinel", ErrNotFound, http.StatusNotFound, "Not Found", nil},
+		{"wrapped by fmt", fmt.Errorf("load: %w", ErrGone), http.StatusGone, "Gone", nil},
+		{"no status and no message", bare, http.StatusInternalServerError, "Internal Server Error", nil},
+		{"a status and no message", teapot, http.StatusTeapot, "I'm a teapot", nil},
+		{"a StatusCoder", coder, http.StatusPaymentRequired, "Payment Required", coder},
+		{"a plain error", plain, http.StatusInternalServerError, "Internal Server Error", plain},
+		{"the client went away", context.Canceled, 499, "", context.Canceled},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			he := HTTPErrorOf(tc.err)
+			if he.Status != tc.wantStatus {
+				t.Errorf("Status = %d, want %d", he.Status, tc.wantStatus)
+			}
+			if he.Message != tc.wantMessage {
+				t.Errorf("Message = %q, want %q", he.Message, tc.wantMessage)
+			}
+			if tc.wantCause != nil && !errors.Is(he.Err, tc.wantCause) {
+				t.Errorf("Err = %v, want %v", he.Err, tc.wantCause)
+			}
+		})
+	}
+
+	if HTTPErrorOf(nil) != nil {
+		t.Error("HTTPErrorOf(nil) is not nil")
+	}
+	if got := HTTPErrorOf(fmt.Errorf("load: %w", ErrGone)); got != ErrGone {
+		t.Error("a wrapped sentinel came back as a copy, want the sentinel itself")
+	}
+	if bare.Status != 0 || bare.Message != "" || teapot.Message != "" {
+		t.Error("HTTPErrorOf changed the caller's error")
+	}
+	if allocs := testing.AllocsPerRun(100, func() { _ = HTTPErrorOf(ErrNotFound) }); allocs != 0 {
+		t.Errorf("HTTPErrorOf(ErrNotFound) allocates %v times, want 0", allocs)
 	}
 }
 
@@ -280,7 +360,7 @@ func (h *levelRecorder) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
+func TestEveryErrorHandlerLogsAClientThatWentAwayAtDebug(t *testing.T) {
 	tests := []struct {
 		name   string
 		cancel bool
@@ -291,31 +371,265 @@ func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
 		{"the client cancelled", true, errors.New("write: broken pipe"), slog.LevelDebug},
 		{"the error is the cancellation", false, context.Canceled, slog.LevelDebug},
 	}
+	for _, custom := range []bool{false, true} {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("custom=%v/%s", custom, tc.name), func(t *testing.T) {
+				rec := &levelRecorder{Handler: slog.Default().Handler()}
+				old := slog.Default()
+				slog.SetDefault(slog.New(rec))
+				defer slog.SetDefault(old)
+
+				calls := 0
+				r := newTestRouter()
+				if custom {
+					r.ErrorHandler(func(c *tctx, err error) error {
+						calls++
+						return c.JSON(StatusOf(err), map[string]string{"error": "failed"})
+					})
+				}
+				r.GET("/", func(c *tctx) error {
+					if tc.cancel {
+						ctx, cancel := context.WithCancel(c.Request().Context())
+						c.SetContext(ctx)
+						cancel()
+					}
+					return tc.err
+				})
+				do(r, http.MethodGet, "/")
+
+				if len(rec.levels) != 1 {
+					t.Fatalf("logged %d records, want 1", len(rec.levels))
+				}
+				if rec.levels[0] != tc.want {
+					t.Errorf("level = %v, want %v", rec.levels[0], tc.want)
+				}
+				if custom && errors.Is(tc.err, context.Canceled) && calls != 0 {
+					t.Errorf("the error handler ran %d times for a canceled error, want 0", calls)
+				}
+			})
+		}
+	}
+}
+
+// errSignIn is a plain error that a custom handler turns into a redirect.
+var errSignIn = errors.New("sign in first")
+
+func TestEveryErrorHandlerIsLoggedByThePolicy(t *testing.T) {
+	errDenied := errors.New("denied")
+	tests := []struct {
+		name       string
+		err        error
+		wantLogged bool
+		wantLevel  slog.Level
+		wantStatus int64
+	}{
+		{"a plain error", errors.New("boom"), true, slog.LevelError, http.StatusInternalServerError},
+		{"a StatusCoder 404", &codedError{http.StatusNotFound}, true, slog.LevelWarn, http.StatusNotFound},
+		{"a bare ErrNotFound", ErrNotFound, false, 0, 0},
+		{"a bare ErrInternalServerError", ErrInternalServerError, true, slog.LevelError, http.StatusInternalServerError},
+		{"a 4xx with a cause", ErrBadRequest.WithError(errors.New("bad id")), true, slog.LevelWarn, http.StatusBadRequest},
+		{"mapped to 403 by the handler", errDenied, true, slog.LevelWarn, http.StatusForbidden},
+		{"mapped to a redirect by the handler", errSignIn, false, 0, 0},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := &levelRecorder{Handler: slog.Default().Handler()}
-			old := slog.Default()
-			slog.SetDefault(slog.New(rec))
-			defer slog.SetDefault(old)
+			sink := captureLogs(t)
 
 			r := newTestRouter()
-			r.GET("/", func(c *tctx) error {
-				if tc.cancel {
-					ctx, cancel := context.WithCancel(c.Request().Context())
-					c.SetRequest(c.Request().WithContext(ctx))
-					cancel()
+			r.ErrorHandler(func(c *tctx, err error) error {
+				switch {
+				case errors.Is(err, errDenied):
+					return c.String(http.StatusForbidden, "denied")
+				case errors.Is(err, errSignIn):
+					return c.Redirect(http.StatusSeeOther, "/login")
 				}
-				return tc.err
+				return c.NoContent(StatusOf(err))
 			})
+			r.GET("/", func(*tctx) error { return tc.err })
 			do(r, http.MethodGet, "/")
 
-			if len(rec.levels) != 1 {
-				t.Fatalf("logged %d records, want 1", len(rec.levels))
+			if !tc.wantLogged {
+				if len(sink.records) != 0 {
+					t.Errorf("logged %d records, want none", len(sink.records))
+				}
+				return
 			}
-			if rec.levels[0] != tc.want {
-				t.Errorf("level = %v, want %v", rec.levels[0], tc.want)
+			if len(sink.records) != 1 {
+				t.Fatalf("logged %d records, want 1", len(sink.records))
+			}
+			got := sink.records[0]
+			if got.Level != tc.wantLevel {
+				t.Errorf("level = %v, want %v", got.Level, tc.wantLevel)
+			}
+			if status, _ := intAttr(got, "status"); status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", status, tc.wantStatus)
 			}
 		})
+	}
+}
+
+func TestHandleErrorOutsideARouter(t *testing.T) {
+	captureLogs(t)
+
+	rec := httptest.NewRecorder()
+	b := NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	HandleError(b, ErrNotFound)
+	if rec.Code != http.StatusNotFound || rec.Body.String() != "Not Found" {
+		t.Errorf("answer = %d %q, want 404 %q", rec.Code, rec.Body.String(), "Not Found")
+	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMETextPlainCharsetUTF8 {
+		t.Errorf("Content-Type = %q, want %q", got, MIMETextPlainCharsetUTF8)
+	}
+
+	rec = httptest.NewRecorder()
+	b = NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	HandleError(b, context.Canceled)
+	if b.Response().Committed || rec.Body.Len() != 0 {
+		t.Errorf("a canceled error wrote %d %q, want nothing", rec.Code, rec.Body.String())
+	}
+}
+
+type validatedUser struct {
+	Name string `json:"name"`
+}
+
+func (u validatedUser) Validate() error {
+	if u.Name == "" {
+		return FieldError{Field: "name", Message: "is required"}
+	}
+	return nil
+}
+
+func TestJSONErrorHandler(t *testing.T) {
+	captureLogs(t)
+
+	tests := []struct {
+		name     string
+		method   string
+		handler  HandlerFunc[*tctx]
+		body     string
+		wantCode int
+		wantBody string
+	}{
+		{
+			name:     "a message",
+			method:   http.MethodGet,
+			handler:  func(*tctx) error { return ErrNotFound.WithMessage("no user 9") },
+			wantCode: http.StatusNotFound,
+			wantBody: `{"error":{"status":404,"message":"no user 9"}}`,
+		},
+		{
+			name:   "a Bind validation failure",
+			method: http.MethodPost,
+			handler: func(c *tctx) error {
+				_, err := c.Bind[validatedUser]()
+				return err
+			},
+			body:     `{"name":""}`,
+			wantCode: http.StatusUnprocessableEntity,
+			wantBody: `{"error":{"status":422,"message":"Unprocessable Entity","details":[{"field":"name","message":"is required"}]}}`,
+		},
+		{
+			name:     "a StatusCoder",
+			method:   http.MethodGet,
+			handler:  func(*tctx) error { return &codedError{http.StatusPaymentRequired} },
+			wantCode: http.StatusPaymentRequired,
+			wantBody: `{"error":{"status":402,"message":"Payment Required"}}`,
+		},
+		{
+			name:     "a HEAD request",
+			method:   http.MethodHead,
+			handler:  func(*tctx) error { return ErrForbidden },
+			wantCode: http.StatusForbidden,
+		},
+		{
+			name:   "a Content-Type the handler set",
+			method: http.MethodGet,
+			handler: func(c *tctx) error {
+				c.Response().Header().Set(HeaderContentType, MIMETextHTMLCharsetUTF8)
+				return ErrConflict
+			},
+			wantCode: http.StatusConflict,
+			wantBody: `{"error":{"status":409,"message":"Conflict"}}`,
+		},
+		{
+			name:   "details that are not field errors",
+			method: http.MethodGet,
+			handler: func(*tctx) error {
+				return ErrTooManyRequests.WithDetails(map[string]int{"retry_after": 30})
+			},
+			wantCode: http.StatusTooManyRequests,
+			wantBody: `{"error":{"status":429,"message":"Too Many Requests","details":{"retry_after":30}}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			r.ErrorHandler(JSONErrorHandler[*tctx])
+			r.Handle(tc.method, "/", tc.handler)
+
+			req := httptest.NewRequest(tc.method, "/", strings.NewReader(tc.body))
+			if tc.body != "" {
+				req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+			}
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %s, want %s", got, tc.wantBody)
+			}
+			if got := rec.Header().Get(HeaderContentType); got != MIMEApplicationJSONCharsetUTF8 {
+				t.Errorf("Content-Type = %q, want %q", got, MIMEApplicationJSONCharsetUTF8)
+			}
+		})
+	}
+}
+
+// The C08 regression: an API error writer that sent err.Error() leaked the
+// cause of every 500 to the client.
+func TestJSONErrorHandlerKeepsTheCauseOutOfTheBody(t *testing.T) {
+	captureLogs(t)
+
+	for _, tc := range []struct {
+		name   string
+		fail   HandlerFunc[*tctx]
+		secret string
+	}{
+		{"a plain error", func(*tctx) error { return errors.New("db password=hunter2") }, "hunter2"},
+		{"an HTTPError with a cause", func(*tctx) error {
+			return ErrBadRequest.WithError(errors.New("db password=hunter2"))
+		}, "hunter2"},
+		{"a panic", func(*tctx) error { panic("db password=hunter2") }, "panic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			r.ErrorHandler(JSONErrorHandler[*tctx])
+			r.GET("/", tc.fail)
+
+			rec := do(r, http.MethodGet, "/")
+			if body := rec.Body.String(); strings.Contains(body, tc.secret) || strings.Contains(body, "hunter2") {
+				t.Errorf("body = %s, want no cause", body)
+			}
+		})
+	}
+}
+
+func TestJSONErrorHandlerWithUnencodableDetailsAnswers500(t *testing.T) {
+	sink := captureLogs(t)
+
+	r := newTestRouter()
+	r.ErrorHandler(JSONErrorHandler[*tctx])
+	r.GET("/", func(*tctx) error { return ErrConflict.WithDetails(make(chan int)) })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError || rec.Body.Len() != 0 {
+		t.Errorf("answer = %d %q, want a bare 500", rec.Code, rec.Body.String())
+	}
+	if len(sink.records) == 0 || sink.records[0].Level != slog.LevelError {
+		t.Errorf("records = %v, want an Error first", sink.records)
 	}
 }
 

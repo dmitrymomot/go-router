@@ -69,7 +69,8 @@ Each line links to the example that proves it.
 - [Groups](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Route) and [mounts](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Mount), and [a mounted router with a context type of its own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.MountRouter).
 - [Routing on the host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Host), wildcards and host parameters included.
 - [Binding with validation](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Bind), from JSON, a form, the query, the path or the headers.
-- [Errors that carry their own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPError.WithMessage), and one handler that writes them.
+- [Errors that carry their own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPError.WithMessage), and one handler that writes them: [JSON on an API host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-JSONErrorHandler), or [an error page of your own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPErrorOf).
+- [Middleware that logs or measures the status the error handler wrote](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HandleError).
 - [Rendering](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Render), [buffered or streamed](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderStream).
 - [Server-sent events](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-ServeSSE) that send JSON, text or rendered HTML.
 - htmx 4: [a fragment or the whole page](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderPartial) from one handler, and [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.HX): retarget, reswap, trigger, redirect.

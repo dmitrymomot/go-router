@@ -141,6 +141,13 @@ func New[C Context](newContext func(http.ResponseWriter, *http.Request) C) *Rout
 	}
 	r.root = r
 	r.eng.owner = r
+	r.ropts.answer = func(c Context, err error) {
+		cc, ok := c.(C)
+		if !ok {
+			panic(fmt.Sprintf("router: HandleError got a %T, which is not the context type of the router that serves it", c))
+		}
+		r.handleError(cc, err)
+	}
 	return r
 }
 
@@ -581,7 +588,9 @@ func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
 // cheaply as a route registered here.
 //
 // sub is closed to further registration afterwards, and it must be a top-level
-// router that carries no setting belonging to the router that serves.
+// router that carries no setting belonging to the router that serves, such as
+// MaxBodyBytes, a logger or a cookie codec. An error handler of sub stays with
+// its routes.
 //
 // Mount panics if sub is nil, is a scope of another router, is mounted inside
 // itself, or carries such a setting.
@@ -753,8 +762,14 @@ func (r *Router[C]) mustOwnFallbacks(what string) {
 
 // ErrorHandler installs the handler that answers a request whose handler
 // returned an error. A scope with a prefix or a host may hold one of its own,
-// which covers the routes of that scope alone. Without a call the router uses
-// [DefaultErrorHandler].
+// which covers the routes of that scope alone, so an API host takes
+// [JSONErrorHandler] rather than one handler branching on the host. Without a
+// call the router uses [DefaultErrorHandler].
+//
+// The router logs every failure itself, skips h for a response that already
+// committed and for an error that is [context.Canceled], and answers a bare
+// 500 when h returns an error having written nothing. To give a domain error
+// its status, make it a [StatusCoder] rather than mapping it inside h.
 //
 // ErrorHandler panics if h is nil, if the scope has neither a prefix nor a
 // host, or after the router started serving.
@@ -804,8 +819,9 @@ func (r *Router[C]) MaxMultipartMemory(n int64) {
 	r.root.ropts.maxMultipart = n
 }
 
-// Logger installs the logger that [Base.Logger] and the error handler use. A
-// nil logger takes [slog.Default].
+// Logger installs the logger that [Base.Logger] and the log of failed requests
+// use. A nil logger takes [slog.Default]. To quiet the log of failed requests,
+// pass a logger whose handler drops the levels you do not want.
 //
 // Logger panics after the router started serving.
 func (r *Router[C]) Logger(l *slog.Logger) {
@@ -1577,29 +1593,14 @@ func canonicalEscapedPath(path string) string {
 
 func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
 	err := h(c)
-	if err != nil {
+	if err != nil && !c.base().errorHandled {
 		r.handleError(c, err)
 	}
 	return err
 }
 
 func (r *Router[C]) handleError(c C, err error) {
-	defer func() {
-		rec := recover()
-		if rec == nil {
-			return
-		}
-		if rec == http.ErrAbortHandler {
-			panic(rec)
-		}
-		b := c.base()
-		b.Logger().ErrorContext(b.req.Context(), "router: the error handler panicked",
-			slog.Any("panic", rec), slog.Any("error", err))
-		if !b.res.Committed {
-			b.res.WriteHeader(http.StatusInternalServerError)
-		}
-	}()
-	r.eng.errorHandlerFor(c.base())(c, err)
+	answerError(c, err, r.eng.errorHandlerFor(c.base()))
 }
 
 func (e *engine[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {

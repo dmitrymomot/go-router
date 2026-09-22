@@ -222,7 +222,7 @@ func TestTimeoutKeepsAServerFaultAtErrorLevel(t *testing.T) {
 func TestTimeoutHandsTheErrorHandlerALiveContext(t *testing.T) {
 	var seen error
 	r := newRouter()
-	r.ErrorHandler(func(c *appContext, _ error) { seen = c.Err() })
+	r.ErrorHandler(func(c *appContext, _ error) error { seen = c.Err(); return nil })
 	r.Use(middleware.TimeoutWithConfig[*appContext](middleware.TimeoutConfig{Duration: 30 * time.Second}))
 	r.GET("/boom", func(*appContext) error { return errors.New("the database is on fire") })
 

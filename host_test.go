@@ -252,10 +252,10 @@ func TestHostMiddleware(t *testing.T) {
 
 func TestHostFallbacks(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(http.StatusTeapot, "root err") })
 
 	r.Host("example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "site err") })
+		h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "site err") })
 		h.GET("/", echoHost)
 		h.GET("/boom", func(c *tctx) error { return fmt.Errorf("boom") })
 	})
@@ -293,7 +293,7 @@ func TestHostFallbacks(t *testing.T) {
 func TestHostPanicUsesHostErrorHandler(t *testing.T) {
 	r := newTestRouter()
 	r.Host("example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "site panic") })
+		h.ErrorHandler(func(c *tctx, err error) error { return c.String(http.StatusTeapot, "site panic") })
 		h.GET("/", func(c *tctx) error { panic("boom") })
 	})
 
@@ -670,7 +670,7 @@ func TestHostRestLabel(t *testing.T) {
 func TestHostFallbackAppliesToEveryPatternOfAScope(t *testing.T) {
 	r := newTestRouter()
 	r.Hosts([]string{"{tenant}.example.com", "*"}, func(h *Router[*tctx]) {
-		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "tenant 404") })
+		h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "tenant 404") })
 		h.GET("/", echoHost)
 	})
 
@@ -701,25 +701,25 @@ func TestHostRedirectTrailingSlashFallsBackToHostFreeRoutes(t *testing.T) {
 
 func TestPerHostErrorHandlers(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root: "+err.Error()) })
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "root: "+err.Error()) })
 
 	r.Host("api.example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(func(c *tctx, err error) {
-			_ = c.JSON(StatusOf(err), map[string]string{"error": err.Error()})
+		h.ErrorHandler(func(c *tctx, err error) error {
+			return c.JSON(StatusOf(err), map[string]string{"error": err.Error()})
 		})
 		h.GET("/boom", func(c *tctx) error { return ErrForbidden })
 	})
 
 	r.Host("example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(func(c *tctx, err error) {
-			_ = c.HTML(StatusOf(err), "<h1>example.com</h1>")
+		h.ErrorHandler(func(c *tctx, err error) error {
+			return c.HTML(StatusOf(err), "<h1>example.com</h1>")
 		})
 		h.GET("/boom", func(c *tctx) error { return ErrForbidden })
 	})
 
 	r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(func(c *tctx, err error) {
-			_ = c.HTML(StatusOf(err), fmt.Sprintf("<h1>%s</h1>", c.Param("tenant")))
+		h.ErrorHandler(func(c *tctx, err error) error {
+			return c.HTML(StatusOf(err), fmt.Sprintf("<h1>%s</h1>", c.Param("tenant")))
 		})
 		h.GET("/boom", func(c *tctx) error { return ErrForbidden })
 	})
@@ -747,8 +747,8 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 	build := func() *Router[*tctx] {
 		r := newTestRouter()
 		r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
-			h.ErrorHandler(func(c *tctx, err error) {
-				_ = c.String(StatusOf(err), "404 tenant="+c.Param("tenant"))
+			h.ErrorHandler(func(c *tctx, err error) error {
+				return c.String(StatusOf(err), "404 tenant="+c.Param("tenant"))
 			})
 			h.GET("/", echoHost)
 		})
@@ -770,7 +770,7 @@ func TestHostParamsSurviveTheHostFreeWalk(t *testing.T) {
 
 func TestHostInheritsTheErrorHandlerOfTheRoot(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "custom "+err.Error()) })
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "custom "+err.Error()) })
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 
 	for _, tc := range []struct {
@@ -791,9 +791,9 @@ func TestHostInheritsTheErrorHandlerOfTheRoot(t *testing.T) {
 
 func TestHostFreeRouteUsesTheRootFallbacks(t *testing.T) {
 	r := newTestRouter()
-	r.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "root err") })
+	r.ErrorHandler(func(c *tctx, err error) error { return c.String(http.StatusTeapot, "root err") })
 	r.Host("example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(func(c *tctx, err error) { _ = c.String(http.StatusTeapot, "host err") })
+		h.ErrorHandler(func(c *tctx, err error) error { return c.String(http.StatusTeapot, "host err") })
 		h.GET("/site", echoHost)
 	})
 	r.GET("/healthz", echoHost)
@@ -850,18 +850,18 @@ func TestPerHostErrorHandlersIgnoreSetterOrder(t *testing.T) {
 	build := func(late bool) *Router[*tctx] {
 		r := newTestRouter()
 		if !late {
-			r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root") })
+			r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "root") })
 		}
 		r.Host("api.example.com", func(h *Router[*tctx]) {
 			h.GET("/boom", func(*tctx) error { return ErrForbidden })
-			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "api") })
+			h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "api") })
 		})
 		r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
 			h.GET("/boom", func(*tctx) error { return ErrForbidden })
-			h.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), c.Param("tenant")) })
+			h.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), c.Param("tenant")) })
 		})
 		if late {
-			r.ErrorHandler(func(c *tctx, err error) { _ = c.String(StatusOf(err), "root") })
+			r.ErrorHandler(func(c *tctx, err error) error { return c.String(StatusOf(err), "root") })
 		}
 		return r
 	}
@@ -896,4 +896,35 @@ func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {
 			h.GET("/x", echoRoute)
 		})
 	})
+}
+
+func TestJSONErrorHandlerOnAHostAnswersItsMisses(t *testing.T) {
+	r := newTestRouter()
+	r.Host("api.example.com", func(h *Router[*tctx]) {
+		h.ErrorHandler(JSONErrorHandler[*tctx])
+		h.GET("/users", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
+	})
+	r.GET("/", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodGet, "/nope", nil)
+	req.Host = "api.example.com"
+	req.Header.Set(HeaderAccept, MIMETextHTML)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if got, want := rec.Body.String(), `{"error":{"status":404,"message":"Not Found"}}`; rec.Code != http.StatusNotFound || got != want {
+		t.Errorf("miss = %d %s, want 404 %s", rec.Code, got, want)
+	}
+
+	rec = doHost(r, http.MethodPost, "api.example.com", "/users")
+	if got, want := rec.Body.String(), `{"error":{"status":405,"message":"Method Not Allowed"}}`; rec.Code != http.StatusMethodNotAllowed || got != want {
+		t.Errorf("405 = %d %s, want 405 %s", rec.Code, got, want)
+	}
+	if got := rec.Header().Get(HeaderAllow); !strings.Contains(got, http.MethodGet) {
+		t.Errorf("Allow = %q, want it to name GET", got)
+	}
+
+	rec = doHost(r, http.MethodGet, "example.com", "/nope")
+	if got := rec.Header().Get(HeaderContentType); rec.Code != http.StatusNotFound || got != MIMETextPlainCharsetUTF8 {
+		t.Errorf("another host answered %d with %q, want a plain-text 404", rec.Code, got)
+	}
 }

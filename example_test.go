@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -190,8 +191,8 @@ func ExampleRouter_HostRouter() {
 	api := router.New(func(http.ResponseWriter, *http.Request) *APIContext {
 		return &APIContext{Version: "v1"}
 	})
-	api.ErrorHandler(func(c *APIContext, err error) {
-		_ = c.Stringf(router.StatusOf(err), "%s: no such endpoint", c.Version)
+	api.ErrorHandler(func(c *APIContext, err error) error {
+		return c.Stringf(router.StatusOf(err), "%s: no such endpoint", c.Version)
 	})
 	api.GET("/users/{id}", func(c *APIContext) error {
 		return c.Stringf(http.StatusOK, "%s user %s", c.Version, c.Param("id"))
@@ -875,4 +876,76 @@ func ExampleHTTPError_WithMessage() {
 	// 404 no user 7 true
 	// 404 Not Found
 	// 422 [name: is required]
+}
+
+func ExampleHandleError() {
+	errLocked := errors.New("the row is locked")
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.ErrorHandler(func(c *Context, err error) error {
+		if errors.Is(err, errLocked) {
+			return c.String(http.StatusLocked, "locked")
+		}
+		return router.DefaultErrorHandler(c, err)
+	})
+	// A metrics middleware answers the error itself, so it reads the status
+	// the error handler wrote rather than guessing it from err.
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			err := next(c)
+			router.HandleError(c, err)
+			fmt.Println("measured", c.Response().Status)
+			return err
+		}
+	})
+	r.GET("/rows/{id}", func(*Context) error { return errLocked })
+
+	fmt.Println(serve(r, http.MethodGet, "/rows/7"))
+	// Output:
+	// measured 423
+	// 423 locked
+}
+
+func ExampleJSONErrorHandler() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.Host("api.example.com", func(h *router.Router[*Context]) {
+		h.ErrorHandler(router.JSONErrorHandler[*Context])
+		h.GET("/v1/users/{id}", func(c *Context) error {
+			return router.ErrNotFound.WithMessage("no user %s", c.Param("id"))
+		})
+	})
+	r.Host("example.com", func(h *router.Router[*Context]) {
+		h.GET("/", func(c *Context) error { return c.String(http.StatusOK, "landing") })
+	})
+
+	fmt.Println(serveHost(r, http.MethodGet, "api.example.com", "/v1/users/9"))
+	fmt.Println(serveHost(r, http.MethodGet, "api.example.com", "/v2/users"))
+	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/missing"))
+	// Output:
+	// 404 {"error":{"status":404,"message":"no user 9"}}
+	// 404 {"error":{"status":404,"message":"Not Found"}}
+	// 404 Not Found
+}
+
+func ExampleHTTPErrorOf() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	// An error page of your own. The same handler, rendering a fragment,
+	// suits an htmx scope, since htmx 4 swaps a 4xx or a 5xx into its target.
+	r.ErrorHandler(func(c *Context, err error) error {
+		he := router.HTTPErrorOf(err)
+		return c.HTML(he.Status, "<h1>"+html.EscapeString(he.Message)+"</h1>")
+	})
+	r.GET("/users/{id}", func(c *Context) error {
+		return router.ErrNotFound.WithMessage("no user %s", c.Param("id"))
+	})
+	r.GET("/report", func(*Context) error { return errors.New("db: connection refused") })
+
+	fmt.Println(serve(r, http.MethodGet, "/users/9"))
+	fmt.Println(serve(r, http.MethodGet, "/report"))
+	// Output:
+	// 404 <h1>no user 9</h1>
+	// 500 <h1>Internal Server Error</h1>
 }

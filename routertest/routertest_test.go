@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -110,6 +111,79 @@ func TestJSONRoundTrip(t *testing.T) {
 	}
 	if got != (user{Name: "ann", Age: 31}) {
 		t.Errorf("got %+v", got)
+	}
+}
+
+type signup struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+func (s signup) Validate() error {
+	var errs []error
+	if s.Name == "" {
+		errs = append(errs, router.FieldError{Field: "name", Message: "is required"})
+	}
+	if s.Email == "" {
+		errs = append(errs, router.FieldError{Field: "email", Message: "is required"})
+	}
+	return errors.Join(errs...)
+}
+
+func jsonErrorRouter() *router.Router[*appContext] {
+	r := router.New(newContext)
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.POST("/signup", func(c *appContext) error {
+		_, err := c.Bind[signup]()
+		return err
+	})
+	r.GET("/limited", func(*appContext) error {
+		return router.ErrTooManyRequests.WithDetails(map[string]int{"retry_after": 30})
+	})
+	r.GET("/text", func(c *appContext) error { return c.String(http.StatusOK, "plain") })
+	r.GET("/other", func(c *appContext) error { return c.JSON(http.StatusOK, map[string]int{"status": 0}) })
+	return r
+}
+
+func TestResponseErrorBody(t *testing.T) {
+	r := jsonErrorRouter()
+
+	t.Run("field errors", func(t *testing.T) {
+		body, err := routertest.Do(r, http.MethodPost, "/signup", routertest.JSONBody(signup{})).ErrorBody()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields, ok := body.Details.([]router.FieldError)
+		if body.Status != http.StatusUnprocessableEntity || !ok {
+			t.Fatalf("body = %+v, want a 422 with []router.FieldError", body)
+		}
+		var names []string
+		for _, f := range fields {
+			names = append(names, f.Field)
+		}
+		if !slices.Equal(names, []string{"name", "email"}) {
+			t.Errorf("fields = %v, want [name email]", names)
+		}
+	})
+
+	t.Run("other details", func(t *testing.T) {
+		body, err := routertest.Get(r, "/limited").ErrorBody()
+		if err != nil {
+			t.Fatal(err)
+		}
+		details, ok := body.Details.(map[string]any)
+		if !ok || details["retry_after"] != float64(30) {
+			t.Errorf("details = %#v, want map[retry_after:30]", body.Details)
+		}
+	})
+
+	for _, path := range []string{"/text", "/other"} {
+		t.Run("no envelope at "+path, func(t *testing.T) {
+			if body, err := routertest.Get(r, path).ErrorBody(); err == nil {
+				t.Errorf("ErrorBody() = %+v, want an error", body)
+			}
+		})
 	}
 }
 

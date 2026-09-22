@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
@@ -628,8 +629,9 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 			r := newRouter()
 			// The status line is already out by the time a flush panics, so the
 			// reply stays a 200 with no body and matches its GET. Only the
-			// error handler sees the panic.
-			r.ErrorHandler(func(_ *appContext, err error) { failed = err })
+			// observer sees the panic: the error handler is skipped for a
+			// committed response.
+			r.Observe(func(_ router.Context, _ int, _ int64, _ time.Duration, err error) { failed = err })
 			r.Use(middleware.GzipWithConfig[*appContext](middleware.GzipConfig{MinLength: 1}))
 			r.GET("/x", tt.handler)
 

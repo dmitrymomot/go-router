@@ -212,9 +212,10 @@ func TestDecompressSkip(t *testing.T) {
 
 func decompressFailingRouter(read func(body []byte, err error)) *router.Router[*appContext] {
 	r := newRouter()
-	r.ErrorHandler(func(c *appContext, _ error) {
+	r.ErrorHandler(func(c *appContext, _ error) error {
 		body, err := io.ReadAll(c.Request().Body)
 		read(body, err)
+		return nil
 	})
 	r.Use(middleware.DecompressWithConfig[*appContext](middleware.DecompressConfig{}))
 	r.POST("/fail", func(*appContext) error {

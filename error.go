@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,7 +67,8 @@ func (e *HTTPError) WithMessage(format string, args ...any) *HTTPError {
 
 // WithDetails copies e with details attached. The default error handler writes
 // a []FieldError one line per field, and leaves any other type to a handler
-// that knows it.
+// that knows it. [JSONErrorHandler] writes any details as JSON, so they must
+// hold nothing private.
 func (e *HTTPError) WithDetails(details any) *HTTPError {
 	c := *e
 	c.Details = details
@@ -94,6 +96,11 @@ func (e FieldError) Error() string { return e.Field + ": " + e.Message }
 // StatusCoder is an error of your own that names its status. [StatusOf] reads
 // it, so a domain error reaches the client with the right status without
 // being wrapped in an [HTTPError].
+//
+// Give a domain sentinel such as ErrForbidden of an access package a
+// StatusCode method rather than mapping it inside the error handler: the
+// error handler, the log of the router, [HTTPErrorOf] and every middleware
+// that reads [StatusOf] then agree on its status.
 type StatusCoder interface {
 	error
 	StatusCode() int
@@ -170,8 +177,10 @@ func PanicErrorSize(recovered any, stackSize int) *HTTPError {
 }
 
 // StatusOf reports the status that err asks for: the status of an [HTTPError],
-// the status of a [StatusCoder], 200 for a nil error, and 500 for anything
-// else.
+// the status of a [StatusCoder], 413 for an [http.MaxBytesError], 499 for an
+// error that is [context.Canceled], 200 for a nil error, and 500 for anything
+// else. 499 is the status nginx logs for a client that went away, so a
+// disconnect does not count as a 5xx.
 func StatusOf(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -188,8 +197,17 @@ func StatusOf(err error) int {
 			return status
 		}
 	}
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		return http.StatusRequestEntityTooLarge
+	}
+	if errors.Is(err, context.Canceled) {
+		return statusClientClosedRequest
+	}
 	return http.StatusInternalServerError
 }
+
+// statusClientClosedRequest has no constant in net/http and no text there.
+const statusClientClosedRequest = 499
 
 // ResolveStatus reports the status that went out. A response that already
 // wrote its header keeps that status, whatever err asks for; otherwise the
@@ -201,86 +219,228 @@ func ResolveStatus(res *Response, err error) int {
 	return StatusOf(err)
 }
 
-// ErrorHandlerFunc writes the answer for a handler that returned an error.
-// [Router.ErrorHandler] installs one, and the router calls it once per failed
-// request.
-type ErrorHandlerFunc[C Context] func(c C, err error)
-
-// DefaultErrorHandler writes the status and the message of err as plain text,
-// one line per [FieldError] in its Details. It logs any 5xx and any error that
-// carries a cause, and it keeps the cause out of the response.
+// HTTPErrorOf reports the [HTTPError] the client is answered with: the one
+// inside err, or one with the status of [StatusOf], its standard text, and err
+// as the cause. A nil err gives nil.
 //
-// A response that already committed is logged and not written again.
-func DefaultErrorHandler[C Context](c C, err error) {
-	writeError(c.base(), err, false)
+// Status is never 0. An empty Message takes the standard text of the status,
+// which is itself empty for a status net/http does not name, such as 499.
+//
+// The result may be err's own HTTPError or a package sentinel, so change it
+// only through a With method.
+func HTTPErrorOf(err error) *HTTPError {
+	if err == nil {
+		return nil
+	}
+	he, ok := errors.AsType[*HTTPError](err)
+	if !ok {
+		status := StatusOf(err)
+		return &HTTPError{Status: status, Message: http.StatusText(status), Err: err}
+	}
+	if he.Status != 0 && he.Message != "" {
+		return he
+	}
+	// The fields are exported, so a caller can build one with no status or no
+	// message. Fix a copy rather than the caller's error.
+	c := *he
+	if c.Status == 0 {
+		c.Status = http.StatusInternalServerError
+	}
+	if c.Message == "" {
+		c.Message = http.StatusText(c.Status)
+	}
+	return &c
+}
+
+// ErrorHandlerFunc writes the answer for a handler that returned an error, and
+// returns the error of that write. [Router.ErrorHandler] installs one.
+//
+// The router calls it at most once per request, and never for a response
+// that already committed or for an error that is [context.Canceled]. The
+// router logs the failure itself, and answers a bare 500 when the handler
+// returns an error having written nothing.
+type ErrorHandlerFunc[C Context] func(c C, err error) error
+
+// DefaultErrorHandler writes the status and the message of [HTTPErrorOf] as
+// plain text, one line per [FieldError] in its Details. The cause stays out
+// of the response.
+//
+// It is a plain writer: called directly, it neither logs nor checks for a
+// committed response. The router does both around every error handler.
+func DefaultErrorHandler[C Context](c C, err error) error {
+	return writeText(c.base(), err, false)
 }
 
 // ErrorHandler is [DefaultErrorHandler] with a say over the cause. With
 // exposeCause set, the wrapped cause follows the message in the body, which
 // suits a development server and leaks internals anywhere else.
 func ErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
-	return func(c C, err error) { writeError(c.base(), err, exposeCause) }
+	return func(c C, err error) error { return writeText(c.base(), err, exposeCause) }
 }
 
-func writeError(b *Base, err error, exposeCause bool) {
-	if err == nil {
-		return
-	}
+// ErrorBody is the object [JSONErrorHandler] writes under "error". Details is
+// the Details of the [HTTPError], such as the []FieldError of a failed
+// [Base.Bind], and it is left out when nil.
+type ErrorBody struct {
+	Status  int    `json:"status"`
+	Message string `json:"message"`
+	Details any    `json:"details,omitzero"`
+}
 
-	he, ok := errors.AsType[*HTTPError](err)
-	if !ok {
-		he = NewHTTPError(StatusOf(err)).WithError(err)
-	}
+type errorEnvelope struct {
+	Error ErrorBody `json:"error"`
+}
 
-	// The fields are exported, so a caller can build one with no status, and
-	// WriteHeader panics on 0. Read it here rather than mutating the caller's
-	// error.
-	status := he.Status
-	if status == 0 {
-		status = http.StatusInternalServerError
+// JSONErrorHandler writes err as {"error": [ErrorBody]} with the status, the
+// message and the details of [HTTPErrorOf]. The cause never reaches the body.
+// Install it on an API host or prefix with [Router.ErrorHandler], rather than
+// branching on the host inside one handler.
+func JSONErrorHandler[C Context](c C, err error) error {
+	he := HTTPErrorOf(err)
+	if he == nil {
+		return nil
 	}
+	b := c.base()
+	body := errorEnvelope{ErrorBody{Status: he.Status, Message: he.Message, Details: he.Details}}
+	data, err := json.Marshal(body, b.jsonOptions(nil)...)
+	if err != nil {
+		return ErrInternalServerError.WithError(fmt.Errorf("router: encode the error body: %w", err))
+	}
+	// The failed handler may have set a Content-Type of its own.
+	b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
+	return b.Blob(he.Status, MIMEApplicationJSONCharsetUTF8, data)
+}
 
-	if status >= http.StatusInternalServerError || he.Err != nil {
-		logFailure(b, err, status)
-	}
-	if !writableFailure(b, err) {
-		return
-	}
-
-	cause := ""
-	if exposeCause && he.Err != nil {
-		cause = he.Err.Error()
+func writeText(b *Base, err error, exposeCause bool) error {
+	he := HTTPErrorOf(err)
+	if he == nil {
+		return nil
 	}
 
 	// Plain text, always. A handler that wants JSON or HTML for its errors
 	// says so in its own ErrorHandler, which knows what its clients read.
 	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
-	b.res.WriteHeader(status)
+	b.res.WriteHeader(he.Status)
 	if b.req.Method == http.MethodHead {
-		return
+		return nil
 	}
-	//nolint:errcheck // The connection is already failing; nothing to report.
-	b.res.WriteString(he.Message)
+	if _, err := b.res.WriteString(he.Message); err != nil {
+		return err
+	}
 	// Field errors say which field failed, which is the useful half of a
 	// binding failure, so they get a line each rather than being dropped.
 	if fields, ok := he.Details.([]FieldError); ok {
 		for _, f := range fields {
-			//nolint:errcheck // Same as above.
-			b.res.WriteString("\n" + f.Error())
+			if _, err := b.res.WriteString("\n" + f.Error()); err != nil {
+				return err
+			}
 		}
 	}
-	if cause != "" {
-		//nolint:errcheck // Same as above.
-		b.res.WriteString("\n\n" + cause)
+	if exposeCause && he.Err != nil {
+		_, err := b.res.WriteString("\n\n" + he.Err.Error())
+		return err
+	}
+	return nil
+}
+
+// HandleError answers err now with the error handler that owns the request,
+// so a middleware that calls it after next reads the final Response.Status
+// and Size. The router then skips its own call. A nil err, or a call after the
+// error was answered, does nothing. Outside a router, on a context from
+// [NewBase], it answers with [DefaultErrorHandler].
+//
+// Like the router, HandleError logs the failure, and skips the error handler
+// for a response that already committed and for [context.Canceled].
+//
+// HandleError panics if c is not the context type of the router that serves
+// it, such as the *Base inside an application context.
+func HandleError(c Context, err error) {
+	if err == nil {
+		return
+	}
+	b := c.base()
+	if b.errorHandled {
+		return
+	}
+	if answer := b.opts().answer; answer != nil {
+		answer(c, err)
+		return
+	}
+	answerError(c, err, DefaultErrorHandler[Context])
+}
+
+// answerError is the error pipeline of a request: the guard, the handler,
+// then the log.
+func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
+	b := c.base()
+	// The flag goes up before h runs, so an h that calls HandleError does not
+	// recurse. needsCleanup takes a pooled context through the slow clear,
+	// which lowers the flag again.
+	b.errorHandled, b.needsCleanup = true, true
+	committedBefore := b.res.Committed
+	if !committedBefore && !errors.Is(err, context.Canceled) {
+		runErrorHandler(c, err, h)
+	}
+	logFailure(b, err, committedBefore)
+}
+
+// runErrorHandler runs h and answers a bare 500 when h fails before it wrote
+// anything: a panic, or an error returned with nothing written.
+func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
+	b := c.base()
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		if rec == http.ErrAbortHandler {
+			panic(rec)
+		}
+		b.Logger().ErrorContext(b.req.Context(), "router: the error handler panicked",
+			slog.Any("panic", rec), slog.Any("error", err))
+		if !b.res.Committed {
+			b.res.WriteHeader(http.StatusInternalServerError)
+		}
+	}()
+	herr := h(c, err)
+	switch {
+	case herr == nil:
+	case b.res.Committed:
+		b.Logger().DebugContext(b.req.Context(), "router: the error handler could not finish its answer",
+			slog.Any("handler_error", herr), slog.Any("error", err))
+	default:
+		b.Logger().ErrorContext(b.req.Context(), "router: the error handler failed",
+			slog.Any("handler_error", herr), slog.Any("error", err))
+		b.res.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
-func logFailure(b *Base, err error, status int) {
+// logFailure logs err with the status that went out: the one the error
+// handler wrote, or the one err asks for when the response committed before.
+// A bare HTTPError under 500 is an answer, not a failure, so it goes unlogged.
+func logFailure(b *Base, err error, committedBefore bool) {
+	he, isHTTP := errors.AsType[*HTTPError](err)
+	var status int
+	switch {
+	case !committedBefore && b.res.Committed:
+		status = b.res.Status
+	case isHTTP && he.Status != 0:
+		status = he.Status
+	default:
+		status = StatusOf(err)
+	}
+	if isHTTP && he.Err == nil && status < http.StatusInternalServerError {
+		return
+	}
+
 	level := slog.LevelError
 	switch {
 	case errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled):
 		level = slog.LevelDebug
-	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
+	case status < http.StatusBadRequest:
+		// The error handler turned the error into a redirect or a success.
+		return
+	case status < http.StatusInternalServerError:
 		level = slog.LevelWarn
 	}
 	b.Logger().Log(b.req.Context(), level, "router: request failed",
@@ -290,11 +450,4 @@ func logFailure(b *Base, err error, status int) {
 		slog.Int("status", status),
 		slog.Any("error", err),
 	)
-}
-
-func writableFailure(b *Base, err error) bool {
-	if b.res.Committed || errors.Is(err, context.Canceled) {
-		return false
-	}
-	return true
 }

@@ -67,10 +67,18 @@ func (e NoUserError) StatusCode() int { return http.StatusNotFound }
 **One place that writes the failures.** The router answers errors in plain text by default. An API says so once, in `ErrorHandler`, and every handler after that just returns an error:
 
 ```go
-r.ErrorHandler(writeError)
+r.ErrorHandler(router.JSONErrorHandler[*Context])
 ```
 
-`ErrorHandler` and `MaxBodyBytes` belong to the root router. `Mount` refuses a sub-router that carries them, because there is one answer to give and one body limit to enforce.
+Every failure then comes back in one envelope, with the fields of a failed `Bind` under `details`:
+
+```json
+{"error":{"status":422,"message":"Unprocessable Entity","details":[{"field":"name","message":"is required"}]}}
+```
+
+The cause of an error, and the text of a domain error such as `no user 9`, stay in the server log. The client reads the status and its standard text, or the message of an `HTTPError` the handler chose to send.
+
+`MaxBodyBytes` belongs to the root router. `Mount` refuses a sub-router that carries it, or a cookie codec, because there is one body limit to enforce and one key to sign with.
 
 ## The files
 
@@ -78,7 +86,7 @@ r.ErrorHandler(writeError)
 | --- | --- |
 | `main.go` | the root router: the settings, the middleware stack, the health route and the mount |
 | `users.go` | the mounted router, the key check and the five handlers |
-| `api.go` | the context type, the input type, the domain error and the error writer |
+| `api.go` | the context type, the input type and the domain error |
 | `store.go` | the users, in a map behind a mutex |
 
 ## What a real API would add

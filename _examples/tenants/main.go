@@ -9,7 +9,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -110,18 +109,13 @@ func readSessionInto(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
 }
 
 // renderError answers a failure with a page, because a browser reads pages.
-func renderError(c Ctx, err error) {
-	status := router.StatusOf(err)
-	message := http.StatusText(status)
-	if he, ok := errors.AsType[*router.HTTPError](err); ok && he.Message != "" {
-		message = he.Message
-	}
-	//nolint:errcheck // The request is already failing; nowhere left to report.
-	c.Render(status, tmpl("error", struct {
+func renderError(c Ctx, err error) error {
+	he := router.HTTPErrorOf(err)
+	return c.Render(he.Status, tmpl("error", struct {
 		Status  int
 		Message string
 		ApexURL string
-	}{Status: status, Message: message, ApexURL: apexURL(c)}))
+	}{Status: he.Status, Message: he.Message, ApexURL: apexURL(c)}))
 }
 
 // sessionKey signs the session cookie. A key that lives only for this run ends
