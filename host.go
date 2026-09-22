@@ -66,33 +66,33 @@ func (hs *hostSet[C]) match(host string, dst []string) (*hostEntry[C], []string)
 	return nil, dst
 }
 
-func (e *hostEntry[C]) match(host string, dst []string) ([]string, bool) {
-	if !strings.HasSuffix(host, e.suffix) {
+func (s *hostSpec) match(host string, dst []string) ([]string, bool) {
+	if !strings.HasSuffix(host, s.suffix) {
 		return dst, false
 	}
 
-	if e.head != nil {
-		label := host[:len(host)-len(e.suffix)]
+	if s.head != nil {
+		label := host[:len(host)-len(s.suffix)]
 		if label == "" || strings.IndexByte(label, '.') >= 0 {
 			return dst, false
 		}
-		if e.head.m != nil && !e.head.m.match(label) {
+		if s.head.m != nil && !s.head.m.match(label) {
 			return dst, false
 		}
-		if e.head.name != "" {
+		if s.head.name != "" {
 			dst = append(dst, label)
 		}
 		return dst, true
 	}
 
 	base := len(dst)
-	for range e.names {
+	for range s.names {
 		dst = append(dst, "")
 	}
 	out := dst[base:]
 
 	rest := host
-	for _, l := range e.labels {
+	for _, l := range s.labels {
 		if rest == "" {
 			return dst, false
 		}
