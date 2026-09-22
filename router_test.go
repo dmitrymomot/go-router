@@ -2600,3 +2600,59 @@ func TestSignedCookieWithoutACodecAnswers500(t *testing.T) {
 		t.Errorf("a router without a codec set a cookie: %q", got)
 	}
 }
+
+func flashRoutes(r *Router[*tctx]) {
+	r.POST("/users", func(c *tctx) error {
+		if err := c.AddFlash(Flash{Kind: "success", Message: "saved"}); err != nil {
+			return err
+		}
+		return c.Redirect(http.StatusSeeOther, "/users")
+	})
+	r.GET("/users", func(c *tctx) error {
+		return c.Stringf(http.StatusOK, "%v", c.Flashes())
+	})
+}
+
+func TestCookieCodecCarriesAFlashAcrossARedirect(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    *Router[*tctx]
+	}{
+		{"New", newTestRouter()},
+		{"NewPooled", NewPooled(func() *tctx { return new(tctx) }, func(c *tctx) { c.Tag = "" })},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.r.CookieCodec(testCodec())
+			flashRoutes(tc.r)
+
+			post := do(tc.r, http.MethodPost, "/users")
+			if post.Code != http.StatusSeeOther {
+				t.Fatalf("POST /users = %d, want 303; body: %s", post.Code, post.Body)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/users", nil)
+			req.Header.Set("Cookie", post.Header().Get("Set-Cookie"))
+			rec := httptest.NewRecorder()
+			tc.r.ServeHTTP(rec, req)
+			if got, want := rec.Body.String(), "[{success saved}]"; got != want {
+				t.Errorf("GET /users with the cookie = %q, want %q", got, want)
+			}
+
+			if got := do(tc.r, http.MethodGet, "/users").Body.String(); got != "[]" {
+				t.Errorf("GET /users without the cookie = %q, want []", got)
+			}
+		})
+	}
+}
+
+func TestAddFlashWithoutACodecAnswers500(t *testing.T) {
+	r := newTestRouter()
+	flashRoutes(r)
+
+	rec := do(r, http.MethodPost, "/users")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("POST /users = %d, want 500", rec.Code)
+	}
+	if got := rec.Header().Get("Set-Cookie"); got != "" {
+		t.Errorf("a router without a codec set a cookie: %q", got)
+	}
+}

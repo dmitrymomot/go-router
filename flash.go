@@ -30,11 +30,21 @@ type Flash struct {
 	Message string `json:"message"`
 }
 
-// AddFlash appends f to the flash cookie, which cc signs. The cookie is the one
-// [Base.NewCookie] builds: HttpOnly, SameSite=Lax, and Secure over HTTPS.
+// AddFlash appends f to the flash cookie, which the codec of
+// [Router.CookieCodec] signs. The cookie is the one [Base.NewCookie] builds:
+// HttpOnly, SameSite=Lax, and Secure over HTTPS.
 //
-// It reports [ErrFlashTooLarge] when the messages no longer fit.
-func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
+// The message travels with whatever this response is: a redirect, an
+// HX-Redirect or a page. [Base.Flashes] in the same request reads it back, so
+// an htmx partial can show it in place.
+//
+// It reports [ErrNoCookieCodec] when the router has no codec, and
+// [ErrFlashTooLarge] when the messages no longer fit.
+func (b *Base) AddFlash(f Flash) error {
+	cc := b.codec()
+	if cc == nil {
+		return ErrNoCookieCodec
+	}
 	flashes := b.flashes(cc)
 	flashes = append(flashes, f)
 
@@ -54,9 +64,21 @@ func (b *Base) AddFlash(cc *CookieCodec, f Flash) error {
 	return nil
 }
 
-// Flashes reports the messages and clears the cookie, so each message is shown
-// once. A second call in the same request reports nothing.
-func (b *Base) Flashes(cc *CookieCodec) []Flash {
+// Flashes reports the messages the request carried, then those this response
+// added, and clears them, so each is shown once. A second call in the same
+// request reports nothing. Add first, then read: a layout that calls Flashes
+// sees what the handler added before it.
+//
+// Clearing is a header, so call Flashes before the response is committed.
+// [Base.Render] buffers, so a template it runs may call Flashes; one that
+// [Base.RenderStream] runs may not.
+//
+// It reports nothing on a router with no codec.
+func (b *Base) Flashes() []Flash {
+	cc := b.codec()
+	if cc == nil {
+		return nil
+	}
 	raw, ok := b.flashCookie(cc)
 	if !ok || raw == "" {
 		return nil

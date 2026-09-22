@@ -692,21 +692,23 @@ func ExampleNewCookieCodec_rotation() {
 	// router: the signed cookie does not verify
 }
 
-func ExampleBase_AddFlash() {
+// The codec of the router also signs the flash cookie, so a message survives
+// the redirect after a form.
+func ExampleRouter_CookieCodec_flash() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	// The key signs the cookie. NewCookieCodec panics under 32 bytes, so read
 	// it from the environment rather than writing one here.
-	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
+	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
 
-	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.POST("/users", func(c *Context) error {
-		if err := c.AddFlash(codec, router.Flash{Kind: "success", Message: "user created"}); err != nil {
+		if err := c.AddFlash(router.Flash{Kind: "success", Message: "user created"}); err != nil {
 			return err
 		}
 		return c.Redirect(http.StatusSeeOther, "/users")
 	})
 	r.GET("/users", func(c *Context) error {
 		// Flashes reads once: it clears the cookie on the way out.
-		return c.Stringf(http.StatusOK, "%v", c.Flashes(codec))
+		return c.Stringf(http.StatusOK, "%v", c.Flashes())
 	})
 
 	created := serveRequest(r, httptest.NewRequest(http.MethodPost, "/users", nil))
