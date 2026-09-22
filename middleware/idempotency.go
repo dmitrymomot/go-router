@@ -28,7 +28,8 @@ const (
 	// plain HTML form.
 	DefaultIdempotencyFormField = "_idempotency_key"
 	// DefaultIdempotencyMaxBody is the longest answer that is kept for a
-	// replay, and the longest request body the default fingerprint reads.
+	// replay, and the longest request body, other than a form, that the
+	// default fingerprint takes.
 	DefaultIdempotencyMaxBody = 64 << 10
 	// DefaultIdempotencyWait is how long a repeat waits for the request that
 	// holds its key.
@@ -48,6 +49,9 @@ var (
 	ErrIdempotencyKeyReused   = errors.New("middleware: the idempotency key was used for a different request")
 	ErrIdempotencyInProgress  = errors.New("middleware: a request with this idempotency key is still running")
 	ErrIdempotencyTooLarge    = errors.New("middleware: the answer to this idempotency key was too large to keep")
+	// ErrIdempotencyBodyTooLarge is the cause of the 413 that the default
+	// fingerprint answers to a body over MaxBody.
+	ErrIdempotencyBodyTooLarge = errors.New("middleware: the request body is too large to fingerprint")
 )
 
 var errIdempotencyStoreFull = errors.New("middleware: every idempotency key in the store is still running")
@@ -66,8 +70,9 @@ var errIdempotencyStoreFull = errors.New("middleware: every idempotency key in t
 // fields, in any order and without the [DefaultCSRFFormField] and
 // [DefaultIdempotencyFormField] fields, and an uploaded file by its field,
 // name, size and type; so the form counts the same whether or not [ParseForm]
-// read it first. Any other body counts by its first MaxBody bytes, which the
-// handler still reads; a body over the cap in force is a 413. The parameters
+// read it first. Any other body counts whole, so it may be MaxBody bytes at
+// most: a longer one is refused with a 413 and [ErrIdempotencyBodyTooLarge]
+// before the handler runs, and so is a body over the cap in force. The parameters
 // of Content-Type do not count, since a multipart boundary changes on every
 // send.
 //
@@ -75,8 +80,9 @@ var errIdempotencyStoreFull = errors.New("middleware: every idempotency key in t
 // Idempotency-Key header, then the [DefaultIdempotencyFormField] form field.
 // The first key found counts.
 //
-// MaxBody is the longest answer kept for a replay, and the longest body the
-// default fingerprint reads; zero takes [DefaultIdempotencyMaxBody]. Wait is
+// MaxBody is the longest answer kept for a replay, and under the default
+// fingerprint the longest request body, other than a form, that a request with
+// a key may send; zero takes [DefaultIdempotencyMaxBody]. Wait is
 // how long a repeat waits for the request that holds its key, and zero takes
 // [DefaultIdempotencyWait]; a negative Wait answers 409 at once. Required
 // refuses an unsafe request that carries no key with a 400.
@@ -120,9 +126,12 @@ func Idempotency[C router.Context](store IdempotencyStore) router.Middleware[C] 
 //     then gets 409.
 //   - Under Required, an unsafe request without a key gets 400.
 //   - A key longer than [MaxIdempotencyKeyLength] bytes gets 400.
+//   - Under the default fingerprint, a body other than a form that is longer
+//     than MaxBody gets 413.
 //
 // The causes of these answers are [ErrIdempotencyKeyReused],
-// [ErrIdempotencyInProgress] and [ErrIdempotencyKeyRequired]. GET, HEAD,
+// [ErrIdempotencyInProgress], [ErrIdempotencyKeyRequired] and
+// [ErrIdempotencyBodyTooLarge]. GET, HEAD,
 // OPTIONS, TRACE and QUERY pass through.
 //
 // The key is released, so a repeat runs again, when the handler answers 5xx,
@@ -390,12 +399,20 @@ func idempotencyFingerprint(c router.Context, maxBody int) ([]byte, error) {
 		}
 		buf = appendIdempotencyForm(buf, form, req.MultipartForm)
 	} else if req.Body != nil && req.Body != http.NoBody {
-		body, err := io.ReadAll(io.LimitReader(req.Body, int64(maxBody)))
+		// The whole body counts, or two bodies that share their first
+		// maxBody bytes would share an answer.
+		if req.ContentLength > int64(maxBody) {
+			return nil, idempotencyBodyTooLarge(maxBody)
+		}
+		body, err := io.ReadAll(io.LimitReader(req.Body, int64(maxBody)+1))
 		if err != nil {
 			return nil, idempotencyBodyError(err)
 		}
-		// The handler reads the body whole: the bytes read here, then the rest.
-		req.Body = readCloser{io.MultiReader(bytes.NewReader(body), req.Body), req.Body}
+		if len(body) > maxBody {
+			return nil, idempotencyBodyTooLarge(maxBody)
+		}
+		// The handler reads the body that was read here.
+		req.Body = readCloser{bytes.NewReader(body), req.Body}
 		buf = appendIdempotencyFields(buf, string(body))
 	}
 	sum := sha256.Sum256(buf)
@@ -405,6 +422,12 @@ func idempotencyFingerprint(c router.Context, maxBody int) ([]byte, error) {
 type readCloser struct {
 	io.Reader
 	io.Closer
+}
+
+func idempotencyBodyTooLarge(maxBody int) error {
+	return router.ErrPayloadTooLarge.WithMessage(
+		"a request with an Idempotency-Key is limited to a body of %d bytes", maxBody).
+		WithError(ErrIdempotencyBodyTooLarge)
 }
 
 func idempotencyBodyError(err error) error {

@@ -1246,24 +1246,52 @@ func TestIdempotencyMemoryStoreWarnsOfAnEarlyEviction(t *testing.T) {
 	}
 }
 
-func TestIdempotencyDefaultFingerprintLeavesALongBodyWhole(t *testing.T) {
-	r := newRouter()
-	r.Use(middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
+func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
+	var runs atomic.Int32
+	seen := &seenErrors{}
+	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
 		Store:   middleware.NewIdempotencyMemoryStore(0),
 		MaxBody: 8,
 	}))
 	r.POST("/pay", func(c *appContext) error {
+		runs.Add(1)
 		body, err := io.ReadAll(c.Request().Body)
 		if err != nil {
 			return err
 		}
 		return c.String(http.StatusOK, string(body))
 	})
-	body := strings.Repeat("0123456789", 3)
-	req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(body))
-	req.Header.Set(router.HeaderIdempotencyKey, "k")
-	if rec := do(r, req); rec.Body.String() != body {
-		t.Errorf("the handler read %q, want %q", rec.Body, body)
+	send := func(body string, length int64) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(body))
+		req.ContentLength = length
+		req.Header.Set(router.HeaderIdempotencyKey, "k")
+		return do(r, req)
+	}
+
+	// Two bodies that share the first MaxBody bytes must not share an answer.
+	for _, body := range []string{"01234567-pay-1", "01234567-pay-999"} {
+		for _, length := range []int64{int64(len(body)), -1} {
+			if rec := send(body, length); rec.Code != http.StatusRequestEntityTooLarge {
+				t.Errorf("%q with Content-Length %d: status = %d, want 413", body, length, rec.Code)
+			}
+			if err := seen.last(); !errors.Is(err, middleware.ErrIdempotencyBodyTooLarge) {
+				t.Errorf("%q: error = %v, want ErrIdempotencyBodyTooLarge", body, err)
+			}
+		}
+	}
+	if n := runs.Load(); n != 0 {
+		t.Fatalf("runs = %d, want 0 for a body over MaxBody", n)
+	}
+
+	// A body of MaxBody bytes reaches the handler whole, and counts whole.
+	if rec := send("01234567", -1); rec.Code != http.StatusOK || rec.Body.String() != "01234567" {
+		t.Errorf("a body at MaxBody: %d %q, want 200 with the body", rec.Code, rec.Body)
+	}
+	if rec := send("01234567", -1); rec.Code != http.StatusOK || runs.Load() != 1 {
+		t.Errorf("a repeat: %d after %d runs, want a replay", rec.Code, runs.Load())
+	}
+	if rec := send("01234568", -1); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("another body of MaxBody bytes: status = %d, want 422", rec.Code)
 	}
 }
 
