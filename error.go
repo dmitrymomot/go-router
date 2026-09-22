@@ -416,6 +416,8 @@ func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	b.errorHandled = true
 	committedBefore := b.res.Committed
 	he, isHTTP := errors.AsType[*HTTPError](err)
+	// A typed nil *HTTPError has no fields to read; it answers as a plain error.
+	isHTTP = isHTTP && he != nil
 	// A sentinel such as ErrNotFound, returned as it stands, wraps nothing and
 	// so cannot be context.Canceled; the check skips the walk for a 404.
 	bare := isHTTP && he.Err == nil && error(he) == err

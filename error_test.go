@@ -758,3 +758,17 @@ func TestFieldErrorsOfReturnsACopy(t *testing.T) {
 		t.Errorf("Details[0].Message = %q, want it untouched", fields[0].Message)
 	}
 }
+
+// A handler that returns a typed nil *HTTPError must not crash the error
+// pipeline on the way to its 500.
+func TestTypedNilHTTPErrorAnswers500(t *testing.T) {
+	captureLogs(t)
+	r := newTestRouter()
+	r.GET("/nil", func(*tctx) error {
+		var he *HTTPError
+		return he
+	})
+	if rec := do(r, http.MethodGet, "/nil"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("GET /nil = %d, want 500", rec.Code)
+	}
+}
