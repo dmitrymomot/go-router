@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"mime"
 	"mime/multipart"
 	"net/http"
 	"slices"
@@ -390,9 +389,10 @@ func IdempotencyFormFingerprint(c router.Context) ([]byte, error) {
 	req := c.Request()
 	buf := appendIdempotencyFields(nil, req.Method, req.URL.Path)
 
+	// The rule of ParseForm and of the form readers, so the fingerprint covers
+	// every body that the handler reads as a form.
 	b, ok := router.FromContext(c)
-	mediaType, _, _ := mime.ParseMediaType(req.Header.Get(router.HeaderContentType))
-	if ok && (mediaType == router.MIMEApplicationForm || mediaType == router.MIMEMultipartForm) {
+	if ok && isFormType(req.Header.Get(router.HeaderContentType)) {
 		form, err := b.FormValues()
 		if err != nil {
 			return nil, err
