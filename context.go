@@ -125,8 +125,7 @@ func NewBase(w http.ResponseWriter, r *http.Request) *Base {
 	return b
 }
 
-// Every request pays for this, so it has to stay under the inline budget:
-// go build -gcflags='-m=2' . 2>&1 | grep 'Base).init'
+// Every request pays for this, so keep it to plain stores.
 func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 	res, ok := w.(*Response)
 	if !ok {
