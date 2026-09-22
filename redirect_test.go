@@ -363,6 +363,19 @@ func TestRedirectHostRefusesALoop(t *testing.T) {
 	}
 }
 
+func TestRedirectHostAnswers404WhenTheTargetRefusesTheValue(t *testing.T) {
+	captureLogs(t)
+	r := newTestRouter()
+	r.RedirectHost("{sub...}.old.test", "{sub}.new.test", http.StatusMovedPermanently)
+
+	if code, loc := follow(r, http.MethodGet, "a.b.old.test", "/"); code != http.StatusNotFound {
+		t.Errorf("GET a.b.old.test/ = %d to %q, want 404; one label cannot hold a.b", code, loc)
+	}
+	if code, loc := follow(r, http.MethodGet, "a.old.test", "/"); code != http.StatusMovedPermanently || loc != "http://a.new.test/" {
+		t.Errorf("GET a.old.test/ = %d to %q, want 301 to http://a.new.test/", code, loc)
+	}
+}
+
 func TestRedirectHostPanicsOnABadCall(t *testing.T) {
 	tests := []struct {
 		name string

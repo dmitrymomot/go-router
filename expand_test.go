@@ -114,6 +114,7 @@ func TestExpandEscapesTheQuery(t *testing.T) {
 		{"a name in the path and the query", "/u/{id}?back={id}", []string{"id", "a b"}, "/u/a%20b?back=a+b"},
 		{"an empty catch-all trims the path, not the query", "/tree/{p...}?x={x}", []string{"p", "", "x", "1"}, "/tree?x=1"},
 		{"literal pairs", "/search?sort=asc&q={q}", []string{"q", "go"}, "/search?sort=asc&q=go"},
+		{"literal text after the value", "/search?q={q}&sort=asc", []string{"q", "go"}, "/search?q=go&sort=asc"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
