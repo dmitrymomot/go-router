@@ -8,6 +8,8 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,19 +39,32 @@ func TestIndexIssuesCSRFAndPinsAssets(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	assets := []string{
-		`src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" crossorigin="anonymous"`,
-		`src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4" integrity="sha384-A986SAtodyH8eg8x8irJnYUk7i9inVQqYigD6qZ9evobksGNIXfeFvDwLSHcp31N" crossorigin="anonymous"`,
-		`action="/join" method="post" hx-post="/join"`,
+	assets := []struct{ src, integrity string }{
+		{
+			"https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/htmx.min.js",
+			"sha384-BvJpBiO8Kh31EqtJe5DRIeWrHWnCGkwytKs9NKFi86Hhw96dEqdEMzZDeK9iEGTc",
+		},
+		{
+			"https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/ext/hx-sse.min.js",
+			"sha384-VZD0TLKqhJ26ayBUgQg3ud6DsOLMJvtcz0ANpNc9WSbgIuQTnlXI2IfsF5jhBjT6",
+		},
 	}
-	for _, asset := range assets {
-		if !strings.Contains(body, asset) {
-			t.Errorf("index does not contain %q", asset)
+	for _, a := range assets {
+		if !sriPattern.MatchString(a.integrity) {
+			t.Errorf("the integrity of %s is not a sha384 hash: %q", a.src, a.integrity)
 		}
+		tag := `src="` + a.src + `" integrity="` + a.integrity + `" crossorigin="anonymous"`
+		if !strings.Contains(body, tag) {
+			t.Errorf("index does not contain %q", tag)
+		}
+	}
+	if !strings.Contains(body, `action="/join" method="post" hx-post="/join"`) {
+		t.Error("index does not post the join form through htmx")
 	}
 	if strings.Contains(body, "unpkg.com") {
 		t.Error("index still loads an unverified unpkg asset")
 	}
+	wantNoHTMX2(t, body)
 	if got := rec.Header().Get(router.HeaderXContentTypeOptions); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q", got)
 	}
@@ -105,10 +120,40 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	for _, form := range []string{
 		`action="/leave" method="post" hx-post="/leave"`,
 		`action="/room/messages" method="post" hx-post="/room/messages"`,
+		`hx-sse:connect="/room/events"`,
 	} {
 		if !strings.Contains(body, form) {
 			t.Errorf("chat page does not contain %q", form)
 		}
+	}
+	wantNoHTMX2(t, body)
+}
+
+func TestJoinRefusalWorksWithoutJavaScript(t *testing.T) {
+	h := newRouter(newRoom())
+	s := startSession(t, h)
+	refuse := func(hx bool) *httptest.ResponseRecorder {
+		rec := send(t, h, http.MethodPost, "/join", url.Values{
+			middleware.DefaultCSRFFormField: {s.csrfToken},
+			"name":                          {" "},
+		}, hx, s.csrfCookie)
+		wantStatus(t, rec, http.StatusOK)
+		if !strings.Contains(rec.Body.String(), `role="alert"`) {
+			t.Error("the refusal does not carry the reason")
+		}
+		// CSRF varies on Cookie first.
+		want := []string{router.HeaderCookie, router.HeaderHXRequest, router.HeaderHXRequestType}
+		if got := rec.Header().Values(router.HeaderVary); !slices.Equal(got, want) {
+			t.Errorf("Vary = %q, want %q", got, want)
+		}
+		return rec
+	}
+
+	if body := refuse(false).Body.String(); !strings.Contains(body, "<!doctype html>") {
+		t.Errorf("a browser without JavaScript got %q, want the whole page", body)
+	}
+	if body := refuse(true).Body.String(); !strings.HasPrefix(body, `<form id="join"`) {
+		t.Errorf("htmx got %q, want the form alone", body)
 	}
 }
 
@@ -250,6 +295,7 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 	}
 	joinReq.Header.Set(router.HeaderContentType, "application/x-www-form-urlencoded")
 	joinReq.Header.Set(router.HeaderHXRequest, "true")
+	joinReq.Header.Set(router.HeaderHXRequestType, "partial")
 	joinRes, err := client.Do(joinReq)
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +318,10 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventsReq.Header.Set(router.HeaderAccept, router.MIMETextEventStream)
+	// What hx-sse sends: an htmx request that also accepts a stream.
+	eventsReq.Header.Set(router.HeaderAccept, "text/html, "+router.MIMETextEventStream)
+	eventsReq.Header.Set(router.HeaderHXRequest, "true")
+	eventsReq.Header.Set(router.HeaderHXRequestType, "partial")
 	eventsRes, err := client.Do(eventsReq)
 	if err != nil {
 		t.Fatal(err)
@@ -293,16 +342,17 @@ func TestSSEFlowAndRoomShutdown(t *testing.T) {
 	if got := readFrame(t, reader); got != "retry: 2000" {
 		t.Errorf("retry frame = %q", got)
 	}
+	// hx-sse swaps only an unnamed event, so no frame carries an event line.
 	joined := readFrame(t, reader)
-	if !strings.Contains(joined, "event: notice") || !strings.Contains(joined, "Alice") ||
-		!strings.Contains(joined, "joined the chat") {
+	if strings.Contains(joined, "event:") || !strings.HasPrefix(joined, `data: <p class="notice"`) ||
+		!strings.Contains(joined, "Alice") || !strings.Contains(joined, "joined the chat") {
 		t.Errorf("join frame = %q", joined)
 	}
 
 	rm.broadcast(message{Kind: kindMessage, Author: "Alice", Text: "hello", At: time.Now()})
 	messageFrame := readFrame(t, reader)
-	if !strings.Contains(messageFrame, "event: message") || !strings.Contains(messageFrame, "hello") ||
-		!strings.Contains(messageFrame, `class="msg own"`) {
+	if strings.Contains(messageFrame, "event:") || !strings.HasPrefix(messageFrame, "data: <article") ||
+		!strings.Contains(messageFrame, "hello") || !strings.Contains(messageFrame, `class="msg own"`) {
 		t.Errorf("message frame = %q", messageFrame)
 	}
 
@@ -329,6 +379,7 @@ func send(t *testing.T, h http.Handler, method, target string, form url.Values, 
 	}
 	if hx {
 		req.Header.Set(router.HeaderHXRequest, "true")
+		req.Header.Set(router.HeaderHXRequestType, "partial")
 	}
 	for _, cookie := range cookies {
 		req.AddCookie(cookie)
@@ -336,6 +387,19 @@ func send(t *testing.T, h http.Handler, method, target string, form url.Values, 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+var sriPattern = regexp.MustCompile(`^sha384-[A-Za-z0-9+/]{64}$`)
+
+// wantNoHTMX2 fails when body still loads htmx 2 or uses its SSE attributes.
+// hx-sse still reads the old ones, deprecated, so they would half work.
+func wantNoHTMX2(t *testing.T, body string) {
+	t.Helper()
+	for _, old := range []string{"htmx.org@2", "htmx-ext-sse", "sse-connect", "sse-swap", `hx-ext="sse"`} {
+		if strings.Contains(body, old) {
+			t.Errorf("the page still holds the htmx 2 %q", old)
+		}
+	}
 }
 
 func startSession(t *testing.T, h http.Handler) session {

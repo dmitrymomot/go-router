@@ -35,11 +35,14 @@ func join(c Ctx) error {
 
 	name := cleanName(in.Name)
 	if name == "" {
-		return c.Render(http.StatusOK, tmpl("join", joinForm{
+		form := joinForm{
 			CSRFToken: middleware.CSRFTokenFrom(c),
 			Name:      in.Name,
 			Error:     "Type a name of 1 to " + maxNameRunesText + " characters.",
-		}))
+		}
+		// htmx swaps the form alone. A browser without JavaScript posted
+		// the whole page away, so it gets the whole page back.
+		return c.RenderPartial(http.StatusOK, tmpl("join", form), tmpl("index", form))
 	}
 
 	writeUser(c, name)

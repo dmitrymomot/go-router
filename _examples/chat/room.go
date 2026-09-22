@@ -87,9 +87,12 @@ type view struct {
 	Own bool
 }
 
+// sendTo sends each message as an unnamed event, because hx-sse in htmx 4
+// swaps only those; a named one becomes a DOM event. The kind still picks the
+// template.
 func sendTo(reader string) router.SSESender[message] {
 	return func(s *router.SSEWriter, m message) error {
-		return s.SendComponent(string(m.Kind), tmpl(string(m.Kind), view{
+		return s.SendComponent("", tmpl(string(m.Kind), view{
 			message: m,
 			Own:     m.Author == reader,
 		}))

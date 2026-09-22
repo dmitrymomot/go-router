@@ -2,8 +2,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.}} · go-router chat</title>
-<script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4" integrity="sha384-A986SAtodyH8eg8x8irJnYUk7i9inVQqYigD6qZ9evobksGNIXfeFvDwLSHcp31N" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/htmx.min.js" integrity="sha384-BvJpBiO8Kh31EqtJe5DRIeWrHWnCGkwytKs9NKFi86Hhw96dEqdEMzZDeK9iEGTc" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/ext/hx-sse.min.js" integrity="sha384-VZD0TLKqhJ26ayBUgQg3ud6DsOLMJvtcz0ANpNc9WSbgIuQTnlXI2IfsF5jhBjT6" crossorigin="anonymous"></script>
 <style>
 	:root {
 		color-scheme: light dark;
@@ -101,12 +101,12 @@
 <!doctype html>
 <html lang="en">
 <head>{{template "head" "Chat"}}</head>
-<body class="chat" hx-ext="sse" sse-connect="/room/events">
+<body class="chat">
 	<header>
 		<h1>go-router chat</h1>
 		<div class="identity">
 			<p class="muted">You are <strong>{{.Name}}</strong></p>
-			<form class="leave" action="/leave" method="post" hx-post="/leave">
+			<form class="leave" action="/leave" method="post" hx-post="/leave" hx-status:4xx="swap:none" hx-status:5xx="swap:none">
 				<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 				<button type="submit">Leave</button>
 			</form>
@@ -114,19 +114,21 @@
 	</header>
 
 	<!--
-		The stream carries rendered HTML. sse-swap names the two events that
-		the room sends, and hx-swap appends each one to the log.
+		The stream carries rendered HTML in unnamed events, which hx-sse swaps
+		into the element that connects; a named event would only fire a DOM
+		event. hx-swap appends each one to the log.
 	-->
 	<div id="log" role="log" aria-live="polite"
-		sse-swap="message,notice" hx-swap="beforeend"
-		hx-on::after-swap="this.scrollTop = this.scrollHeight"></div>
+		hx-sse:connect="/room/events" hx-swap="beforeend"
+		hx-on::sse:after:message="this.scrollTop = this.scrollHeight"></div>
 
 	<!--
 		The post answers 204, so htmx swaps nothing: the message arrives over
 		the stream instead, like everybody else's. The answer also fires
-		message-sent, which empties the input.
+		message-sent, which empties the input. htmx 4 swaps an error answer
+		too, so hx-status keeps a 4xx or 5xx from replacing the form.
 	-->
-	<form action="/room/messages" method="post" hx-post="/room/messages" hx-on:message-sent="this.reset()" autocomplete="off">
+	<form action="/room/messages" method="post" hx-post="/room/messages" hx-status:4xx="swap:none" hx-status:5xx="swap:none" hx-on:message-sent="this.reset()" autocomplete="off">
 		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 		<input name="text" placeholder="Write a message" maxlength="500" required autofocus>
 		<button type="submit">Send</button>
