@@ -238,6 +238,34 @@ func ExampleBase_Bind() {
 	// 201 ann is 30
 }
 
+func ExampleBase_BindForm() {
+	type Prefs struct {
+		Name string `form:"name"`
+		// A checkbox sends "on" when it is checked and nothing when it is not.
+		Newsletter bool `form:"newsletter"`
+	}
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/prefs", func(c *Context) error {
+		in, err := c.BindForm[Prefs]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%s %t", in.Name, in.Newsletter)
+	})
+
+	for _, body := range []string{"name=ann&newsletter=on", "name=bo"} {
+		req := httptest.NewRequest(http.MethodPost, "/prefs", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Println(rec.Code, rec.Body.String())
+	}
+	// Output:
+	// 200 ann true
+	// 200 bo false
+}
+
 func serve(h http.Handler, method, target string) string {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
@@ -308,6 +336,64 @@ func ExampleBase_SetContext() {
 	// Output:
 	// 200 en
 	// 200 uk
+}
+
+func ExampleBase_SetBodyLimit() {
+	type Note struct {
+		Text string `json:"text"`
+	}
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.MaxBodyBytes(16)
+	r.POST("/import", func(c *Context) error {
+		c.SetBodyLimit(1 << 10)
+		if _, err := c.Bind[Note](); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusOK)
+	})
+	r.POST("/note", func(c *Context) error {
+		if _, err := c.Bind[Note](); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusOK)
+	})
+
+	body := `{"text":"` + strings.Repeat("x", 30) + `"}`
+	for _, target := range []string{"/import", "/note"} {
+		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Println(target, rec.Code)
+	}
+	// Output:
+	// /import 200
+	// /note 413
+}
+
+func ExampleBase_FormRequired() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/confirm", func(c *Context) error {
+		token, err := c.FormRequired("token")
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, "confirmed "+token)
+	})
+
+	for _, body := range []string{"token=abc", "token="} {
+		req := httptest.NewRequest(http.MethodPost, "/confirm", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Println(rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+	// Output:
+	// 200 confirmed abc
+	// 400 invalid request
+	// token: is required
 }
 
 func ExampleNewPooled() {

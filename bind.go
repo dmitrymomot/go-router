@@ -14,7 +14,8 @@ import (
 )
 
 // DefaultMaxBodyBytes is the request body that the Bind methods read before
-// they report [ErrPayloadTooLarge]. [Router.MaxBodyBytes] changes it.
+// they report [ErrPayloadTooLarge]. [Router.MaxBodyBytes] changes it, and
+// [Base.SetBodyLimit] changes it for one request.
 const DefaultMaxBodyBytes int64 = 4 << 20
 
 const defaultMaxMultipartMemory int64 = 32 << 20
@@ -81,7 +82,8 @@ func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 
 // BindForm fills a T from the form of the body and validates it. It reads a
 // URL-encoded form and a multipart one alike, through the `form` tag. Parsing
-// happens once per request, so a later form read costs nothing.
+// happens once per request, so a later form read costs nothing. A bool field
+// reads a checkbox: "on" when it is checked, and false when it is absent.
 func (b *Base) BindForm[T any]() (T, error) {
 	var v T
 	if err := b.parseForm(); err != nil {
@@ -216,18 +218,60 @@ func (c *countingBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// SetBodyLimit caps the body of this request at n bytes, in place of the cap
+// of [Router.MaxBodyBytes], above or below it. The Bind methods and the form
+// readers stop there with [ErrPayloadTooLarge], and a handler that reads
+// Request().Body itself meets an [*http.MaxBytesError]. n of zero or less lifts
+// the cap of the router, but not a cap already on the body, so of two calls
+// the smaller cap wins. A request without a body is left alone.
+//
+// It applies to what is still unread: a form parsed before the call keeps the
+// cap it was read under.
+func (b *Base) SetBodyLimit(n int64) {
+	if b.req.Body == nil || b.req.Body == http.NoBody {
+		return
+	}
+	if n <= 0 {
+		b.deferrals().bodyLimit = -1
+		return
+	}
+	b.deferrals().bodyLimit = n
+	b.req.Body = http.MaxBytesReader(innermostWriter(b.res), b.req.Body, n)
+}
+
+func (b *Base) bodyLimit() int64 {
+	if b.deferred != nil && b.deferred.bodyLimit != 0 {
+		return b.deferred.bodyLimit
+	}
+	return b.opts().maxBody
+}
+
+// limitedBody caps the body again even after SetBodyLimit did, because
+// Decompress may have swapped the body since.
 func (b *Base) limitedBody() io.ReadCloser {
 	if b.req.Body == nil {
 		return http.NoBody
 	}
-	limit := b.opts().maxBody
+	limit := b.bodyLimit()
 	if limit <= 0 {
 		return b.req.Body
 	}
-	// MaxBytesReader marks the connection for closing through an unexported
-	// method on the writer it is handed, and does not unwrap, so it needs the
-	// one net/http gave us rather than the wrapper.
-	return http.MaxBytesReader(b.res.ResponseWriter, b.req.Body, limit)
+	return http.MaxBytesReader(innermostWriter(b.res), b.req.Body, limit)
+}
+
+// innermostWriter follows Unwrap to the writer net/http created. MaxBytesReader
+// marks the connection for closing through an unexported method on the writer
+// it is handed, and does not unwrap, so a wrapper such as the one of Gzip
+// would keep the connection open after a 413.
+func innermostWriter(w http.ResponseWriter) http.ResponseWriter {
+	for range unwrapLimit {
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		w = u.Unwrap()
+	}
+	return w
 }
 
 func (b *Base) parseForm() error {
@@ -244,6 +288,14 @@ func (b *Base) parseForm() error {
 		return nil
 	}
 	b.req.Body = b.limitedBody()
+	// net/http fills Form from the query as well, and fails the whole parse on
+	// a malformed query. A Form already in place makes it skip the query. One
+	// the router put there itself goes again afterwards, so net/http builds
+	// the full Form when asked; one an earlier reader built stays.
+	preset := b.req.Form == nil
+	if preset {
+		b.req.Form = make(url.Values)
+	}
 
 	var err error
 	if multipart {
@@ -257,6 +309,9 @@ func (b *Base) parseForm() error {
 	} else {
 		err = b.req.ParseForm()
 	}
+	if preset {
+		b.req.Form = nil
+	}
 	if err == nil {
 		return nil
 	}
@@ -266,8 +321,8 @@ func (b *Base) parseForm() error {
 	return b.setFormError(ErrBadRequest.WithMessage("malformed form body").WithError(err))
 }
 
-// net/http removes these from the request it holds, but the binder parses into
-// a middleware copy, so nothing else would.
+// net/http removes these from the request it holds, but the binder may parse
+// into a copy that Decompress or a SetRequest made, so nothing else would.
 func removeSpilledParts(req *http.Request) {
 	form := req.MultipartForm
 	if form == nil || len(form.File) == 0 {
@@ -281,7 +336,8 @@ func removeSpilledParts(req *http.Request) {
 
 // ParamAs reads route parameter name as a T. T may be any string, bool,
 // integer, float, time.Duration or time.Time, or a type that implements
-// encoding.TextUnmarshaler.
+// encoding.TextUnmarshaler. A bool takes what strconv.ParseBool takes, and
+// also on and off.
 //
 // A missing parameter and one that does not parse each report an
 // [ErrBadRequest].
@@ -341,8 +397,8 @@ func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 
 // ParseValue parses s as a T. T may be any string, bool, integer, float,
 // time.Duration or time.Time, or a type that implements
-// encoding.TextUnmarshaler. The error is the parse failure itself, without a
-// status.
+// encoding.TextUnmarshaler. A bool takes what strconv.ParseBool takes, and
+// also on and off. The error is the parse failure itself, without a status.
 func ParseValue[T any](s string) (T, error) {
 	var v T
 	if err := setScalar(reflect.ValueOf(&v).Elem(), s, ""); err != nil {
@@ -375,7 +431,8 @@ func ParseValueDefault[T any](s string, def T) T {
 // FormValue reads form field name from the body, or "" when the field is
 // absent or the body does not parse. Unlike [http.Request.FormValue] it reads
 // the body alone and never the query. Use [Base.FormValues] to see the parse
-// error.
+// error, and [Base.FormRequired] for a field that must be there. The ParseForm
+// middleware refuses a body that does not parse before the handler runs.
 func (b *Base) FormValue(name string) string {
 	//nolint:errcheck // The caller asked for a value, not for the parse error.
 	b.parseForm()
@@ -383,7 +440,7 @@ func (b *Base) FormValue(name string) string {
 }
 
 // FormDefault reads form field name from the body, or reports def when the
-// field is absent or empty.
+// field is absent or empty, or the body does not parse.
 func (b *Base) FormDefault(name, def string) string {
 	//nolint:errcheck // Same as FormValue.
 	b.parseForm()
@@ -391,6 +448,23 @@ func (b *Base) FormDefault(name, def string) string {
 		return v[0]
 	}
 	return def
+}
+
+// FormRequired reads form field name from the body. An absent or empty field
+// reports an [ErrBadRequest] whose Details hold one [FieldError] for name, as
+// [Base.Bind] reports one. A body that does not parse reports what
+// [Base.FormValues] reports.
+func (b *Base) FormRequired(name string) (string, error) {
+	if err := b.parseForm(); err != nil {
+		return "", err
+	}
+	if v := b.req.PostForm.Get(name); v != "" {
+		return v, nil
+	}
+	fe := FieldError{Field: name, Message: "is required"}
+	return "", ErrBadRequest.WithMessage("invalid request").
+		WithDetails([]FieldError{fe}).
+		WithError(fe)
 }
 
 // FormValues reports the parsed form of the body. The router parses it once

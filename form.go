@@ -249,7 +249,7 @@ func setScalar(fv reflect.Value, s, layout string) error {
 	case reflect.String:
 		fv.SetString(s)
 	case reflect.Bool:
-		v, err := strconv.ParseBool(s)
+		v, err := parseBool(s)
 		if err != nil {
 			return fmt.Errorf("cannot parse %q as a boolean", s)
 		}
@@ -284,6 +284,18 @@ func setScalar(fv reflect.Value, s, layout string) error {
 		return fmt.Errorf("cannot decode a value into %s", fv.Type())
 	}
 	return nil
+}
+
+// parseBool is [strconv.ParseBool] that also reads on and off, in the same
+// three casings. A checkbox with no value attribute sends "on".
+func parseBool(s string) (bool, error) {
+	switch s {
+	case "on", "On", "ON":
+		return true, nil
+	case "off", "Off", "OFF":
+		return false, nil
+	}
+	return strconv.ParseBool(s)
 }
 
 func setTime(fv reflect.Value, s, layout string) error {

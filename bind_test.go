@@ -1276,3 +1276,404 @@ func TestBindPointerWithANullBodyIsRefused(t *testing.T) {
 		t.Errorf("null body = %d %q, want 400", rec.Code, rec.Body.String())
 	}
 }
+
+// A checkbox with no value attribute sends "on" when it is checked and
+// nothing when it is not.
+func TestBindFormReadsACheckbox(t *testing.T) {
+	type prefs struct {
+		News   *bool `form:"news"`
+		Accept bool  `form:"accept"`
+	}
+
+	r := newTestRouter()
+	r.POST("/prefs", func(c *tctx) error {
+		in, err := c.BindForm[prefs]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%v/%v", in.Accept, in.News)
+	})
+
+	tests := []struct {
+		form url.Values
+		want string
+	}{
+		{form: url.Values{"accept": {"on"}}, want: "true/<nil>"},
+		{form: url.Values{"accept": {"off"}}, want: "false/<nil>"},
+		{form: url.Values{}, want: "false/<nil>"},
+	}
+	for _, tt := range tests {
+		rec := postForm(r, "/prefs", tt.form)
+		if rec.Code != http.StatusOK || rec.Body.String() != tt.want {
+			t.Errorf("BindForm(%s) = %d %q, want 200 %q", tt.form.Encode(), rec.Code, rec.Body.String(), tt.want)
+		}
+	}
+}
+
+func TestBindQueryReadsACheckbox(t *testing.T) {
+	type filter struct {
+		Open bool `query:"open"`
+	}
+
+	r := newTestRouter()
+	r.GET("/issues", func(c *tctx) error {
+		in, err := c.BindQuery[filter]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%v", in.Open)
+	})
+
+	for target, want := range map[string]string{
+		"/issues?open=on":  "true",
+		"/issues?open=OFF": "false",
+		"/issues":          "false",
+	} {
+		rec := do(r, http.MethodGet, target)
+		if rec.Code != http.StatusOK || rec.Body.String() != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", target, rec.Code, rec.Body.String(), want)
+		}
+	}
+}
+
+func TestFormAsReadsACheckbox(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/prefs", func(c *tctx) error {
+		on, err := c.FormAs[bool]("accept")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%v", on)
+	})
+
+	rec := postForm(r, "/prefs", url.Values{"accept": {"on"}})
+	if rec.Code != http.StatusOK || rec.Body.String() != "true" {
+		t.Errorf("FormAs[bool] of on = %d %q, want 200 %q", rec.Code, rec.Body.String(), "true")
+	}
+}
+
+func TestParseValueReadsOnAndOff(t *testing.T) {
+	for in, want := range map[string]bool{"on": true, "On": true, "off": false, "OFF": false} {
+		got, err := ParseValue[bool](in)
+		if err != nil || got != want {
+			t.Errorf("ParseValue[bool](%q) = %v, %v, want %v", in, got, err, want)
+		}
+	}
+	if _, err := ParseValue[bool]("yes"); err == nil {
+		t.Error("ParseValue[bool] accepted yes")
+	}
+}
+
+// net/http fails a form parse on a malformed query string, which would turn a
+// good body into a 400.
+func TestFormReadersIgnoreAMalformedQuery(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/users", func(c *tctx) error {
+		in, err := c.BindForm[struct {
+			Name string `form:"name"`
+		}]()
+		if err != nil {
+			return err
+		}
+		if _, err := c.FormValues(); err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%s/%s", in.Name, c.Request().FormValue("name"))
+	})
+	r.POST("/upload", func(c *tctx) error {
+		name := c.FormValue("name")
+		form, err := c.MultipartForm()
+		if err != nil {
+			return err
+		}
+		_, fh, err := c.FormFile("doc")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%s/%s/%d", name, fh.Filename, len(form.File))
+	})
+
+	rec := post(r, "/users?q=%zz&a;b", MIMEApplicationForm, "name=bo")
+	if rec.Code != http.StatusOK || rec.Body.String() != "bo/bo" {
+		t.Errorf("URL-encoded = %d %q, want 200 %q", rec.Code, rec.Body.String(), "bo/bo")
+	}
+
+	body, ct := multipartBody(t, url.Values{"name": {"bo"}}, upload{field: "doc", name: "a.txt", content: "hi"})
+	rec = post(r, "/upload?q=%zz", ct, body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "bo/a.txt/1" {
+		t.Errorf("multipart = %d %q, want 200 %q", rec.Code, rec.Body.String(), "bo/a.txt/1")
+	}
+}
+
+func TestFormReadersKeepAFormAnEarlierReaderBuilt(t *testing.T) {
+	r := newTestRouter()
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			_ = c.Request().ParseForm()
+			return next(c)
+		}
+	})
+	r.POST("/upload", func(c *tctx) error {
+		if _, _, err := c.FormFile("doc"); err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, c.Request().Form.Get("q"))
+	})
+
+	body, ct := multipartBody(t, nil, upload{field: "doc", name: "a.txt", content: "hi"})
+	rec := post(r, "/upload?q=1", ct, body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "1" {
+		t.Errorf("Form after FormFile = %d %q, want 200 %q", rec.Code, rec.Body.String(), "1")
+	}
+}
+
+type unwrappingWriter struct{ http.ResponseWriter }
+
+func (w unwrappingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Gzip and HTMXRedirect put a wrapper into the ResponseWriter of the Response,
+// and MaxBytesReader does not unwrap.
+func TestOversizedBodyClosesTheConnectionBehindAWrappedWriter(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(16)
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			res := c.Response()
+			res.ResponseWriter = unwrappingWriter{res.ResponseWriter}
+			return next(c)
+		}
+	})
+	r.POST("/b", func(c *tctx) error {
+		_, err := c.Bind[map[string]any]()
+		return err
+	})
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body := `{"k":"` + strings.Repeat("a", 4096) + `"}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/b", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // The test is done with it.
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	if !resp.Close {
+		t.Error("the server kept the connection open after a 413")
+	}
+}
+
+func setBodyLimitRouter(limit int64) *Router[*tctx] {
+	r := newTestRouter()
+	r.MaxBodyBytes(16)
+	r.POST("/bind", func(c *tctx) error {
+		c.SetBodyLimit(limit)
+		in, err := c.Bind[map[string]string]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, in["k"])
+	})
+	r.POST("/read", func(c *tctx) error {
+		c.SetBodyLimit(limit)
+		n, err := io.Copy(io.Discard, c.Request().Body)
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			return c.String(http.StatusRequestEntityTooLarge, "MaxBytesError")
+		}
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%d", n)
+	})
+	return r
+}
+
+func jsonOfLength(n int) string {
+	return `{"k":"` + strings.Repeat("a", n-len(`{"k":""}`)) + `"}`
+}
+
+func TestSetBodyLimitRaisesTheCapOfTheRouter(t *testing.T) {
+	r := setBodyLimitRouter(1 << 10)
+	body := jsonOfLength(100)
+
+	rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, body)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d %q, want 200", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/bind", strings.NewReader(body))
+	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
+	req.ContentLength = -1
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("chunked: status = %d %q, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetBodyLimitLowersTheCapOfTheRouter(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/bind", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		_, err := c.Bind[map[string]string]()
+		return err
+	})
+	r.POST("/read", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		_, err := io.Copy(io.Discard, c.Request().Body)
+		if _, ok := errors.AsType[*http.MaxBytesError](err); !ok {
+			return ErrInternalServerError.WithMessage("read error = %v, want a MaxBytesError", err)
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	body := jsonOfLength(100)
+	if rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, body); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("Bind: status = %d, want 413", rec.Code)
+	}
+	if rec := doBody(r, http.MethodPost, "/read", MIMEApplicationJSON, body); rec.Code != http.StatusNoContent {
+		t.Errorf("raw read: %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetBodyLimitZeroLiftsTheCapOfTheRouter(t *testing.T) {
+	r := setBodyLimitRouter(0)
+	body := jsonOfLength(4 << 10)
+
+	if rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, body); rec.Code != http.StatusOK {
+		t.Errorf("Bind: status = %d, want 200", rec.Code)
+	}
+	if rec := doBody(r, http.MethodPost, "/read", MIMEApplicationJSON, body); rec.Code != http.StatusOK {
+		t.Errorf("raw read: status = %d %q, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetBodyLimitKeepsASmallerCapOnTheBody(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/bind", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		c.SetBodyLimit(0)
+		_, err := c.Bind[map[string]string]()
+		return err
+	})
+
+	if rec := doBody(r, http.MethodPost, "/bind", MIMEApplicationJSON, jsonOfLength(100)); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestSetBodyLimitReachesTheFormReaders(t *testing.T) {
+	r := newTestRouter()
+	r.MaxBodyBytes(64)
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			c.SetBodyLimit(4 << 10)
+			return next(c)
+		}
+	})
+	r.POST("/form", func(c *tctx) error {
+		return c.Stringf(http.StatusOK, "%d", len(c.FormValue("name")))
+	})
+	r.POST("/upload", func(c *tctx) error {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return err
+		}
+		_, fh, err := c.FormFile("doc")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%d/%d", len(form.File), fh.Size)
+	})
+
+	rec := postForm(r, "/form", url.Values{"name": {strings.Repeat("x", 1000)}})
+	if rec.Code != http.StatusOK || rec.Body.String() != "1000" {
+		t.Errorf("FormValue = %d %q, want 200 %q", rec.Code, rec.Body.String(), "1000")
+	}
+
+	body, ct := multipartBody(t, nil, upload{field: "doc", name: "a.txt", content: strings.Repeat("x", 1000)})
+	rec = post(r, "/upload", ct, body)
+	if rec.Code != http.StatusOK || rec.Body.String() != "1/1000" {
+		t.Errorf("FormFile = %d %q, want 200 %q", rec.Code, rec.Body.String(), "1/1000")
+	}
+}
+
+func TestSetBodyLimitWithoutABodyAllocatesNothing(t *testing.T) {
+	b := NewBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if allocs := testing.AllocsPerRun(100, func() { b.SetBodyLimit(1 << 10) }); allocs != 0 {
+		t.Errorf("SetBodyLimit on a request without a body allocated %v times, want 0", allocs)
+	}
+	if b.deferred != nil {
+		t.Error("SetBodyLimit on a request without a body kept a cap")
+	}
+}
+
+func TestFormRequired(t *testing.T) {
+	var got error
+	r := newTestRouter()
+	r.MaxBodyBytes(64)
+	r.POST("/confirm", func(c *tctx) error {
+		token, err := c.FormRequired("token")
+		got = err
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, token)
+	})
+
+	missing := []FieldError{{Field: "token", Message: "is required"}}
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		wantStatus  int
+		wantBody    string
+		wantFields  []FieldError
+	}{
+		{name: "present", contentType: MIMEApplicationForm, body: "token=abc", wantStatus: http.StatusOK, wantBody: "abc"},
+		{name: "absent", contentType: MIMEApplicationForm, body: "other=1", wantStatus: http.StatusBadRequest, wantFields: missing},
+		{name: "empty", contentType: MIMEApplicationForm, body: "token=", wantStatus: http.StatusBadRequest, wantFields: missing},
+		{name: "a JSON body", contentType: MIMEApplicationJSON, body: `{"token":"abc"}`, wantStatus: http.StatusBadRequest, wantFields: missing},
+		{
+			name: "over the limit", contentType: MIMEApplicationForm,
+			body: "token=" + strings.Repeat("x", 100), wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name: "a malformed multipart body", contentType: "multipart/form-data; boundary=B",
+			body: "not multipart", wantStatus: http.StatusBadRequest, wantBody: "malformed form body",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got = nil
+			rec := post(r, "/confirm", tt.contentType, tt.body)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), tt.wantStatus)
+			}
+			if tt.wantBody != "" && strings.TrimSpace(rec.Body.String()) != tt.wantBody {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tt.wantBody)
+			}
+			if tt.wantFields == nil {
+				return
+			}
+			he, ok := errors.AsType[*HTTPError](got)
+			if !ok {
+				t.Fatalf("error = %v, want an *HTTPError", got)
+			}
+			if he.Message != "invalid request" || !reflect.DeepEqual(he.Details, tt.wantFields) {
+				t.Errorf("error = %q %#v, want %q %#v", he.Message, he.Details, "invalid request", tt.wantFields)
+			}
+			if fe, ok := errors.AsType[FieldError](got); !ok || fe != tt.wantFields[0] {
+				t.Errorf("errors.AsType[FieldError] = %#v, %v, want %#v", fe, ok, tt.wantFields[0])
+			}
+		})
+	}
+}

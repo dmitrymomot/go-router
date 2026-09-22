@@ -800,9 +800,11 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 	}
 }
 
-// MaxBodyBytes caps the request body that the Bind methods read. It defaults
-// to [DefaultMaxBodyBytes], and a body over the cap fails with
-// [ErrPayloadTooLarge]. A value of zero or less lifts the cap.
+// MaxBodyBytes caps the request body that the Bind methods and the form
+// readers read. It defaults to [DefaultMaxBodyBytes], and a body over the cap
+// fails with [ErrPayloadTooLarge]. A value of zero or less lifts the cap.
+// [Base.SetBodyLimit], and so the BodyLimit middleware, replaces it for one
+// request, above or below.
 //
 // MaxBodyBytes panics after the router started serving.
 func (r *Router[C]) MaxBodyBytes(n int64) {

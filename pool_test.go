@@ -124,6 +124,38 @@ func TestPoolResetsTheCachedRequestState(t *testing.T) {
 	}
 }
 
+func TestPoolForgetsTheBodyLimitOfAnEarlierRequest(t *testing.T) {
+	r := NewPooled(func() *pctx { return new(pctx) }, resetPctx)
+	r.MaxBodyBytes(16)
+	bind := func(c *pctx) error {
+		if _, err := c.Bind[map[string]string](); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	}
+	r.POST("/raise", func(c *pctx) error {
+		c.SetBodyLimit(1 << 10)
+		return bind(c)
+	})
+	r.POST("/plain", bind)
+
+	body := `{"k":"` + strings.Repeat("x", 100) + `"}`
+	for _, step := range []struct {
+		target string
+		want   int
+	}{
+		{"/raise", http.StatusNoContent},
+		{"/plain", http.StatusRequestEntityTooLarge},
+		{"/raise", http.StatusNoContent},
+		{"/plain", http.StatusRequestEntityTooLarge},
+	} {
+		rec := doBody(r, http.MethodPost, step.target, MIMEApplicationJSON, body)
+		if rec.Code != step.want {
+			t.Errorf("POST %s = %d, want %d", step.target, rec.Code, step.want)
+		}
+	}
+}
+
 func TestPoolDropsAContextThatPanicked(t *testing.T) {
 	const rounds = 20
 	built := 0

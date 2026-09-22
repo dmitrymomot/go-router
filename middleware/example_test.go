@@ -205,10 +205,59 @@ func ExampleGzip() {
 	// long: "gzip" under 2000: true
 }
 
+func ExampleParseForm() {
+	r := newAPI()
+	r.MaxBodyBytes(32)
+	r.Use(middleware.ParseForm[*Context])
+	calls := 0
+	r.POST("/toggle", func(c *Context) error {
+		calls++
+		// Without ParseForm, an oversized form would read as empty here and
+		// switch the setting off.
+		return c.Stringf(http.StatusOK, "on=%t", c.FormValue("on") == "on")
+	})
+
+	for _, body := range []string{"on=on", "on=on&note=" + strings.Repeat("x", 64)} {
+		res := routertest.Do(r, http.MethodPost, "/toggle",
+			routertest.Body(router.MIMEApplicationForm, strings.NewReader(body)))
+		fmt.Println(res.StatusCode, res.String())
+	}
+	fmt.Println("handler calls:", calls)
+	// Output:
+	// 200 on=true
+	// 413 Request Entity Too Large
+	// handler calls: 1
+}
+
+func ExampleBodyLimit() {
+	r := newAPI()
+	// The default for every route, and more for the one that takes uploads.
+	r.MaxBodyBytes(64)
+	save := func(c *Context) error {
+		if _, err := c.Bind[map[string]string](); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusOK)
+	}
+	r.With(middleware.BodyLimit[*Context](1<<20)).POST("/uploads", save)
+	r.POST("/notes", save)
+
+	body := `{"text":"` + strings.Repeat("x", 200) + `"}`
+	for _, target := range []string{"/uploads", "/notes"} {
+		res := routertest.Do(r, http.MethodPost, target,
+			routertest.Body(router.MIMEApplicationJSON, strings.NewReader(body)))
+		fmt.Println(target, res.StatusCode)
+	}
+	// Output:
+	// /uploads 200
+	// /notes 413
+}
+
 func ExampleDecompress() {
 	r := newAPI()
-	// BodyLimit bounds the bytes on the wire; MaxDecompressedSize bounds what
-	// they expand into. A zip bomb needs both.
+	// BodyLimit bounds the bytes on the wire and what Bind reads of their
+	// expansion; MaxDecompressedSize bounds the expansion for any reader. A
+	// zip bomb needs both.
 	r.Use(
 		middleware.BodyLimit[*Context](1<<20),
 		middleware.DecompressWithConfig[*Context](middleware.DecompressConfig{

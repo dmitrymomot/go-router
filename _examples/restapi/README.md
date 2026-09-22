@@ -78,7 +78,7 @@ Every failure then comes back in one envelope, with the fields of a failed `Bind
 
 The cause of an error, and the text of a domain error such as `no user 9`, stay in the server log. The client reads the status and its standard text, or the message of an `HTTPError` the handler chose to send.
 
-`MaxBodyBytes` belongs to the root router. `Mount` refuses a sub-router that carries it, or a cookie codec, because there is one body limit to enforce and one key to sign with.
+`MaxBodyBytes` belongs to the root router. `Mount` refuses a sub-router that carries it, or a cookie codec, because there is one default body limit and one key to sign with. A route that needs another limit, above or below the default, takes the `BodyLimit` middleware.
 
 ## The files
 
