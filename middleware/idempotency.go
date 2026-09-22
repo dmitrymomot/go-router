@@ -434,11 +434,11 @@ func idempotencyStoreKey(scope, key string) string {
 //
 //betteralign:check
 type IdempotencyEntry struct {
+	// Answer is nil while that request still runs.
+	Answer *router.Recorded
 	// Fingerprint is the fingerprint of the request that claimed the key. The
 	// caller must not change it.
 	Fingerprint []byte
-	// Answer is nil while that request still runs.
-	Answer *router.Recorded
 }
 
 // IdempotencyStore holds the keys of [IdempotencyWithConfig].
