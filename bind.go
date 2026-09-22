@@ -211,9 +211,10 @@ func (b *Base) BindHeader[T any]() (T, error) {
 //   - Any other error becomes a plain [ErrUnprocessableEntity], and its text
 //     reaches only the log.
 //
-// An HTTPError anywhere in the tree decides before a StatusCoder, as in
-// [StatusOf], and FieldErrors beside it are not added to its Details. One
-// with a status of zero counts as any other error.
+// The first HTTPError in the tree decides before a StatusCoder, as in
+// [StatusOf], and FieldErrors beside it are not added to its Details. When
+// its status is zero, the rest of the list decides, and a nil *HTTPError
+// becomes a plain ErrUnprocessableEntity.
 type Validator interface {
 	Validate() error
 }
