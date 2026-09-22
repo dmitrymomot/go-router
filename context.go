@@ -24,6 +24,7 @@ type Context interface {
 	context.Context
 	Request() *http.Request
 	SetRequest(r *http.Request)
+	SetContext(ctx context.Context)
 	Response() *Response
 	Set(key string, value any)
 	Get(key string) (any, bool)
@@ -212,17 +213,47 @@ func (b *Base) base() *Base { return b }
 func (b *Base) Request() *http.Request { return b.req }
 
 // SetRequest replaces the request. A middleware calls it after it wraps the
-// body or adds a value to the request context. The cached query and host are
-// dropped, so the next read takes them from r.
+// body or rewrites the URL; to change the request context alone, it calls
+// [Base.SetContext]. The cached query and host are dropped, so the next read
+// takes them from r.
 //
-// SetRequest panics if r is nil.
+// SetRequest panics if r is nil, or if the context of r derives from b.
 func (b *Base) SetRequest(r *http.Request) {
 	if r == nil {
 		panic("router: SetRequest needs a request")
 	}
+	b.mustNotBeAncestorOf(r.Context(), "SetRequest")
 	b.req = r
 	b.queryCache = nil
 	b.host, b.hostKnown = "", false
+}
+
+// SetContext replaces the context of the request, for a middleware that adds
+// a value or a deadline. It copies the request with WithContext and keeps the
+// cached query and host.
+//
+// A context derived from b is fine to pass on, to a [Component] or to domain
+// code, but it must not come back as the request context: b looks up in the
+// request context what it lacks itself. Derive ctx from Request().Context(),
+// so that it still ends when the client goes away and the files that
+// [Base.Bind] spilled to disk are still removed with the request.
+//
+// SetContext panics if ctx is nil or derives from b.
+func (b *Base) SetContext(ctx context.Context) {
+	if ctx == nil {
+		panic("router: SetContext needs a context")
+	}
+	b.mustNotBeAncestorOf(ctx, "SetContext")
+	b.req = b.req.WithContext(ctx)
+}
+
+// mustNotBeAncestorOf refuses a request context that looks up in b, since b
+// looks up in the request context and the two would recurse until the stack
+// runs out. The lookup stops at the first Base it meets.
+func (b *Base) mustNotBeAncestorOf(ctx context.Context, what string) {
+	if ctx.Value(baseKeyType{}) == b {
+		panic("router: " + what + " got a context derived from the handler context itself; derive it from Request().Context()")
+	}
 }
 
 // Logger reports the logger of the router, or [slog.Default] when the router

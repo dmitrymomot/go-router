@@ -60,11 +60,11 @@ func TimeoutWithConfig[C router.Context](cfg TimeoutConfig) router.Middleware[C]
 			ctx, cancel := context.WithTimeout(req.Context(), cfg.Duration)
 			defer cancel()
 
-			timed := req.WithContext(ctx)
-			c.SetRequest(timed)
+			c.SetContext(ctx)
+			timed := c.Request()
 			defer func() {
-				if cur := c.Request(); cur != timed {
-					c.SetRequest(cur.WithContext(req.Context()))
+				if c.Request() != timed {
+					c.SetContext(req.Context())
 					return
 				}
 				c.SetRequest(req)

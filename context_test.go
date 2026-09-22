@@ -148,6 +148,10 @@ func TestContextConstructionRejectsNilInputs(t *testing.T) {
 		{name: "response writer", call: func() { NewBase(nil, httptest.NewRequest(http.MethodGet, "/", nil)) }},
 		{name: "request", call: func() { NewBase(httptest.NewRecorder(), nil) }},
 		{name: "replacement request", call: func() { newBase("/").SetRequest(nil) }},
+		{name: "replacement context", call: func() {
+			var ctx context.Context
+			newBase("/").SetContext(ctx)
+		}},
 		{name: "route base", call: func() { SetRouteForTest(nil, "/", nil, nil) }},
 	}
 	for _, tt := range tests {
@@ -233,6 +237,147 @@ func TestSetRequestDropsTheCachedHost(t *testing.T) {
 	}
 	if b.RouteHost() != "{tenant}.example.com" || b.hostIdx != 3 {
 		t.Error("SetRequest changed the already-matched route host identity")
+	}
+}
+
+func TestSetContextAndSetRequestRefuseAContextDerivedFromTheBase(t *testing.T) {
+	type key struct{ n int }
+	derive := []struct {
+		name string
+		make func() (*Base, context.Context)
+	}{
+		{"the Base itself", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, b
+		}},
+		{"a value", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, context.WithValue(b, key{1}, "v")
+		}},
+		{"a cancel", func() (*Base, context.Context) {
+			b := newBase("/")
+			ctx, cancel := context.WithCancel(b)
+			t.Cleanup(cancel)
+			return b, ctx
+		}},
+		{"a timeout", func() (*Base, context.Context) {
+			b := newBase("/")
+			ctx, cancel := context.WithTimeout(b, time.Hour)
+			t.Cleanup(cancel)
+			return b, ctx
+		}},
+		{"no cancel", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, context.WithoutCancel(b)
+		}},
+		{"two levels deep", func() (*Base, context.Context) {
+			b := newBase("/")
+			return b, context.WithValue(context.WithValue(b, key{1}, "v"), key{2}, "w")
+		}},
+		{"the embedding context", func() (*Base, context.Context) {
+			c := &tctx{Base: *newBase("/")}
+			return &c.Base, context.WithValue(c, key{1}, "v")
+		}},
+	}
+	set := []struct {
+		name string
+		call func(b *Base, ctx context.Context)
+	}{
+		{"SetRequest", func(b *Base, ctx context.Context) { b.SetRequest(b.Request().WithContext(ctx)) }},
+		{"SetContext", func(b *Base, ctx context.Context) { b.SetContext(ctx) }},
+	}
+	for _, d := range derive {
+		for _, s := range set {
+			t.Run(s.name+"/"+d.name, func(t *testing.T) {
+				b, ctx := d.make()
+				old := b.Request()
+				func() {
+					defer func() {
+						msg, _ := recover().(string)
+						if !strings.Contains(msg, "Request().Context()") {
+							t.Errorf("panic = %q, want one that points to Request().Context()", msg)
+						}
+					}()
+					s.call(b, ctx)
+				}()
+				if b.Request() != old {
+					t.Error("the refused call replaced the request")
+				}
+				// Each of these would recurse without end had the call gone through.
+				_ = b.Value("missing")
+				_ = b.Done()
+				_ = b.Err()
+			})
+		}
+	}
+}
+
+func TestAContextDerivedFromAnotherBaseIsNotALoop(t *testing.T) {
+	type key struct{}
+	b1, b2 := newBase("/"), newBase("/")
+
+	for name, set := range map[string]func(ctx context.Context){
+		"SetRequest": func(ctx context.Context) { b1.SetRequest(b1.Request().WithContext(ctx)) },
+		"SetContext": b1.SetContext,
+	} {
+		set(context.WithValue(b2, key{}, name))
+		if got := b1.Value(key{}); got != name {
+			t.Errorf("%s: Value = %v, want %s", name, got, name)
+		}
+		if got, _ := FromContext(b1); got != b1 {
+			t.Errorf("%s: FromContext(b1) did not return b1", name)
+		}
+	}
+}
+
+func TestSetContextKeepsTheCachedQueryAndHost(t *testing.T) {
+	type key struct{}
+	b := newBase("/search?q=go")
+	host := b.Host()
+	b.QueryValues().Set("q", "cached")
+
+	b.SetContext(context.WithValue(b.Request().Context(), key{}, "v"))
+	if got := b.Query("q"); got != "cached" {
+		t.Errorf("Query(%q) = %q, want the cached parse", "q", got)
+	}
+	if got := b.Host(); got != host {
+		t.Errorf("Host() = %q, want %q", got, host)
+	}
+	if b.Value(key{}) != "v" || b.Request().Context().Value(key{}) != "v" {
+		t.Error("the new context value is not visible through b and its request")
+	}
+}
+
+func TestSetContextLeavesTheOldRequestAlone(t *testing.T) {
+	type key struct{}
+	b := newBase("/")
+	old := b.Request()
+
+	b.SetContext(context.WithValue(old.Context(), key{}, "v"))
+	if b.Request() == old {
+		t.Error("SetContext kept the old request, want a copy")
+	}
+	if old.Context().Value(key{}) != nil {
+		t.Error("SetContext changed the context of the old request")
+	}
+}
+
+func TestSetContextCarriesCancellation(t *testing.T) {
+	b := newBase("/")
+	ctx, cancel := context.WithCancel(b.Request().Context())
+	b.SetContext(ctx)
+	if b.Err() != nil {
+		t.Fatalf("Err() = %v before cancel, want nil", b.Err())
+	}
+
+	cancel()
+	select {
+	case <-b.Done():
+	default:
+		t.Error("Done() is open after cancel")
+	}
+	if !errors.Is(b.Err(), context.Canceled) {
+		t.Errorf("Err() = %v, want context.Canceled", b.Err())
 	}
 }
 
