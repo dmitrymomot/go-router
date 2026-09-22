@@ -35,7 +35,8 @@ func (r *Response) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // Before registers fn to run just before the header goes out, which is the
 // last moment a header can still be set. Callbacks run in the order they were
-// added.
+// added. A callback that panics drops the callbacks, and the panic goes on up
+// to the recovery of the router, which answers 500.
 //
 // Before panics if fn is nil.
 func (r *Response) Before(fn func()) {
@@ -72,16 +73,33 @@ func (r *Response) WriteHeader(code int) {
 		r.Committed = true
 		return
 	}
+	prev := r.Status
 	r.Status = code
-	r.committing = true
-	for _, fn := range r.before {
-		fn()
-	}
-	r.committing = false
+	r.runBefore(prev)
 	if !r.Committed {
 		r.ResponseWriter.WriteHeader(code)
 		r.Committed = true
 	}
+}
+
+// runBefore runs the callbacks of Before. A callback that panics leaves the
+// response uncommitted with the status it had before, and drops every
+// callback, so the error answer that follows does not run one twice. The
+// panic goes on up.
+func (r *Response) runBefore(prev int) {
+	r.committing = true
+	done := false
+	defer func() {
+		r.committing = false
+		if !done && !r.Committed {
+			r.before = nil
+			r.Status = prev
+		}
+	}()
+	for _, fn := range r.before {
+		fn()
+	}
+	done = true
 }
 
 func (r *Response) dropStatus(code int) {

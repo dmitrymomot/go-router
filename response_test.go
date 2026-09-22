@@ -890,3 +890,46 @@ func TestFlushErrorReportsTheWriterError(t *testing.T) {
 		t.Errorf("ResponseController.Flush = %v, want %v", err, gone)
 	}
 }
+
+// A Before callback that panics must not leave the response half committed:
+// the recovered panic answers 500 and is logged as a failure.
+func TestBeforeCallbackThatPanicsAnswers500(t *testing.T) {
+	for _, pooled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pooled=%v", pooled), func(t *testing.T) {
+			sink := &recordSink{}
+			r := newTestRouter()
+			if pooled {
+				r = NewPooled(func() *tctx { return new(tctx) }, func(*tctx) {})
+			}
+			r.Logger(slog.New(sink))
+			ran := 0
+			r.GET("/", func(c *tctx) error {
+				c.Response().Before(func() {
+					ran++
+					panic("boom")
+				})
+				return c.String(http.StatusOK, "ok")
+			})
+
+			rec := do(r, http.MethodGet, "/")
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want 500", rec.Code)
+			}
+			if ran != 1 {
+				t.Errorf("the callback ran %d times, want 1", ran)
+			}
+			failed := 0
+			for _, rec := range sink.records {
+				if rec.Message == "router: request failed" {
+					failed++
+					if got, _ := intAttr(rec, "status"); got != http.StatusInternalServerError {
+						t.Errorf("logged status = %d, want 500", got)
+					}
+				}
+			}
+			if failed != 1 {
+				t.Errorf("logged %d failures, want 1", failed)
+			}
+		})
+	}
+}
