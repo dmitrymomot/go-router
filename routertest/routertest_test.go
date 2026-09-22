@@ -292,12 +292,38 @@ func eventRouter() *router.Router[*appContext] {
 
 func TestEvents(t *testing.T) {
 	res := routertest.Get(eventRouter(), "/events")
-	res.Expect(t).Status(http.StatusOK).Header("Content-Type", "text/event-stream")
-	routertest.AssertEvents(t, res,
+	res.Expect(t).Status(http.StatusOK).Header("Content-Type", "text/event-stream").Events(
 		routertest.Event{ID: "1", Name: "tick", Data: "one"},
 		routertest.Event{ID: "1", Data: "two\nlines"},
 		routertest.Event{ID: "3", Name: "tick", Data: "three"},
 	)
+}
+
+func TestExpectEventsReportsAMissAndGoesOn(t *testing.T) {
+	res := routertest.Get(eventRouter(), "/events")
+	tests := []struct {
+		name string
+		want []routertest.Event
+	}{
+		{"one event short", []routertest.Event{{ID: "1", Name: "tick", Data: "one"}}},
+		{"another event", []routertest.Event{
+			{ID: "1", Name: "tick", Data: "one"},
+			{ID: "1", Data: "two\nlines"},
+			{ID: "3", Name: "tock", Data: "three"},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tb := new(recordingTB)
+			res.Expect(tb).Events(tt.want...).Status(http.StatusOK)
+			if len(tb.errors) != 1 || len(tb.fatals) != 0 {
+				t.Fatalf("errors = %q, fatals = %q; want one error", tb.errors, tb.fatals)
+			}
+			if !strings.Contains(tb.errors[0], "GET /events: events = ") {
+				t.Errorf("error = %q, want one that names the request", tb.errors[0])
+			}
+		})
+	}
 }
 
 func TestEventsParsing(t *testing.T) {
@@ -890,9 +916,17 @@ func setUpdate(tb testing.TB, on bool) {
 	})
 }
 
+// page answers every request with body.
+func page(body string) *routertest.Response {
+	return routertest.Get(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		//nolint:errcheck // The recorder never fails.
+		io.WriteString(w, body)
+	}), "/page")
+}
+
 var plainUpdate = flag.Bool("update", false, "rewrite the golden files of this package")
 
-func TestAssertGoldenReadsThePlainUpdateFlag(t *testing.T) {
+func TestExpectGoldenReadsThePlainUpdateFlag(t *testing.T) {
 	const name = "plain/page.html"
 	file := filepath.Join("testdata", filepath.FromSlash(name))
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(file)) })
@@ -902,19 +936,19 @@ func TestAssertGoldenReadsThePlainUpdateFlag(t *testing.T) {
 	*plainUpdate = true
 	t.Cleanup(func() { *plainUpdate = old })
 
-	routertest.AssertGolden(t, name, []byte(goldenPage))
+	page(goldenPage).Expect(t).Golden(name)
 	if got, err := os.ReadFile(file); err != nil || string(got) != goldenPage {
 		t.Fatalf("read the written file: %q, %v", got, err)
 	}
 }
 
-func TestAssertGoldenAcceptsTheFile(t *testing.T) {
+func TestExpectGoldenAcceptsTheFile(t *testing.T) {
 	setUpdate(t, false)
 
-	routertest.AssertGolden(t, "page.html", []byte(goldenPage))
+	page(goldenPage).Expect(t).Golden("page.html")
 }
 
-func TestAssertGoldenReportsADifference(t *testing.T) {
+func TestExpectGoldenReportsADifference(t *testing.T) {
 	setUpdate(t, false)
 
 	tests := []struct {
@@ -930,24 +964,24 @@ func TestAssertGoldenReportsADifference(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tb := new(recordingTB)
-			routertest.AssertGolden(tb, tt.file, []byte(tt.got))
-			if !tb.failed {
-				t.Fatalf("AssertGolden accepted %s", tt.name)
+			page(tt.got).Expect(tb).Golden(tt.file)
+			if len(tb.errors) != 1 || len(tb.fatals) != 0 {
+				t.Fatalf("errors = %q, fatals = %q; want one error for %s", tb.errors, tb.fatals, tt.name)
 			}
-			if !strings.Contains(tb.msg, "-routertest.update") {
-				t.Errorf("message = %q; it has to name the flag that rewrites the file", tb.msg)
+			if !strings.Contains(tb.errors[0], "-routertest.update") {
+				t.Errorf("message = %q; it has to name the flag that rewrites the file", tb.errors[0])
 			}
 		})
 	}
 }
 
-func TestAssertGoldenWritesTheFileWithUpdate(t *testing.T) {
+func TestExpectGoldenWritesTheFileWithUpdate(t *testing.T) {
 	const name = "written/page.html"
 	file := filepath.Join("testdata", filepath.FromSlash(name))
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(file)) })
 
 	setUpdate(t, true)
-	routertest.AssertGolden(t, name, []byte(goldenPage))
+	page(goldenPage).Expect(t).Golden(name)
 
 	got, err := os.ReadFile(file)
 	if err != nil {
@@ -957,10 +991,10 @@ func TestAssertGoldenWritesTheFileWithUpdate(t *testing.T) {
 		t.Errorf("wrote %q", got)
 	}
 	setUpdate(t, false)
-	routertest.AssertGolden(t, name, []byte(goldenPage))
+	page(goldenPage).Expect(t).Golden(name)
 }
 
-func TestAssertGoldenRejectsNamesOutsideTestdata(t *testing.T) {
+func TestExpectGoldenRejectsNamesOutsideTestdata(t *testing.T) {
 	setUpdate(t, true)
 	outside := "outside-routertest-golden.html"
 	_ = os.Remove(outside)
@@ -969,9 +1003,9 @@ func TestAssertGoldenRejectsNamesOutsideTestdata(t *testing.T) {
 	for _, name := range []string{"", ".", "../" + outside, "nested/../../" + outside, "/tmp/outside", `..\outside`} {
 		t.Run(name, func(t *testing.T) {
 			tb := new(recordingTB)
-			routertest.AssertGolden(tb, name, []byte("unsafe"))
-			if !tb.failed || !strings.Contains(tb.msg, "invalid golden file name") {
-				t.Fatalf("failure = %v, %q; want invalid-name failure", tb.failed, tb.msg)
+			page("unsafe").Expect(tb).Golden(name)
+			if len(tb.errors) != 1 || !strings.Contains(tb.errors[0], "invalid golden file name") {
+				t.Fatalf("errors = %q; want an invalid-name failure", tb.errors)
 			}
 		})
 	}
@@ -980,7 +1014,7 @@ func TestAssertGoldenRejectsNamesOutsideTestdata(t *testing.T) {
 	}
 }
 
-func TestAssertGoldenDoesNotFollowAnEscapingSymlink(t *testing.T) {
+func TestExpectGoldenDoesNotFollowAnEscapingSymlink(t *testing.T) {
 	setUpdate(t, true)
 	outside := t.TempDir()
 	link := filepath.Join("testdata", "escaping-link")
@@ -991,9 +1025,9 @@ func TestAssertGoldenDoesNotFollowAnEscapingSymlink(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(link) })
 
 	tb := new(recordingTB)
-	routertest.AssertGolden(tb, "escaping-link/outside.html", []byte("unsafe"))
+	page("unsafe").Expect(tb).Golden("escaping-link/outside.html")
 	if !tb.failed {
-		t.Fatal("AssertGolden followed a symlink outside testdata")
+		t.Fatal("Golden followed a symlink outside testdata")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "outside.html")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("outside file exists or cannot be checked: %v", err)

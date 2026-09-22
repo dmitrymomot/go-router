@@ -4,8 +4,9 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/dmitrymomot/go-router/internal/headcheck"
+
 	"github.com/dmitrymomot/go-router"
-	"github.com/dmitrymomot/go-router/routertest"
 	"github.com/dmitrymomot/go-router/sse"
 )
 
@@ -21,5 +22,5 @@ func TestHEADMatchesGET(t *testing.T) {
 		return s.Send(sse.Event{Data: "hello"})
 	})
 
-	routertest.AssertHEADMatchesGET(t, r, "/events")
+	headcheck.MatchesGET(t, r, "/events")
 }

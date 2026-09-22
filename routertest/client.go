@@ -6,7 +6,6 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,9 +22,10 @@ import (
 // only to a request that [router.SchemeOf] counts as https. It knows no public
 // suffix list, which test hosts do not need.
 //
-// A Client is safe for concurrent use and never fails the test itself, so
-// subtests can share one. A stream that the test reads as it arrives still
-// needs [NewServer].
+// A Client is safe for concurrent use, so subtests can share one. Only
+// [Client.Follow] fails the test, and it fails the test given to [NewClient],
+// so a subtest that follows a redirect needs a client of its own. A stream
+// that the test reads as it arrives still needs [NewServer].
 type Client struct {
 	tb       testing.TB
 	h        http.Handler
@@ -79,15 +79,19 @@ func (c *Client) Get(target string, opts ...RequestOption) *Response {
 // against the request that res answered. It follows one hop, and it sends a
 // GET even after a 307 or a 308.
 //
-// Follow panics when res is nil or names neither header.
+// Follow stops the test and returns nil when res names neither header or
+// names one it cannot read: the handler under test did not redirect. It
+// panics if res is nil.
 func (c *Client) Follow(res *Response) *Response {
 	if res == nil {
 		panic("routertest: Follow needs a response")
 	}
+	c.tb.Helper()
 	loc := cmp.Or(res.Header.Get(router.HeaderLocation), res.Header.Get(htmx.HeaderRedirect))
 	if loc == "" {
-		panic("routertest: Follow needs a Location or an HX-Redirect, and the " +
-			strconv.Itoa(res.StatusCode) + " answer has neither")
+		c.tb.Fatalf("routertest: Follow: the %d answer to %s carries neither a Location nor an HX-Redirect; body: %s",
+			res.StatusCode, requestLine(res), res.Body)
+		return nil
 	}
 	base := &url.URL{Path: "/"}
 	if req := res.Request; req != nil {
@@ -95,10 +99,20 @@ func (c *Client) Follow(res *Response) *Response {
 	}
 	u, err := base.Parse(loc)
 	if err != nil {
-		panic("routertest: Follow cannot read the Location " + strconv.Quote(loc) + ": " + err.Error())
+		c.tb.Fatalf("routertest: Follow cannot read the Location %q of the answer to %s: %v", loc, requestLine(res), err)
+		return nil
 	}
 	u.Fragment, u.RawFragment = "", ""
 	return c.Do(http.MethodGet, u.String())
+}
+
+// requestLine names the request that res answered, or "the request" when
+// [Recorded] left it out.
+func requestLine(res *Response) string {
+	if res.Request == nil {
+		return "the request"
+	}
+	return res.Request.Method + " " + res.Request.URL.RequestURI()
 }
 
 // Cookie reports the cookie called name that the client would send to the

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmitrymomot/go-router/internal/headcheck"
+
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/routertest"
@@ -619,8 +621,8 @@ func TestGzipCommitsASwitchingProtocols(t *testing.T) {
 
 // The nil gzip.Writer crash lived here: HEAD stopped being short-circuited, so
 // a handler that flushed reached a writer that had never been opened. The rule
-// is routertest.AssertHEADMatchesGET's — the reply carries the headers of the
-// GET, compressed ones included, and no body.
+// is headcheck.MatchesGET's — the reply carries the headers of the GET,
+// compressed ones included, and no body.
 func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -663,7 +665,7 @@ func TestGzipAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 				t.Fatalf("the GET sent Content-Encoding %q, want %q; this case no longer reaches the path it names", got, tt.encoding)
 			}
 
-			routertest.AssertHEADMatchesGET(t, r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
+			headcheck.MatchesGET(t, r, "/x", routertest.Header(router.HeaderAcceptEncoding, "gzip"))
 			if failed != nil {
 				t.Errorf("the request failed: %v", failed)
 			}

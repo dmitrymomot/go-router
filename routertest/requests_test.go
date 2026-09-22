@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
@@ -61,7 +62,7 @@ func TestRequestsReachEveryRoute(t *testing.T) {
 		return ""
 	}
 	count := 0
-	for rt, req := range routertest.Requests(r.Routes(), fill) {
+	for rt, req := range routertest.Requests(t, r.Routes(), fill) {
 		count++
 		t.Run(rt.Method+" "+rt.Host+" "+rt.Pattern, func(t *testing.T) {
 			want := rt.Host + " " + rt.Pattern
@@ -80,25 +81,52 @@ func TestRequestsEscapeTheValues(t *testing.T) {
 	r := router.New(newContext)
 	r.GET("/users/{id}", func(c *appContext) error { return c.String(http.StatusOK, c.Param("id")) })
 	r.GET("/files/{path...}", func(c *appContext) error { return c.String(http.StatusOK, c.Param("path")) })
-	r.GET("/n/{n:[0-9]+}", func(c *appContext) error { return c.String(http.StatusOK, c.Param("n")) })
 
-	values := map[string]string{"id": "a b/c", "path": "x/y z", "n": "a b"}
+	values := map[string]string{"id": "a b/c", "path": "x/y z"}
 	fill := func(_ router.Route, param string) string { return values[param] }
-	for rt, req := range routertest.Requests(r.Routes(), fill) {
-		res := routertest.Serve(r, req)
-		switch rt.Pattern {
-		case "/users/{id}":
-			res.Expect(t).Status(http.StatusOK).Body("a b/c")
-		case "/files/{path...}":
-			res.Expect(t).Status(http.StatusOK).Body("x/y z")
-		default:
-			// Expand refuses a value the constraint does not match, so the
-			// value goes out escaped by hand and misses the route.
-			if got := req.URL.EscapedPath(); got != "/n/a%20b" {
-				t.Errorf("path = %q, want /n/a%%20b", got)
-			}
-			res.Expect(t).Status(http.StatusNotFound)
+	for rt, req := range routertest.Requests(t, r.Routes(), fill) {
+		want := values["id"]
+		if rt.Pattern == "/files/{path...}" {
+			want = values["path"]
 		}
+		routertest.Serve(r, req).Expect(t).Status(http.StatusOK).Body(want)
+	}
+}
+
+func TestRequestsFailOnAValueTheParameterRefuses(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		fill    func(router.Route, string) string
+	}{
+		{"a value the expression refuses", "/n/{n:[0-9]+}", func(router.Route, string) string { return "a b" }},
+		{"x for an expression", "/c/{code:[a-z]{2}}", nil},
+		{"a value the class refuses", "/int/{id:int}", func(router.Route, string) string { return "one" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := router.New(newContext)
+			r.GET(tt.pattern, echoRoute)
+			r.GET("/after", echoRoute)
+
+			tb := new(recordingTB)
+			var sent []string
+			for rt := range routertest.Requests(tb, r.Routes(), tt.fill) {
+				sent = append(sent, rt.Pattern)
+			}
+			if len(tb.fatals) != 1 || !strings.Contains(tb.msg, tt.pattern) {
+				t.Fatalf("fatals = %q, want one that names %s", tb.fatals, tt.pattern)
+			}
+			routes := r.Routes()
+			failed := slices.IndexFunc(routes, func(rt router.Route) bool { return rt.Pattern == tt.pattern })
+			want := make([]string, failed)
+			for i, rt := range routes[:failed] {
+				want[i] = rt.Pattern
+			}
+			if !slices.Equal(sent, want) {
+				t.Errorf("sent %q, want %q: the sequence ends at the failure", sent, want)
+			}
+		})
 	}
 }
 
@@ -109,7 +137,7 @@ func TestRequestsFillWithX(t *testing.T) {
 		nil,
 		func(router.Route, string) string { return "" },
 	} {
-		for _, req := range routertest.Requests(r.Routes(), fill) {
+		for _, req := range routertest.Requests(t, r.Routes(), fill) {
 			if req.URL.Path != "/users/x" {
 				t.Errorf("path = %q, want /users/x", req.URL.Path)
 			}
@@ -123,7 +151,7 @@ func TestRequestsFillTheBuiltinClasses(t *testing.T) {
 	r.GET("/uuid/{id:uuid}", echoRoute)
 	r.GET("/slug/{s:slug}", echoRoute)
 
-	for _, req := range routertest.Requests(r.Routes(), nil) {
+	for _, req := range routertest.Requests(t, r.Routes(), nil) {
 		routertest.Serve(r, req).Expect(t).Status(http.StatusOK)
 	}
 }
@@ -140,7 +168,7 @@ func TestRequestsAskFillForEachParameter(t *testing.T) {
 
 	var asked []string
 	sent := 0
-	for range routertest.Requests(r.Routes(), func(rt router.Route, param string) string {
+	for range routertest.Requests(t, r.Routes(), func(rt router.Route, param string) string {
 		asked = append(asked, rt.Pattern+" "+param)
 		return ""
 	}) {
@@ -164,7 +192,7 @@ func TestRequestsAskFillForEachParameter(t *testing.T) {
 func TestRequestsSendAnyAsGET(t *testing.T) {
 	r := router.New(newContext)
 	r.Any("/any", echoRoute)
-	for rt, req := range routertest.Requests(r.Routes(), nil) {
+	for rt, req := range routertest.Requests(t, r.Routes(), nil) {
 		if rt.Method != "*" || req.Method != http.MethodGet {
 			t.Errorf("route method %q went out as %q, want * as GET", rt.Method, req.Method)
 		}
@@ -177,7 +205,7 @@ func TestRequestsApplyTheOptions(t *testing.T) {
 	r.Host("{tenant}.example.test", func(h *router.Router[*appContext]) {
 		h.GET("/b", echoRoute)
 	})
-	for rt, req := range routertest.Requests(r.Routes(), nil,
+	for rt, req := range routertest.Requests(t, r.Routes(), nil,
 		routertest.Header("X-Key", "k"), routertest.Host("acme.example.test")) {
 		if req.Header.Get("X-Key") != "k" {
 			t.Errorf("%s: the header of the option is missing", rt.Pattern)
@@ -193,7 +221,7 @@ func TestRequestsStopWhenTheLoopBreaks(t *testing.T) {
 	r.GET("/a/{id}", echoRoute)
 	r.GET("/b/{id}", echoRoute)
 	calls := 0
-	for range routertest.Requests(r.Routes(), func(router.Route, string) string {
+	for range routertest.Requests(t, r.Routes(), func(router.Route, string) string {
 		calls++
 		return ""
 	}) {

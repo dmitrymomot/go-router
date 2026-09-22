@@ -547,27 +547,12 @@ func Events(r *Response) []Event {
 	return events
 }
 
-// AssertEvents fails the test unless the body holds exactly the events want,
-// in order.
-func AssertEvents(tb testing.TB, r *Response, want ...Event) {
-	tb.Helper()
-	got := Events(r)
-	if len(got) != len(want) {
-		tb.Fatalf("%d events, want %d; body: %s", len(got), len(want), r.Body)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			tb.Fatalf("event %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}
-
 const updateFlagName = "routertest.update"
 
 const plainUpdateFlagName = "update"
 
 var updateGolden = flag.Bool(updateFlagName, false,
-	"rewrite the golden files that routertest.AssertGolden reads")
+	"rewrite the golden files that routertest.Expect.Golden reads")
 
 func goldenUpdate() bool {
 	if *updateGolden {
@@ -584,55 +569,22 @@ func closeGoldenRoot(tb testing.TB, root *os.Root) {
 	}
 }
 
-// AssertGolden compares got with the file testdata/name, and fails the test on
-// any difference. Run the test with -routertest.update, or with an -update
-// flag of your own, to write the file instead.
-//
-// name is a slash path inside testdata, and it cannot leave that directory.
-func AssertGolden(tb testing.TB, name string, got []byte) {
+// writeGolden writes body to testdata/rel, making the directories it needs
+// without leaving testdata.
+func writeGolden(tb testing.TB, rel string, body []byte) error {
 	tb.Helper()
-
-	rel, err := goldenName(name)
-	if err != nil {
-		tb.Fatalf("routertest: invalid golden file name %q: %v", name, err)
-		return
-	}
-	file := filepath.Join("testdata", rel)
-	if goldenUpdate() {
-		if err := os.MkdirAll("testdata", 0o755); err != nil {
-			tb.Fatalf("routertest: make the golden directory: %v", err)
-			return
-		}
-		root, err := os.OpenRoot("testdata")
-		if err != nil {
-			tb.Fatalf("routertest: open the golden directory: %v", err)
-			return
-		}
-		defer closeGoldenRoot(tb, root)
-		if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
-			tb.Fatalf("routertest: make the golden directory: %v", err)
-			return
-		}
-		if err := root.WriteFile(rel, got, 0o644); err != nil {
-			tb.Fatalf("routertest: write %s: %v", file, err)
-		}
-		return
+	if err := os.MkdirAll("testdata", 0o755); err != nil {
+		return err
 	}
 	root, err := os.OpenRoot("testdata")
 	if err != nil {
-		tb.Fatalf("routertest: open the golden directory: %v", err)
-		return
+		return err
 	}
 	defer closeGoldenRoot(tb, root)
-	want, err := root.ReadFile(rel)
-	if err != nil {
-		tb.Fatalf("routertest: read %s: %v; run the test with -%s to write it", file, err, updateFlagName)
-		return
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return err
 	}
-	if !bytes.Equal(got, want) {
-		tb.Fatalf("%s differs; run the test with -%s to accept the change\ngot:\n%s\nwant:\n%s",
-			file, updateFlagName, got, want)
-	}
+	return root.WriteFile(rel, body, 0o644)
 }
 
 func goldenName(name string) (string, error) {

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/dmitrymomot/go-router/internal/headcheck"
+
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/routertest"
 	"github.com/dmitrymomot/go-router/static"
@@ -161,13 +163,13 @@ func TestMountInsideAHostScope(t *testing.T) {
 }
 
 // The asset server decides HEAD in two places, its own method check and the
-// reader it hands to http.ServeContent. Both answer
-// routertest.AssertHEADMatchesGET's rule.
+// reader it hands to http.ServeContent. Both answer to the rule of
+// headcheck.MatchesGET.
 func TestMountAnswersHEADWithTheHeadersOfTheGET(t *testing.T) {
 	r := newRouter()
 	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"})
 	static.Mount(r, a)
 
-	routertest.AssertHEADMatchesGET(t, r, a.URL("css/app.css"))
-	routertest.AssertHEADMatchesGET(t, r, "/static/missing.css")
+	headcheck.MatchesGET(t, r, a.URL("css/app.css"))
+	headcheck.MatchesGET(t, r, "/static/missing.css")
 }

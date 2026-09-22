@@ -3,14 +3,14 @@ package router
 import (
 	"context"
 	"io"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
+
+	"github.com/dmitrymomot/go-router/internal/headcheck"
 )
 
 // HEAD is decided in its own place on every response path: Blob, String,
@@ -23,10 +23,8 @@ import (
 //	A HEAD reply carries the status and the headers its GET would carry, and
 //	no body.
 //
-// routertest.AssertHEADMatchesGET spells the same rule for the packages that
-// cannot import this one, and the gzip middleware and the asset server answer
-// it there. assertHEADMatchesGET below is that check again, because routertest
-// imports this package.
+// headcheck.MatchesGET spells the rule once, for this package and for the
+// event stream, the gzip middleware and the asset server in theirs.
 type headCase struct {
 	name   string
 	setup  func(t *testing.T, r *Router[*tctx])
@@ -194,20 +192,7 @@ func TestHEADCarriesTheHeadersOfItsGETAndNoBody(t *testing.T) {
 			if tc.check != nil {
 				tc.check(t, get)
 			}
-			assertHEADMatchesGET(t, get, head)
+			headcheck.Compare(t, target, get, head)
 		})
-	}
-}
-
-func assertHEADMatchesGET(t *testing.T, get, head *httptest.ResponseRecorder) {
-	t.Helper()
-	if head.Code != get.Code {
-		t.Errorf("status = %d, want the %d of the GET", head.Code, get.Code)
-	}
-	if head.Body.Len() != 0 {
-		t.Errorf("body = %q, want none", head.Body.String())
-	}
-	if !maps.EqualFunc(head.Header(), get.Header(), slices.Equal) {
-		t.Errorf("headers = %v, want the %v of the GET", head.Header(), get.Header())
 	}
 }

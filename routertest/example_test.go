@@ -170,6 +170,9 @@ func ExampleClient_Follow() {
 // Requests sends one request to each route, here to prove that every route
 // but the health check asks for a key.
 func ExampleRequests() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
 	r := router.New(newContext)
 	r.Host("api.example.com", func(api *router.Router[*appContext]) {
 		api.GET("/v1/health", func(c *appContext) error { return c.NoContent(http.StatusNoContent) })
@@ -188,12 +191,9 @@ func ExampleRequests() {
 	})
 
 	routes := slices.DeleteFunc(r.Routes(), func(rt router.Route) bool { return rt.Pattern == "/v1/health" })
-	for rt, req := range routertest.Requests(routes, nil) {
-		fmt.Println(rt.Method, rt.Pattern, "->", routertest.Serve(r, req).StatusCode)
+	for _, req := range routertest.Requests(tb, routes, nil) {
+		routertest.Serve(r, req).Expect(tb).Status(http.StatusUnauthorized)
 	}
-	// Output:
-	// DELETE /v1/users/{id:int} -> 401
-	// GET /v1/users/{id:int} -> 401
 }
 
 // SignedCookie reads a signed cookie back through the codec that set it.
