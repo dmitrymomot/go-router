@@ -81,7 +81,8 @@ func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 
 // BindForm fills a T from the form of the body and validates it. It reads a
 // URL-encoded form and a multipart one alike, through the `form` tag. Parsing
-// happens once per request, so a later form read costs nothing.
+// happens once per request, so a later form read costs nothing. A bool field
+// reads a checkbox: "on" when it is checked, and false when it is absent.
 func (b *Base) BindForm[T any]() (T, error) {
 	var v T
 	if err := b.parseForm(); err != nil {
@@ -281,7 +282,8 @@ func removeSpilledParts(req *http.Request) {
 
 // ParamAs reads route parameter name as a T. T may be any string, bool,
 // integer, float, time.Duration or time.Time, or a type that implements
-// encoding.TextUnmarshaler.
+// encoding.TextUnmarshaler. A bool takes what strconv.ParseBool takes, and
+// also on and off.
 //
 // A missing parameter and one that does not parse each report an
 // [ErrBadRequest].
@@ -341,8 +343,8 @@ func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 
 // ParseValue parses s as a T. T may be any string, bool, integer, float,
 // time.Duration or time.Time, or a type that implements
-// encoding.TextUnmarshaler. The error is the parse failure itself, without a
-// status.
+// encoding.TextUnmarshaler. A bool also takes on and off, as a checkbox sends
+// them. The error is the parse failure itself, without a status.
 func ParseValue[T any](s string) (T, error) {
 	var v T
 	if err := setScalar(reflect.ValueOf(&v).Elem(), s, ""); err != nil {

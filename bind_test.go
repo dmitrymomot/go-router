@@ -1276,3 +1276,90 @@ func TestBindPointerWithANullBodyIsRefused(t *testing.T) {
 		t.Errorf("null body = %d %q, want 400", rec.Code, rec.Body.String())
 	}
 }
+
+// A checkbox with no value attribute sends "on" when it is checked and
+// nothing when it is not.
+func TestBindFormReadsACheckbox(t *testing.T) {
+	type prefs struct {
+		News   *bool `form:"news"`
+		Accept bool  `form:"accept"`
+	}
+
+	r := newTestRouter()
+	r.POST("/prefs", func(c *tctx) error {
+		in, err := c.BindForm[prefs]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%v/%v", in.Accept, in.News)
+	})
+
+	tests := []struct {
+		form url.Values
+		want string
+	}{
+		{form: url.Values{"accept": {"on"}}, want: "true/<nil>"},
+		{form: url.Values{"accept": {"off"}}, want: "false/<nil>"},
+		{form: url.Values{}, want: "false/<nil>"},
+	}
+	for _, tt := range tests {
+		rec := postForm(r, "/prefs", tt.form)
+		if rec.Code != http.StatusOK || rec.Body.String() != tt.want {
+			t.Errorf("BindForm(%s) = %d %q, want 200 %q", tt.form.Encode(), rec.Code, rec.Body.String(), tt.want)
+		}
+	}
+}
+
+func TestBindQueryReadsACheckbox(t *testing.T) {
+	type filter struct {
+		Open bool `query:"open"`
+	}
+
+	r := newTestRouter()
+	r.GET("/issues", func(c *tctx) error {
+		in, err := c.BindQuery[filter]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%v", in.Open)
+	})
+
+	for target, want := range map[string]string{
+		"/issues?open=on":  "true",
+		"/issues?open=OFF": "false",
+		"/issues":          "false",
+	} {
+		rec := do(r, http.MethodGet, target)
+		if rec.Code != http.StatusOK || rec.Body.String() != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", target, rec.Code, rec.Body.String(), want)
+		}
+	}
+}
+
+func TestFormAsReadsACheckbox(t *testing.T) {
+	r := newTestRouter()
+	r.POST("/prefs", func(c *tctx) error {
+		on, err := c.FormAs[bool]("accept")
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%v", on)
+	})
+
+	rec := postForm(r, "/prefs", url.Values{"accept": {"on"}})
+	if rec.Code != http.StatusOK || rec.Body.String() != "true" {
+		t.Errorf("FormAs[bool] of on = %d %q, want 200 %q", rec.Code, rec.Body.String(), "true")
+	}
+}
+
+func TestParseValueReadsOnAndOff(t *testing.T) {
+	for in, want := range map[string]bool{"on": true, "On": true, "off": false, "OFF": false} {
+		got, err := ParseValue[bool](in)
+		if err != nil || got != want {
+			t.Errorf("ParseValue[bool](%q) = %v, %v, want %v", in, got, err, want)
+		}
+	}
+	if _, err := ParseValue[bool]("yes"); err == nil {
+		t.Error("ParseValue[bool] accepted yes")
+	}
+}

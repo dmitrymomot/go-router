@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -149,6 +150,32 @@ func FuzzHTMXTargetID(f *testing.F) {
 		}
 		if len(id) > len(after) {
 			t.Errorf("TargetID() of %q = %q, longer than what follows the '#'", s, id)
+		}
+	})
+}
+
+func FuzzParseBool(f *testing.F) {
+	for _, seed := range []string{"on", "off", "true", "1", "yes", ""} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, s string) {
+		got, err := parseBool(s)
+		switch s {
+		case "on", "On", "ON":
+			if err != nil || !got {
+				t.Fatalf("parseBool(%q) = %v, %v, want true", s, got, err)
+			}
+			return
+		case "off", "Off", "OFF":
+			if err != nil || got {
+				t.Fatalf("parseBool(%q) = %v, %v, want false", s, got, err)
+			}
+			return
+		}
+		want, wantErr := strconv.ParseBool(s)
+		if got != want || (err == nil) != (wantErr == nil) {
+			t.Fatalf("parseBool(%q) = %v, %v; strconv.ParseBool says %v, %v", s, got, err, want, wantErr)
 		}
 	})
 }
