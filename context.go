@@ -58,13 +58,13 @@ type Base struct {
 	store       map[string]any
 	paramArr    [maxInlineParams]string
 	queryCache  url.Values
-	pattern     string
 	host        string
 	hostPattern string
 	rawTail     string
 	paramNames  []string
 	paramVals   []string
 	ropts       *routerOpts
+	route       *routeRecord
 
 	// One word rather than the fields it points to, which would push an
 	// embedder with a string of its own past 320 bytes and into the next size
@@ -128,7 +128,7 @@ func (b *Base) init(w http.ResponseWriter, r *http.Request) {
 		res = &b.resStorage
 	}
 	b.req, b.res = r, res
-	b.pattern, b.rawTail = "", ""
+	b.route, b.rawTail = nil, ""
 	b.paramNames, b.paramVals = nil, b.paramArr[:0]
 	b.host, b.hostKnown, b.hostPattern = "", false, ""
 	b.hostIdx = -1
@@ -198,8 +198,16 @@ func (b *Base) setHXError(err error) {
 	}
 }
 
-func (b *Base) setRoute(pattern string, names, vals []string) {
-	b.pattern = pattern
+// routeRecord is what a matched route publishes to its Base. Registration
+// builds it, and every request of the route shares it, so it never changes.
+// Base holds one pointer to it rather than the pattern string, which keeps an
+// embedder with a string of its own in the 320-byte size class.
+type routeRecord struct {
+	pattern string
+}
+
+func (b *Base) setRoute(rec *routeRecord, names, vals []string) {
+	b.route = rec
 	b.paramNames = names
 	b.paramVals = vals
 }
@@ -213,8 +221,12 @@ func SetRouteForTest(b *Base, pattern string, names, vals []string) {
 	if b == nil {
 		panic("router: SetRouteForTest needs a Base")
 	}
+	var rec *routeRecord
+	if pattern != "" {
+		rec = &routeRecord{pattern: pattern}
+	}
 	b.needsCleanup = true
-	b.setRoute(pattern, names, vals)
+	b.setRoute(rec, names, vals)
 }
 
 // SetCookieCodecForTest gives b the codec that [Router.CookieCodec] gives the
@@ -364,7 +376,12 @@ func (b *Base) Get(key string) (any, bool) {
 
 // RoutePattern reports the pattern that matched, such as "/users/{id}", or ""
 // when no route matched.
-func (b *Base) RoutePattern() string { return b.pattern }
+func (b *Base) RoutePattern() string {
+	if b.route == nil {
+		return ""
+	}
+	return b.route.pattern
+}
 
 // RouteHost reports the host pattern that matched, such as
 // "{tenant}.example.com", or "" when the route is not scoped to a host.

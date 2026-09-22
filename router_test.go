@@ -3199,3 +3199,61 @@ func TestGroupMiddlewareSkipsTheFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestRoutePatternUnchangedOnEveryPath(t *testing.T) {
+	var pre, pattern, reqPattern string
+	r := newTestRouter()
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			pre = c.RoutePattern()
+			return next(c)
+		}
+	})
+	record := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			pattern, reqPattern = c.RoutePattern(), c.Request().Pattern
+			return next(c)
+		}
+	}
+	r.Use(record)
+	r.GET("/users/{id}", echoRoute)
+	r.Route("/t/{tid}", func(g *Router[*tctx]) {
+		g.Use(record)
+		g.GET("/home", echoRoute)
+	})
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.Use(record)
+		h.GET("/only", echoRoute)
+	})
+
+	tests := []struct {
+		name, method, host, path string
+		code                     int
+		pattern, reqPattern      string
+	}{
+		{"a match", http.MethodGet, "", "/users/7", http.StatusOK, "/users/{id}", "/users/{id}"},
+		{"a 405", http.MethodPost, "", "/users/7", http.StatusMethodNotAllowed, "/users/{id}", "/users/{id}"},
+		{"an automatic OPTIONS", http.MethodOptions, "", "/users/7", http.StatusNoContent, "/users/{id}", "/users/{id}"},
+		{"a scope 404", http.MethodGet, "", "/t/acme/typo", http.StatusNotFound, "/t/{tid}", ""},
+		{"a root 404", http.MethodGet, "", "/typo", http.StatusNotFound, "", ""},
+		{"a host 404", http.MethodGet, "example.com", "/typo", http.StatusNotFound, "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pre, pattern, reqPattern = "unset", "unset", "unset"
+			rec := doHost(r, tc.method, tc.host, tc.path)
+			if rec.Code != tc.code {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.code)
+			}
+			if pre != "" {
+				t.Errorf("Pre saw RoutePattern %q, want none", pre)
+			}
+			if pattern != tc.pattern {
+				t.Errorf("RoutePattern = %q, want %q", pattern, tc.pattern)
+			}
+			if reqPattern != tc.reqPattern {
+				t.Errorf("Request().Pattern = %q, want %q", reqPattern, tc.reqPattern)
+			}
+		})
+	}
+}

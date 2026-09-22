@@ -1094,7 +1094,10 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	}
 	for _, ps := range pending {
 		segs, names, _ := parsePattern(ps.prefix, ps.classes) //nolint:errcheck // newChild rejected a bad prefix already.
-		s := &scopeFallback[C]{prefix: ps.prefix, names: names, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
+		s := &scopeFallback[C]{
+			prefix: ps.prefix, rec: &routeRecord{pattern: ps.prefix}, names: names, pattern: segs,
+			hostIdx: -1, depth: ps.depth, errorIdx: -1,
+		}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
@@ -1169,6 +1172,7 @@ func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
 
 type scopeFallback[C Context] struct {
 	prefix          string
+	rec             *routeRecord
 	names           []string
 	pattern         []segment
 	depth           int
@@ -1281,7 +1285,7 @@ func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) 
 		names = append(slices.Clip(b.paramNames), s.names...)
 	}
 	b.needsCleanup = true
-	b.setRoute(s.prefix, names, vals)
+	b.setRoute(s.rec, names, vals)
 }
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
@@ -1506,7 +1510,7 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		}
 		if host != nil {
 			b.hostIdx, b.hostPattern = host.idx, host.pattern
-			b.setRoute("", host.names, hostVals)
+			b.setRoute(nil, host.names, hostVals)
 		}
 	}
 
@@ -1546,8 +1550,8 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 				vals[len(vals)-1] = decoded
 			}
 		}
-		b.setRoute(n.pattern, n.names, vals)
-		req.Pattern = n.pattern
+		b.setRoute(n.rec, n.names, vals)
+		req.Pattern = n.rec.pattern
 		h := n.handler(req.Method)
 		if handleErrors {
 			return e.owner.dispatch(c, h)
@@ -1571,8 +1575,8 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 			e.selectErrorTarget(b, host, trimmed, escaped)
 		}
 		b.needsCleanup = true
-		b.setRoute(match.pattern, match.names, matched)
-		req.Pattern = match.pattern
+		b.setRoute(match.rec, match.names, matched)
+		req.Pattern = match.rec.pattern
 		b.res.Header().Set(HeaderAllow, e.allowHeader(&hostSt, &anySt))
 
 		_, _, notAllowed, options := e.fallbackChains(host, trimmed, escaped)

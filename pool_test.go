@@ -311,8 +311,8 @@ func TestBaseStaysInItsSizeClass(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) != 8 {
 		t.Skip("the size classes are those of a 64-bit platform")
 	}
-	if got := unsafe.Sizeof(Base{}); got != 304 {
-		t.Errorf("unsafe.Sizeof(Base{}) = %d, want 304", got)
+	if got := unsafe.Sizeof(Base{}); got != 296 {
+		t.Errorf("unsafe.Sizeof(Base{}) = %d, want 296", got)
 	}
 	if got := unsafe.Sizeof(tctx{}); got > 320 {
 		t.Errorf("a Base plus a string is %d bytes, want at most 320", got)
