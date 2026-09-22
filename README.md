@@ -65,7 +65,7 @@ func main() {
 
 Each line links to the example that proves it.
 
-- [Routes with parameters](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-package), including [a parameter inside a segment](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.GET-partialSegment) such as `/reports/rep-{date}.csv`, and [a class such as `{id:uuid}`](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.GET-paramClass) that turns a malformed id away with a 404.
+- [Routes with parameters](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-package), including [a parameter inside a segment](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.GET-PartialSegment) such as `/reports/rep-{date}.csv`, and [a class such as `{id:uuid}`](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.GET-ParamClass) that turns a malformed id away with a 404.
 - [Groups](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Route) and [mounts](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Mount), and [a mounted router with a context type of its own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.MountRouter).
 - [Routing on the host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Host), wildcards and host parameters included. The middleware of a host or of a scope with a prefix also runs for its 404 and 405 answers.
 - [Links built from the route patterns](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Expand), path, query or [host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-MustExpand), escaped and checked to route back.
