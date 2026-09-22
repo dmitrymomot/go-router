@@ -70,7 +70,6 @@ func newRouter(store *Store, codec *router.CookieCodec) *router.Router[Ctx] {
 
 	r.ErrorHandler(renderError)
 	r.CookieCodec(codec)
-	r.MaxBodyBytes(maxBodyBytes)
 
 	r.Use(
 		middleware.Logger[Ctx],
