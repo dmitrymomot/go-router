@@ -329,6 +329,9 @@ id, err := c.ParamAs[int64]("id")
 if errors.Is(err, router.ErrNotFound) {
 	return router.ErrBadRequest.WithMessage("the id is not a number")
 }
+if err != nil {
+	return err
+}
 ```
 
 Read a parameter the route may lack with `c.ParamOK(name)` or `c.ParamAsDefault(name, def)`. The fields of a `BindPath` error are in the cause: `router.FieldErrorsOf(err)`.
