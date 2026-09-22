@@ -176,10 +176,10 @@ type instance struct {
 
 func prepare(h http.Handler, cfg Config, opts []Option) (*instance, error) {
 	if h == nil {
-		return nil, errors.New("serve: Run needs a handler")
+		return nil, errors.New("serve: the server needs a handler")
 	}
 	if cfg.Listener == nil && cfg.Addr == "" {
-		return nil, errors.New("serve: Run needs Config.Addr or Config.Listener")
+		return nil, errors.New("serve: the server needs Config.Addr or Config.Listener")
 	}
 	if cfg.DrainDelay < 0 {
 		return nil, errors.New("serve: Config.DrainDelay is negative")
