@@ -487,31 +487,6 @@ func FlashCookie(cc *router.CookieCodec, flashes ...router.Flash) RequestOption 
 	}
 }
 
-// AssertStatus fails the test unless the status is want. The message carries
-// the body, which usually says why.
-func (r *Response) AssertStatus(tb testing.TB, want int) {
-	tb.Helper()
-	if r.StatusCode != want {
-		tb.Fatalf("status = %d, want %d; body: %s", r.StatusCode, want, r.Body)
-	}
-}
-
-// AssertBody fails the test unless the body is exactly want.
-func (r *Response) AssertBody(tb testing.TB, want string) {
-	tb.Helper()
-	if got := r.String(); got != want {
-		tb.Fatalf("body = %q, want %q", got, want)
-	}
-}
-
-// AssertHeader fails the test unless the response header key is want.
-func (r *Response) AssertHeader(tb testing.TB, key, want string) {
-	tb.Helper()
-	if got := r.Header.Get(key); got != want {
-		tb.Fatalf("header %s = %q, want %q", key, got, want)
-	}
-}
-
 // NewServer starts a real server for h and stops it when the test ends. Use it
 // where the recorder is not enough, such as a stream the test reads as it
 // arrives.
