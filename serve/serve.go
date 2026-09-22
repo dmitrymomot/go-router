@@ -1,4 +1,4 @@
-// Package serve runs an HTTP server that stops when its context does.
+// Package serve runs HTTP servers that stop when their context does.
 package serve
 
 import (
@@ -35,6 +35,19 @@ const DefaultReadHeaderTimeout = 10 * time.Second
 // OnListen runs with the address the server actually listens on, which names
 // the port that ":0" chose. OnServer sees the [http.Server] before it serves,
 // for a setting this Config does not carry; an error from it stops Run.
+//
+// Once ctx ends, Run calls OnDrain and keeps answering for DrainDelay, so that
+// a load balancer polling a readiness probe takes the server out of rotation
+// before the drain starts. It then drains within ShutdownTimeout. OnDrain runs
+// on its own goroutine while the handlers still answer: the flag it flips has
+// to be atomic, and an OnDrain that blocks pushes back both the delay and the
+// drain. A server whose serving fails closes at once, with no OnDrain and no
+// delay. A negative DrainDelay is an error.
+//
+// Keep-alives stay on during the delay, because closing idle connections while
+// the balancer still sends would fail its requests. To turn them off anyway,
+// keep the server from OnServer and call SetKeepAlivesEnabled(false) on it
+// from OnDrain.
 type Config struct {
 	Addr              string
 	Network           string
@@ -44,9 +57,11 @@ type Config struct {
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
+	DrainDelay        time.Duration
 	ShutdownTimeout   time.Duration
 	Logger            *slog.Logger
 	OnListen          func(net.Addr)
+	OnDrain           func()
 	OnServer          func(*http.Server) error
 }
 
@@ -106,17 +121,19 @@ func CertFS(fsys fs.FS, certPath, keyPath string) Option {
 	}
 }
 
-// Run serves h until ctx ends, then drains the requests in flight and reports
-// once the server has stopped. A cancelled ctx is the ordinary way to stop, so
-// Run reports nil for it.
+// Run serves h until ctx ends, waits Config.DrainDelay, then drains the
+// requests in flight and reports once the server has stopped. A cancelled ctx
+// is the ordinary way to stop, so Run reports nil for it.
 //
 // Any certificate among opts turns the server into an HTTPS one, over TLS 1.3
 // and h2. A Config.TLSConfig of your own wins, and the certificates join the
 // ones it already carries.
 //
 // Run reports an error for a nil context, a nil handler, a Config that names
-// neither an address nor a listener, a nil or failing option, a listener it
-// cannot open, and a drain that runs out of time.
+// neither an address nor a listener, a negative DrainDelay, a nil or failing
+// option, a TLS config with no certificate, a listener it cannot open, and a
+// drain that runs out of time. It checks the certificate after OnServer and
+// before it listens.
 func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error {
 	// Run closes a caller-supplied listener on the serving path, so it owns it
 	// from here on and has to close it on every path. It used to return early
@@ -129,62 +146,114 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	if ctx == nil {
 		return errors.New("serve: Run needs a context")
 	}
+	in, err := prepare(h, cfg, opts)
+	if err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := in.build(); err != nil {
+		return err
+	}
+	if err := in.open(ctx); err != nil {
+		return err
+	}
+	defer in.closeOwn()
+	if cfg.OnListen != nil {
+		cfg.OnListen(in.ln.Addr())
+	}
+	return in.serve(ctx)
+}
+
+// instance is one server on its way from a Config to serving. [Run] and
+// [RunAll] take each server through the same steps: prepare, build, open and
+// serve.
+type instance struct {
+	h     http.Handler
+	srv   *http.Server
+	ln    net.Listener
+	certs []tls.Certificate
+	cfg   Config
+}
+
+func prepare(h http.Handler, cfg Config, opts []Option) (*instance, error) {
 	if h == nil {
-		return errors.New("serve: Run needs a handler")
+		return nil, errors.New("serve: the server needs a handler")
 	}
 	if cfg.Listener == nil && cfg.Addr == "" {
-		return errors.New("serve: Run needs Config.Addr or Config.Listener")
+		return nil, errors.New("serve: the server needs Config.Addr or Config.Listener")
+	}
+	if cfg.DrainDelay < 0 {
+		return nil, errors.New("serve: Config.DrainDelay is negative")
 	}
 
 	var o options
 	for i, opt := range opts {
 		if opt == nil {
-			return fmt.Errorf("serve: option %d is nil", i)
+			return nil, fmt.Errorf("serve: option %d is nil", i)
 		}
 		if err := opt(&o); err != nil {
-			return err
+			return nil, err
 		}
 	}
+	return &instance{h: h, cfg: cfg, certs: o.certs}, nil
+}
 
-	if ctx.Err() != nil {
-		return nil
-	}
-
-	logger := cfg.Logger
+func (in *instance) build() error {
+	logger := in.cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           h,
-		TLSConfig:         tlsConfig(cfg, o.certs),
-		ReadHeaderTimeout: headerTimeout(cfg.ReadHeaderTimeout),
-		ReadTimeout:       cfg.ReadTimeout,
-		WriteTimeout:      cfg.WriteTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
+	in.srv = &http.Server{
+		Addr:              in.cfg.Addr,
+		Handler:           in.h,
+		TLSConfig:         tlsConfig(in.cfg, in.certs),
+		ReadHeaderTimeout: headerTimeout(in.cfg.ReadHeaderTimeout),
+		ReadTimeout:       in.cfg.ReadTimeout,
+		WriteTimeout:      in.cfg.WriteTimeout,
+		IdleTimeout:       in.cfg.IdleTimeout,
 
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
-	if cfg.OnServer != nil {
-		if err := cfg.OnServer(srv); err != nil {
+	if in.cfg.OnServer != nil {
+		if err := in.cfg.OnServer(in.srv); err != nil {
 			return err
 		}
 	}
+	if in.srv.TLSConfig != nil && !hasCertificate(in.srv.TLSConfig) {
+		return errors.New("serve: the TLS config has no certificate; add one through Config.TLSConfig, an option or OnServer")
+	}
+	return nil
+}
 
-	ln, err := listen(ctx, cfg)
+// hasCertificate follows the rule of [http.Server.ServeTLS], which Run calls
+// with no certificate files: the config has to carry a certificate of its own.
+// Keep it in step with configHasCert in net/http.
+func hasCertificate(c *tls.Config) bool {
+	return len(c.Certificates) > 0 || c.GetCertificate != nil || c.GetConfigForClient != nil
+}
+
+func (in *instance) open(ctx context.Context) error {
+	ln, err := listen(ctx, in.cfg)
 	if err != nil {
 		return err
 	}
-	if cfg.Listener == nil {
-		defer ln.Close() //nolint:errcheck // The listener is going away either way.
-	}
+	in.ln = ln
+	return nil
+}
 
-	if cfg.OnListen != nil {
-		cfg.OnListen(ln.Addr())
+// closeOwn closes the listener that open opened. A listener of the Config is
+// left to whoever owns it.
+func (in *instance) closeOwn() {
+	if in.ln != nil && in.cfg.Listener == nil {
+		in.ln.Close() //nolint:errcheck // The listener is going away either way.
 	}
+}
 
+func (in *instance) serve(ctx context.Context) error {
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
 	var drainErr error
@@ -196,13 +265,13 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 		case <-stopped:
 			return
 		}
-		drainErr = drain(ctx, srv, cfg.ShutdownTimeout)
+		drainErr = in.drain(ctx, stopped)
 	}()
 
-	err = serveOn(srv, ln)
+	err := serveOn(in.srv, in.ln)
 	var closeErr error
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		if closeErr = srv.Close(); closeErr != nil {
+		if closeErr = in.srv.Close(); closeErr != nil {
 			closeErr = fmt.Errorf("serve: close connections after serving failed: %w", closeErr)
 		}
 	}
@@ -254,7 +323,26 @@ func serveOn(srv *http.Server, ln net.Listener) error {
 	return srv.Serve(ln)
 }
 
-func drain(ctx context.Context, srv *http.Server, timeout time.Duration) error {
+// drain calls OnDrain, waits DrainDelay while the server still answers, then
+// shuts it down. A server whose serving fails during the delay is already
+// closed, so there is nothing left to drain.
+func (in *instance) drain(ctx context.Context, stopped <-chan struct{}) error {
+	if in.cfg.OnDrain != nil {
+		in.cfg.OnDrain()
+	}
+	if d := in.cfg.DrainDelay; d > 0 {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-stopped:
+			return nil
+		}
+	}
+	return shutdown(ctx, in.srv, in.cfg.ShutdownTimeout)
+}
+
+func shutdown(ctx context.Context, srv *http.Server, timeout time.Duration) error {
 	if timeout < 0 {
 		if err := srv.Close(); err != nil {
 			return fmt.Errorf("serve: close the connections: %w", err)
