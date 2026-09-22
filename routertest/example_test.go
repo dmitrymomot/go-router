@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"testing"
 	"time"
 
@@ -145,6 +146,35 @@ func ExampleClient_Follow() {
 	cl := routertest.NewClient(tb, r)
 	res := cl.Do(http.MethodPost, "/users")
 	cl.Follow(res).Expect(tb).Status(http.StatusOK).Body("user 7")
+}
+
+// Requests sends one request to each route, here to prove that every route
+// but the health check asks for a key.
+func ExampleRequests() {
+	r := router.New(newContext)
+	r.Host("api.example.com", func(api *router.Router[*appContext]) {
+		api.GET("/v1/health", func(c *appContext) error { return c.NoContent(http.StatusNoContent) })
+		api.Route("/v1", func(v1 *router.Router[*appContext]) {
+			v1.Use(func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+				return func(c *appContext) error {
+					if c.Request().Header.Get("X-Api-Key") != "secret" {
+						return router.ErrUnauthorized
+					}
+					return next(c)
+				}
+			})
+			v1.GET("/users/{id:int}", showUser)
+			v1.DELETE("/users/{id:int}", showUser)
+		})
+	})
+
+	routes := slices.DeleteFunc(r.Routes(), func(rt router.Route) bool { return rt.Pattern == "/v1/health" })
+	for rt, req := range routertest.Requests(routes, nil) {
+		fmt.Println(rt.Method, rt.Pattern, "->", routertest.Serve(r, req).StatusCode)
+	}
+	// Output:
+	// DELETE /v1/users/{id:int} -> 401
+	// GET /v1/users/{id:int} -> 401
 }
 
 // SignedCookie reads a signed cookie back through the codec of the router
