@@ -18,11 +18,12 @@ import (
 // Query().Get reads the target's value, and a handler that reads every value
 // sees the request's too. A value the target pattern refuses, or one that would
 // make the Location start with "//" or hold a "." or ".." segment, answers
-// [ErrNotFound]. A method-preserving
-// move of a POST needs a handler that calls [Base.Redirect].
+// [ErrNotFound]. A method-preserving move of a POST needs a handler that calls
+// [Base.Redirect].
 //
 // Redirect panics on a status that is not a redirect, a target that is not a
-// path, a target that names a parameter the route lacks or that only some hosts
+// path, a target that starts with "//" or holds a "." or ".." segment of its
+// own, a target that names a parameter the route lacks or that only some hosts
 // of the scope declare, a target equal to the route, and wherever Handle does.
 func (r *Router[C]) Redirect(pattern, target string, status int) {
 	if !isRedirectStatus(status) {
@@ -34,6 +35,17 @@ func (r *Router[C]) Redirect(pattern, target string, status int) {
 	tmpl, err := compileTemplate(target, r.class)
 	if err != nil {
 		panic(err.Error())
+	}
+	// These would fail the check in expand on every request, whatever the
+	// values, so they belong to the call.
+	for i, sg := range tmpl.segs {
+		switch {
+		case sg.kind != segStatic:
+		case i == 0 && sg.value == "":
+			panic(fmt.Sprintf("router: the redirect target %q starts with \"//\", which a browser reads as another host", target))
+		case sg.value == "." || sg.value == "..":
+			panic(fmt.Sprintf("router: the redirect target %q holds the segment %q, which a browser resolves to another path", target, sg.value))
+		}
 	}
 	full := joinPattern(r.scopePrefix(), pattern)
 	segs, names, err := parsePattern(full, r.class)
