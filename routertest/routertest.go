@@ -3,6 +3,7 @@ package routertest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -39,6 +40,23 @@ func Host(host string) RequestOption {
 	return func(r *http.Request) { r.Host = host }
 }
 
+// Context gives the request ctx as its context, such as the t.Context() of the
+// test.
+//
+// Context panics if ctx is nil.
+func Context(ctx context.Context) RequestOption {
+	if ctx == nil {
+		panic("routertest: Context needs a context")
+	}
+	return func(r *http.Request) { *r = *r.WithContext(ctx) }
+}
+
+// RemoteAddr sets the "host:port" the request comes from, for a handler that
+// keys on the caller.
+func RemoteAddr(addr string) RequestOption {
+	return func(r *http.Request) { r.RemoteAddr = addr }
+}
+
 // HTMX marks the request as one htmx 4 made to swap one element: it sets
 // HX-Request and HX-Request-Type: partial. Add
 // Header(router.HeaderHXRequestType, "full") for a boosted link or a history
@@ -50,18 +68,22 @@ func HTMX() RequestOption {
 	}
 }
 
-// A nil cookie is refused here: http.Request.AddCookie takes it and adds
-// nothing, so the request would go out short of a cookie and say nothing.
+// Cookie adds c to the request.
 func Cookie(c *http.Cookie) RequestOption {
+	// A nil cookie is refused here: http.Request.AddCookie takes it and adds
+	// nothing, so the request would go out short of a cookie and say nothing.
 	if c == nil {
 		panic("routertest: Cookie needs a cookie")
 	}
 	return func(r *http.Request) { r.AddCookie(c) }
 }
 
-// A nil reader is refused here: it would reach the handler as a body that
-// panics on the first read, a long way from the call that built it.
+// Body sends r as the body, under contentType. A reader is read once, so a
+// Body shared by several requests, such as a [Client] default or an option of
+// [Requests], reaches only the first.
 func Body(contentType string, r io.Reader) RequestOption {
+	// A nil reader is refused here: it would reach the handler as a body that
+	// panics on the first read, a long way from the call that built it.
 	if r == nil {
 		panic("routertest: Body needs a reader")
 	}
@@ -157,7 +179,9 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 }
 
 // Request builds a request for a handler under test. target is a path, and it
-// may carry a query.
+// may carry a query. It may also be an absolute URL: its host becomes the Host
+// of the request, and https marks the request as one over TLS. The request
+// carries context.Background unless an option gives it another.
 func Request(method, target string, opts ...RequestOption) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	for _, opt := range opts {

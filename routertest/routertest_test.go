@@ -1,6 +1,7 @@
 package routertest_test
 
 import (
+	"context"
 	"encoding/json/v2"
 	"errors"
 	"flag"
@@ -366,6 +367,7 @@ func TestRequestHelpersRejectNilInputs(t *testing.T) {
 		{name: "body reader", call: func() { routertest.Body("text/plain", nil) }},
 		{name: "cookie", call: func() { routertest.Cookie(nil) }},
 		{name: "recorder", call: func() { routertest.Recorded(nil) }},
+		{name: "context", call: func() { routertest.Context(nilContext) }},
 		{name: "cookie codec", call: func() { routertest.WithCookieCodec(nil) }},
 		{name: "Serve handler", call: func() { routertest.Serve(nil, routertest.Request(http.MethodGet, "/")) }},
 		{name: "Serve request", call: func() { routertest.Serve(http.NotFoundHandler(), nil) }},
@@ -426,6 +428,57 @@ func TestServeKeepsTheRequest(t *testing.T) {
 	if err != nil || loc.Path != "/a/next" {
 		t.Errorf("Location = %v, %v; want /a/next", loc, err)
 	}
+}
+
+// nilContext is passed where a context is refused, so staticcheck does not
+// read the nil as a mistake.
+var nilContext context.Context
+
+type ctxKey struct{}
+
+func TestContextOptionReplacesTheRequestContext(t *testing.T) {
+	ctx := context.WithValue(t.Context(), ctxKey{}, "tenant-7")
+
+	req := routertest.Request(http.MethodGet, "/", routertest.Context(ctx))
+	if req.Context() != ctx {
+		t.Error("the request does not carry the context of the option")
+	}
+
+	r := router.New(newContext)
+	r.GET("/", func(c *appContext) error {
+		v, _ := c.Value(ctxKey{}).(string)
+		return c.String(http.StatusOK, v)
+	})
+	routertest.Get(r, "/", routertest.Context(ctx)).Expect(t).Status(http.StatusOK).Body("tenant-7")
+}
+
+func TestRequestKeepsTheBackgroundContext(t *testing.T) {
+	if ctx := routertest.Request(http.MethodGet, "/").Context(); ctx != context.Background() {
+		t.Errorf("Request context = %v, want context.Background", ctx)
+	}
+	var seen context.Context
+	h := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { seen = r.Context() })
+	for _, send := range []func(){
+		func() { routertest.Get(h, "/") },
+		func() { routertest.Do(h, http.MethodPost, "/") },
+	} {
+		seen = nil
+		send()
+		if seen != context.Background() {
+			t.Errorf("handler context = %v, want context.Background", seen)
+		}
+	}
+}
+
+func TestRemoteAddrOption(t *testing.T) {
+	req := routertest.Request(http.MethodGet, "/", routertest.RemoteAddr("203.0.113.7:4321"))
+	if req.RemoteAddr != "203.0.113.7:4321" {
+		t.Errorf("RemoteAddr = %q", req.RemoteAddr)
+	}
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.RemoteAddr) })
+	routertest.Get(h, "/", routertest.RemoteAddr("203.0.113.7:4321")).Expect(t).Body("203.0.113.7:4321")
+	routertest.Get(h, "/").Expect(t).Body("192.0.2.1:1234")
 }
 
 func TestContextHelpersRejectNilInputs(t *testing.T) {

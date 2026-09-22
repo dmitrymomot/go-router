@@ -1,6 +1,7 @@
 package routertest_test
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -53,6 +54,35 @@ func ExampleNewContext() {
 	if got := rec.Body.String(); got != "user 7" {
 		tb.Errorf("body = %q, want %q", got, "user 7")
 	}
+}
+
+type tenantKey struct{}
+
+// Context gives the request a context of its own, such as one that carries
+// what a middleware would have put there.
+func ExampleContext() {
+	r := router.New(newContext)
+	r.GET("/whoami", func(c *appContext) error {
+		return c.Stringf(http.StatusOK, "tenant %v", c.Value(tenantKey{}))
+	})
+
+	ctx := context.WithValue(context.Background(), tenantKey{}, "acme")
+	fmt.Println(routertest.Get(r, "/whoami", routertest.Context(ctx)))
+	// Output:
+	// tenant acme
+}
+
+// RemoteAddr sets the address the request comes from, for a handler or a
+// middleware that keys on the caller.
+func ExampleRemoteAddr() {
+	r := router.New(newContext)
+	r.GET("/ip", func(c *appContext) error {
+		return c.String(http.StatusOK, c.Request().RemoteAddr)
+	})
+
+	fmt.Println(routertest.Get(r, "/ip", routertest.RemoteAddr("203.0.113.7:54321")))
+	// Output:
+	// 203.0.113.7:54321
 }
 
 // Expect chains the checks of one answer. Status and Redirect stop the test on
