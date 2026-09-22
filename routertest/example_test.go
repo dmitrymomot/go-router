@@ -55,6 +55,22 @@ func ExampleNewContext() {
 	}
 }
 
+// Expect chains the checks of one answer. Status and Redirect stop the test on
+// a miss; the other checks report it and go on.
+func ExampleResponse_Expect() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
+	r := router.New(newContext)
+	r.GET("/users/{id}", showUser)
+
+	routertest.Get(r, "/users/7").Expect(tb).
+		Status(http.StatusOK).
+		ContentType(router.MIMETextPlain).
+		Contains("user 7").
+		NotContains("error")
+}
+
 // SignedCookie reads a signed cookie back through the codec of the router
 // that set it.
 func ExampleSignedCookie() {

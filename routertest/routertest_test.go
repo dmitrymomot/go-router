@@ -840,10 +840,14 @@ func TestAssertGoldenDoesNotFollowAnEscapingSymlink(t *testing.T) {
 	}
 }
 
+// recordingTB keeps what a helper reports instead of failing the test. Its
+// Fatalf does not stop, so a helper goes on past a fatal miss.
 type recordingTB struct {
 	testing.TB
-	failed bool
 	msg    string
+	fatals []string
+	errors []string
+	failed bool
 }
 
 func (tb *recordingTB) Helper() {}
@@ -851,6 +855,12 @@ func (tb *recordingTB) Helper() {}
 func (tb *recordingTB) Fatalf(format string, args ...any) {
 	tb.failed = true
 	tb.msg = fmt.Sprintf(format, args...)
+	tb.fatals = append(tb.fatals, tb.msg)
+}
+
+func (tb *recordingTB) Errorf(format string, args ...any) {
+	tb.failed = true
+	tb.errors = append(tb.errors, fmt.Sprintf(format, args...))
 }
 
 var cookieKey = []byte(strings.Repeat("k", router.MinCookieKeyLen))
