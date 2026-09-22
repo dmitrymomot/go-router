@@ -81,8 +81,8 @@ func (b *Base) Flashes() []Flash {
 	if cc == nil {
 		return nil
 	}
-	raw, ok := b.flashCookie(cc)
-	if !ok || raw == "" {
+	flashes, ok := b.flashCookie(cc)
+	if !ok {
 		return nil
 	}
 	b.Vary(HeaderCookie)
@@ -91,48 +91,50 @@ func (b *Base) Flashes() []Flash {
 	} else {
 		b.dropFlashCookie()
 	}
-	return decodeFlashes(cc, raw)
+	return flashes
 }
 
 func (b *Base) flashes(cc *CookieCodec) []Flash {
-	raw, ok := b.flashCookie(cc)
-	if !ok {
-		return nil
-	}
-	return decodeFlashes(cc, raw)
+	flashes, _ := b.flashCookie(cc)
+	return flashes
 }
 
-func decodeFlashes(cc *CookieCodec, raw string) []Flash {
-	data, err := cc.Decode(FlashCookieName, raw)
-	if err != nil {
-		return nil
+// flashCookie reports the messages of the flash cookie, verified once. ok
+// reports a cookie that holds a value, verified or not, which Flashes clears.
+// It reads the response before the request, so a second call sees what the
+// first one wrote rather than handing the same messages out twice.
+func (b *Base) flashCookie(cc *CookieCodec) (flashes []Flash, ok bool) {
+	lines := b.res.Header()[headerSetCookie]
+	for _, line := range slices.Backward(lines) {
+		if c, found := parseFlashLine(line); found {
+			if c.Value == "" {
+				return nil, false
+			}
+			data, err := cc.Decode(FlashCookieName, c.Value)
+			if err != nil {
+				return nil, true
+			}
+			return unmarshalFlashes(data), true
+		}
 	}
+	cookies := b.req.CookiesNamed(FlashCookieName)
+	if len(cookies) == 0 {
+		return nil, false
+	}
+	for _, c := range cookies {
+		if data, err := cc.Decode(FlashCookieName, c.Value); err == nil {
+			return unmarshalFlashes(data), true
+		}
+	}
+	return nil, cookies[0].Value != ""
+}
+
+func unmarshalFlashes(data []byte) []Flash {
 	var flashes []Flash
 	if err := json.Unmarshal(data, &flashes); err != nil {
 		return nil
 	}
 	return flashes
-}
-
-// Reads the response before the request, so a second call sees what the first
-// one wrote rather than handing the same messages out twice.
-func (b *Base) flashCookie(cc *CookieCodec) (string, bool) {
-	lines := b.res.Header()[headerSetCookie]
-	for _, line := range slices.Backward(lines) {
-		if c, ok := parseFlashLine(line); ok {
-			return c.Value, true
-		}
-	}
-	cookies := b.req.CookiesNamed(FlashCookieName)
-	if len(cookies) == 0 {
-		return "", false
-	}
-	for _, c := range cookies {
-		if _, err := cc.Decode(FlashCookieName, c.Value); err == nil {
-			return c.Value, true
-		}
-	}
-	return cookies[0].Value, true
 }
 
 func (b *Base) writeFlashCookie(c *http.Cookie) {
