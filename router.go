@@ -180,9 +180,18 @@ func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 // "{name...}" takes the rest of the path. A parameter may sit inside a
 // segment, as in "/reports/rep-{date}.csv".
 //
-// Handle panics on an empty method, a nil handler, a nil middleware, a pattern
-// that conflicts with one already registered, or a call that arrives after the
-// router started serving.
+// A constraint after a colon narrows what a parameter admits, and a value
+// outside it does not match the route. A word names a class: "{id:int}" takes
+// ASCII digits, "{t:slug}" lowercase letters, digits and inner hyphens, and
+// "{id:uuid}" the canonical 8-4-4-4-12 form of a UUID in either case, and no
+// other spelling of one. Any other word panics; a literal word is spelled
+// "(?:word)". Anything else is a regular expression that must match the whole
+// value, as in "{id:[0-9]{6}}".
+//
+// Handle panics on an empty method, a nil handler, a nil middleware, a
+// constraint that names no class or does not compile, a pattern that conflicts
+// with one already registered, or a call that arrives after the router started
+// serving.
 func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.handle(method, pattern, h, mws)
 }
@@ -227,14 +236,14 @@ func (r *Router[C]) install(reg registration[C]) {
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
 		eng.anyHostRoutes = true
-		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache); err != nil {
+		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache, builtinClass); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, nil, full)
 		return
 	}
 	for _, e := range entries {
-		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache); err != nil {
+		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache, builtinClass); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, e, full)
@@ -428,7 +437,7 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 		panic("router: cannot create a scope after the router started serving")
 	}
 	r.mustBeOpen("open a scope")
-	if _, _, err := parsePattern(prefix); err != nil {
+	if _, _, err := parsePattern(prefix, builtinClass); err != nil {
 		panic(err.Error())
 	}
 	c := &Router[C]{root: r.root, owner: r, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
@@ -516,8 +525,9 @@ func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 
 // Hosts opens a scope that answers for any of patterns. A pattern is an exact
 // host, a leading wildcard such as "*.example.com", or a host parameter such
-// as "{tenant}.example.com", which [Base.Param] then reads. A route outside
-// any host scope answers for every host.
+// as "{tenant}.example.com", which [Base.Param] then reads. A host parameter
+// takes the constraints of [Router.Handle], as in "{tenant:slug}.example.com".
+// A route outside any host scope answers for every host.
 //
 // Hosts panics on an empty patterns or on a pattern it cannot parse.
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
@@ -526,7 +536,7 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	}
 	specs := make([]hostSpec, 0, len(patterns))
 	for _, p := range patterns {
-		spec, err := parseHostPattern(p)
+		spec, err := parseHostPattern(p, builtinClass)
 		if err != nil {
 			panic(err.Error())
 		}
@@ -1008,7 +1018,7 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		})
 	}
 	for _, ps := range pending {
-		segs, names, _ := parsePattern(ps.prefix) //nolint:errcheck // newChild rejected a bad prefix already.
+		segs, names, _ := parsePattern(ps.prefix, builtinClass) //nolint:errcheck // newChild rejected a bad prefix already.
 		s := &scopeFallback[C]{prefix: ps.prefix, names: names, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx

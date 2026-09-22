@@ -232,3 +232,23 @@ func TestDuplicateAnyConflicts(t *testing.T) {
 	r.Any("/x", echoRoute)
 	mustPanicContaining(t, "already registered", func() { r.Any("/x", echoRoute) })
 }
+
+func TestConstraintNodeSharing(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/a/{id:uuid}", echoRoute)
+	r.GET("/a/{id:uuid}/x", echoRoute)
+	if n := len(r.eng.tree.statics[0].constrained); n != 1 {
+		t.Errorf("one class under two routes made %d nodes, want 1", n)
+	}
+
+	r = newTestRouter()
+	r.GET("/a/{id:uuid}", echoRoute)
+	r.GET("/a/{id:[0-9a-f-]{36}}", echoRoute)
+	if n := len(r.eng.tree.statics[0].constrained); n != 2 {
+		t.Errorf("a class and a regular expression made %d nodes, want 2", n)
+	}
+
+	r = newTestRouter()
+	r.GET("/a/{id:uuid}", echoRoute)
+	mustPanicContaining(t, `already named "id"`, func() { r.GET("/a/{key:uuid}/y", echoRoute) })
+}

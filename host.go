@@ -129,7 +129,7 @@ func (e *hostEntry[C]) match(host string, dst []string) ([]string, bool) {
 	return dst, true
 }
 
-func parseHostPattern(pattern string) (hostSpec, error) {
+func parseHostPattern(pattern string, classes classLookup) (hostSpec, error) {
 	raw := pattern
 	if n := len(pattern); n > 0 && pattern[n-1] == '.' {
 		pattern = pattern[:n-1]
@@ -154,7 +154,7 @@ func parseHostPattern(pattern string) (hostSpec, error) {
 		return hostSpec{}, err
 	}
 	for i, text := range labels {
-		l, names, err := parseHostLabel(text, pattern)
+		l, names, err := parseHostLabel(text, pattern, classes)
 		if err != nil {
 			return hostSpec{}, err
 		}
@@ -288,7 +288,7 @@ func splitHostLabels(pattern string) ([]string, error) {
 	return append(labels, pattern[start:]), nil
 }
 
-func parseHostLabel(text, pattern string) (hostLabel, []string, error) {
+func parseHostLabel(text, pattern string, classes classLookup) (hostLabel, []string, error) {
 	switch {
 	case text == "*":
 		return hostLabel{}, nil, nil
@@ -301,14 +301,14 @@ func parseHostLabel(text, pattern string) (hostLabel, []string, error) {
 		if rest {
 			return hostLabel{parts: []segPart{{name: name}}, rest: true}, []string{name}, nil
 		}
-		m, err := constraintOf(name, expr, pattern)
+		m, err := constraintOf(name, expr, pattern, classes)
 		if err != nil {
 			return hostLabel{}, nil, err
 		}
 		return hostLabel{parts: []segPart{{name: name, m: m}}}, []string{name}, nil
 
 	case strings.ContainsAny(text, "{}"):
-		parts, names, err := parseTemplate(text, pattern)
+		parts, names, err := parseTemplate(text, pattern, classes)
 		if err != nil {
 			return hostLabel{}, nil, err
 		}

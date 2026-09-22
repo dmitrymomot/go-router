@@ -32,8 +32,10 @@ type node[C Context] struct {
 	names       []string
 }
 
-func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string) error {
-	segs, names, err := parsePattern(pattern)
+func (n *node[C]) insert(
+	method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string, classes classLookup,
+) error {
+	segs, names, err := parsePattern(pattern, classes)
 	if err != nil {
 		return err
 	}

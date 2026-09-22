@@ -2118,7 +2118,7 @@ func TestScopeCoverageRejectsInvalidDynamicEscapes(t *testing.T) {
 		{"/x/y", "/x", false},
 	}
 	for _, tc := range tests {
-		segs, _, err := parsePattern(tc.pattern)
+		segs, _, err := parsePattern(tc.pattern, builtinClass)
 		if err != nil {
 			t.Fatalf("parsePattern(%q) = %v", tc.pattern, err)
 		}
