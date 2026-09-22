@@ -160,34 +160,10 @@ func validate[T any](v *T) error {
 	if err == nil {
 		return nil
 	}
-	if fields := fieldErrors(err); len(fields) > 0 {
+	if fields := FieldErrorsOf(err); fields != nil {
 		return ErrUnprocessableEntity.WithDetails(fields).WithError(err)
 	}
 	return ErrUnprocessableEntity.WithError(err)
-}
-
-func fieldErrors(err error) []FieldError {
-	switch e := err.(type) {
-	case FieldError:
-		return []FieldError{e}
-	case *FieldError:
-		return []FieldError{*e}
-	case *HTTPError:
-		if fields, ok := e.Details.([]FieldError); ok {
-			return fields
-		}
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		var out []FieldError
-		for _, sub := range joined.Unwrap() {
-			out = append(out, fieldErrors(sub)...)
-		}
-		return out
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return fieldErrors(wrapped.Unwrap())
-	}
-	return nil
 }
 
 func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {

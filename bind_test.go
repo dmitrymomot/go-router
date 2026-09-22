@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -1104,37 +1103,6 @@ func TestParseValueDefault(t *testing.T) {
 		t.Run(tt.in, func(t *testing.T) {
 			if got := ParseValueDefault(tt.in, time.Minute); got != tt.want {
 				t.Errorf("ParseValueDefault(%q) = %v, want %v", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFieldErrorsReachesThroughAnErrorTree(t *testing.T) {
-	email := FieldError{Field: "email", Message: "is not an address"}
-	age := FieldError{Field: "age", Message: "must be 18 or more"}
-
-	tests := []struct {
-		name string
-		err  error
-		want []FieldError
-	}{
-		{name: "one field error", err: email, want: []FieldError{email}},
-		{name: "a pointer to one", err: &email, want: []FieldError{email}},
-		{name: "several joined", err: errors.Join(email, age), want: []FieldError{email, age}},
-		{
-			name: "the details of an HTTPError",
-			err:  ErrUnprocessableEntity.WithDetails([]FieldError{email}),
-			want: []FieldError{email},
-		},
-		{name: "a wrapped one", err: fmt.Errorf("read the form: %w", email), want: []FieldError{email}},
-		{name: "an error that names no field", err: errors.New("nope")},
-		{name: "no error at all"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := fieldErrors(tt.err); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("fieldErrors = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

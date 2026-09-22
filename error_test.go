@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -692,5 +693,68 @@ func TestBlobWithNoContentTypeLetsTheServerSniff(t *testing.T) {
 	if _, ok := rec.Result().Header[HeaderContentType]; ok {
 		t.Errorf("Content-Type = %q, want the header left out so the server sniffs",
 			rec.Header().Get(HeaderContentType))
+	}
+}
+
+func TestFieldErrorsOf(t *testing.T) {
+	email := FieldError{Field: "email", Message: "is not an address"}
+	age := FieldError{Field: "age", Message: "must be 18 or more"}
+
+	tests := []struct {
+		name string
+		err  error
+		want []FieldError
+	}{
+		{name: "one field error", err: email, want: []FieldError{email}},
+		{name: "a pointer to one", err: &email, want: []FieldError{email}},
+		{name: "several joined", err: errors.Join(email, age), want: []FieldError{email, age}},
+		{
+			name: "the details of an HTTPError",
+			err:  ErrUnprocessableEntity.WithDetails([]FieldError{email}),
+			want: []FieldError{email},
+		},
+		{name: "a wrapped one", err: fmt.Errorf("read the form: %w", email), want: []FieldError{email}},
+		{name: "an error that names no field", err: errors.New("nope")},
+		{name: "no error at all"},
+		{name: "a typed nil HTTPError", err: (*HTTPError)(nil)},
+		{name: "a typed nil FieldError", err: (*FieldError)(nil)},
+		{name: "an HTTPError with no fields in its details", err: ErrBadRequest.WithDetails([]FieldError{})},
+		{
+			name: "an HTTPError whose cause names a field",
+			err:  ErrBadRequest.WithDetails("see the cause").WithError(fmt.Errorf("decode: %w", age)),
+			want: []FieldError{age},
+		},
+		{
+			name: "details and a cause that hold the same fields",
+			err: ErrBadRequest.WithMessage("invalid request").
+				WithDetails([]FieldError{email, age}).
+				WithError(errors.Join(email, age)),
+			want: []FieldError{email, age},
+		},
+		{
+			name: "a field joined with an HTTPError",
+			err:  errors.Join(email, ErrUnprocessableEntity.WithDetails([]FieldError{age})),
+			want: []FieldError{email, age},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FieldErrorsOf(tt.err); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("FieldErrorsOf = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFieldErrorsOfReturnsACopy(t *testing.T) {
+	fields := []FieldError{{Field: "email", Message: "is not an address"}}
+	err := ErrUnprocessableEntity.WithDetails(fields)
+
+	got := FieldErrorsOf(err)
+	got[0].Message = "changed"
+
+	if fields[0].Message != "is not an address" {
+		t.Errorf("Details[0].Message = %q, want it untouched", fields[0].Message)
 	}
 }

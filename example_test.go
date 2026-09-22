@@ -1035,3 +1035,32 @@ func ExampleHTTPErrorOf() {
 	// 404 <h1>no user 9</h1>
 	// 500 <h1>Internal Server Error</h1>
 }
+
+func ExampleFieldErrorsOf() {
+	type Signup struct {
+		Email string `form:"email"`
+		Age   int    `form:"age"`
+	}
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/signup", func(c *Context) error {
+		in, err := c.BindForm[Signup]()
+		if err == nil {
+			return c.Stringf(http.StatusCreated, "welcome %s", in.Email)
+		}
+		// Show the form again with what the client typed and a message
+		// under each field that failed.
+		problems := make(map[string]string)
+		for _, f := range router.FieldErrorsOf(err) {
+			problems[f.Field] = f.Message
+		}
+		return c.Stringf(router.StatusOf(err), "email=%s age: %s", in.Email, problems["age"])
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader("email=ann@example.com&age=old"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := serveRequest(r, req)
+	fmt.Println(rec.Code, rec.Body.String())
+	// Output:
+	// 400 email=ann@example.com age: cannot parse "old" as int
+}

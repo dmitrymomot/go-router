@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -83,8 +84,9 @@ func (e *HTTPError) WithError(err error) *HTTPError {
 	return &c
 }
 
-// FieldError names one field that failed validation. [Base.Bind] collects
-// them into the Details of an [ErrUnprocessableEntity].
+// FieldError names one field that failed to decode or to validate. The Bind
+// methods list them in the Details of the error they return, and
+// [FieldErrorsOf] reads them back.
 type FieldError struct {
 	Field   string `json:"field"`
 	Message string `json:"message"`
@@ -92,6 +94,42 @@ type FieldError struct {
 
 // Error reports the field and its message.
 func (e FieldError) Error() string { return e.Field + ": " + e.Message }
+
+// FieldErrorsOf reports the fields err names, in order: a FieldError (or
+// *FieldError), the []FieldError Details of an [HTTPError], or any of them
+// joined with [errors.Join] or wrapped with %w. It is nil when err names none.
+// The slice belongs to the caller.
+func FieldErrorsOf(err error) []FieldError {
+	switch e := err.(type) {
+	case FieldError:
+		return []FieldError{e}
+	case *FieldError:
+		if e == nil {
+			return nil
+		}
+		return []FieldError{*e}
+	case *HTTPError:
+		if e == nil {
+			return nil
+		}
+		// The Bind methods also wrap the same fields as the cause, so the
+		// Details alone count them once.
+		if fields, ok := e.Details.([]FieldError); ok && len(fields) > 0 {
+			return slices.Clone(fields)
+		}
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		var out []FieldError
+		for _, sub := range e.Unwrap() {
+			out = append(out, FieldErrorsOf(sub)...)
+		}
+		return out
+	case interface{ Unwrap() error }:
+		return FieldErrorsOf(e.Unwrap())
+	}
+	return nil
+}
 
 // StatusCoder is an error of your own that names its status. [StatusOf] reads
 // it, so a domain error reaches the client with the right status without
