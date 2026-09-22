@@ -238,6 +238,34 @@ func ExampleBase_Bind() {
 	// 201 ann is 30
 }
 
+func ExampleBase_BindForm() {
+	type Prefs struct {
+		Name string `form:"name"`
+		// A checkbox sends "on" when it is checked and nothing when it is not.
+		Newsletter bool `form:"newsletter"`
+	}
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST("/prefs", func(c *Context) error {
+		in, err := c.BindForm[Prefs]()
+		if err != nil {
+			return err
+		}
+		return c.Stringf(http.StatusOK, "%s %t", in.Name, in.Newsletter)
+	})
+
+	for _, body := range []string{"name=ann&newsletter=on", "name=bo"} {
+		req := httptest.NewRequest(http.MethodPost, "/prefs", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		fmt.Println(rec.Code, rec.Body.String())
+	}
+	// Output:
+	// 200 ann true
+	// 200 bo false
+}
+
 func serve(h http.Handler, method, target string) string {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
