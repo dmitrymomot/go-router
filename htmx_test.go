@@ -567,6 +567,43 @@ func TestHXRedirect(t *testing.T) {
 	})
 }
 
+func TestHXRedirectCarriesTheFlash(t *testing.T) {
+	r := newTestRouter()
+	r.CookieCodec(testCodec())
+	r.POST("/join", func(c *tctx) error {
+		if err := c.AddFlash(Flash{Kind: "success", Message: "welcome"}); err != nil {
+			return err
+		}
+		return c.HX().Redirect("/chat")
+	})
+	r.GET("/chat", func(c *tctx) error { return c.Stringf(http.StatusOK, "%v", c.Flashes()) })
+
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		status  int
+	}{
+		{"htmx gets a client-side redirect", map[string]string{HeaderHXRequest: "true"}, http.StatusOK},
+		{"a browser gets a 303", nil, http.StatusSeeOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := hxDo(r, http.MethodPost, "/join", tc.headers)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
+			}
+			line := rec.Header().Get("Set-Cookie")
+			if !strings.HasPrefix(line, FlashCookieName+"=") {
+				t.Fatalf("the redirect carries Set-Cookie %q, want the flash cookie", line)
+			}
+
+			got := hxDo(r, http.MethodGet, "/chat", map[string]string{HeaderCookie: line})
+			if want := "[{success welcome}]"; got.Body.String() != want {
+				t.Errorf("the next page shows %q, want %q", got.Body, want)
+			}
+		})
+	}
+}
+
 func TestHXLocation(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/short", func(c *tctx) error { return c.HX().Location("/chat") })
