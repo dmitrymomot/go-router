@@ -347,8 +347,11 @@ func (b *Base) Get(key string) (any, bool) {
 	return v, ok
 }
 
-// RoutePattern reports the pattern that matched, such as "/users/{id}", or ""
-// when no route matched.
+// RoutePattern reports the pattern that matched, such as "/users/{id}". A 405
+// and an automatic OPTIONS answer report the pattern that the path matched. A
+// 404 under a scope with a prefix reports that prefix, such as "/t/{tid}",
+// whose parameters [Base.Param] then reads. Anything else that matched no
+// route reports "".
 func (b *Base) RoutePattern() string {
 	if b.route == nil {
 		return ""
