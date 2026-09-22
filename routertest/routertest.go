@@ -1,4 +1,8 @@
 // Package routertest holds helpers for testing a handler or a router.
+//
+// [Client] sends requests as a browser does, and keeps the cookies of every
+// answer. [Response.Expect] chains the checks of one answer. [Requests] builds
+// one request for each route of a router, with every parameter filled in.
 package routertest
 
 import (
