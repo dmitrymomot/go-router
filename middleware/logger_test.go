@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -281,5 +282,33 @@ func TestLoggerLevelsMoveAtRunTime(t *testing.T) {
 	get(r, "/boom")
 	if !strings.Contains(buf.String(), "level=DEBUG") {
 		t.Errorf("record = %q, want level=DEBUG after the level moved", buf.String())
+	}
+}
+
+// A handler that reads an oversized body itself returns an
+// *http.MaxBytesError. Logger inside BodyLimit answers before BodyLimit sees
+// it, and the client still gets a 413.
+func TestLoggerInsideBodyLimitAnswersAnOversizedBodyWith413(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRouter()
+	r.Use(
+		middleware.BodyLimit[*appContext](4),
+		middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
+			Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		}),
+	)
+	r.POST("/read", func(c *appContext) error {
+		_, err := io.ReadAll(c.Request().Body)
+		return err
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/read", strings.NewReader("more than four bytes"))
+	req.ContentLength = -1
+	rec := do(r, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if !strings.Contains(buf.String(), "status=413") {
+		t.Errorf("record = %q, want status=413", buf.String())
 	}
 }

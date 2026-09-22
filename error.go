@@ -177,9 +177,10 @@ func PanicErrorSize(recovered any, stackSize int) *HTTPError {
 }
 
 // StatusOf reports the status that err asks for: the status of an [HTTPError],
-// the status of a [StatusCoder], 499 for an error that is [context.Canceled],
-// 200 for a nil error, and 500 for anything else. 499 is the status nginx logs
-// for a client that went away, so a disconnect does not count as a 5xx.
+// the status of a [StatusCoder], 413 for an [http.MaxBytesError], 499 for an
+// error that is [context.Canceled], 200 for a nil error, and 500 for anything
+// else. 499 is the status nginx logs for a client that went away, so a
+// disconnect does not count as a 5xx.
 func StatusOf(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -195,6 +196,9 @@ func StatusOf(err error) int {
 		if status := sc.StatusCode(); status != 0 {
 			return status
 		}
+	}
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		return http.StatusRequestEntityTooLarge
 	}
 	if errors.Is(err, context.Canceled) {
 		return statusClientClosedRequest

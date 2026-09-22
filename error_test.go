@@ -55,6 +55,7 @@ func TestStatusOf(t *testing.T) {
 		{ErrGone, http.StatusGone},
 		{fmt.Errorf("wrapped: %w", ErrTooManyRequests), http.StatusTooManyRequests},
 		{errors.New("boom"), http.StatusInternalServerError},
+		{fmt.Errorf("read body: %w", &http.MaxBytesError{Limit: 4}), http.StatusRequestEntityTooLarge},
 	}
 	for _, tc := range tests {
 		if got := StatusOf(tc.err); got != tc.want {
