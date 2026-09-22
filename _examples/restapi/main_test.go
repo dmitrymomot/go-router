@@ -103,3 +103,23 @@ func TestTheMountAppearsInTheRouteTable(t *testing.T) {
 	}
 	t.Fatalf("no %q in the route table: %v", want, r.Routes())
 }
+
+func TestTheHealthRouteIsNeverRateLimited(t *testing.T) {
+	r := newRouter(NewStore(), testKey)
+
+	for i := range 30 {
+		if res := routertest.Get(r, "/healthz"); res.StatusCode != http.StatusNoContent {
+			t.Fatalf("health check %d answered %d, want 204", i+1, res.StatusCode)
+		}
+	}
+	limited := false
+	for range 30 {
+		if routertest.Get(r, "/v1/users").StatusCode == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Error("30 requests to /v1/users met no rate limit, so the health test proves nothing")
+	}
+}

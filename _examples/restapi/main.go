@@ -20,6 +20,9 @@ import (
 
 const healthPath = "/healthz"
 
+// unlimited marks a route that the rate limit lets through.
+type unlimited struct{}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -70,15 +73,19 @@ func newRouter(store *Store, apiKey string) *router.Router[*Context] {
 		middleware.RateLimitWithConfig(middleware.RateLimitConfig[*Context]{
 			Store: middleware.NewMemoryStore[*Context](10, 20, time.Minute),
 			// A load balancer polls the health of this service far harder than
-			// any client, and must never be turned away.
-			Skip: func(c router.Context) bool { return c.Request().URL.Path == healthPath },
+			// any client, and must never be turned away. The route says so
+			// itself, with Meta, rather than the limiter knowing its path.
+			Skip: func(c router.Context) bool {
+				_, ok := router.MetaAs[unlimited](c)
+				return ok
+			},
 		}),
 		middleware.CORSWithConfig[*Context](middleware.CORSConfig{
 			AllowOrigins: []string{"https://app.example.com"},
 		}),
 	)
 
-	r.GET(healthPath, func(c *Context) error { return c.NoContent(http.StatusNoContent) })
+	r.Meta(unlimited{}).GET(healthPath, func(c *Context) error { return c.NoContent(http.StatusNoContent) })
 
 	// The version lives at the mount and nowhere else. A v2 is another line.
 	r.Mount("/v1", usersAPI(apiKey))
