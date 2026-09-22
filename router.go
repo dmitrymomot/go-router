@@ -822,9 +822,9 @@ func (r *Router[C]) JSONOptions(opts ...json.Options) {
 	r.root.ropts.jsonOpts = slices.Clone(opts)
 }
 
-// CookieCodec sets the codec that signs [Base.SetSignedCookie],
-// [Base.SignedCookie] and the flash cookie. It applies to the whole router,
-// whichever scope calls it. A router given to [Router.MountRouter] or
+// CookieCodec sets the codec that signs [Base.SetSignedCookie] and
+// [Base.SignedCookie]. It applies to the whole router, whichever scope calls
+// it. A router given to [Router.MountRouter] or
 // [Router.HostRouter] serves with settings of its own and needs its own call.
 // [NewCookieCodec] takes the previous keys that rotate out.
 //
