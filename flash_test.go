@@ -407,3 +407,60 @@ func TestFlashesWithoutACodecLeavesTheCookie(t *testing.T) {
 		t.Errorf("Flashes without a codec wrote the headers %v", h)
 	}
 }
+
+func TestFlashesReadInTheSameRequestNeverLeaveTheServer(t *testing.T) {
+	b := flashBase()
+	addFlashes(t, b, Flash{Kind: "success", Message: "saved"})
+
+	wantFlashes(t, b.Flashes(), []Flash{{Kind: "success", Message: "saved"}})
+
+	h := b.Response().Header()
+	if lines, ok := h["Set-Cookie"]; ok {
+		t.Errorf("the response carries Set-Cookie %q, want no Set-Cookie key at all", lines)
+	}
+	if got := h.Get(HeaderVary); got != HeaderCookie {
+		t.Errorf("Vary = %q, want %q", got, HeaderCookie)
+	}
+}
+
+func TestFlashesKeepTheOtherCookiesOfTheResponse(t *testing.T) {
+	b := flashBase()
+	b.SetCookie(b.NewCookie("session", "abc", time.Hour))
+	addFlashes(t, b, Flash{Kind: "success", Message: "saved"})
+	b.Flashes()
+
+	cookies := setCookies(t, b)
+	if len(cookies) != 1 || cookies[0].Name != "session" || cookies[0].Value != "abc" {
+		t.Errorf("the response sets %+v, want only the session cookie", cookies)
+	}
+}
+
+func TestFlashesClearTheCookieTheRequestCarried(t *testing.T) {
+	post := flashBase()
+	addFlashes(t, post, Flash{Kind: "info", Message: "old"})
+
+	get := flashRequest(t, post)
+	addFlashes(t, get, Flash{Kind: "info", Message: "new"})
+	wantFlashes(t, get.Flashes(), []Flash{
+		{Kind: "info", Message: "old"},
+		{Kind: "info", Message: "new"},
+	})
+
+	cookies := setCookies(t, get)
+	if len(cookies) != 1 {
+		t.Fatalf("the response sets %d cookies, want the one that clears the flash", len(cookies))
+	}
+	c := cookies[0]
+	if c.Name != FlashCookieName || c.MaxAge >= 0 || c.Value != "" || c.Path != "/" {
+		t.Errorf("the response sets %+v, want an expired, empty %s cookie on /", c, FlashCookieName)
+	}
+}
+
+func TestAddFlashAfterASameRequestReadStartsAgain(t *testing.T) {
+	b := flashBase()
+	addFlashes(t, b, Flash{Kind: "info", Message: "a"})
+	b.Flashes()
+	addFlashes(t, b, Flash{Kind: "info", Message: "b"})
+
+	wantFlashes(t, flashRequest(t, b).Flashes(), []Flash{{Kind: "info", Message: "b"}})
+}

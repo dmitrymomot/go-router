@@ -69,7 +69,9 @@ func (b *Base) AddFlash(f Flash) error {
 // request reports nothing. Add first, then read: a layout that calls Flashes
 // sees what the handler added before it.
 //
-// Clearing is a header, so call Flashes before the response is committed.
+// Only a cookie the request carried is cleared on the client, so a message
+// added and read in one request never leaves the server. Clearing is a
+// header, so call Flashes before the response is committed.
 // [Base.Render] buffers, so a template it runs may call Flashes; one that
 // [Base.RenderStream] runs may not.
 //
@@ -84,7 +86,11 @@ func (b *Base) Flashes() []Flash {
 		return nil
 	}
 	b.Vary(HeaderCookie)
-	b.writeFlashCookie(b.NewCookie(FlashCookieName, "", -1))
+	if _, err := b.req.Cookie(FlashCookieName); err == nil {
+		b.writeFlashCookie(b.NewCookie(FlashCookieName, "", -1))
+	} else {
+		b.dropFlashCookie()
+	}
 	return decodeFlashes(cc, raw)
 }
 
@@ -113,7 +119,7 @@ func decodeFlashes(cc *CookieCodec, raw string) []Flash {
 func (b *Base) flashCookie(cc *CookieCodec) (string, bool) {
 	lines := b.res.Header()[headerSetCookie]
 	for _, line := range slices.Backward(lines) {
-		if c, err := http.ParseSetCookie(line); err == nil && c.Name == FlashCookieName {
+		if c, ok := parseFlashLine(line); ok {
 			return c.Value, true
 		}
 	}
@@ -137,10 +143,33 @@ func (b *Base) writeFlashCookie(c *http.Cookie) {
 	header := b.res.Header()
 	lines := header[headerSetCookie]
 	for i, l := range lines {
-		if got, err := http.ParseSetCookie(l); err == nil && got.Name == FlashCookieName {
+		if _, ok := parseFlashLine(l); ok {
 			lines[i] = line
 			return
 		}
 	}
 	header[headerSetCookie] = append(lines, line)
+}
+
+// dropFlashCookie takes back the flash cookie this response set, for a
+// request that carried none and so has nothing to clear on the client.
+func (b *Base) dropFlashCookie() {
+	header := b.res.Header()
+	lines := slices.DeleteFunc(header[headerSetCookie], func(l string) bool {
+		_, ok := parseFlashLine(l)
+		return ok
+	})
+	if len(lines) == 0 {
+		delete(header, headerSetCookie)
+		return
+	}
+	header[headerSetCookie] = lines
+}
+
+func parseFlashLine(line string) (*http.Cookie, bool) {
+	c, err := http.ParseSetCookie(line)
+	if err != nil || c.Name != FlashCookieName {
+		return nil, false
+	}
+	return c, true
 }
