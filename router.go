@@ -588,7 +588,9 @@ func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
 // cheaply as a route registered here.
 //
 // sub is closed to further registration afterwards, and it must be a top-level
-// router that carries no setting belonging to the router that serves.
+// router that carries no setting belonging to the router that serves, such as
+// MaxBodyBytes, a logger or a cookie codec. An error handler of sub stays with
+// its routes.
 //
 // Mount panics if sub is nil, is a scope of another router, is mounted inside
 // itself, or carries such a setting.
