@@ -136,10 +136,7 @@ func (r *Router[C]) RedirectHost(pattern, target string, status int) {
 	if !isRedirectStatus(status) {
 		panic(fmt.Sprintf("router: RedirectHost needs a redirect status, not %d", status))
 	}
-	if r.root.started.Load() {
-		panic("router: cannot register a host scope after the router started serving")
-	}
-	r.mustBeOpen("register a host redirect")
+	r.guard("register a host redirect")()
 	if r.inHost || len(r.hosts) > 0 {
 		panic("router: a host scope cannot sit inside another host scope")
 	}

@@ -56,8 +56,8 @@ type Router[C Context] struct {
 	// reaches it through root.
 	eng *engine[C]
 
-	// regMu orders registration against the one-time freeze, so the check that
-	// refuses a late route cannot be overtaken by the request that makes it
+	// regMu orders every setter against the one-time freeze, so the check that
+	// refuses a late change cannot be overtaken by the request that makes it
 	// late. No request ever takes it.
 	regMu sync.Mutex
 
@@ -193,12 +193,7 @@ func (r *Router[C]) register(reg registration[C]) {
 	method, pattern := reg.method, reg.pattern
 	// Ordered against the freeze: without it the check below is a guess, and a
 	// route could go into a trie a request had already started reading.
-	r.root.regMu.Lock()
-	defer r.root.regMu.Unlock()
-	if r.root.started.Load() {
-		panic("router: cannot register " + method + " " + pattern + " after the router started serving")
-	}
-	r.mustBeOpen("register " + method + " " + pattern)
+	defer r.guard("register " + method + " " + pattern)()
 	if method == "" {
 		panic("router: Handle needs a method")
 	}
@@ -336,10 +331,8 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 // Pre panics on a scope, on a nil middleware, or after the router started
 // serving.
 func (r *Router[C]) Pre(mws ...Middleware[C]) {
-	if r.root != r {
-		panic("router: Pre belongs to the root router, because it runs before matching picks a scope")
-	}
-	r.mustNotBeServing("the pre-routing middleware")
+	r.mustBeRoot("Pre", "it runs before matching picks a scope")
+	defer r.guard("change the pre-routing middleware")()
 	validateMiddleware(mws)
 	r.preMws = append(r.preMws, mws...)
 	r.settingChanged()
@@ -362,10 +355,8 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 // already declared name; on a nil match; on a mounted router; or after the
 // router started serving.
 func (r *Router[C]) ParamClass(name string, match func(value string) bool) {
-	if r.root != r {
-		panic("router: ParamClass belongs to the root router, because a class applies to all of its patterns")
-	}
-	r.mustNotBeServing("the parameter classes")
+	r.mustBeRoot("ParamClass", "a class applies to all of its patterns")
+	defer r.guard("change the parameter classes")()
 	if !validClassName(name) {
 		panic(fmt.Sprintf("router: ParamClass needs a name of letters, digits and '_' that starts with a letter, not %q", name))
 	}
@@ -402,18 +393,29 @@ func (r *Router[C]) class(name string) *matcher {
 	return builtinClass(name)
 }
 
-func (r *Router[C]) mustNotBeServing(what string) {
-	if r.root.started.Load() {
-		panic("router: cannot change " + what + " after the router started serving")
+// guard takes the lock that orders setup against the first request, checks
+// that the router may still change, and returns the unlock. A setter defers it
+// around its whole change, so a request never reads a half-made one. what
+// completes "cannot ..." in the panic, as in "change the logger".
+func (r *Router[C]) guard(what string) (unlock func()) {
+	root := r.root
+	root.regMu.Lock()
+	if root.started.Load() {
+		root.regMu.Unlock()
+		panic("router: cannot " + what + " after the router started serving")
 	}
-	r.mustBeOpen("change " + what)
+	if r.closed {
+		root.regMu.Unlock()
+		panic("router: cannot " + what + " on a mounted router; do it before Mount")
+	}
+	return root.regMu.Unlock
 }
 
-// mustBeOpen rejects work on a subtree that Mount already replayed and closed.
-// Anything added now would sit in a router nobody serves, silently.
-func (r *Router[C]) mustBeOpen(what string) {
-	if r.closed {
-		panic("router: cannot " + what + " on a mounted router; do it before Mount")
+// mustBeRoot rejects a setting that applies to the whole router when a scope
+// calls it, since a scope would silently change the root.
+func (r *Router[C]) mustBeRoot(setter, why string) {
+	if r.root != r {
+		panic("router: " + setter + " belongs to the root router, because " + why)
 	}
 }
 
@@ -446,7 +448,7 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 	if h == nil {
 		panic("router: ErrorHandler needs a handler")
 	}
-	r.mustNotBeServing("the error handler")
+	defer r.guard("change the error handler")()
 	r.mustOwnFallbacks("the error handler")
 	r.errHandler = h
 	r.settingChanged()
@@ -456,9 +458,11 @@ func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
 // methods of the matched path. It is on by default. An OPTIONS route of your
 // own wins either way.
 //
-// HandleOPTIONS panics after the router started serving.
+// HandleOPTIONS panics on a scope, on a mounted router, or after the router started
+// serving.
 func (r *Router[C]) HandleOPTIONS(on bool) {
-	r.mustNotBeServing("the OPTIONS setting")
+	r.mustBeRoot("HandleOPTIONS", "it applies to the whole router")
+	defer r.guard("change the OPTIONS setting")()
 	root := r.root
 	root.eng.autoOptions = on
 	root.eng.tree.recacheAllow(on, root.eng.allowCache)
@@ -475,18 +479,22 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 // [Base.SetBodyLimit], and so the BodyLimit middleware, replaces it for one
 // request, above or below.
 //
-// MaxBodyBytes panics after the router started serving.
+// MaxBodyBytes panics on a scope, on a mounted router, or after the router started
+// serving.
 func (r *Router[C]) MaxBodyBytes(n int64) {
-	r.mustNotBeServing("the body limit")
+	r.mustBeRoot("MaxBodyBytes", "it applies to the whole router")
+	defer r.guard("change the body limit")()
 	r.root.ropts.maxBody = n
 }
 
 // MaxMultipartMemory caps the memory that a multipart form takes before its
 // parts spill to a temporary file. Zero takes the default of net/http.
 //
-// MaxMultipartMemory panics after the router started serving.
+// MaxMultipartMemory panics on a scope, on a mounted router, or after the router started
+// serving.
 func (r *Router[C]) MaxMultipartMemory(n int64) {
-	r.mustNotBeServing("the multipart memory limit")
+	r.mustBeRoot("MaxMultipartMemory", "it applies to the whole router")
+	defer r.guard("change the multipart memory limit")()
 	r.root.ropts.maxMultipart = n
 }
 
@@ -494,33 +502,38 @@ func (r *Router[C]) MaxMultipartMemory(n int64) {
 // use. A nil logger takes [slog.Default]. To quiet the log of failed requests,
 // pass a logger whose handler drops the levels you do not want.
 //
-// Logger panics after the router started serving.
+// Logger panics on a scope, on a mounted router, or after the router started
+// serving.
 func (r *Router[C]) Logger(l *slog.Logger) {
-	r.mustNotBeServing("the logger")
+	r.mustBeRoot("Logger", "it applies to the whole router")
+	defer r.guard("change the logger")()
 	r.root.ropts.logger = l
 }
 
 // JSONOptions sets the options that [Base.JSON] and [Base.BindJSON] apply. The
 // options of a single call win over these.
 //
-// JSONOptions panics after the router started serving.
+// JSONOptions panics on a scope, on a mounted router, or after the router started
+// serving.
 func (r *Router[C]) JSONOptions(opts ...json.Options) {
-	r.mustNotBeServing("the JSON options")
+	r.mustBeRoot("JSONOptions", "it applies to the whole router")
+	defer r.guard("change the JSON options")()
 	r.root.ropts.jsonOpts = slices.Clone(opts)
 }
 
 // CookieCodec sets the codec that signs [Base.SetSignedCookie],
 // [Base.SignedCookie] and the flash cookie of [Base.AddFlash]. It applies to
-// the whole router, whichever scope calls it. A router given to
+// the whole router. A router given to
 // [Router.MountRouter] or [Router.HostRouter] serves with settings of its own
 // and needs its own call. [NewCookieCodec] takes the previous keys that rotate
 // out.
 //
 // CookieCodec panics if cc is nil or was not built by NewCookieCodec, on a
-// mounted router, or after the router started serving.
+// scope, on a mounted router, or after the router started serving.
 func (r *Router[C]) CookieCodec(cc *CookieCodec) {
 	mustBeBuiltCodec(cc, "router: CookieCodec")
-	r.mustNotBeServing("the cookie codec")
+	r.mustBeRoot("CookieCodec", "it applies to the whole router")
+	defer r.guard("change the cookie codec")()
 	r.root.ropts.codec = cc
 }
 
@@ -531,9 +544,11 @@ func (r *Router[C]) cookieCodec() *CookieCodec { return r.root.ropts.codec }
 // HEAD, 308 for anything else. It is off by default, and such a request
 // otherwise ends in a 404.
 //
-// RedirectTrailingSlash panics after the router started serving.
+// RedirectTrailingSlash panics on a scope, on a mounted router, or after the router started
+// serving.
 func (r *Router[C]) RedirectTrailingSlash(on bool) {
-	r.mustNotBeServing("the trailing slash setting")
+	r.mustBeRoot("RedirectTrailingSlash", "it applies to the whole router")
+	defer r.guard("change the trailing slash setting")()
 	r.root.eng.redirectSlash = on
 }
 
@@ -542,8 +557,10 @@ func (r *Router[C]) RedirectTrailingSlash(on bool) {
 // took, and the error the handler returned. It suits a metric; a log line
 // belongs in a middleware, which can also read the request.
 //
-// Observe panics after the router started serving.
+// Observe panics on a scope, on a mounted router, or after the router started
+// serving.
 func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Duration, err error)) {
-	r.mustNotBeServing("the observer")
+	r.mustBeRoot("Observe", "it applies to the whole router")
+	defer r.guard("change the observer")()
 	r.root.observer = fn
 }

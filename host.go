@@ -561,21 +561,21 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 		}
 		specs = append(specs, spec)
 	}
-	if r.root.started.Load() {
-		panic("router: cannot register a host scope after the router started serving")
-	}
 	if r.inHost || len(r.hosts) > 0 {
 		panic("router: a host scope cannot sit inside another host scope")
 	}
 	var c *Router[C]
 	r.inOneScope(func() {
-		c = r.newChild("", nil)
+		c = r.newChild("", nil, nil)
+		unlock := r.guard("register a host scope")
 		c.hosts = specs
 		for _, spec := range specs {
 			if _, err := r.root.eng.hostEntry(spec); err != nil {
+				unlock()
 				panic(err.Error())
 			}
 		}
+		unlock()
 		if fn != nil {
 			fn(c)
 		}

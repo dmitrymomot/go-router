@@ -32,7 +32,8 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	}
 	sub.mustNotCarryRootOnlySettings()
 
-	shim := r.newChild(prefix, nil)
+	shim := r.newChild(prefix, nil, nil)
+	defer r.guard("mount a router")()
 	shim.children = append(shim.children, sub)
 	// The subtree registers into this parent from now on, so replay what it
 	// already holds and close it: a later route would have nowhere to go.

@@ -2890,16 +2890,32 @@ func TestCookieCodecSignsAcrossRequests(t *testing.T) {
 	}
 }
 
-func TestCookieCodecFromAScopeCoversTheRouter(t *testing.T) {
-	r := newTestRouter()
-	r.Route("/admin", func(g *Router[*tctx]) {
-		g.CookieCodec(testCodec())
-	})
-	signingRoutes(r)
-
-	if rec := do(r, http.MethodPost, "/signin"); rec.Code != http.StatusNoContent {
-		t.Errorf("POST /signin = %d, want 204; body: %s", rec.Code, rec.Body)
+// A setting of the whole router called on a scope used to change the root
+// silently, as if the scope owned it.
+func TestRootSettingsPanicOnAScope(t *testing.T) {
+	calls := map[string]func(g *Router[*tctx]){
+		"HandleOPTIONS":         func(g *Router[*tctx]) { g.HandleOPTIONS(false) },
+		"MaxBodyBytes":          func(g *Router[*tctx]) { g.MaxBodyBytes(1) },
+		"MaxMultipartMemory":    func(g *Router[*tctx]) { g.MaxMultipartMemory(1) },
+		"Logger":                func(g *Router[*tctx]) { g.Logger(nil) },
+		"JSONOptions":           func(g *Router[*tctx]) { g.JSONOptions() },
+		"CookieCodec":           func(g *Router[*tctx]) { g.CookieCodec(testCodec()) },
+		"RedirectTrailingSlash": func(g *Router[*tctx]) { g.RedirectTrailingSlash(true) },
+		"Observe":               func(g *Router[*tctx]) { g.Observe(nil) },
 	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			r := newTestRouter()
+			mustPanicContaining(t, name+" belongs to the root router", func() { call(r.Route("/admin", nil)) })
+		})
+	}
+}
+
+// Use on a router that Mount already replayed reached no route, silently.
+func TestUseOnAMountedRouterPanics(t *testing.T) {
+	r, sub := newTestRouter(), newTestRouter()
+	r.Mount("/api", sub)
+	mustPanicContaining(t, "on a mounted router", func() { sub.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] { return next }) })
 }
 
 func TestCookieCodecPanics(t *testing.T) {
@@ -3591,7 +3607,7 @@ func TestMetaPanics(t *testing.T) {
 		{"after serving", func(r *Router[*tctx]) {
 			do(r, http.MethodGet, "/")
 			r.Meta("a")
-		}, "cannot change the route metadata after the router started serving"},
+		}, "cannot open a scope after the router started serving"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

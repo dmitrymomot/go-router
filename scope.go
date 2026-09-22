@@ -109,15 +109,13 @@ func (r *Router[C]) hostEntriesIn(eng *engine[C]) []*hostEntry[C] {
 // its own: its middleware reaches a 404 only through a scope with a prefix
 // opened inside it.
 //
-// Use panics on a nil middleware, on a scope that already holds routes, or
-// after the router started serving.
+// Use panics on a nil middleware, on a scope that already holds routes, on a
+// mounted router, or after the router started serving.
 func (r *Router[C]) Use(mws ...Middleware[C]) {
 	validateMiddleware(mws)
+	defer r.guard("add middleware")()
 	if r.hasRoutes {
 		panic("router: Use must come before the routes of a scope; open a Group for later middleware")
-	}
-	if r.root.started.Load() {
-		panic("router: cannot add middleware after the router started serving")
 	}
 	r.mws = append(r.mws, mws...)
 	r.settingChanged()
@@ -131,16 +129,13 @@ func validateMiddleware[C Context](mws []Middleware[C]) {
 	}
 }
 
-func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
+func (r *Router[C]) newChild(prefix string, mws []Middleware[C], meta []any) *Router[C] {
 	validateMiddleware(mws)
-	if r.root.started.Load() {
-		panic("router: cannot create a scope after the router started serving")
-	}
-	r.mustBeOpen("open a scope")
+	defer r.guard("open a scope")()
 	if _, _, err := parsePattern(prefix, r.class); err != nil {
 		panic(err.Error())
 	}
-	c := &Router[C]{root: r.root, owner: r, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
+	c := &Router[C]{root: r.root, owner: r, prefix: prefix, mws: mws, meta: meta, inHost: r.inHost || len(r.hosts) > 0}
 	r.children = append(r.children, c)
 	if normalizePattern(prefix) != "/" {
 		c.settingChanged()
@@ -154,7 +149,7 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
-		c = r.newChild("", nil)
+		c = r.newChild("", nil, nil)
 		if fn != nil {
 			fn(c)
 		}
@@ -168,7 +163,7 @@ func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
-		c = r.newChild(prefix, nil)
+		c = r.newChild(prefix, nil, nil)
 		if fn != nil {
 			fn(c)
 		}
@@ -180,7 +175,7 @@ func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 // Unlike [Router.Use] it registers nothing itself, so it suits a single route:
 // r.With(auth).GET("/me", me).
 func (r *Router[C]) With(mws ...Middleware[C]) *Router[C] {
-	return r.newChild("", slices.Clone(mws))
+	return r.newChild("", slices.Clone(mws), nil)
 }
 
 // Meta opens a scope whose routes carry v on top of the values of the scopes
@@ -193,14 +188,11 @@ func (r *Router[C]) With(mws ...Middleware[C]) *Router[C] {
 //
 // Meta panics on no value, on a nil value, or after the router started serving.
 func (r *Router[C]) Meta(v ...any) *Router[C] {
-	r.mustNotBeServing("the route metadata")
 	if len(v) == 0 {
 		panic("router: Meta needs at least one value")
 	}
 	if slices.Contains(v, nil) {
 		panic("router: Meta got a nil value; register the route outside the Meta scope instead")
 	}
-	c := r.newChild("", nil)
-	c.meta = slices.Clone(v)
-	return c
+	return r.newChild("", nil, slices.Clone(v))
 }
