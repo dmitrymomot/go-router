@@ -1175,6 +1175,63 @@ func TestValidatorKeepsTheStatusItNames(t *testing.T) {
 	}
 }
 
+func TestBindFormReturnsWhatDecoded(t *testing.T) {
+	var in signup
+	var bindErr error
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/signups", func(c *tctx) error {
+		in, bindErr = c.BindForm[signup]()
+		return bindErr
+	})
+	r.POST("/small", func(c *tctx) error {
+		c.SetBodyLimit(16)
+		in, bindErr = c.BindForm[signup]()
+		return bindErr
+	})
+
+	t.Run("a field that does not decode", func(t *testing.T) {
+		postForm(r, "/signups", url.Values{"email": {"bo@x.io"}, "age": {"abc"}})
+		if in.Email != "bo@x.io" {
+			t.Errorf("Email = %q, want the value that decoded", in.Email)
+		}
+		want := []FieldError{{Field: "age", Message: `cannot parse "abc" as int`}}
+		if got := FieldErrorsOf(bindErr); !reflect.DeepEqual(got, want) {
+			t.Errorf("FieldErrorsOf = %+v, want %+v", got, want)
+		}
+		if got := StatusOf(bindErr); got != http.StatusBadRequest {
+			t.Errorf("StatusOf = %d, want 400", got)
+		}
+	})
+
+	t.Run("a value that Validate refuses", func(t *testing.T) {
+		postForm(r, "/signups", url.Values{"email": {"bo"}, "age": {"9"}})
+		if in.Email != "bo" || in.Age != 9 {
+			t.Errorf("in = %+v, want the bound value", in)
+		}
+		got := FieldErrorsOf(bindErr)
+		if len(got) != 2 || got[0].Field != "email" || got[1].Field != "age" {
+			t.Errorf("FieldErrorsOf = %+v, want email and age", got)
+		}
+		if got := StatusOf(bindErr); got != http.StatusUnprocessableEntity {
+			t.Errorf("StatusOf = %d, want 422", got)
+		}
+	})
+
+	t.Run("a body over the limit", func(t *testing.T) {
+		post(r, "/small", MIMEApplicationForm, "email="+strings.Repeat("x", 100))
+		if in != (signup{}) {
+			t.Errorf("in = %+v, want the zero value", in)
+		}
+		if got := FieldErrorsOf(bindErr); got != nil {
+			t.Errorf("FieldErrorsOf = %+v, want nil", got)
+		}
+		if got := StatusOf(bindErr); got != http.StatusRequestEntityTooLarge {
+			t.Errorf("StatusOf = %d, want 413", got)
+		}
+	})
+}
+
 type countedValidate struct {
 	Age int `form:"age" json:"age"`
 }

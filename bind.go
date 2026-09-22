@@ -28,10 +28,16 @@ const defaultMaxMultipartMemory int64 = 32 << 20
 //
 // T names its sources with struct tags, one per source: `json`, `form`,
 // `query`, `param` for a route parameter, and `header`. A T that implements
-// [Validator] is validated last, and a failure becomes an
-// [ErrUnprocessableEntity] whose Details hold the [FieldError] list.
+// [Validator] is validated last.
 //
-// The error is an [HTTPError], so a handler can return it as it stands.
+// A value that does not fit its field is an [ErrBadRequest] "invalid
+// request", and a value that Validate refuses is an [ErrUnprocessableEntity],
+// unless the Validator names a status of its own. Both list the fields in
+// Details, which [FieldErrorsOf] reads. The T comes back with the error and
+// holds what decoded: every field of a form, the query, the path or the
+// headers, and the JSON members before the one that failed.
+// errors.AsType[*HTTPError] finds one in every error, and [StatusOf] reports
+// its status, so a handler can return it as it stands.
 func (b *Base) Bind[T any]() (T, error) {
 	var v T
 
@@ -141,6 +147,9 @@ func jsonField(p jsontext.Pointer) string {
 // URL-encoded form and a multipart one alike, through the `form` tag. Parsing
 // happens once per request, so a later form read costs nothing. A bool field
 // reads a checkbox: "on" when it is checked, and false when it is absent.
+//
+// It reports errors as [Base.Bind] does. Every field that decoded is set, and
+// a field that failed keeps its zero value, nil for a pointer.
 func (b *Base) BindForm[T any]() (T, error) {
 	var v T
 	if err := b.parseForm(); err != nil {
@@ -153,7 +162,7 @@ func (b *Base) BindForm[T any]() (T, error) {
 }
 
 // BindQuery fills a T from the query string and validates it, through the
-// `query` tag.
+// `query` tag. It reports errors as [Base.Bind] does.
 func (b *Base) BindQuery[T any]() (T, error) {
 	var v T
 	if err := b.decodeInto(b.queryValues(), &v, "query"); err != nil {
@@ -163,7 +172,7 @@ func (b *Base) BindQuery[T any]() (T, error) {
 }
 
 // BindPath fills a T from the route parameters and validates it, through the
-// `param` tag.
+// `param` tag. It reports errors as [Base.Bind] does.
 func (b *Base) BindPath[T any]() (T, error) {
 	var v T
 	vals := make(url.Values, len(b.paramNames))
@@ -179,7 +188,8 @@ func (b *Base) BindPath[T any]() (T, error) {
 }
 
 // BindHeader fills a T from the request headers and validates it, through the
-// `header` tag, whose value is the header name.
+// `header` tag, whose value is the header name. It reports errors as
+// [Base.Bind] does.
 func (b *Base) BindHeader[T any]() (T, error) {
 	var v T
 	if err := b.decodeInto(url.Values(b.req.Header), &v, "header"); err != nil {
