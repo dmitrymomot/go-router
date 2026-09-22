@@ -1,4 +1,4 @@
-// Package serve runs an HTTP server that stops when its context does.
+// Package serve runs HTTP servers that stop when their context does.
 package serve
 
 import (
@@ -164,8 +164,9 @@ func Run(ctx context.Context, h http.Handler, cfg Config, opts ...Option) error 
 	return in.serve(ctx)
 }
 
-// instance is one server on its way from a Config to serving, in four steps:
-// prepare, build, open and serve.
+// instance is one server on its way from a Config to serving. [Run] and
+// [RunAll] take each server through the same steps: prepare, build, open and
+// serve.
 type instance struct {
 	h     http.Handler
 	srv   *http.Server
