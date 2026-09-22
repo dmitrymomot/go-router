@@ -510,3 +510,38 @@ func TestSafeFileNameRejectsAmbiguousRootsAndTraversal(t *testing.T) {
 		}
 	}
 }
+
+// noSeekFS hands out files that cannot seek.
+type noSeekFS struct{ fs.FS }
+
+type noSeekFile struct{ f fs.File }
+
+func (f noSeekFile) Stat() (fs.FileInfo, error) { return f.f.Stat() }
+func (f noSeekFile) Read(p []byte) (int, error) { return f.f.Read(p) }
+func (f noSeekFile) Close() error               { return f.f.Close() }
+
+func (n noSeekFS) Open(name string) (fs.File, error) {
+	f, err := n.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return noSeekFile{f}, nil
+}
+
+// A file that fails to go out must not turn the error page into a download.
+func TestAttachmentFileThatFailsSetsNoContentDisposition(t *testing.T) {
+	fsys := noSeekFS{fstest.MapFS{"r.pdf": {Data: []byte("%PDF")}}}
+	r := newTestRouter()
+	r.GET("/attachment", func(c *tctx) error { return c.AttachmentFile(fsys, "r.pdf", "") })
+	r.GET("/inline", func(c *tctx) error { return c.InlineFile(fsys, "r.pdf", "") })
+
+	for _, target := range []string{"/attachment", "/inline"} {
+		rec := do(r, http.MethodGet, target)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("GET %s = %d, want 500", target, rec.Code)
+		}
+		if got := rec.Header().Get(HeaderContentDisposition); got != "" {
+			t.Errorf("GET %s: Content-Disposition = %q, want none", target, got)
+		}
+	}
+}

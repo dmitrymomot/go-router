@@ -73,13 +73,24 @@ func (b *Base) serveFile(fsys fs.FS, name, kind, filename string) error {
 		return ErrNotFound
 	}
 
+	// ServeContent needs to seek to size the body and to answer a Range.
+	// os.DirFS and embed.FS both return seekable files; a filesystem that does
+	// not has to say so rather than be faked around.
+	rs, ok := f.(io.ReadSeeker)
+	if !ok {
+		return ErrInternalServerError.WithError(
+			fmt.Errorf("router: %s comes from a filesystem whose files cannot seek", clean))
+	}
+	// Set only once the file goes out, so an error page is not saved as the
+	// file.
 	if kind != "" {
 		if filename == "" {
 			filename = path.Base(clean)
 		}
 		b.res.Header().Set(HeaderContentDisposition, contentDisposition(kind, filename))
 	}
-	return b.sendFile(clean, f, info)
+	http.ServeContent(b.res, b.req, path.Base(clean), info.ModTime(), rs)
+	return nil
 }
 
 func fileNotFound(err error) error {
@@ -87,19 +98,6 @@ func fileNotFound(err error) error {
 		return ErrNotFound
 	}
 	return ErrNotFound.WithError(fmt.Errorf("router: serve the file: %w", err))
-}
-
-func (b *Base) sendFile(name string, f fs.File, info fs.FileInfo) error {
-	// ServeContent needs to seek to size the body and to answer a Range.
-	// os.DirFS and embed.FS both return seekable files; a filesystem that does
-	// not has to say so rather than be faked around.
-	rs, ok := f.(io.ReadSeeker)
-	if !ok {
-		return ErrInternalServerError.WithError(
-			fmt.Errorf("router: %s comes from a filesystem whose files cannot seek", name))
-	}
-	http.ServeContent(b.res, b.req, path.Base(name), info.ModTime(), rs)
-	return nil
 }
 
 func safeFileName(name string) bool {
