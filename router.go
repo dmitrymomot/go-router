@@ -762,8 +762,9 @@ func (r *Router[C]) mustOwnFallbacks(what string) {
 
 // ErrorHandler installs the handler that answers a request whose handler
 // returned an error. A scope with a prefix or a host may hold one of its own,
-// which covers the routes of that scope alone. Without a call the router uses
-// [DefaultErrorHandler].
+// which covers the routes of that scope alone, so an API host takes
+// [JSONErrorHandler] rather than one handler branching on the host. Without a
+// call the router uses [DefaultErrorHandler].
 //
 // The router logs every failure itself, skips h for a response that already
 // committed and for an error that is [context.Canceled], and answers a bare
