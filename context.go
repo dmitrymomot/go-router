@@ -107,6 +107,11 @@ func (b *Base) opts() *routerOpts {
 // router never calls. The route, its parameters and the host stay empty. The
 // Base has no cookie codec; see [SetCookieCodecForTest].
 //
+// To test a handler of your own context type, let routertest.NewContext build
+// the whole context. It fills an embedded Base in place, whereas a struct
+// literal that copies *NewBase(w, r) keeps writing through the Base it was
+// copied from.
+//
 // NewBase panics if w or r is nil.
 func NewBase(w http.ResponseWriter, r *http.Request) *Base {
 	if w == nil {
@@ -216,7 +221,8 @@ func (b *Base) setRoute(rec *routeRecord, names, vals []string) {
 
 // SetRouteForTest gives b a route pattern and its parameters, so a test can
 // call a handler that reads them without a router. names and vals pair up by
-// index.
+// index. routertest.NewContext does this for a whole context through its
+// WithPattern and WithParams options.
 //
 // SetRouteForTest panics if b is nil.
 func SetRouteForTest(b *Base, pattern string, names, vals []string) {

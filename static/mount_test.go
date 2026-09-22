@@ -26,9 +26,8 @@ func TestMountServesTheAssets(t *testing.T) {
 	static.Mount(r, a)
 
 	res := routertest.Get(r, a.URL("css/app.css"))
-	res.AssertStatus(t, http.StatusOK)
-	res.AssertBody(t, appCSS)
-	res.AssertHeader(t, "Cache-Control", "public, max-age=31536000, immutable")
+	res.Expect(t).Status(http.StatusOK).Body(appCSS).
+		Header("Cache-Control", "public, max-age=31536000, immutable")
 }
 
 func TestHandlerAndMountRejectNilDependencies(t *testing.T) {
@@ -57,8 +56,8 @@ func TestMountAnswersTheBarePrefixWithTheIndex(t *testing.T) {
 	r := newRouter()
 	static.Mount(r, newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"}))
 
-	routertest.Get(r, "/static").AssertBody(t, rootIndex)
-	routertest.Get(r, "/static/").AssertBody(t, rootIndex)
+	routertest.Get(r, "/static").Expect(t).Body(rootIndex)
+	routertest.Get(r, "/static/").Expect(t).Body(rootIndex)
 }
 
 func TestMountSendsAMissToTheErrorHandler(t *testing.T) {
@@ -69,8 +68,7 @@ func TestMountSendsAMissToTheErrorHandler(t *testing.T) {
 	static.Mount(r, newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"}))
 
 	res := routertest.Get(r, "/static/absent.css")
-	res.AssertStatus(t, http.StatusNotFound)
-	res.AssertBody(t, "handled: 404 Not Found")
+	res.Expect(t).Status(http.StatusNotFound).Body("handled: 404 Not Found")
 }
 
 func TestMountRegistersGETAndHEADOnly(t *testing.T) {
@@ -78,10 +76,9 @@ func TestMountRegistersGETAndHEADOnly(t *testing.T) {
 	static.Mount(r, newAssets(t, static.Config{FS: assetFS(), Prefix: "/static"}))
 
 	res := routertest.Do(r, http.MethodPost, "/static/css/app.css")
-	res.AssertStatus(t, http.StatusMethodNotAllowed)
-	res.AssertHeader(t, "Allow", "GET, HEAD, OPTIONS")
+	res.Expect(t).Status(http.StatusMethodNotAllowed).Header("Allow", "GET, HEAD, OPTIONS")
 
-	routertest.Do(r, http.MethodHead, "/static/css/app.css").AssertStatus(t, http.StatusOK)
+	routertest.Do(r, http.MethodHead, "/static/css/app.css").Expect(t).Status(http.StatusOK)
 }
 
 func TestMountAtTheRootKeepsTheOtherRoutes(t *testing.T) {
@@ -89,10 +86,10 @@ func TestMountAtTheRootKeepsTheOtherRoutes(t *testing.T) {
 	r.GET("/api/ping", func(c *appContext) error { return c.String(http.StatusOK, "pong") })
 	static.Mount(r, newAssets(t, static.Config{FS: assetFS(), SPA: true}))
 
-	routertest.Get(r, "/api/ping").AssertBody(t, "pong")
-	routertest.Get(r, "/js/app.js").AssertBody(t, appJS)
-	routertest.Get(r, "/").AssertBody(t, rootIndex)
-	routertest.Get(r, "/orders/7").AssertBody(t, rootIndex)
+	routertest.Get(r, "/api/ping").Expect(t).Body("pong")
+	routertest.Get(r, "/js/app.js").Expect(t).Body(appJS)
+	routertest.Get(r, "/").Expect(t).Body(rootIndex)
+	routertest.Get(r, "/orders/7").Expect(t).Body(rootIndex)
 }
 
 func TestMountKeepsAnEscapedPathInside(t *testing.T) {
@@ -113,7 +110,7 @@ func TestHandlerReadsTheCatchAllParameter(t *testing.T) {
 	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/files"})
 	r.GET("/files/{"+static.PathParam+"...}", static.Handler[*appContext](a))
 
-	routertest.Get(r, "/files/js/app.js").AssertBody(t, appJS)
+	routertest.Get(r, "/files/js/app.js").Expect(t).Body(appJS)
 }
 
 func TestMountHandlerServesTheAssetsToo(t *testing.T) {
@@ -122,8 +119,7 @@ func TestMountHandlerServesTheAssetsToo(t *testing.T) {
 	r.MountHandler(a.Prefix(), a)
 
 	res := routertest.Get(r, "/static/css/app.css")
-	res.AssertStatus(t, http.StatusOK)
-	res.AssertBody(t, appCSS)
+	res.Expect(t).Status(http.StatusOK).Body(appCSS)
 }
 
 func TestHandlerReportsAWrongMethod(t *testing.T) {
@@ -132,8 +128,7 @@ func TestHandlerReportsAWrongMethod(t *testing.T) {
 	r.Any("/static/{"+static.PathParam+"...}", static.Handler[*appContext](a))
 
 	res := routertest.Do(r, http.MethodPost, "/static/css/app.css")
-	res.AssertStatus(t, http.StatusMethodNotAllowed)
-	res.AssertHeader(t, "Allow", "GET, HEAD")
+	res.Expect(t).Status(http.StatusMethodNotAllowed).Header("Allow", "GET, HEAD")
 }
 
 func TestHandlerOnARouteWithoutTheParameter(t *testing.T) {
@@ -142,8 +137,8 @@ func TestHandlerOnARouteWithoutTheParameter(t *testing.T) {
 	r.GET("/static/css/app.css", static.Handler[*appContext](a))
 	r.GET("/favicon.ico", static.Handler[*appContext](a))
 
-	routertest.Get(r, "/static/css/app.css").AssertBody(t, appCSS)
-	routertest.Get(r, "/favicon.ico").AssertStatus(t, http.StatusNotFound)
+	routertest.Get(r, "/static/css/app.css").Expect(t).Body(appCSS)
+	routertest.Get(r, "/favicon.ico").Expect(t).Status(http.StatusNotFound)
 }
 
 func TestMountInsideAHostScope(t *testing.T) {
@@ -157,13 +152,12 @@ func TestMountInsideAHostScope(t *testing.T) {
 	})
 
 	res := routertest.Get(r, a.URL("css/app.css"), routertest.Host("acme.example.com"))
-	res.AssertStatus(t, http.StatusOK)
-	res.AssertBody(t, appCSS)
+	res.Expect(t).Status(http.StatusOK).Body(appCSS)
 
-	routertest.Get(r, "/who", routertest.Host("acme.example.com")).AssertBody(t, "acme")
+	routertest.Get(r, "/who", routertest.Host("acme.example.com")).Expect(t).Body("acme")
 
 	routertest.Get(r, a.URL("css/app.css"), routertest.Host("other.invalid")).
-		AssertStatus(t, http.StatusNotFound)
+		Expect(t).Status(http.StatusNotFound)
 }
 
 // The asset server decides HEAD in two places, its own method check and the

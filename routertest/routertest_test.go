@@ -1,6 +1,7 @@
 package routertest_test
 
 import (
+	"context"
 	"encoding/json/v2"
 	"errors"
 	"flag"
@@ -103,7 +104,7 @@ func newRouter() *router.Router[*appContext] {
 func TestJSONRoundTrip(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/users",
 		routertest.JSONBody(user{Name: "ann", Age: 30}))
-	res.AssertStatus(t, http.StatusCreated)
+	res.Expect(t).Status(http.StatusCreated)
 
 	got, err := res.JSON[user]()
 	if err != nil {
@@ -189,15 +190,13 @@ func TestResponseErrorBody(t *testing.T) {
 
 func TestGetAndBody(t *testing.T) {
 	res := routertest.Get(newRouter(), "/users/7")
-	res.AssertStatus(t, http.StatusOK)
-	res.AssertBody(t, "user 7")
+	res.Expect(t).Status(http.StatusOK).Body("user 7")
 }
 
 func TestFormBodyAndHeader(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/login",
 		routertest.FormBody(url.Values{"name": {"bo"}}))
-	res.AssertStatus(t, http.StatusNoContent)
-	res.AssertHeader(t, "X-Who", "bo")
+	res.Expect(t).Status(http.StatusNoContent).Header("X-Who", "bo")
 }
 
 func TestRequestOptionsSetHostCookieAndBody(t *testing.T) {
@@ -230,11 +229,11 @@ func TestHTMXOption(t *testing.T) {
 	))
 	r.GET("/type", func(c *appContext) error { return c.String(http.StatusOK, c.HTMX().RequestType) })
 
-	routertest.Get(r, "/panel", routertest.HTMX()).AssertBody(t, "fragment")
-	routertest.Get(r, "/panel").AssertBody(t, "page")
+	routertest.Get(r, "/panel", routertest.HTMX()).Expect(t).Body("fragment")
+	routertest.Get(r, "/panel").Expect(t).Body("page")
 	routertest.Get(r, "/panel", routertest.HTMX(), routertest.Header(router.HeaderHXRequestType, "full")).
-		AssertBody(t, "page")
-	routertest.Get(r, "/type", routertest.HTMX()).AssertBody(t, "partial")
+		Expect(t).Body("page")
+	routertest.Get(r, "/type", routertest.HTMX()).Expect(t).Body("partial")
 }
 
 func TestNewServer(t *testing.T) {
@@ -275,8 +274,7 @@ func eventRouter() *router.Router[*appContext] {
 
 func TestEvents(t *testing.T) {
 	res := routertest.Get(eventRouter(), "/events")
-	res.AssertStatus(t, http.StatusOK)
-	res.AssertHeader(t, "Content-Type", "text/event-stream")
+	res.Expect(t).Status(http.StatusOK).Header("Content-Type", "text/event-stream")
 	routertest.AssertEvents(t, res,
 		routertest.Event{ID: "1", Name: "tick", Data: "one"},
 		routertest.Event{ID: "1", Data: "two\nlines"},
@@ -365,6 +363,10 @@ func TestRequestHelpersRejectNilInputs(t *testing.T) {
 		{name: "request option", call: func() { routertest.Request(http.MethodGet, "/", nil) }},
 		{name: "body reader", call: func() { routertest.Body("text/plain", nil) }},
 		{name: "cookie", call: func() { routertest.Cookie(nil) }},
+		{name: "recorder", call: func() { routertest.Recorded(nil) }},
+		{name: "client cookie", call: func() { routertest.NewClient(t, http.NotFoundHandler()).SetCookie(nil) }},
+		{name: "client follow", call: func() { routertest.NewClient(t, http.NotFoundHandler()).Follow(nil) }},
+		{name: "context", call: func() { routertest.Context(nilContext) }},
 		{name: "cookie codec", call: func() { routertest.WithCookieCodec(nil) }},
 		{name: "Serve handler", call: func() { routertest.Serve(nil, routertest.Request(http.MethodGet, "/")) }},
 		{name: "Serve request", call: func() { routertest.Serve(http.NotFoundHandler(), nil) }},
@@ -381,6 +383,103 @@ func TestRequestHelpersRejectNilInputs(t *testing.T) {
 	}
 }
 
+func TestRecordedReadsTheRecorder(t *testing.T) {
+	c, rec := routertest.NewContext(t, newContext)
+	if err := c.Redirect(http.StatusSeeOther, "/x"); err != nil {
+		t.Fatalf("Redirect: %v", err)
+	}
+	res := routertest.Recorded(rec)
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get(router.HeaderLocation) != "/x" {
+		t.Errorf("status = %d, Location = %q; want 303 to /x", res.StatusCode, res.Header.Get(router.HeaderLocation))
+	}
+	if res.Request != nil {
+		t.Errorf("Request = %v, want nil for a recorder", res.Request)
+	}
+	if res.Recorder != rec {
+		t.Error("Recorder is not the recorder given")
+	}
+
+	c, rec = routertest.NewContext(t, newContext)
+	if err := c.JSON(http.StatusOK, user{Name: "ann", Age: 30}); err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	res = routertest.Recorded(rec)
+	if got, err := res.JSON[user](); err != nil || got != (user{Name: "ann", Age: 30}) {
+		t.Errorf("JSON = %+v, %v", got, err)
+	}
+	again, err := io.ReadAll(res.Response.Body)
+	if err != nil || string(again) != res.String() || res.String() == "" {
+		t.Errorf("body read again = %q, %v; want %q", again, err, res.String())
+	}
+}
+
+func TestServeKeepsTheRequest(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(router.HeaderLocation, "next")
+		w.WriteHeader(http.StatusSeeOther)
+	})
+	req := routertest.Request(http.MethodGet, "/a/b")
+	res := routertest.Serve(h, req)
+	if res.Request != req {
+		t.Fatal("the response does not carry the request Serve sent")
+	}
+	loc, err := res.Location()
+	if err != nil || loc.Path != "/a/next" {
+		t.Errorf("Location = %v, %v; want /a/next", loc, err)
+	}
+}
+
+// nilContext is passed where a context is refused, so staticcheck does not
+// read the nil as a mistake.
+var nilContext context.Context
+
+type ctxKey struct{}
+
+func TestContextOptionReplacesTheRequestContext(t *testing.T) {
+	ctx := context.WithValue(t.Context(), ctxKey{}, "tenant-7")
+
+	req := routertest.Request(http.MethodGet, "/", routertest.Context(ctx))
+	if req.Context() != ctx {
+		t.Error("the request does not carry the context of the option")
+	}
+
+	r := router.New(newContext)
+	r.GET("/", func(c *appContext) error {
+		v, _ := c.Value(ctxKey{}).(string)
+		return c.String(http.StatusOK, v)
+	})
+	routertest.Get(r, "/", routertest.Context(ctx)).Expect(t).Status(http.StatusOK).Body("tenant-7")
+}
+
+func TestRequestKeepsTheBackgroundContext(t *testing.T) {
+	if ctx := routertest.Request(http.MethodGet, "/").Context(); ctx != context.Background() {
+		t.Errorf("Request context = %v, want context.Background", ctx)
+	}
+	var seen context.Context
+	h := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { seen = r.Context() })
+	for _, send := range []func(){
+		func() { routertest.Get(h, "/") },
+		func() { routertest.Do(h, http.MethodPost, "/") },
+	} {
+		seen = nil
+		send()
+		if seen != context.Background() {
+			t.Errorf("handler context = %v, want context.Background", seen)
+		}
+	}
+}
+
+func TestRemoteAddrOption(t *testing.T) {
+	req := routertest.Request(http.MethodGet, "/", routertest.RemoteAddr("203.0.113.7:4321"))
+	if req.RemoteAddr != "203.0.113.7:4321" {
+		t.Errorf("RemoteAddr = %q", req.RemoteAddr)
+	}
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.RemoteAddr) })
+	routertest.Get(h, "/", routertest.RemoteAddr("203.0.113.7:4321")).Expect(t).Body("203.0.113.7:4321")
+	routertest.Get(h, "/").Expect(t).Body("192.0.2.1:1234")
+}
+
 func TestContextHelpersRejectNilInputs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -388,6 +487,9 @@ func TestContextHelpersRejectNilInputs(t *testing.T) {
 	}{
 		{name: "server handler", call: func(tb *recordingTB) {
 			routertest.NewServer(tb, nil)
+		}},
+		{name: "client handler", call: func(tb *recordingTB) {
+			routertest.NewClient(tb, nil)
 		}},
 	}
 	for _, tt := range tests {
@@ -438,6 +540,32 @@ func TestNewContextOptions(t *testing.T) {
 			wantPath:   "/users/7",
 		},
 		{
+			name: "a target",
+			opts: []routertest.ContextOption{
+				routertest.WithTarget(http.MethodPut, "/users/7?tab=orders"),
+			},
+			wantMethod: http.MethodPut,
+			wantPath:   "/users/7",
+		},
+		{
+			name: "WithRequest then WithTarget",
+			opts: []routertest.ContextOption{
+				routertest.WithRequest(routertest.Request(http.MethodPost, "/request")),
+				routertest.WithTarget(http.MethodPut, "/target"),
+			},
+			wantMethod: http.MethodPut,
+			wantPath:   "/target",
+		},
+		{
+			name: "WithTarget then WithRequest",
+			opts: []routertest.ContextOption{
+				routertest.WithTarget(http.MethodPut, "/target"),
+				routertest.WithRequest(routertest.Request(http.MethodPost, "/request")),
+			},
+			wantMethod: http.MethodPost,
+			wantPath:   "/request",
+		},
+		{
 			name: "all of them",
 			opts: []routertest.ContextOption{
 				routertest.WithPattern("/users/{id}"),
@@ -471,6 +599,68 @@ func TestNewContextOptions(t *testing.T) {
 				t.Errorf("path = %q, want %q", got, tt.wantPath)
 			}
 		})
+	}
+}
+
+func TestNewContextCarriesTheContextOfTheTest(t *testing.T) {
+	c, _ := routertest.NewContext(t, newContext)
+	if c.Request().Context() != t.Context() {
+		t.Error("the request does not carry t.Context()")
+	}
+
+	var inner context.Context
+	t.Run("subtest", func(t *testing.T) {
+		c, _ := routertest.NewContext(t, newContext)
+		inner = c.Request().Context()
+		if inner.Err() != nil {
+			t.Errorf("context ended while the test runs: %v", inner.Err())
+		}
+	})
+	if inner.Err() == nil {
+		t.Error("the context of a subtest is still live after the subtest returned")
+	}
+}
+
+func TestNewContextWithTarget(t *testing.T) {
+	c, _ := routertest.NewContext(t, newContext,
+		routertest.WithTarget(http.MethodPost, "/onboarding/?step=2",
+			routertest.Host("acme.example.com"),
+			routertest.MultipartBody(url.Values{"name": {"acme"}},
+				routertest.FilePart{Field: "logo", Content: []byte("png")}),
+			routertest.HTMX(),
+		))
+
+	if c.Method() != http.MethodPost || c.Path() != "/onboarding/" || c.Query("step") != "2" {
+		t.Errorf("request = %s %s ?step=%s", c.Method(), c.Path(), c.Query("step"))
+	}
+	if c.Host() != "acme.example.com" {
+		t.Errorf("host = %q", c.Host())
+	}
+	if got := c.FormValue("name"); got != "acme" {
+		t.Errorf("name = %q, want acme", got)
+	}
+	f, _, err := c.FormFile("logo")
+	if err != nil {
+		t.Fatalf("FormFile: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if body, _ := io.ReadAll(f); string(body) != "png" {
+		t.Errorf("logo = %q, want png", body)
+	}
+	if c.Request().Header.Get(router.HeaderHXRequest) != "true" {
+		t.Error("the htmx header is missing")
+	}
+	if c.Request().Context() != t.Context() {
+		t.Error("the request does not carry t.Context()")
+	}
+}
+
+func TestWithTargetTakesAContextOfItsOwn(t *testing.T) {
+	ctx := context.WithValue(t.Context(), ctxKey{}, "own")
+	c, _ := routertest.NewContext(t, newContext,
+		routertest.WithTarget(http.MethodGet, "/", routertest.Context(ctx)))
+	if c.Request().Context() != ctx {
+		t.Error("the context of the option lost to t.Context()")
 	}
 }
 
@@ -562,7 +752,7 @@ func TestMultipartBodyPostsAFile(t *testing.T) {
 				Content:     []byte("png bytes"),
 			},
 		))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
@@ -583,7 +773,7 @@ func TestMultipartBodyPostsAFile(t *testing.T) {
 func TestMultipartBodyDefaultsTheFilePart(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
 		routertest.MultipartBody(nil, routertest.FilePart{Field: "avatar", Content: []byte("x")}))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
@@ -604,7 +794,7 @@ func TestMultipartBodyPostsMoreThanOneFile(t *testing.T) {
 			routertest.FilePart{Field: "docs", Filename: "one.txt", Content: []byte("one")},
 			routertest.FilePart{Field: "docs", Filename: "two.txt", Content: []byte("two")},
 		))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
@@ -621,7 +811,7 @@ func TestMultipartBodyPostsMoreThanOneFile(t *testing.T) {
 func TestMultipartBodyIsMissingWithoutAFile(t *testing.T) {
 	res := routertest.Do(newRouter(), http.MethodPost, "/avatars",
 		routertest.MultipartBody(url.Values{"name": {"ann"}}))
-	res.AssertStatus(t, http.StatusBadRequest)
+	res.Expect(t).Status(http.StatusBadRequest)
 }
 
 func TestMultipartBodyWritesTheFieldsInNameOrder(t *testing.T) {
@@ -653,7 +843,7 @@ func TestMultipartBodyEscapesTheNames(t *testing.T) {
 			Filename: `a"b.png`,
 			Content:  []byte("x"),
 		}))
-	res.AssertStatus(t, http.StatusOK)
+	res.Expect(t).Status(http.StatusOK)
 
 	got, err := res.JSON[upload]()
 	if err != nil {
@@ -793,17 +983,31 @@ func TestAssertGoldenDoesNotFollowAnEscapingSymlink(t *testing.T) {
 	}
 }
 
+// recordingTB keeps what a helper reports instead of failing the test. Its
+// Fatalf does not stop, so a helper goes on past a fatal miss.
 type recordingTB struct {
 	testing.TB
-	failed bool
 	msg    string
+	fatals []string
+	errors []string
+	failed bool
 }
 
 func (tb *recordingTB) Helper() {}
 
+// Context stands in for the context of the test, which NewContext reads before
+// it can report anything.
+func (tb *recordingTB) Context() context.Context { return context.Background() }
+
 func (tb *recordingTB) Fatalf(format string, args ...any) {
 	tb.failed = true
 	tb.msg = fmt.Sprintf(format, args...)
+	tb.fatals = append(tb.fatals, tb.msg)
+}
+
+func (tb *recordingTB) Errorf(format string, args ...any) {
+	tb.failed = true
+	tb.errors = append(tb.errors, fmt.Sprintf(format, args...))
 }
 
 var cookieKey = []byte(strings.Repeat("k", router.MinCookieKeyLen))

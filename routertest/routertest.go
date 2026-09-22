@@ -1,8 +1,13 @@
 // Package routertest holds helpers for testing a handler or a router.
+//
+// [Client] sends requests as a browser does, and keeps the cookies of every
+// answer. [Response.Expect] chains the checks of one answer. [Requests] builds
+// one request for each route of a router, with every parameter filled in.
 package routertest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -39,6 +44,23 @@ func Host(host string) RequestOption {
 	return func(r *http.Request) { r.Host = host }
 }
 
+// Context gives the request ctx as its context, such as the t.Context() of the
+// test.
+//
+// Context panics if ctx is nil.
+func Context(ctx context.Context) RequestOption {
+	if ctx == nil {
+		panic("routertest: Context needs a context")
+	}
+	return func(r *http.Request) { *r = *r.WithContext(ctx) }
+}
+
+// RemoteAddr sets the "host:port" the request comes from, for a handler that
+// keys on the caller.
+func RemoteAddr(addr string) RequestOption {
+	return func(r *http.Request) { r.RemoteAddr = addr }
+}
+
 // HTMX marks the request as one htmx 4 made to swap one element: it sets
 // HX-Request and HX-Request-Type: partial. Add
 // Header(router.HeaderHXRequestType, "full") for a boosted link or a history
@@ -50,18 +72,22 @@ func HTMX() RequestOption {
 	}
 }
 
-// A nil cookie is refused here: http.Request.AddCookie takes it and adds
-// nothing, so the request would go out short of a cookie and say nothing.
+// Cookie adds c to the request.
 func Cookie(c *http.Cookie) RequestOption {
+	// A nil cookie is refused here: http.Request.AddCookie takes it and adds
+	// nothing, so the request would go out short of a cookie and say nothing.
 	if c == nil {
 		panic("routertest: Cookie needs a cookie")
 	}
 	return func(r *http.Request) { r.AddCookie(c) }
 }
 
-// A nil reader is refused here: it would reach the handler as a body that
-// panics on the first read, a long way from the call that built it.
+// Body sends r as the body, under contentType. A reader is read once, so a
+// Body shared by several requests, such as a [Client] default or an option of
+// [Requests], reaches only the first.
 func Body(contentType string, r io.Reader) RequestOption {
+	// A nil reader is refused here: it would reach the handler as a body that
+	// panics on the first read, a long way from the call that built it.
 	if r == nil {
 		panic("routertest: Body needs a reader")
 	}
@@ -157,7 +183,9 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 }
 
 // Request builds a request for a handler under test. target is a path, and it
-// may carry a query.
+// may carry a query. It may also be an absolute URL: its host becomes the Host
+// of the request, and https marks the request as one over TLS. The request
+// carries context.Background unless an option gives it another.
 func Request(method, target string, opts ...RequestOption) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	for _, opt := range opts {
@@ -167,7 +195,7 @@ func Request(method, target string, opts ...RequestOption) *http.Request {
 }
 
 type contextSpec struct {
-	req     *http.Request
+	newReq  func(context.Context) *http.Request
 	params  map[string]string
 	codec   *router.CookieCodec
 	pattern string
@@ -189,9 +217,24 @@ func WithPattern(pattern string) ContextOption {
 }
 
 // WithRequest gives the context a request of your own, from [Request] or from
-// httptest. Without it the context answers a GET of "/".
+// httptest, with the context it carries. Without it or [WithTarget] the context
+// answers a GET of "/". The last of WithRequest and WithTarget wins.
 func WithRequest(req *http.Request) ContextOption {
-	return func(s *contextSpec) { s.req = req }
+	return func(s *contextSpec) {
+		s.newReq = func(context.Context) *http.Request { return req }
+	}
+}
+
+// WithTarget gives the context the request that [Request] builds from method,
+// target and opts. The request carries the context of the test unless opts
+// give one. The last of WithRequest and WithTarget wins.
+func WithTarget(method, target string, opts ...RequestOption) ContextOption {
+	opts = slices.Clone(opts)
+	return func(s *contextSpec) {
+		s.newReq = func(ctx context.Context) *http.Request {
+			return Request(method, target, slices.Concat([]RequestOption{Context(ctx)}, opts)...)
+		}
+	}
 }
 
 // WithCookieCodec gives the context the codec that [router.Router.CookieCodec]
@@ -211,6 +254,9 @@ func WithCookieCodec(cc *router.CookieCodec) ContextOption {
 // newCtx is the factory of the application, the same one [router.New] takes.
 // It has to return a context whose [router.Base] is usable: embed Base by
 // value, or fill an embedded pointer with [router.NewBase].
+//
+// Without [WithRequest] the request carries tb.Context(), which ends when the
+// test does.
 func NewContext[C router.Context](
 	tb testing.TB,
 	newCtx func(http.ResponseWriter, *http.Request) C,
@@ -222,10 +268,13 @@ func NewContext[C router.Context](
 	for _, opt := range opts {
 		opt(&spec)
 	}
-	req := spec.req
-	if req == nil {
-		req = httptest.NewRequest(http.MethodGet, "/", nil)
+	newReq := spec.newReq
+	if newReq == nil {
+		newReq = func(ctx context.Context) *http.Request {
+			return Request(http.MethodGet, "/", Context(ctx))
+		}
 	}
+	req := newReq(tb.Context())
 	rec := httptest.NewRecorder()
 	res := &router.Response{ResponseWriter: rec}
 
@@ -262,6 +311,8 @@ func paramSlices(params map[string]string) (names, vals []string) {
 
 // Response is what a handler answered. Body holds the whole body, already
 // read, and the embedded [http.Response] can be read again from the start.
+// [Serve] fills the Request of the embedded http.Response with the request it
+// sent, so Location resolves a relative redirect; [Recorded] leaves it nil.
 type Response struct {
 	*http.Response
 	Body     []byte
@@ -280,11 +331,25 @@ func Serve(h http.Handler, req *http.Request) *Response {
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+	res := Recorded(rec)
+	res.Request = req
+	res.codec = router.CookieCodecOf(h)
+	return res
+}
+
+// Recorded reports what rec holds as a Response, so the answer of a handler
+// called through [NewContext] can be checked with [Response.Expect].
+//
+// Recorded panics if rec is nil.
+func Recorded(rec *httptest.ResponseRecorder) *Response {
+	if rec == nil {
+		panic("routertest: Recorded needs a recorder")
+	}
 	res := rec.Result()
 	body, _ := io.ReadAll(res.Body)
 	_ = res.Body.Close()
 	res.Body = io.NopCloser(bytes.NewReader(body))
-	return &Response{Response: res, Body: body, Recorder: rec, codec: router.CookieCodecOf(h)}
+	return &Response{Response: res, Body: body, Recorder: rec}
 }
 
 // Do builds a request and sends it to h. See [Request] and [Serve].
@@ -423,31 +488,6 @@ func FlashCookie(cc *router.CookieCodec, flashes ...router.Flash) RequestOption 
 		if value != "" {
 			r.AddCookie(&http.Cookie{Name: router.FlashCookieName, Value: value})
 		}
-	}
-}
-
-// AssertStatus fails the test unless the status is want. The message carries
-// the body, which usually says why.
-func (r *Response) AssertStatus(tb testing.TB, want int) {
-	tb.Helper()
-	if r.StatusCode != want {
-		tb.Fatalf("status = %d, want %d; body: %s", r.StatusCode, want, r.Body)
-	}
-}
-
-// AssertBody fails the test unless the body is exactly want.
-func (r *Response) AssertBody(tb testing.TB, want string) {
-	tb.Helper()
-	if got := r.String(); got != want {
-		tb.Fatalf("body = %q, want %q", got, want)
-	}
-}
-
-// AssertHeader fails the test unless the response header key is want.
-func (r *Response) AssertHeader(tb testing.TB, key, want string) {
-	tb.Helper()
-	if got := r.Header.Get(key); got != want {
-		tb.Fatalf("header %s = %q, want %q", key, got, want)
 	}
 }
 
