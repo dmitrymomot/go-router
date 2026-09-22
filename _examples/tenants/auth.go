@@ -3,10 +3,10 @@ package main
 import (
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 )
 
@@ -146,6 +146,10 @@ func checkSignup(name, email, password string) string {
 	return ""
 }
 
+// enterPath is where a workspace spends a ticket. The route table registers it,
+// and enterURL fills it in.
+const enterPath = "/enter"
+
 func enterURL(c Ctx, slug, ticket string) string {
-	return workspaceURL(c, slug) + "enter?ticket=" + url.QueryEscape(ticket)
+	return origin(c, workspaceHost(slug)) + router.MustExpand(enterPath+"?ticket={ticket}", "ticket", ticket)
 }

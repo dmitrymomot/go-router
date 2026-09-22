@@ -21,6 +21,7 @@ The apex sells the product and makes workspaces. It has no login and no session 
 | Step | Request | Answer |
 | --- | --- | --- |
 | Read the pitch | `GET lvh.me/` | the landing page |
+| Type www | `GET www.lvh.me/signup` | `301` to `lvh.me/signup`, with the query kept |
 | Open the signup form | `GET lvh.me/signup` | the form, with a CSRF token |
 | Create a workspace | `POST lvh.me/signup` | `303` to `acme.lvh.me/enter?ticket=…`, or the form again with the reason |
 | Arrive | `GET acme.lvh.me/enter?ticket=…` | the session cookie, then `303` to the dashboard |
@@ -35,12 +36,13 @@ The apex sells the product and makes workspaces. It has no login and no session 
 **A host is a route.** The apex and every workspace are separate scopes of one router, and the subdomain is a parameter like any path segment:
 
 ```go
-r.Hosts([]string{baseDomain, "www." + baseDomain}, apexRoutes)
-r.Host("{tenant}."+baseDomain, workspaceRoutes)
+r.Host(baseDomain, apexRoutes)
+r.RedirectHost("www."+baseDomain, baseDomain, http.StatusMovedPermanently)
+r.Host(tenantHost, workspaceRoutes) // "{tenant}.lvh.me"
 r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })
 ```
 
-An exact host wins over a pattern, so `www.lvh.me` never reads as a workspace named `www`. The port never appears in a pattern: the router strips it before it matches, so the same three lines serve `lvh.me:8080` here and `lvh.me` in production.
+An exact host wins over a pattern, so `www.lvh.me` never reads as a workspace named `www`: it answers every request with a `301` to the same path and query on the apex. The port never appears in a pattern: the router strips it before it matches, so the same lines serve `lvh.me:8080` here and `lvh.me` in production. Links to a workspace fill in the same pattern, `router.MustExpand(tenantHost, "tenant", slug)`, so the table and the links cannot drift apart.
 
 **The subdomain reaches the handler as a parameter.** One middleware turns it into the workspace, and every handler under it reads `c.Workspace`:
 

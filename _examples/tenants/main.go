@@ -25,6 +25,10 @@ import (
 // baseDomain is the apex. A workspace named Acme answers on acme.lvh.me.
 const baseDomain = "lvh.me"
 
+// tenantHost is the host of every workspace. The route table registers it,
+// and links to a workspace fill it in with router.MustExpand.
+const tenantHost = "{tenant}." + baseDomain
+
 const addr = "localhost:8080"
 
 const maxBodyBytes = 8 << 10
@@ -83,12 +87,14 @@ func newRouter(store *Store, codec *router.CookieCodec) *router.Router[Ctx] {
 		readSessionInto,
 	)
 
-	// The apex, and www beside it. An exact host wins over a pattern, so www
-	// never reads as a workspace named "www".
-	r.Hosts([]string{baseDomain, "www." + baseDomain}, apexRoutes)
+	// The apex. www sends every request to it, keeping the path and query. An
+	// exact host wins over a pattern, so www never reads as a workspace named
+	// "www".
+	r.Host(baseDomain, apexRoutes)
+	r.RedirectHost("www."+baseDomain, baseDomain, http.StatusMovedPermanently)
 
 	// One table for every workspace: the subdomain is the {tenant} parameter.
-	r.Host("{tenant}."+baseDomain, workspaceRoutes)
+	r.Host(tenantHost, workspaceRoutes)
 
 	// Everything else, such as a request sent straight to 127.0.0.1:8080.
 	r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })

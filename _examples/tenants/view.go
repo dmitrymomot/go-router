@@ -45,23 +45,23 @@ func readSession(c Ctx) (string, bool) {
 
 func clearSession(c Ctx) { c.ClearCookie(sessionCookie) }
 
-// workspaceURL is the absolute address of a workspace. The port comes from the
-// request that asked, so one binary serves lvh.me:8080 here and lvh.me there.
-func workspaceURL(c Ctx, slug string) string {
-	host := slug + "." + baseDomain
+// origin is the scheme and authority of host. The port comes from the request
+// that asked, so one binary serves lvh.me:8080 here and lvh.me there.
+func origin(c Ctx, host string) string {
 	if _, port, err := net.SplitHostPort(c.Request().Host); err == nil {
 		host = net.JoinHostPort(host, port)
 	}
-	return c.Scheme() + "://" + host + "/"
+	return c.Scheme() + "://" + host
 }
 
-func apexURL(c Ctx) string {
-	host := baseDomain
-	if _, port, err := net.SplitHostPort(c.Request().Host); err == nil {
-		host = net.JoinHostPort(host, port)
-	}
-	return c.Scheme() + "://" + host + "/"
-}
+// workspaceHost is the host of a workspace, built from the pattern that routes
+// it.
+func workspaceHost(slug string) string { return router.MustExpand(tenantHost, "tenant", slug) }
+
+// workspaceURL is the absolute address of a workspace.
+func workspaceURL(c Ctx, slug string) string { return origin(c, workspaceHost(slug)) + "/" }
+
+func apexURL(c Ctx) string { return origin(c, baseDomain) + "/" }
 
 const (
 	maxNameRunes  = 40
