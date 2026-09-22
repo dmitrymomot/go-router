@@ -8,9 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/routertest"
 )
 
 func realIPRouter(cfg middleware.RealIPConfig) *router.Router[*appContext] {
@@ -502,9 +504,7 @@ func TestRealIPDeletesTheForwardedProtoOfAnUntrustedPeer(t *testing.T) {
 }
 
 func TestRealIPKeepsTheForwardedProtoOfATrustedProxy(t *testing.T) {
-	cfg := middleware.RealIPConfig{Headers: []string{
-		router.HeaderXForwardedFor, router.HeaderXForwardedProto,
-	}}
+	cfg := middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor}}
 	r := headerEchoRouter(cfg, router.HeaderXForwardedProto)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -516,26 +516,324 @@ func TestRealIPKeepsTheForwardedProtoOfATrustedProxy(t *testing.T) {
 	}
 }
 
-func TestRealIPDropsAnUnnamedForwardedProtoFromATrustedPeer(t *testing.T) {
-	cfg := middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor}}
+func TestRealIPWithoutHeadersKeepsTheSchemeOfATrustedPeer(t *testing.T) {
+	r := headerEchoRouter(middleware.RealIPConfig{}, router.HeaderXForwardedProto)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderXForwardedProto, "https")
+	if got := do(r, fromProxy(req, "10.0.0.5:1234")).Body.String(); got != "10.0.0.5 https https" {
+		t.Errorf("client ip, scheme and %s = %q, want %q",
+			router.HeaderXForwardedProto, got, "10.0.0.5 https https")
+	}
+}
+
+func TestRealIPKeepsTheSchemeOfATrustedProxy(t *testing.T) {
+	cfg := middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor, router.HeaderXRealIP}}
 	r := headerEchoRouter(cfg, router.HeaderXForwardedProto)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(router.HeaderXForwardedFor, "198.51.100.5")
 	req.Header.Set(router.HeaderXForwardedProto, "https")
-	if got := do(r, fromProxy(req, "10.0.0.1:9000")).Body.String(); got != "198.51.100.5 http " {
+	if got := do(r, fromProxy(req, "10.0.0.1:9000")).Body.String(); got != "198.51.100.5 https https" {
 		t.Errorf("client ip, scheme and %s = %q, want %q",
-			router.HeaderXForwardedProto, got, "198.51.100.5 http ")
+			router.HeaderXForwardedProto, got, "198.51.100.5 https https")
 	}
 }
 
-func TestRealIPDropsTheForwardedProtoItDoesNotRead(t *testing.T) {
-	r := headerEchoRouter(middleware.RealIPConfig{}, router.HeaderXForwardedProto)
+func TestRealIPSecuresTheCookiesBehindATLSProxy(t *testing.T) {
+	r := newRouter()
+	r.Use(
+		middleware.RealIPWithConfig[*appContext](middleware.RealIPConfig{
+			Headers: []string{router.HeaderXForwardedFor},
+		}),
+		middleware.SecureWithConfig[*appContext](middleware.SecureConfig{HSTSMaxAge: 365 * 24 * time.Hour}),
+		middleware.CSRF[*appContext],
+	)
+	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
+
+	tests := []struct {
+		name   string
+		peer   string
+		secure bool
+	}{
+		{"a trusted proxy", "10.0.0.1:9000", true},
+		{"an untrusted peer", "192.0.2.1:1234", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set(router.HeaderXForwardedFor, "198.51.100.5")
+			req.Header.Set(router.HeaderXForwardedProto, "https")
+			rec := do(r, fromProxy(req, tt.peer))
+
+			if got := csrfCookie(t, rec).Secure; got != tt.secure {
+				t.Errorf("token cookie secure = %t, want %t", got, tt.secure)
+			}
+			if got := rec.Header().Get(router.HeaderStrictTransportSecurity) != ""; got != tt.secure {
+				t.Errorf("HSTS sent = %t, want %t", got, tt.secure)
+			}
+		})
+	}
+}
+
+func TestRealIPReducesTheSchemeToOneValue(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		scheme string
+		header string
+	}{
+		{"https", []string{"https"}, "https", "https"},
+		{"another case", []string{"HTTPS"}, "https", "https"},
+		{"the last entry of a list", []string{"http, https"}, "https", "https"},
+		{"the last entry over the first", []string{"https, http"}, "http", "http"},
+		{"the last of two lines", []string{"https", "http"}, "http", "http"},
+		{"an empty entry is passed over", []string{"https, "}, "https", "https"},
+		{"a scheme that is not HTTP", []string{"gopher"}, "http", ""},
+		{"a URL", []string{"https://evil.example"}, "http", ""},
+		{"an empty value", []string{""}, "http", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor}}
+			r := headerEchoRouter(cfg, router.HeaderXForwardedProto)
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set(router.HeaderXForwardedFor, "198.51.100.5")
+			for _, v := range tt.values {
+				req.Header.Add(router.HeaderXForwardedProto, v)
+			}
+			want := "198.51.100.5 " + tt.scheme + " " + tt.header
+			if got := do(r, fromProxy(req, "10.0.0.1:9000")).Body.String(); got != want {
+				t.Errorf("client ip, scheme and %s = %q, want %q",
+					router.HeaderXForwardedProto, got, want)
+			}
+		})
+	}
+}
+
+func recordIncoming(incoming **http.Request) router.Middleware[*appContext] {
+	return func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+		return func(c *appContext) error {
+			*incoming = c.Request()
+			return next(c)
+		}
+	}
+}
+
+func TestRealIPPassesATrustedRequestWithoutForwardingHeadersThrough(t *testing.T) {
+	for _, dropProto := range []bool{false, true} {
+		t.Run("DropProto "+strconv.FormatBool(dropProto), func(t *testing.T) {
+			var incoming, handled *http.Request
+			r := newRouter()
+			r.Use(recordIncoming(&incoming))
+			r.Use(middleware.RealIPWithConfig[*appContext](middleware.RealIPConfig{
+				Headers:   []string{router.HeaderXForwardedFor},
+				DropProto: dropProto,
+			}))
+			r.GET("/", func(c *appContext) error {
+				handled = c.Request()
+				return c.String(http.StatusOK, "ok")
+			})
+
+			do(r, fromProxy(httptest.NewRequest(http.MethodGet, "/", nil), "10.0.0.1:9000"))
+			if handled != incoming {
+				t.Error("the handler got a copy of the request, want the one that came in")
+			}
+		})
+	}
+}
+
+func TestRealIPLeftmostKeepsTheFirstScheme(t *testing.T) {
+	cfg := middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor}, Leftmost: true}
+	r := headerEchoRouter(cfg, router.HeaderXForwardedProto)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(router.HeaderXForwardedProto, "https")
-	if got := do(r, fromProxy(req, "10.0.0.5:1234")).Body.String(); got != "10.0.0.5 http " {
+	req.Header.Set(router.HeaderXForwardedFor, "203.0.113.9")
+	req.Header.Set(router.HeaderXForwardedProto, "https, http")
+	if got := do(r, req).Body.String(); got != "203.0.113.9 https https" {
 		t.Errorf("client ip, scheme and %s = %q, want %q",
-			router.HeaderXForwardedProto, got, "10.0.0.5 http ")
+			router.HeaderXForwardedProto, got, "203.0.113.9 https https")
+	}
+}
+
+func TestRealIPDropProto(t *testing.T) {
+	tests := []struct {
+		name   string
+		cfg    middleware.RealIPConfig
+		header map[string]string
+		peer   string
+		echo   string
+		want   string
+	}{
+		{
+			name:   "X-Forwarded-Proto of a trusted proxy is deleted",
+			cfg:    middleware.RealIPConfig{Headers: []string{router.HeaderXForwardedFor}, DropProto: true},
+			header: map[string]string{router.HeaderXForwardedFor: "198.51.100.5", router.HeaderXForwardedProto: "https"},
+			peer:   "10.0.0.1:9000",
+			echo:   router.HeaderXForwardedProto,
+			want:   "198.51.100.5 http ",
+		},
+		{
+			name:   "Forwarded proto= is ignored and Forwarded kept",
+			cfg:    middleware.RealIPConfig{Headers: []string{router.HeaderForwarded}, DropProto: true},
+			header: map[string]string{router.HeaderForwarded: "for=198.51.100.9;proto=https"},
+			peer:   "10.0.0.1:9000",
+			echo:   router.HeaderForwarded,
+			want:   "198.51.100.9 http for=198.51.100.9;proto=https",
+		},
+		{
+			name: "Forwarded proto= sets no X-Forwarded-Proto",
+			cfg:  middleware.RealIPConfig{Headers: []string{router.HeaderForwarded}, DropProto: true},
+			header: map[string]string{
+				router.HeaderForwarded: "for=198.51.100.9;proto=https", router.HeaderXForwardedProto: "https",
+			},
+			peer: "10.0.0.1:9000",
+			echo: router.HeaderXForwardedProto,
+			want: "198.51.100.9 http ",
+		},
+		{
+			name: "Leftmost vouches for no scheme",
+			cfg: middleware.RealIPConfig{
+				Headers: []string{router.HeaderXForwardedFor}, Leftmost: true, DropProto: true,
+			},
+			header: map[string]string{router.HeaderXForwardedFor: "203.0.113.9", router.HeaderXForwardedProto: "https"},
+			peer:   "192.0.2.1:1234",
+			echo:   router.HeaderXForwardedProto,
+			want:   "203.0.113.9 http ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := headerEchoRouter(tt.cfg, tt.echo)
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			for name, value := range tt.header {
+				req.Header.Set(name, value)
+			}
+			if got := do(r, fromProxy(req, tt.peer)).Body.String(); got != tt.want {
+				t.Errorf("client ip, scheme and %s = %q, want %q", tt.echo, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRealIPForwardedWithoutProtoKeepsTheSchemeHeader(t *testing.T) {
+	cfg := middleware.RealIPConfig{Headers: []string{router.HeaderForwarded}}
+	r := headerEchoRouter(cfg, router.HeaderXForwardedProto)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderForwarded, "for=198.51.100.9")
+	req.Header.Set(router.HeaderXForwardedProto, "https")
+	if got := do(r, fromProxy(req, "10.0.0.1:9000")).Body.String(); got != "198.51.100.9 https https" {
+		t.Errorf("client ip, scheme and %s = %q, want %q",
+			router.HeaderXForwardedProto, got, "198.51.100.9 https https")
+	}
+}
+
+func TestRealIPWithConfigPanicsWhenHeadersNameTheScheme(t *testing.T) {
+	for _, name := range []string{router.HeaderXForwardedProto, "x-forwarded-proto"} {
+		t.Run(name, func(t *testing.T) {
+			mustPanicContaining(t, "DropProto", func() {
+				middleware.RealIPWithConfig[*appContext](middleware.RealIPConfig{
+					Headers: []string{router.HeaderXForwardedFor, name},
+				})
+			})
+		})
+	}
+}
+
+func TestClientAddr(t *testing.T) {
+	tests := []struct {
+		remote string
+		want   netip.Addr
+		ok     bool
+	}{
+		{"203.0.113.7:1234", netip.MustParseAddr("203.0.113.7"), true},
+		{"[2001:db8::1]:443", netip.MustParseAddr("2001:db8::1"), true},
+		{"203.0.113.7", netip.MustParseAddr("203.0.113.7"), true},
+		{"2001:db8::1", netip.MustParseAddr("2001:db8::1"), true},
+		{"[::ffff:192.0.2.1]:80", netip.MustParseAddr("192.0.2.1"), true},
+		{"::ffff:192.0.2.1", netip.MustParseAddr("192.0.2.1"), true},
+		{"[fe80::1%en0]:80", netip.MustParseAddr("fe80::1"), true},
+		{"", netip.Addr{}, false},
+		{"@", netip.Addr{}, false},
+		{"pipe", netip.Addr{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remote, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tt.remote
+			c, _ := routertest.NewContext(t, func(http.ResponseWriter, *http.Request) *appContext {
+				return &appContext{}
+			}, routertest.WithRequest(req))
+
+			got, ok := middleware.ClientAddr(c)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("ClientAddr = %v, %t, want %v, %t", got, ok, tt.want, tt.ok)
+			}
+			if ok && (got.Is4In6() || got.Zone() != "") {
+				t.Errorf("ClientAddr = %v, want no mapping and no zone", got)
+			}
+		})
+	}
+}
+
+func TestClientAddrAfterRealIP(t *testing.T) {
+	r := newRouter()
+	r.Use(namedRealIP(router.HeaderXForwardedFor))
+	r.GET("/", func(c *appContext) error {
+		addr, ok := middleware.ClientAddr(c)
+		return c.String(http.StatusOK, addr.String()+" "+strconv.FormatBool(ok))
+	})
+
+	req := forwarded(router.HeaderXForwardedFor, "::ffff:203.0.113.9", "10.0.0.1:9000")
+	if got := do(r, req).Body.String(); got != "203.0.113.9 true" {
+		t.Errorf("client addr = %q, want %q", got, "203.0.113.9 true")
+	}
+}
+
+func BenchmarkRealIP(b *testing.B) {
+	mw := namedRealIP(router.HeaderXForwardedFor)
+	h := mw(func(*appContext) error { return nil })
+
+	tls := forwarded(router.HeaderXForwardedFor, "198.51.100.5", "10.0.0.1:9000")
+	tls.Header.Set(router.HeaderXForwardedProto, "https")
+	benchmarks := []struct {
+		req  *http.Request
+		name string
+	}{
+		{tls, "a trusted proxy that ends TLS"},
+		{fromProxy(httptest.NewRequest(http.MethodGet, "/", nil), "10.0.0.1:9000"), "a trusted peer with no header"},
+		{forwarded(router.HeaderXForwardedFor, "198.51.100.5", "192.0.2.1:1234"), "an untrusted peer"},
+	}
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			c, _ := routertest.NewContext(b, func(http.ResponseWriter, *http.Request) *appContext {
+				return &appContext{}
+			}, routertest.WithRequest(bm.req))
+			b.ReportAllocs()
+			for b.Loop() {
+				c.SetRequest(bm.req)
+				if err := h(c); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkClientAddr(b *testing.B) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[::ffff:203.0.113.7]:1234"
+	c, _ := routertest.NewContext(b, func(http.ResponseWriter, *http.Request) *appContext {
+		return &appContext{}
+	}, routertest.WithRequest(req))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, ok := middleware.ClientAddr(c); !ok {
+			b.Fatal("ClientAddr found no address")
+		}
 	}
 }

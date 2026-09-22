@@ -89,26 +89,59 @@ func ExampleRealIPWithConfig() {
 		r := newAPI()
 		r.Use(mw)
 		r.GET("/", func(c *Context) error {
-			return c.String(http.StatusOK, middleware.ClientIP(c))
+			return c.String(http.StatusOK, middleware.ClientIP(c)+" "+c.Scheme())
 		})
 		return routertest.Get(r, "/",
-			routertest.Header(router.HeaderXForwardedFor, "203.0.113.9")).String()
+			routertest.Header(router.HeaderXForwardedFor, "203.0.113.9"),
+			routertest.Header(router.HeaderXForwardedProto, "https")).String()
 	}
 
-	// The bare middleware names no header, so it strips every forwarding
-	// header and the peer address stands.
+	// The bare middleware names no header and trusts no public peer, so it
+	// strips every forwarding header and the connection stands.
 	fmt.Println(report(middleware.RealIP[*Context]))
 
 	// A header counts only when it is named and the peer is a trusted proxy.
-	// The test request arrives from 192.0.2.1, which no default trusts.
+	// The test request arrives from 192.0.2.1, which no default trusts. The
+	// scheme of a trusted proxy is kept without being named.
+	proxies := middleware.NewTrustSet(
+		middleware.TrustPrefix(netip.MustParsePrefix("192.0.2.0/24")))
 	fmt.Println(report(middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
+		Headers: []string{router.HeaderXForwardedFor},
+		Trust:   proxies,
+	})))
+
+	// DropProto takes the scheme from the connection alone.
+	fmt.Println(report(middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
+		Headers:   []string{router.HeaderXForwardedFor},
+		Trust:     proxies,
+		DropProto: true,
+	})))
+	// Output:
+	// 192.0.2.1 http
+	// 203.0.113.9 https
+	// 203.0.113.9 http
+}
+
+func ExampleClientAddr() {
+	r := newAPI()
+	r.Use(middleware.RealIPWithConfig[*Context](middleware.RealIPConfig{
 		Headers: []string{router.HeaderXForwardedFor},
 		Trust: middleware.NewTrustSet(
 			middleware.TrustPrefix(netip.MustParsePrefix("192.0.2.0/24"))),
-	})))
+	}))
+	r.GET("/", func(c *Context) error {
+		addr, ok := middleware.ClientAddr(c)
+		if !ok {
+			return router.ErrBadRequest
+		}
+		return c.String(http.StatusOK, fmt.Sprint(addr, " ", addr.Is4()))
+	})
+
+	// The proxy wrote an IPv4-mapped address, which comes back unmapped.
+	fmt.Println(routertest.Get(r, "/",
+		routertest.Header(router.HeaderXForwardedFor, "::ffff:203.0.113.9")).String())
 	// Output:
-	// 192.0.2.1
-	// 203.0.113.9
+	// 203.0.113.9 true
 }
 
 func ExampleKeyAuth() {
