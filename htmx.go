@@ -53,9 +53,9 @@ const (
 // HTMXRequest is what the htmx headers of one request say. Request is false
 // when htmx did not make the request, and the other fields are then empty.
 //
-// RequestType is "full" when htmx swaps the whole page, as for a boosted link
-// or a history restore, and "partial" when it swaps one element; it is what
-// [Base.WantsPartial] reads. Source names the element that made the request
+// RequestType is "full" when htmx swaps the whole body or selects part of the
+// answer, as for a boosted link or a history restore, and "partial" when it
+// swaps one element; it is what [Base.WantsPartial] reads. Source names the element that made the request
 // and Target the one the answer goes into, both in the tag#id form htmx 4
 // sends, such as "ul#user-list". [HTMXRequest.TargetID] and
 // [HTMXRequest.SourceID] read the id alone.
@@ -96,8 +96,8 @@ func (h HTMXRequest) TargetID() string { return idOf(h.Target) }
 // for the source "button#delete-7". It is "" when the source has no id.
 func (h HTMXRequest) SourceID() string { return idOf(h.Source) }
 
-// idOf reads the id out of the tag#id form of htmx 4, which escapes it as a
-// URI component. An escape that does not decode is returned as sent.
+// idOf reads the id out of the tag#id form of htmx 4, which escapes the id
+// with encodeURI. An escape that does not decode is returned as sent.
 func idOf(v string) string {
 	_, id, ok := strings.Cut(v, "#")
 	if !ok {
@@ -121,8 +121,8 @@ func (b *Base) IsBoosted() bool { return hxTrue(b.req.Header.Get(HeaderHXBoosted
 
 // HTMXWantsPartial reports whether r wants a fragment: htmx made it, and its
 // HX-Request-Type is not "full". htmx 4 sends "full" for a boosted link, a
-// history restore and a request that swaps the whole body, and a request
-// without the type counts as partial. htmx 2 sends no type, so it is not
+// history restore, and a request that swaps the whole body or selects part of
+// the answer. A request without the type counts as partial. htmx 2 sends no type, so it is not
 // supported: its boosted links and history restores would get fragments.
 func HTMXWantsPartial(r *http.Request) bool {
 	h := r.Header
