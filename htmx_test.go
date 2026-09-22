@@ -1,7 +1,9 @@
 package router
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -190,6 +192,120 @@ func TestHTMXPartial(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWantsPartialSetsVary(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		vary    string
+		want    []string
+	}{
+		{"a browser", nil, "", hxVary},
+		{"a partial request", map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "partial"}, "", hxVary},
+		{"a full request", map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "full"}, "", hxVary},
+		{"an answer that varies on everything", map[string]string{HeaderHXRequest: "true"}, "*", []string{"*"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			if tc.vary != "" {
+				rec.Header().Set(HeaderVary, tc.vary)
+			}
+			b := NewBase(rec, req)
+
+			if got, want := b.WantsPartial(), HTMXWantsPartial(req); got != want {
+				t.Errorf("WantsPartial() = %v, want %v, as HTMXWantsPartial answers", got, want)
+			}
+			b.WantsPartial()
+			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, tc.want) {
+				t.Errorf("Vary after two calls = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderPartial(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error {
+		return c.RenderPartial(http.StatusOK, comp("<li>card</li>"), comp("<h1>page</h1>"))
+	})
+	r.GET("/invalid", func(c *tctx) error {
+		return c.RenderPartial(http.StatusUnprocessableEntity, comp("<form>partial</form>"), comp("<form>page</form>"))
+	})
+	r.GET("/broken", func(c *tctx) error {
+		broken := ComponentFunc(func(context.Context, io.Writer) error { return errors.New("template failed") })
+		return c.RenderPartial(http.StatusOK, broken, broken)
+	})
+
+	const (
+		partial = "<li>card</li>"
+		page    = "<h1>page</h1>"
+	)
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{"a browser gets the page", nil, page},
+		{"a partial request gets the partial", map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "partial"}, partial},
+		{
+			"a full boosted request gets the page",
+			map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "full", HeaderHXBoosted: "true"},
+			page,
+		},
+		{
+			"a full history restore gets the page",
+			map[string]string{HeaderHXRequest: "true", HeaderHXRequestType: "full", HeaderHXHistoryRestoreRequest: "true"},
+			page,
+		},
+		{"a request with no type gets the partial", map[string]string{HeaderHXRequest: "true"}, partial},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := hxDo(r, http.MethodGet, "/", tc.headers)
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200", rec.Code)
+			}
+			if got := rec.Body.String(); got != tc.want {
+				t.Errorf("body = %q, want %q", got, tc.want)
+			}
+			if got := rec.Header().Get(HeaderContentType); got != MIMETextHTMLCharsetUTF8 {
+				t.Errorf("Content-Type = %q, want %q", got, MIMETextHTMLCharsetUTF8)
+			}
+			if got := rec.Header().Values(HeaderVary); !slices.Equal(got, hxVary) {
+				t.Errorf("Vary = %v, want %v", got, hxVary)
+			}
+		})
+	}
+
+	t.Run("both branches keep the status", func(t *testing.T) {
+		for _, headers := range []map[string]string{nil, {HeaderHXRequest: "true"}} {
+			rec := hxDo(r, http.MethodGet, "/invalid", headers)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Errorf("status = %d, want 422", rec.Code)
+			}
+		}
+	})
+
+	t.Run("HEAD writes no body", func(t *testing.T) {
+		rec := hxDo(r, http.MethodHead, "/", map[string]string{HeaderHXRequest: "true"})
+		if rec.Body.Len() != 0 {
+			t.Errorf("body = %q, want an empty one", rec.Body.String())
+		}
+	})
+
+	t.Run("a failing component answers 500", func(t *testing.T) {
+		for _, headers := range []map[string]string{nil, {HeaderHXRequest: "true"}} {
+			if code := hxDo(r, http.MethodGet, "/broken", headers).Code; code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want 500", code)
+			}
+		}
+	})
 }
 
 func TestHTMXPartialNeedsBothHandlers(t *testing.T) {
@@ -629,6 +745,24 @@ func BenchmarkIsHTMX(b *testing.B) {
 	for b.Loop() {
 		if !base.IsHTMX() {
 			b.Fatal("IsHTMX() = false")
+		}
+	}
+}
+
+func BenchmarkWantsPartial(b *testing.B) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(HeaderHXRequest, "true")
+	req.Header.Set(HeaderHXRequestType, "partial")
+
+	rec := httptest.NewRecorder()
+	base := NewBase(rec, req)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		// Vary starts empty each round, as it does in a request.
+		rec.Header().Del(HeaderVary)
+		if !base.WantsPartial() {
+			b.Fatal("WantsPartial() = false")
 		}
 	}
 }

@@ -137,6 +137,23 @@ func hxTrue(v string) bool { return strings.EqualFold(v, "true") }
 // middleware names the same two, in the same order.
 var hxVary = []string{HeaderHXRequest, HeaderHXRequestType}
 
+// WantsPartial reports whether the request wants a fragment rather than a
+// whole page, as [HTMXWantsPartial] decides. It adds the headers it reads to
+// Vary, so a cache keeps the two answers apart.
+func (b *Base) WantsPartial() bool {
+	b.Vary(hxVary...)
+	return HTMXWantsPartial(b.req)
+}
+
+// RenderPartial renders partial with status for a request that wants a
+// fragment, and page for any other. See [Base.WantsPartial] and [Base.Render].
+func (b *Base) RenderPartial(status int, partial, page Component) error {
+	if b.WantsPartial() {
+		return b.Render(status, partial)
+	}
+	return b.Render(status, page)
+}
+
 // HTMXPartial picks between two handlers for one route: partial for a request
 // that wants a fragment, page for anything else. It adds the htmx headers to
 // Vary, so a cache keeps the two answers apart.
@@ -147,9 +164,7 @@ func HTMXPartial[C Context](partial, page HandlerFunc[C]) HandlerFunc[C] {
 		panic("router: HTMXPartial needs both handlers")
 	}
 	return func(c C) error {
-		b := c.base()
-		b.Vary(hxVary...)
-		if HTMXWantsPartial(b.req) {
+		if c.base().WantsPartial() {
 			return partial(c)
 		}
 		return page(c)

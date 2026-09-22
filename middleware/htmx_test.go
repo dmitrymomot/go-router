@@ -226,3 +226,25 @@ func TestHTMXRedirectKeepsTheStreamFlushable(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
+
+func TestHTMXRedirectVariesLikeWantsPartial(t *testing.T) {
+	r := newRouter()
+	r.GET("/plain", func(c *appContext) error {
+		c.WantsPartial()
+		return c.NoContent(http.StatusOK)
+	})
+	r.Group(func(r *router.Router[*appContext]) {
+		r.Use(middleware.HTMXRedirect[*appContext])
+		r.GET("/both", func(c *appContext) error {
+			c.WantsPartial()
+			return c.NoContent(http.StatusOK)
+		})
+	})
+
+	headers := map[string]string{router.HeaderHXRequest: "true"}
+	want := hxGet(r, "/plain", headers).Header().Values(router.HeaderVary)
+	got := hxGet(r, "/both", headers).Header().Values(router.HeaderVary)
+	if !slices.Equal(got, want) {
+		t.Errorf("Vary behind HTMXRedirect = %q, want %q, as WantsPartial alone sets", got, want)
+	}
+}

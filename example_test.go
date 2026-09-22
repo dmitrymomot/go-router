@@ -495,6 +495,7 @@ func ExampleHTMXPartial() {
 		req := httptest.NewRequest(http.MethodGet, "/users", nil)
 		if htmx {
 			req.Header.Set(router.HeaderHXRequest, "true")
+			req.Header.Set(router.HeaderHXRequestType, "partial")
 		}
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
@@ -503,6 +504,57 @@ func ExampleHTMXPartial() {
 	// Output:
 	// <li id="user-7">ann</li>
 	// <h1>users</h1><p>/users</p>
+}
+
+func ExampleBase_WantsPartial() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.POST("/users", func(c *Context) error {
+		u := &User{ID: "7", Name: "ann"}
+		if c.WantsPartial() {
+			return c.Render(http.StatusCreated, card(u))
+		}
+		return c.Redirect(http.StatusSeeOther, "/users")
+	})
+
+	for _, htmx := range []bool{true, false} {
+		req := httptest.NewRequest(http.MethodPost, "/users", nil)
+		if htmx {
+			req.Header.Set(router.HeaderHXRequest, "true")
+			req.Header.Set(router.HeaderHXRequestType, "partial")
+		}
+		rec := serveRequest(r, req)
+		fmt.Println(rec.Code, rec.Header().Get("Location")+rec.Body.String())
+	}
+	// Output:
+	// 201 <li id="user-7">ann</li>
+	// 303 /users
+}
+
+func ExampleBase_RenderPartial() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+
+	r.GET("/users", func(c *Context) error {
+		return c.RenderPartial(http.StatusOK, card(&User{ID: "7", Name: "ann"}), page("users"))
+	})
+
+	var rec *httptest.ResponseRecorder
+	for _, requestType := range []string{"", "partial", "full"} {
+		req := httptest.NewRequest(http.MethodGet, "/users", nil)
+		if requestType != "" {
+			// htmx 4 sends "full" for a boosted link and a history restore.
+			req.Header.Set(router.HeaderHXRequest, "true")
+			req.Header.Set(router.HeaderHXRequestType, requestType)
+		}
+		rec = serveRequest(r, req)
+		fmt.Println(rec.Body)
+	}
+	fmt.Println(strings.Join(rec.Header().Values("Vary"), ", "))
+	// Output:
+	// <h1>users</h1><p>/users</p>
+	// <li id="user-7">ann</li>
+	// <h1>users</h1><p>/users</p>
+	// Hx-Request, Hx-Request-Type
 }
 
 func ExampleHTMXRequest_TargetID() {
