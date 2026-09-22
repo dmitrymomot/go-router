@@ -449,7 +449,7 @@ func TestDirModeAddsNoBuildTag(t *testing.T) {
 }
 
 func TestDirModeAlwaysRevalidates(t *testing.T) {
-	a := newAssets(t, static.Config{Dir: assetDir(t), MaxAge: time.Hour})
+	a := newAssets(t, static.Config{Dir: assetDir(t)})
 
 	rec := get(a, "/css/app.css")
 	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
@@ -1116,5 +1116,60 @@ func TestBuildTagRejectsDotSegments(t *testing.T) {
 		if err == nil {
 			t.Errorf("Build %q was accepted, want an error", tag)
 		}
+	}
+}
+
+// The URLs a set hands out carry its prefix; behind StripPrefix on a stdlib mux,
+// as ServeHTTP documents, every one of them reaches its file.
+func TestServeHTTPBehindStripPrefixServesTheURLs(t *testing.T) {
+	a := newAssets(t, static.Config{FS: assetFS(), Prefix: "/s"})
+	mux := http.NewServeMux()
+	mux.Handle("/s/", http.StripPrefix(a.Prefix(), a))
+
+	for _, target := range []string{a.URL("js/app.js"), "/s/js/app.js"} {
+		if rec := get(mux, target); rec.Code != http.StatusOK || rec.Body.String() != appJS {
+			t.Errorf("GET %s = %d %q, want 200 and the asset", target, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// A live directory changes under the same URL, so a build tag would make the
+// browser keep a stale file for a year, and MaxAge was silently ignored.
+func TestNewRefusesSettingsALiveSetCannotHonor(t *testing.T) {
+	dir := t.TempDir()
+	for name, cfg := range map[string]static.Config{
+		"Dir with Build":       {Dir: dir, Build: "v1"},
+		"Dir with MaxAge":      {Dir: dir, MaxAge: time.Hour},
+		"Fallback without SPA": {FS: assetFS(), Fallback: func(*http.Request) bool { return true }},
+	} {
+		if _, err := static.New(cfg); err == nil {
+			t.Errorf("%s: New returned no error", name)
+		}
+	}
+}
+
+// An embed.FS drops dotfiles; a live directory must not serve .git or .env.
+func TestLiveSetRefusesDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{".git/config": "secret", ".env": "secret", "app.js": appJS} {
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := newAssets(t, static.Config{Dir: dir})
+	for _, target := range []string{"/.git/config", "/.env", "/x/../.env"} {
+		if rec := get(a, target); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", target, rec.Code)
+		}
+	}
+	if rec := get(a, "/app.js"); rec.Code != http.StatusOK {
+		t.Errorf("GET /app.js = %d, want 200", rec.Code)
+	}
+	opened := newAssets(t, static.Config{Dir: dir, Dotfiles: true})
+	if rec := get(opened, "/.env"); rec.Code != http.StatusOK {
+		t.Errorf("GET /.env with Dotfiles = %d, want 200", rec.Code)
 	}
 }

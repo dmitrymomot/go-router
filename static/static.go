@@ -35,8 +35,10 @@ const immutableCacheControl = "public, max-age=31536000, immutable"
 // SPA answers an unknown path with Index, so a client-side router can take it,
 // and Fallback narrows that to the requests it recognizes as navigation.
 // RedirectDir sends a directory without a trailing slash to the path with one.
-// MaxAge is the cache lifetime of a set without a build tag. NotFound answers
-// a path the set does not hold.
+// MaxAge is the cache lifetime of an embedded set without a build tag.
+// NotFound answers a path the set does not hold. A live set refuses a path
+// with a segment that starts with a dot, such as .git or .env, unless Dotfiles
+// is set; an embedded set holds none unless embed was told to keep them.
 type Config struct {
 	FS          fs.FS
 	Dir         string
@@ -49,6 +51,7 @@ type Config struct {
 	Fallback    func(r *http.Request) bool
 	MaxAge      time.Duration
 	NotFound    http.Handler
+	Dotfiles    bool
 }
 
 // Assets is a set of static files and the URLs that reach them. It is safe for
@@ -77,7 +80,9 @@ type Assets struct {
 // which fingerprints every file for its ETag and builds the tag of the set.
 //
 // New reports an error for a cfg that names neither FS nor Dir or names both,
-// a build tag that is not one path segment, an index that is not a file name,
+// a Dir with a build tag or a MaxAge (its files change under the same URL, so
+// only no-cache is honest), a Fallback without SPA, a build tag that is not
+// one path segment, an index that is not a file name,
 // a directory it cannot read, and an index that is a directory.
 func New(cfg Config) (*Assets, error) {
 	switch {
@@ -85,6 +90,12 @@ func New(cfg Config) (*Assets, error) {
 		return nil, errors.New("static: New needs Config.FS or Config.Dir")
 	case cfg.FS != nil && cfg.Dir != "":
 		return nil, errors.New("static: Config.FS and Config.Dir exclude each other")
+	case cfg.Dir != "" && cfg.Build != "":
+		return nil, errors.New("static: a Config.Dir set changes under the same URL, so it takes no Config.Build")
+	case cfg.Dir != "" && cfg.MaxAge != 0:
+		return nil, errors.New("static: a Config.Dir set changes under the same URL, so it takes no Config.MaxAge")
+	case cfg.Fallback != nil && !cfg.SPA:
+		return nil, errors.New("static: Config.Fallback narrows the SPA fallback, so it needs Config.SPA")
 	}
 
 	a := &Assets{
@@ -130,7 +141,7 @@ func New(cfg Config) (*Assets, error) {
 		if !info.IsDir() {
 			return nil, fmt.Errorf("static: %s is not a directory", dir)
 		}
-		a.fsys = liveFS(dir)
+		a.fsys = liveFS{dir: dir, dotfiles: cfg.Dotfiles}
 		if err := validateIndex(a.fsys, a.index); err != nil {
 			return nil, err
 		}
@@ -281,11 +292,28 @@ func index(fsys fs.FS) (map[string]string, string, error) {
 	return etags, hex.EncodeToString(sum.Sum(nil)[:6]), nil
 }
 
-type liveFS string
+type liveFS struct {
+	dir      string
+	dotfiles bool
+}
 
 func (d liveFS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
-	return os.OpenInRoot(string(d), filepath.FromSlash(name))
+	if !d.dotfiles && hasDotSegment(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return os.OpenInRoot(d.dir, filepath.FromSlash(name))
+}
+
+// hasDotSegment reports a segment such as .git or .env. fs.ValidPath already
+// refused "." and ".." inside a name.
+func hasDotSegment(name string) bool {
+	for seg := range strings.SplitSeq(name, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
 }

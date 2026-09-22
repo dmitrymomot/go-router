@@ -22,7 +22,10 @@ var errMethod = errors.New("static: the method is neither GET nor HEAD")
 const allowedMethods = "GET, HEAD"
 
 // ServeHTTP serves the set as a standard library handler, which suits a mux
-// that is not this router. See [Mount] for a router.
+// that is not this router. It reads the path below Prefix, so put it behind
+// [http.StripPrefix] with [Assets.Prefix], or [router.Router.MountHandler],
+// which strips it too; the URLs of [Assets.URL] then reach it. See [Mount] for
+// a router.
 func (a *Assets) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	err := a.serve(w, r, r.URL.Path)
 	switch {
