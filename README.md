@@ -41,7 +41,7 @@ func main() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
 		return &Context{DB: db}
 	})
-	r.Use(middleware.Recover[*Context], middleware.RequestID[*Context], middleware.Logger[*Context])
+	r.Use(middleware.RequestID[*Context], middleware.Logger[*Context], middleware.Recover[*Context])
 
 	// findUser is yours; the router never sees the database.
 	r.GET("/users/{id}", func(c *Context) error {
