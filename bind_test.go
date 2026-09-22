@@ -296,7 +296,7 @@ func TestParamAsAnswers404ForAMalformedValue(t *testing.T) {
 	r := newTestRouter()
 	r.ErrorHandler(func(c *tctx, err error) error {
 		seen = err
-		return DefaultErrorHandler(c, err)
+		return TextErrorHandler[*tctx](false)(c, err)
 	})
 	r.GET("/users/{id}", func(c *tctx) error {
 		id, err := c.ParamAs[int]("id")
@@ -341,7 +341,7 @@ func TestParamAsReportsAMissingNameAs500(t *testing.T) {
 	r := newTestRouter()
 	r.ErrorHandler(func(c *tctx, err error) error {
 		seen = err
-		return DefaultErrorHandler(c, err)
+		return TextErrorHandler[*tctx](false)(c, err)
 	})
 	r.GET("/users/{id}", func(c *tctx) error {
 		_, err := c.ParamAs[int]("nope")
@@ -546,7 +546,7 @@ func TestBindJSONKeepsTheParserTextInTheCause(t *testing.T) {
 
 	dev := newTestRouter()
 	dev.Logger(slog.New(slog.DiscardHandler))
-	dev.ErrorHandler(ErrorHandler[*tctx](true))
+	dev.ErrorHandler(TextErrorHandler[*tctx](true))
 	dev.POST("/users", func(c *tctx) error {
 		_, err := c.BindJSON[createUser]()
 		return err
@@ -1050,7 +1050,7 @@ func TestBindPathReportsAParseError(t *testing.T) {
 
 	r.ErrorHandler(func(c *tctx, err error) error {
 		seen = err
-		return DefaultErrorHandler(c, err)
+		return TextErrorHandler[*tctx](false)(c, err)
 	})
 
 	rec := do(r, http.MethodGet, "/users/abc")
@@ -2231,7 +2231,7 @@ func TestBindAnswers500ForATargetThatIsNotAStruct(t *testing.T) {
 	r := newTestRouter()
 	r.ErrorHandler(func(c *tctx, err error) error {
 		seen = err
-		return DefaultErrorHandler(c, err)
+		return TextErrorHandler[*tctx](false)(c, err)
 	})
 	r.GET("/query", func(c *tctx) error { _, err := c.BindQuery[[]string](); return err })
 	r.POST("/form", func(c *tctx) error { _, err := c.BindForm[*int](); return err })

@@ -81,9 +81,9 @@ func (r *Router[C]) compile(eng *engine[C]) {
 
 	// The table is built fresh: a request never reads it before the router
 	// serves, and no setter runs after that.
-	rootErr := ErrorHandlerFunc[C](DefaultErrorHandler[C])
-	if r.errHandler != nil {
-		rootErr = r.errHandler
+	rootErr := r.errHandler
+	if rootErr == nil {
+		rootErr = TextErrorHandler[C](false)
 	}
 	eng.errHandlers = []ErrorHandlerFunc[C]{rootErr}
 	owners := map[*Router[C]]int32{r: 0}

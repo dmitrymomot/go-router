@@ -93,7 +93,7 @@ func newRouter(store *Store, codec *cookie.Codec) *router.Router[Ctx] {
 	// exact host wins over a pattern, so www never reads as a workspace named
 	// "www".
 	r.Host(baseDomain, apexRoutes)
-	r.RedirectHost("www."+baseDomain, baseDomain, http.StatusMovedPermanently)
+	r.RedirectHost("www."+baseDomain, http.StatusMovedPermanently, baseDomain)
 
 	// One table for every workspace: the subdomain is the {tenant} parameter.
 	r.Host(tenantHost, workspaceRoutes)

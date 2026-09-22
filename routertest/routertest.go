@@ -367,6 +367,7 @@ func (r *Response) ErrorBody() (router.ErrorBody, error) {
 		Error struct {
 			Details jsontext.Value `json:"details"`
 			Message string         `json:"message"`
+			Cause   string         `json:"cause"`
 			Status  int            `json:"status"`
 		} `json:"error"`
 	}
@@ -376,7 +377,7 @@ func (r *Response) ErrorBody() (router.ErrorBody, error) {
 	if env.Error.Status == 0 {
 		return router.ErrorBody{}, fmt.Errorf("routertest: the body %q carries no error envelope", r.Body)
 	}
-	body := router.ErrorBody{Status: env.Error.Status, Message: env.Error.Message}
+	body := router.ErrorBody{Status: env.Error.Status, Message: env.Error.Message, Cause: env.Error.Cause}
 	details := env.Error.Details
 	if len(details) == 0 || details.Kind() == 'n' {
 		return body, nil

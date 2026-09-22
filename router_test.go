@@ -629,12 +629,17 @@ func TestErrorHandlerCatchesEverything(t *testing.T) {
 	type failure struct {
 		status int
 		msg    string
+		stack  string
 	}
 	var seen []failure
 
 	r := newTestRouter()
 	r.ErrorHandler(func(c *tctx, err error) error {
-		seen = append(seen, failure{StatusOf(err), err.Error()})
+		f := failure{status: StatusOf(err), msg: err.Error()}
+		if pv, ok := errors.AsType[*PanicValue](err); ok {
+			f.stack = string(pv.Stack)
+		}
+		seen = append(seen, f)
 		return c.String(StatusOf(err), "handled")
 	})
 	r.GET("/panic", func(*tctx) error { panic("boom") })
@@ -672,8 +677,8 @@ func TestErrorHandlerCatchesEverything(t *testing.T) {
 	if !strings.Contains(seen[0].msg, "panic: boom") {
 		t.Errorf("error = %q, want the panic value", seen[0].msg)
 	}
-	if !strings.Contains(seen[0].msg, "router.(*Router[") && !strings.Contains(seen[0].msg, "goroutine") {
-		t.Errorf("error = %q, want a stack", seen[0].msg)
+	if !strings.Contains(seen[0].stack, "goroutine") {
+		t.Errorf("stack = %q, want the stack of the panic", seen[0].stack)
 	}
 }
 
@@ -1561,7 +1566,7 @@ func TestAScopeFallbackReachesTheScopesBelowIt(t *testing.T) {
 func TestScopeErrorHandlerAnswersItsScopeAlone(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/debug", func(g *Router[*tctx]) {
-		g.ErrorHandler(ErrorHandler[*tctx](true))
+		g.ErrorHandler(TextErrorHandler[*tctx](true))
 		g.GET("/dump", func(*tctx) error {
 			return ErrInternalServerError.WithError(errors.New("debug cause"))
 		})

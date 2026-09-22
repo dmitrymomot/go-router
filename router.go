@@ -121,7 +121,7 @@ func newEngine[C Context]() *engine[C] {
 		notFoundChain:   defaultNotFound[C],
 		notAllowedChain: defaultMethodNotAllowed[C],
 		optionsChain:    autoOptions[C],
-		errHandlers:     []ErrorHandlerFunc[C]{DefaultErrorHandler[C]},
+		errHandlers:     []ErrorHandlerFunc[C]{TextErrorHandler[C](false)},
 		errSlots:        map[errKey[C]]*int32{},
 	}
 }
@@ -438,8 +438,8 @@ func (r *Router[C]) mustBeRoot(setter, why string) {
 // scope and the scopes inside it register, unless a nearer scope holds its own,
 // so an API host takes [JSONErrorHandler] rather than one handler branching on
 // the host. A route outside every scope with a handler goes to the handler of
-// its host scope, then to the router's, and without a call to
-// [DefaultErrorHandler].
+// its host scope, then to the router's, which is [TextErrorHandler] with
+// exposeCause unset until the router calls ErrorHandler.
 //
 // A 404 or 405 has no route. It goes to the handler that the routes of the
 // most specific scope with a prefix covering the path would get, then to the

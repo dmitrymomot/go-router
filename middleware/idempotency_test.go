@@ -82,7 +82,7 @@ func (s *seenErrors) handle(c *appContext, err error) error {
 	s.mu.Lock()
 	s.errs = append(s.errs, err)
 	s.mu.Unlock()
-	return router.DefaultErrorHandler(c, err)
+	return router.TextErrorHandler[*appContext](false)(c, err)
 }
 
 func (s *seenErrors) count() int {

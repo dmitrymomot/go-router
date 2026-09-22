@@ -63,7 +63,7 @@ func TestLoggerReportsTheStatusTheErrorHandlerWrote(t *testing.T) {
 		if errors.Is(err, errLocked) {
 			return c.String(http.StatusLocked, "locked")
 		}
-		return router.DefaultErrorHandler(c, err)
+		return router.TextErrorHandler[*appContext](false)(c, err)
 	})
 	r.Use(middleware.LoggerWithConfig[*appContext](middleware.LoggerConfig{
 		Logger: slog.New(slog.NewTextHandler(&buf, nil)),

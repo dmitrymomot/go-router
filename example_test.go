@@ -632,11 +632,12 @@ func ExampleHandleError() {
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.Logger(slog.New(slog.DiscardHandler))
+	fallback := router.TextErrorHandler[*Context](false)
 	r.ErrorHandler(func(c *Context, err error) error {
 		if errors.Is(err, errLocked) {
 			return c.String(http.StatusLocked, "locked")
 		}
-		return router.DefaultErrorHandler(c, err)
+		return fallback(c, err)
 	})
 	// A metrics middleware answers the error itself, so it reads the status
 	// the error handler wrote rather than guessing it from err.
@@ -683,7 +684,7 @@ func ExampleJSONErrorHandler() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.Logger(slog.New(slog.DiscardHandler))
 	r.Host("api.example.com", func(h *router.Router[*Context]) {
-		h.ErrorHandler(router.JSONErrorHandler[*Context])
+		h.ErrorHandler(router.JSONErrorHandler[*Context](false))
 		h.GET("/v1/users/{id}", func(c *Context) error {
 			return router.ErrNotFound.WithMessage("no user %s", c.Param("id"))
 		})
@@ -841,8 +842,8 @@ func serveLocation(h http.Handler, host, target string) string {
 
 func ExampleRouter_Redirect() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
-	r.Redirect("/bonuses/{agent}", "/bonus?agent={agent}", http.StatusFound)
-	r.Redirect("/old", "/new", http.StatusMovedPermanently)
+	r.Redirect("/bonuses/{agent}", http.StatusFound, "/bonus?agent={agent}")
+	r.Redirect("/old", http.StatusMovedPermanently, "/new")
 
 	fmt.Println(serveLocation(r, "", "/bonuses/a%20b"))
 	fmt.Println(serveLocation(r, "", "/old?page=2"))
@@ -856,8 +857,8 @@ func ExampleRouter_RedirectHost() {
 	r.Host("example.com", func(h *router.Router[*Context]) {
 		h.GET("/pricing", func(c *Context) error { return c.String(http.StatusOK, "pricing") })
 	})
-	r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
-	r.RedirectHost("{tenant}.example.org", "{tenant}.example.com", http.StatusPermanentRedirect)
+	r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
+	r.RedirectHost("{tenant}.example.org", http.StatusPermanentRedirect, "{tenant}.example.com")
 
 	fmt.Println(serveLocation(r, "www.example.com", "/pricing?plan=pro"))
 	fmt.Println(serveLocation(r, "acme.example.org:8080", "/orders"))

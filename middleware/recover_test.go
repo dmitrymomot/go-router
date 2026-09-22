@@ -17,7 +17,7 @@ func recoverRouter(cfg middleware.RecoverConfig, caught **router.PanicValue) *ro
 		if pv, ok := errors.AsType[*router.PanicValue](err); ok {
 			*caught = pv
 		}
-		return router.DefaultErrorHandler(c, err)
+		return router.TextErrorHandler[*appContext](false)(c, err)
 	})
 	r.GET("/boom", func(*appContext) error { panic("handler exploded") })
 	return r
@@ -83,9 +83,9 @@ func TestRecoverStackSizeBoundsTheTrace(t *testing.T) {
 	}
 }
 
-func TestRecoverDisableStackKeepsTheValue(t *testing.T) {
+func TestRecoverNegativeStackSizeKeepsTheValue(t *testing.T) {
 	var caught *router.PanicValue
-	r := recoverRouter(middleware.RecoverConfig{DisableStack: true}, &caught)
+	r := recoverRouter(middleware.RecoverConfig{StackSize: -1}, &caught)
 
 	rec := get(r, "/boom")
 	if rec.Code != http.StatusInternalServerError {

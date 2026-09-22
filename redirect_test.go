@@ -22,7 +22,7 @@ func follow(h http.Handler, method, host, target string) (int, string) {
 
 func TestRedirectEscapesTheValue(t *testing.T) {
 	r := newTestRouter()
-	r.Redirect("/desk/{agent}", "/agents/{agent}?from={agent}", http.StatusFound)
+	r.Redirect("/desk/{agent}", http.StatusFound, "/agents/{agent}?from={agent}")
 	r.GET("/agents/{agent}", func(c *tctx) error {
 		return c.String(http.StatusOK, c.Param("agent")+" from="+c.Query("from"))
 	})
@@ -49,7 +49,7 @@ func TestRedirectEscapesTheValue(t *testing.T) {
 func TestRedirectNeverPointsAtAnotherHost(t *testing.T) {
 	captureLogs(t)
 	r := newTestRouter()
-	r.Redirect("/old/{p...}", "/{p...}", http.StatusMovedPermanently)
+	r.Redirect("/old/{p...}", http.StatusMovedPermanently, "/{p...}")
 
 	for _, target := range []string{"/old//evil.com", "/old/%2Fevil.com", "/old//evil.com/x?y=1", "/old/%2F%2Fevil.com"} {
 		code, loc := follow(r, http.MethodGet, "", target)
@@ -69,8 +69,8 @@ func TestRedirectNeverPointsAtAnotherHost(t *testing.T) {
 func TestRedirectRefusesADotSegment(t *testing.T) {
 	captureLogs(t)
 	r := newTestRouter()
-	r.Redirect("/old/{id}", "/new/{id}", http.StatusMovedPermanently)
-	r.Redirect("/files/{p...}", "/docs/{p...}", http.StatusMovedPermanently)
+	r.Redirect("/old/{id}", http.StatusMovedPermanently, "/new/{id}")
+	r.Redirect("/files/{p...}", http.StatusMovedPermanently, "/docs/{p...}")
 
 	for _, target := range []string{"/old/%2E%2E", "/old/%2e", "/files/a/%2E%2E/%2E%2E/admin"} {
 		if code, loc := follow(r, http.MethodGet, "", target); code != http.StatusNotFound {
@@ -84,8 +84,8 @@ func TestRedirectRefusesADotSegment(t *testing.T) {
 
 func TestRedirectKeepsTheRequestQuery(t *testing.T) {
 	r := newTestRouter()
-	r.Redirect("/old", "/new", http.StatusMovedPermanently)
-	r.Redirect("/bonuses/{agent}", "/cashbox?agent={agent}", http.StatusFound)
+	r.Redirect("/old", http.StatusMovedPermanently, "/new")
+	r.Redirect("/bonuses/{agent}", http.StatusFound, "/cashbox?agent={agent}")
 	r.GET("/cashbox", func(c *tctx) error { return c.String(http.StatusOK, c.Query("agent")) })
 
 	tests := []struct {
@@ -110,7 +110,7 @@ func TestRedirectKeepsTheRequestQuery(t *testing.T) {
 
 func TestRedirectAnswersGETAndHEADOnly(t *testing.T) {
 	r := newTestRouter()
-	r.Redirect("/old", "/new", http.StatusMovedPermanently)
+	r.Redirect("/old", http.StatusMovedPermanently, "/new")
 
 	if code, loc := follow(r, http.MethodHead, "", "/old"); code != http.StatusMovedPermanently || loc != "/new" {
 		t.Errorf("HEAD /old = %d to %q, want 301 to /new", code, loc)
@@ -132,7 +132,7 @@ func TestRedirectTakesPrefixAndHostParams(t *testing.T) {
 	r := newTestRouter()
 	r.Host("{tenant}.example.com", func(h *Router[*tctx]) {
 		h.Route("/t/{team}", func(g *Router[*tctx]) {
-			g.Redirect("/old/{id}", "/{tenant}/{team}/items/{id}", http.StatusMovedPermanently)
+			g.Redirect("/old/{id}", http.StatusMovedPermanently, "/{tenant}/{team}/items/{id}")
 		})
 	})
 
@@ -144,10 +144,10 @@ func TestRedirectTakesPrefixAndHostParams(t *testing.T) {
 func TestRedirectTargetIsNotJoinedToTheScopePrefix(t *testing.T) {
 	r := newTestRouter()
 	r.Route("/api", func(g *Router[*tctx]) {
-		g.Redirect("/v1/users", "/api/v2/users", http.StatusPermanentRedirect)
+		g.Redirect("/v1/users", http.StatusPermanentRedirect, "/api/v2/users")
 	})
 	sub := newTestRouter()
-	sub.Redirect("/old", "/new", http.StatusFound)
+	sub.Redirect("/old", http.StatusFound, "/new")
 	r.Mount("/mounted", sub)
 
 	if code, loc := follow(r, http.MethodGet, "", "/api/v1/users"); code != http.StatusPermanentRedirect || loc != "/api/v2/users" {
@@ -160,7 +160,7 @@ func TestRedirectTargetIsNotJoinedToTheScopePrefix(t *testing.T) {
 
 func TestRedirectMovesACatchAll(t *testing.T) {
 	r := newTestRouter()
-	r.Redirect("/docs/{path...}", "/manual/{path...}", http.StatusMovedPermanently)
+	r.Redirect("/docs/{path...}", http.StatusMovedPermanently, "/manual/{path...}")
 
 	tests := []struct{ target, want string }{
 		{"/docs/a/b c.txt", "/manual/a/b%20c.txt"},
@@ -178,7 +178,7 @@ func TestRedirectChecksDeclaredClasses(t *testing.T) {
 	captureLogs(t)
 	r := newTestRouter()
 	r.ParamClass("shortid", func(s string) bool { return len(s) == 6 })
-	r.Redirect("/s/{code}", "/short/{code:shortid}", http.StatusFound)
+	r.Redirect("/s/{code}", http.StatusFound, "/short/{code:shortid}")
 
 	if code, loc := follow(r, http.MethodGet, "", "/s/abc123"); code != http.StatusFound || loc != "/short/abc123" {
 		t.Errorf("GET /s/abc123 = %d to %q, want 302 to /short/abc123", code, loc)
@@ -192,14 +192,14 @@ func TestRedirectChecksDeclaredClasses(t *testing.T) {
 			t.Errorf("panic = %q, want one about the undeclared class", msg)
 		}
 	}()
-	r.Redirect("/n/{code}", "/new/{code:nope}", http.StatusFound)
+	r.Redirect("/n/{code}", http.StatusFound, "/new/{code:nope}")
 }
 
 func TestRedirectAnswers404WhenTheTargetRefusesTheValue(t *testing.T) {
 	captureLogs(t)
 	r := newTestRouter()
-	r.Redirect("/old/{id}", "/new/{id:int}", http.StatusMovedPermanently)
-	r.Redirect("/x/{env}/{name}", "/r/{env}-{name}", http.StatusMovedPermanently)
+	r.Redirect("/old/{id}", http.StatusMovedPermanently, "/new/{id:int}")
+	r.Redirect("/x/{env}/{name}", http.StatusMovedPermanently, "/r/{env}-{name}")
 
 	for _, target := range []string{"/old/abc", "/x/prod/web-api"} {
 		if code, loc := follow(r, http.MethodGet, "", target); code != http.StatusNotFound {
@@ -221,7 +221,7 @@ func TestRedirectRunsScopeMiddlewareAndCarriesMeta(t *testing.T) {
 			return next(c)
 		}
 	})
-	r.With(setHeader("X-With", "with")).Meta(perm("legacy")).Redirect("/old", "/new", http.StatusFound)
+	r.With(setHeader("X-With", "with")).Meta(perm("legacy")).Redirect("/old", http.StatusFound, "/new")
 
 	rec := do(r, http.MethodGet, "/old")
 	if rec.Header().Get("X-Root") != "root" || rec.Header().Get("X-With") != "with" || rec.Header().Get("X-Perm") != "legacy" {
@@ -238,39 +238,39 @@ func TestRedirectPanicsOnABadCall(t *testing.T) {
 		call func(r *Router[*tctx])
 		want string
 	}{
-		{"status 200", func(r *Router[*tctx]) { r.Redirect("/a", "/b", http.StatusOK) }, "redirect status"},
-		{"status 304", func(r *Router[*tctx]) { r.Redirect("/a", "/b", http.StatusNotModified) }, "redirect status"},
-		{"status 0", func(r *Router[*tctx]) { r.Redirect("/a", "/b", 0) }, "redirect status"},
-		{"a target that is not a path", func(r *Router[*tctx]) { r.Redirect("/a", "cashbox", http.StatusFound) }, `starts with "/"`},
-		{"an absolute URL", func(r *Router[*tctx]) { r.Redirect("/a", "https://example.com/", http.StatusFound) }, `starts with "/"`},
-		{"a network-path target", func(r *Router[*tctx]) { r.Redirect("/a", "//evil.com/x", http.StatusFound) }, "another host"},
-		{"a target with a dot segment", func(r *Router[*tctx]) { r.Redirect("/a", "/b/../c", http.StatusFound) }, `segment ".."`},
-		{"a target with a dot", func(r *Router[*tctx]) { r.Redirect("/a/{id}", "/b/./{id}", http.StatusFound) }, `segment "."`},
-		{"a parameter the route lacks", func(r *Router[*tctx]) { r.Redirect("/x/{id}", "/x/{nope}", http.StatusFound) }, `"nope"`},
-		{"a malformed target", func(r *Router[*tctx]) { r.Redirect("/x/{id}", "/x/{", http.StatusFound) }, "unbalanced"},
-		{"a malformed route", func(r *Router[*tctx]) { r.Redirect("/x/{", "/y", http.StatusFound) }, "unbalanced"},
-		{"a target equal to the route", func(r *Router[*tctx]) { r.Redirect("/a", "/a/", http.StatusFound) }, "points at itself"},
+		{"status 200", func(r *Router[*tctx]) { r.Redirect("/a", http.StatusOK, "/b") }, "redirect status"},
+		{"status 304", func(r *Router[*tctx]) { r.Redirect("/a", http.StatusNotModified, "/b") }, "redirect status"},
+		{"status 0", func(r *Router[*tctx]) { r.Redirect("/a", 0, "/b") }, "redirect status"},
+		{"a target that is not a path", func(r *Router[*tctx]) { r.Redirect("/a", http.StatusFound, "cashbox") }, `starts with "/"`},
+		{"an absolute URL", func(r *Router[*tctx]) { r.Redirect("/a", http.StatusFound, "https://example.com/") }, `starts with "/"`},
+		{"a network-path target", func(r *Router[*tctx]) { r.Redirect("/a", http.StatusFound, "//evil.com/x") }, "another host"},
+		{"a target with a dot segment", func(r *Router[*tctx]) { r.Redirect("/a", http.StatusFound, "/b/../c") }, `segment ".."`},
+		{"a target with a dot", func(r *Router[*tctx]) { r.Redirect("/a/{id}", http.StatusFound, "/b/./{id}") }, `segment "."`},
+		{"a parameter the route lacks", func(r *Router[*tctx]) { r.Redirect("/x/{id}", http.StatusFound, "/x/{nope}") }, `"nope"`},
+		{"a malformed target", func(r *Router[*tctx]) { r.Redirect("/x/{id}", http.StatusFound, "/x/{") }, "unbalanced"},
+		{"a malformed route", func(r *Router[*tctx]) { r.Redirect("/x/{", http.StatusFound, "/y") }, "unbalanced"},
+		{"a target equal to the route", func(r *Router[*tctx]) { r.Redirect("/a", http.StatusFound, "/a/") }, "points at itself"},
 		{"a target equal to the route but for a constraint", func(r *Router[*tctx]) {
-			r.Redirect("/a/{id:int}", "/a/{id}", http.StatusFound)
+			r.Redirect("/a/{id:int}", http.StatusFound, "/a/{id}")
 		}, "points at itself"},
 		{"a target equal to the route but for a constraint in a segment", func(r *Router[*tctx]) {
-			r.Redirect("/a/v{n:int}.json", "/a/v{n}.json", http.StatusFound)
+			r.Redirect("/a/v{n:int}.json", http.StatusFound, "/a/v{n}.json")
 		}, "points at itself"},
 		{"a target equal to the route under a prefix", func(r *Router[*tctx]) {
-			r.Route("/p", func(g *Router[*tctx]) { g.Redirect("/a", "/p/a", http.StatusFound) })
+			r.Route("/p", func(g *Router[*tctx]) { g.Redirect("/a", http.StatusFound, "/p/a") })
 		}, "points at itself"},
 		{"a parameter one host lacks", func(r *Router[*tctx]) {
 			r.Hosts([]string{"{tenant}.example.com", "example.com"}, func(h *Router[*tctx]) {
-				h.Redirect("/old", "/{tenant}", http.StatusFound)
+				h.Redirect("/old", http.StatusFound, "/{tenant}")
 			})
 		}, `"tenant"`},
 		{"a route already registered", func(r *Router[*tctx]) {
 			r.GET("/a", echoRoute)
-			r.Redirect("/a", "/b", http.StatusFound)
+			r.Redirect("/a", http.StatusFound, "/b")
 		}, "already registered"},
 		{"after serving", func(r *Router[*tctx]) {
 			do(r, http.MethodGet, "/")
-			r.Redirect("/a", "/b", http.StatusFound)
+			r.Redirect("/a", http.StatusFound, "/b")
 		}, "after the router started serving"},
 	}
 	for _, tc := range tests {
@@ -288,7 +288,7 @@ func TestRedirectPanicsOnABadCall(t *testing.T) {
 func TestRedirectHostCoversEveryPathOnAnUnknownHost(t *testing.T) {
 	r := newTestRouter()
 	r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
-	r.RedirectHost("*", "example.com", http.StatusMovedPermanently)
+	r.RedirectHost("*", http.StatusMovedPermanently, "example.com")
 	r.GET("/healthz", echoHost)
 
 	for _, target := range []string{"/", "/healthz", "/a/b?c=d"} {
@@ -304,9 +304,9 @@ func TestRedirectHostCoversEveryPathOnAnUnknownHost(t *testing.T) {
 
 func TestRedirectHostKeepsPathQueryPortAndScheme(t *testing.T) {
 	r := newTestRouter()
-	r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
-	r.RedirectHost("{tenant}.old.test", "{tenant}.new.test", http.StatusPermanentRedirect)
-	r.RedirectHost("legacy.test", "example.com:8443", http.StatusFound)
+	r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
+	r.RedirectHost("{tenant}.old.test", http.StatusPermanentRedirect, "{tenant}.new.test")
+	r.RedirectHost("legacy.test", http.StatusFound, "example.com:8443")
 
 	tests := []struct {
 		name, method, host, target, proto string
@@ -344,29 +344,29 @@ func TestRedirectHostOwnsItsHost(t *testing.T) {
 		defer wantPanic(t, "already holds routes")
 		r := newTestRouter()
 		r.Host("www.example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
-		r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+		r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
 	})
 	t.Run("a route registered after", func(t *testing.T) {
 		defer wantPanic(t, "belongs to RedirectHost")
 		r := newTestRouter()
-		r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+		r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
 		r.Host("www.example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 	})
 	t.Run("a route of a Hosts scope that names it", func(t *testing.T) {
 		defer wantPanic(t, "belongs to RedirectHost")
 		r := newTestRouter()
-		r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+		r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
 		r.Hosts([]string{"example.com", "www.example.com"}, func(h *Router[*tctx]) { h.GET("/", echoHost) })
 	})
 	t.Run("a second redirect", func(t *testing.T) {
 		defer wantPanic(t, "already has a RedirectHost")
 		r := newTestRouter()
-		r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
-		r.RedirectHost("www.example.com", "example.org", http.StatusMovedPermanently)
+		r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
+		r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.org")
 	})
 	t.Run("the target host", func(t *testing.T) {
 		r := newTestRouter()
-		r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+		r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
 		r.Host("example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
 		if rec := doHost(r, http.MethodGet, "example.com", "/"); rec.Code != http.StatusOK {
 			t.Errorf("GET example.com/ = %d, want 200", rec.Code)
@@ -377,7 +377,7 @@ func TestRedirectHostOwnsItsHost(t *testing.T) {
 func TestRedirectHostOwnsItsHostThroughAMount(t *testing.T) {
 	sub := func() *Router[*tctx] {
 		s := newTestRouter()
-		s.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+		s.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.com")
 		return s
 	}
 	t.Run("a route of the parent registered before", func(t *testing.T) {
@@ -395,7 +395,7 @@ func TestRedirectHostOwnsItsHostThroughAMount(t *testing.T) {
 	t.Run("a redirect of the parent", func(t *testing.T) {
 		defer wantPanic(t, "already has a RedirectHost")
 		r := newTestRouter()
-		r.RedirectHost("www.example.com", "example.org", http.StatusMovedPermanently)
+		r.RedirectHost("www.example.com", http.StatusMovedPermanently, "example.org")
 		r.Mount("/", sub())
 	})
 	t.Run("a mount under a prefix", func(t *testing.T) {
@@ -417,7 +417,7 @@ func TestRedirectHostOwnsItsHostThroughAMount(t *testing.T) {
 func TestRedirectHostRefusesALoop(t *testing.T) {
 	captureLogs(t)
 	r := newTestRouter()
-	r.RedirectHost("*", "example.com", http.StatusMovedPermanently)
+	r.RedirectHost("*", http.StatusMovedPermanently, "example.com")
 
 	for _, host := range []string{"example.com", "EXAMPLE.com:8080"} {
 		if code, loc := follow(r, http.MethodGet, host, "/a"); code != http.StatusNotFound {
@@ -432,7 +432,7 @@ func TestRedirectHostRefusesALoop(t *testing.T) {
 func TestRedirectHostAnswers404WhenTheTargetRefusesTheValue(t *testing.T) {
 	captureLogs(t)
 	r := newTestRouter()
-	r.RedirectHost("{sub...}.old.test", "{sub}.new.test", http.StatusMovedPermanently)
+	r.RedirectHost("{sub...}.old.test", http.StatusMovedPermanently, "{sub}.new.test")
 
 	if code, loc := follow(r, http.MethodGet, "a.b.old.test", "/"); code != http.StatusNotFound {
 		t.Errorf("GET a.b.old.test/ = %d to %q, want 404; one label cannot hold a.b", code, loc)
@@ -448,25 +448,25 @@ func TestRedirectHostPanicsOnABadCall(t *testing.T) {
 		call func(r *Router[*tctx])
 		want string
 	}{
-		{"a bad pattern", func(r *Router[*tctx]) { r.RedirectHost("{x", "example.com", 301) }, "unbalanced"},
-		{"an empty target", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "", 301) }, "needs a target host"},
-		{"a target with a path", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "example.com/a", 301) }, "a host alone"},
-		{"a URL target", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "https://example.com", 301) }, "bad port"},
-		{"a bad port", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "example.com:99999", 301) }, "bad port"},
-		{"an empty port", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "example.com:", 301) }, "bad port"},
-		{"a wildcard target", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "*.example.com", 301) }, "wildcard"},
-		{"an unknown parameter", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "{tenant}.example.com", 301) }, `"tenant"`},
-		{"a target equal to the pattern", func(r *Router[*tctx]) { r.RedirectHost("{t}.example.com", "{t}.EXAMPLE.com.", 301) }, "points at itself"},
-		{"status 200", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", "example.com", http.StatusOK) }, "redirect status"},
+		{"a bad pattern", func(r *Router[*tctx]) { r.RedirectHost("{x", 301, "example.com") }, "unbalanced"},
+		{"an empty target", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", 301, "") }, "needs a target host"},
+		{"a target with a path", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", 301, "example.com/a") }, "a host alone"},
+		{"a URL target", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", 301, "https://example.com") }, "bad port"},
+		{"a bad port", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", 301, "example.com:99999") }, "bad port"},
+		{"an empty port", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", 301, "example.com:") }, "bad port"},
+		{"a wildcard target", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", 301, "*.example.com") }, "wildcard"},
+		{"an unknown parameter", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", 301, "{tenant}.example.com") }, `"tenant"`},
+		{"a target equal to the pattern", func(r *Router[*tctx]) { r.RedirectHost("{t}.example.com", 301, "{t}.EXAMPLE.com.") }, "points at itself"},
+		{"status 200", func(r *Router[*tctx]) { r.RedirectHost("www.example.com", http.StatusOK, "example.com") }, "redirect status"},
 		{"inside a host scope", func(r *Router[*tctx]) {
-			r.Host("example.com", func(h *Router[*tctx]) { h.RedirectHost("www.example.com", "example.com", 301) })
+			r.Host("example.com", func(h *Router[*tctx]) { h.RedirectHost("www.example.com", 301, "example.com") })
 		}, "inside another host scope"},
 		{"inside a prefix", func(r *Router[*tctx]) {
-			r.Route("/x", func(g *Router[*tctx]) { g.RedirectHost("www.example.com", "example.com", 301) })
+			r.Route("/x", func(g *Router[*tctx]) { g.RedirectHost("www.example.com", 301, "example.com") })
 		}, "scope with a prefix"},
 		{"after serving", func(r *Router[*tctx]) {
 			do(r, http.MethodGet, "/")
-			r.RedirectHost("www.example.com", "example.com", 301)
+			r.RedirectHost("www.example.com", 301, "example.com")
 		}, "after the router started serving"},
 	}
 	for _, tc := range tests {

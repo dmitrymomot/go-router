@@ -25,7 +25,7 @@ import (
 // path, a target that starts with "//" or holds a "." or ".." segment of its
 // own, a target that names a parameter the route lacks or that only some hosts
 // of the scope declare, a target equal to the route, and wherever Handle does.
-func (r *Router[C]) Redirect(pattern, target string, status int) {
+func (r *Router[C]) Redirect(pattern string, status int, target string) {
 	if !isRedirectStatus(status) {
 		panic(fmt.Sprintf("router: Redirect needs a redirect status, not %d", status))
 	}
@@ -117,7 +117,7 @@ func (r *Router[C]) sharedHostNames() []string {
 
 // RedirectHost answers every request for a host that matches pattern with a
 // redirect to target, keeping the scheme ([Base.Scheme]), the port, the path and
-// the query: r.RedirectHost("www."+apex, apex, http.StatusMovedPermanently).
+// the query: r.RedirectHost("www."+apex, http.StatusMovedPermanently, apex).
 // target is a host that may name the parameters of pattern, as in
 // "{tenant}.example.com", and may carry a port of its own, which replaces the
 // port of the request. Like any host scope it wins over routes registered outside
@@ -132,7 +132,7 @@ func (r *Router[C]) sharedHostNames() []string {
 // that already holds routes, on an empty or wildcard target, a target that holds
 // a path or a bad port, a target that names a parameter pattern lacks, a target
 // equal to pattern, and a status that is not a redirect.
-func (r *Router[C]) RedirectHost(pattern, target string, status int) {
+func (r *Router[C]) RedirectHost(pattern string, status int, target string) {
 	if !isRedirectStatus(status) {
 		panic(fmt.Sprintf("router: RedirectHost needs a redirect status, not %d", status))
 	}

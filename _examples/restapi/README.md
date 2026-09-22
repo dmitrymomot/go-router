@@ -67,7 +67,7 @@ func (e NoUserError) StatusCode() int { return http.StatusNotFound }
 **One place that writes the failures.** The router answers errors in plain text by default. An API says so once, in `ErrorHandler`, and every handler after that just returns an error:
 
 ```go
-r.ErrorHandler(router.JSONErrorHandler[*Context])
+r.ErrorHandler(router.JSONErrorHandler[*Context](false))
 ```
 
 Every failure then comes back in one envelope, with the fields of a failed `Bind` under `details`:

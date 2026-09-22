@@ -834,3 +834,59 @@ func TestCaptureRejectsANegativeLimit(t *testing.T) {
 	}()
 	new(Response).Capture(-1)
 }
+
+func TestBeforeCallbackThatWritesRunsOnce(t *testing.T) {
+	w := &statusWriter{ResponseWriter: httptest.NewRecorder()}
+	res := &Response{ResponseWriter: w}
+	calls := 0
+	res.Before(func() {
+		calls++
+		if calls > 3 {
+			return // Stop a runaway recursion so the test can report it.
+		}
+		res.Header().Set("X-Early", "yes")
+		_, _ = res.WriteString("early ")
+	})
+	later := 0
+	res.Before(func() { later++ })
+
+	res.WriteHeader(http.StatusAccepted)
+	_, _ = res.WriteString("body")
+
+	if calls != 1 || later != 1 {
+		t.Errorf("the callbacks ran %d and %d times, want once each", calls, later)
+	}
+	if len(w.codes) != 1 {
+		t.Errorf("the writer saw %v, want one status", w.codes)
+	}
+	rec := w.ResponseWriter.(*httptest.ResponseRecorder)
+	if got := rec.Body.String(); got != "early body" {
+		t.Errorf("body = %q, want %q", got, "early body")
+	}
+	if !res.Committed {
+		t.Error("the response is not committed")
+	}
+}
+
+type failingFlusher struct {
+	http.ResponseWriter
+	err error
+}
+
+func (w *failingFlusher) FlushError() error { return w.err }
+
+func TestFlushErrorReportsTheWriterError(t *testing.T) {
+	gone := errors.New("client gone")
+	res := &Response{ResponseWriter: &failingFlusher{ResponseWriter: httptest.NewRecorder(), err: gone}}
+
+	if err := res.FlushError(); !errors.Is(err, gone) {
+		t.Errorf("FlushError = %v, want %v", err, gone)
+	}
+	if res.Status != http.StatusOK || !res.Committed {
+		t.Errorf("Status = %d, Committed = %v, want 200 and true", res.Status, res.Committed)
+	}
+	// http.NewResponseController finds FlushError on Response itself.
+	if err := http.NewResponseController(res).Flush(); !errors.Is(err, gone) {
+		t.Errorf("ResponseController.Flush = %v, want %v", err, gone)
+	}
+}

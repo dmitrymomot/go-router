@@ -272,7 +272,7 @@ func ExampleEvents() {
 func ExampleResponse_ErrorBody() {
 	r := router.New(newContext)
 	r.Logger(slog.New(slog.DiscardHandler))
-	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.ErrorHandler(router.JSONErrorHandler[*appContext](false))
 	r.POST("/signup", func(c *appContext) error {
 		_, err := c.Bind[signup]()
 		return err
@@ -299,7 +299,7 @@ func ExampleExpect_FieldErrors() {
 	var tb testing.TB
 
 	r := router.New(newContext)
-	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.ErrorHandler(router.JSONErrorHandler[*appContext](false))
 	r.POST("/signup", func(c *appContext) error {
 		_, err := c.Bind[signup]()
 		return err

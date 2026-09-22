@@ -1,21 +1,18 @@
 package middleware
 
 import (
-	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/dmitrymomot/go-router"
 )
 
 // RecoverConfig configures [RecoverWithConfig]. StackSize caps the stack that
-// the error carries, and zero takes [router.DefaultStackSize]. DisableStack
+// the error carries: zero takes [router.DefaultStackSize], and a negative size
 // records the panic value alone, for a server that must not hold a stack in
 // memory.
 type RecoverConfig struct {
-	Skip         func(c router.Context) bool
-	StackSize    int
-	DisableStack bool
+	Skip      func(c router.Context) bool
+	StackSize int
 }
 
 // Recover turns a panic in a later handler into an
@@ -45,21 +42,9 @@ func RecoverWithConfig[C router.Context](cfg RecoverConfig) router.Middleware[C]
 				if rec == http.ErrAbortHandler {
 					panic(rec)
 				}
-				if cfg.DisableStack {
-					err = router.ErrInternalServerError.WithError(
-						&router.PanicValue{Value: rec, Err: panicCause(rec)})
-					return
-				}
-				err = router.PanicErrorSize(rec, cfg.StackSize)
+				err = router.PanicError(rec, cfg.StackSize)
 			}()
 			return next(c)
 		}
 	}
-}
-
-func panicCause(rec any) error {
-	if err, ok := rec.(error); ok {
-		return err
-	}
-	return errors.New(fmt.Sprint(rec))
 }

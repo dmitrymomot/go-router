@@ -182,7 +182,7 @@ func TestHTMXRedirectTurnsARedirectOfTheErrorHandler(t *testing.T) {
 		if router.StatusOf(err) == http.StatusUnauthorized {
 			return c.Redirect(http.StatusSeeOther, "/login")
 		}
-		return router.DefaultErrorHandler(c, err)
+		return router.TextErrorHandler[*appContext](false)(c, err)
 	})
 	calls := 0
 	r.Use(func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {

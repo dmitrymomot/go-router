@@ -42,7 +42,7 @@ func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
 			panic(rec)
 		}
 		if rec != nil {
-			err = PanicError(rec)
+			err = PanicError(rec, 0)
 			r.handleError(c, err)
 		}
 		b := c.base()
@@ -78,7 +78,7 @@ func (r *Router[C]) release(c C) {
 		if rec == http.ErrAbortHandler {
 			panic(rec)
 		}
-		r.handleError(c, PanicError(rec))
+		r.handleError(c, PanicError(rec, 0))
 		return
 	}
 	if r.pool != nil {

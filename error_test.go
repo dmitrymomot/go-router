@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,7 +22,7 @@ func TestHTTPErrorIsMatchesOnTheStatus(t *testing.T) {
 	}{
 		{"the sentinel itself", ErrNotFound, true},
 		{"a copy with another message", ErrNotFound.WithMessage("no user 9"), true},
-		{"a fresh error with the same status", NewHTTPError(http.StatusNotFound), true},
+		{"a fresh error with the same status", NewHTTPError(http.StatusNotFound, ""), true},
 		{"wrapped by fmt", fmt.Errorf("load user: %w", ErrNotFound), true},
 		{"another status", ErrForbidden, false},
 		{"a plain error", errors.New("boom"), false},
@@ -245,7 +246,7 @@ func TestFieldErrorsReachTheBody(t *testing.T) {
 }
 
 func TestPanicErrorCarriesTheValueAndTheStack(t *testing.T) {
-	err := PanicError("boom")
+	err := PanicError("boom", 0)
 
 	if !errors.Is(err, ErrInternalServerError) {
 		t.Error("the error is not a 500")
@@ -260,37 +261,41 @@ func TestPanicErrorCarriesTheValueAndTheStack(t *testing.T) {
 	if !strings.Contains(string(pv.Stack), "goroutine") {
 		t.Errorf("Stack = %q, want the stack of the goroutine", pv.Stack)
 	}
-	if got := err.Error(); !strings.Contains(got, "panic: boom") {
-		t.Errorf("Error() = %q, want it to name the panic", got)
+	if got := err.Error(); !strings.Contains(got, "panic: boom") || strings.Contains(got, "goroutine") {
+		t.Errorf("Error() = %q, want it to name the panic and leave the stack out", got)
 	}
 
 	sentinel := errors.New("no rows")
-	if !errors.Is(PanicError(sentinel), sentinel) {
+	if !errors.Is(PanicError(sentinel, 0), sentinel) {
 		t.Error("the panic value is not reachable through Unwrap")
 	}
-	if pv, ok := errors.AsType[*PanicValue](PanicError(sentinel)); !ok || pv.Err != sentinel {
+	if pv, ok := errors.AsType[*PanicValue](PanicError(sentinel, 0)); !ok || pv.Err != sentinel {
 		t.Error("Err is not the panic value")
 	}
 }
 
-func TestPanicErrorSizeCapsTheStack(t *testing.T) {
+func TestPanicErrorCapsTheStack(t *testing.T) {
 	tests := []struct {
 		name string
 		size int
+		min  int
 		max  int
 	}{
-		{"a small buffer", 64, 64},
-		{"zero uses the default", 0, DefaultStackSize},
-		{"a negative size uses the default", -1, DefaultStackSize},
+		{"a small buffer", 64, 1, 64},
+		{"zero uses the default", 0, 1, DefaultStackSize},
+		{"a negative size records no stack", -1, 0, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pv, ok := errors.AsType[*PanicValue](PanicErrorSize("boom", tc.size))
+			pv, ok := errors.AsType[*PanicValue](PanicError("boom", tc.size))
 			if !ok {
 				t.Fatal("the internal cause carries no PanicValue")
 			}
-			if len(pv.Stack) == 0 {
-				t.Error("the stack is empty")
+			if pv.Value != "boom" {
+				t.Errorf("Value = %v, want the panic value", pv.Value)
+			}
+			if len(pv.Stack) < tc.min {
+				t.Errorf("the stack is %d bytes, want at least %d", len(pv.Stack), tc.min)
 			}
 			if len(pv.Stack) > tc.max {
 				t.Errorf("the stack is %d bytes, want at most %d", len(pv.Stack), tc.max)
@@ -299,7 +304,7 @@ func TestPanicErrorSizeCapsTheStack(t *testing.T) {
 	}
 }
 
-func TestErrorHandlerWithoutTheCauseMatchesTheDefault(t *testing.T) {
+func TestTextErrorHandlerWithoutTheCauseMatchesTheDefault(t *testing.T) {
 	captureLogs(t)
 
 	failing := func(*tctx) error {
@@ -310,7 +315,7 @@ func TestErrorHandlerWithoutTheCauseMatchesTheDefault(t *testing.T) {
 	byDefault.GET("/", failing)
 
 	explicit := newTestRouter()
-	explicit.ErrorHandler(ErrorHandler[*tctx](false))
+	explicit.ErrorHandler(TextErrorHandler[*tctx](false))
 	explicit.GET("/", failing)
 
 	want := do(byDefault, http.MethodGet, "/")
@@ -331,11 +336,11 @@ func TestErrorHandlerWithoutTheCauseMatchesTheDefault(t *testing.T) {
 	}
 }
 
-func TestErrorHandlerExposesTheCause(t *testing.T) {
+func TestTextErrorHandlerExposesTheCause(t *testing.T) {
 	captureLogs(t)
 
 	r := newTestRouter()
-	r.ErrorHandler(ErrorHandler[*tctx](true))
+	r.ErrorHandler(TextErrorHandler[*tctx](true))
 	r.GET("/", func(*tctx) error {
 		return ErrBadRequest.WithMessage("check the payload").WithError(errors.New("sql: no rows"))
 	})
@@ -566,7 +571,7 @@ func TestJSONErrorHandler(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTestRouter()
-			r.ErrorHandler(JSONErrorHandler[*tctx])
+			r.ErrorHandler(JSONErrorHandler[*tctx](false))
 			r.Handle(tc.method, "/", tc.handler)
 
 			req := httptest.NewRequest(tc.method, "/", strings.NewReader(tc.body))
@@ -607,7 +612,7 @@ func TestJSONErrorHandlerKeepsTheCauseOutOfTheBody(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTestRouter()
-			r.ErrorHandler(JSONErrorHandler[*tctx])
+			r.ErrorHandler(JSONErrorHandler[*tctx](false))
 			r.GET("/", tc.fail)
 
 			rec := do(r, http.MethodGet, "/")
@@ -618,11 +623,47 @@ func TestJSONErrorHandlerKeepsTheCauseOutOfTheBody(t *testing.T) {
 	}
 }
 
+func TestJSONErrorHandlerExposesTheCause(t *testing.T) {
+	captureLogs(t)
+
+	for _, tc := range []struct {
+		name string
+		fail HandlerFunc[*tctx]
+		want string
+	}{
+		{"an HTTPError with a cause", func(*tctx) error {
+			return ErrBadRequest.WithMessage("check the payload").WithError(errors.New("sql: no rows"))
+		}, `{"error":{"status":400,"message":"check the payload","cause":"sql: no rows"}}`},
+		{
+			"a plain error", func(*tctx) error { return errors.New("sql: no rows") },
+			`{"error":{"status":500,"message":"Internal Server Error","cause":"sql: no rows"}}`,
+		},
+		{
+			"no cause", func(*tctx) error { return ErrNotFound },
+			`{"error":{"status":404,"message":"Not Found"}}`,
+		},
+		{
+			"a panic", func(*tctx) error { panic("boom") },
+			`{"error":{"status":500,"message":"Internal Server Error","cause":"panic: boom"}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter()
+			r.ErrorHandler(JSONErrorHandler[*tctx](true))
+			r.GET("/", tc.fail)
+
+			if got := do(r, http.MethodGet, "/").Body.String(); got != tc.want {
+				t.Errorf("body = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestJSONErrorHandlerWithUnencodableDetailsAnswers500(t *testing.T) {
 	sink := captureLogs(t)
 
 	r := newTestRouter()
-	r.ErrorHandler(JSONErrorHandler[*tctx])
+	r.ErrorHandler(JSONErrorHandler[*tctx](false))
 	r.GET("/", func(*tctx) error { return ErrConflict.WithDetails(make(chan int)) })
 
 	rec := do(r, http.MethodGet, "/")
@@ -634,7 +675,7 @@ func TestJSONErrorHandlerWithUnencodableDetailsAnswers500(t *testing.T) {
 	}
 }
 
-func TestDefaultErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
+func TestTextErrorHandlerHEADKeepsRepresentationHeaders(t *testing.T) {
 	r := newTestRouter()
 	r.GET("/boom", func(*tctx) error { return ErrForbidden })
 
@@ -762,13 +803,76 @@ func TestFieldErrorsOfReturnsACopy(t *testing.T) {
 // A handler that returns a typed nil *HTTPError must not crash the error
 // pipeline on the way to its 500.
 func TestTypedNilHTTPErrorAnswers500(t *testing.T) {
-	captureLogs(t)
+	sink := &recordSink{}
 	r := newTestRouter()
+	r.Logger(slog.New(sink))
 	r.GET("/nil", func(*tctx) error {
 		var he *HTTPError
 		return he
 	})
 	if rec := do(r, http.MethodGet, "/nil"); rec.Code != http.StatusInternalServerError {
 		t.Errorf("GET /nil = %d, want 500", rec.Code)
+	}
+	for _, rec := range sink.records {
+		rec.Attrs(func(a slog.Attr) bool {
+			if err, ok := a.Value.Any().(error); ok {
+				if _, ok := errors.AsType[*PanicValue](err); ok {
+					t.Errorf("record %q logs a panic: %v", rec.Message, err)
+				}
+			}
+			return true
+		})
+	}
+}
+
+func TestTypedNilHTTPErrorIsNotAnHTTPError(t *testing.T) {
+	var he *HTTPError
+	err := error(he)
+
+	if got := StatusOf(err); got != http.StatusInternalServerError {
+		t.Errorf("StatusOf = %d, want 500", got)
+	}
+	if got := HTTPErrorOf(err); got == nil || got.Status != http.StatusInternalServerError {
+		t.Errorf("HTTPErrorOf = %v, want a 500", got)
+	}
+	if errors.Is(ErrNotFound, err) {
+		t.Error("errors.Is(ErrNotFound, typed nil) = true, want false")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Error("errors.Is(typed nil, ErrNotFound) = true, want false")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Error("errors.Is(typed nil, context.Canceled) = true, want false")
+	}
+	if he.Unwrap() != nil {
+		t.Error("Unwrap of a typed nil is not nil")
+	}
+	_ = he.Error()
+}
+
+func TestHTTPErrorIsMatchesADirectTargetOnly(t *testing.T) {
+	// A target that wraps an HTTPError is not an HTTPError itself.
+	wrapped := fmt.Errorf("load: %w", ErrNotFound)
+	if errors.Is(ErrNotFound, wrapped) {
+		t.Error("errors.Is(ErrNotFound, wrapped 404) = true, want false")
+	}
+}
+
+func TestExposedPanicKeepsTheStackInTheLog(t *testing.T) {
+	var logged bytes.Buffer
+	r := newTestRouter()
+	r.Logger(slog.New(slog.NewTextHandler(&logged, nil)))
+	r.ErrorHandler(TextErrorHandler[*tctx](true))
+	r.GET("/", func(*tctx) error { panic("boom") })
+
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "goroutine") || !strings.Contains(body, "boom") {
+		t.Errorf("body = %q, want the panic value and no stack", body)
+	}
+	if !strings.Contains(logged.String(), "goroutine") {
+		t.Errorf("log = %q, want the stack", logged.String())
 	}
 }

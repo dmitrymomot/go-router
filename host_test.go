@@ -964,7 +964,7 @@ func TestHostsRejectsTwoSpellingsOfOneHost(t *testing.T) {
 func TestJSONErrorHandlerOnAHostAnswersItsMisses(t *testing.T) {
 	r := newTestRouter()
 	r.Host("api.example.com", func(h *Router[*tctx]) {
-		h.ErrorHandler(JSONErrorHandler[*tctx])
+		h.ErrorHandler(JSONErrorHandler[*tctx](false))
 		h.GET("/users", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })
 	})
 	r.GET("/", func(c *tctx) error { return c.NoContent(http.StatusNoContent) })

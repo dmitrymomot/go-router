@@ -137,7 +137,7 @@ func (s signup) Validate() error {
 func jsonErrorRouter() *router.Router[*appContext] {
 	r := router.New(newContext)
 	r.Logger(slog.New(slog.DiscardHandler))
-	r.ErrorHandler(router.JSONErrorHandler[*appContext])
+	r.ErrorHandler(router.JSONErrorHandler[*appContext](false))
 	r.POST("/signup", func(c *appContext) error {
 		_, err := c.Bind[signup]()
 		return err
@@ -168,6 +168,21 @@ func TestResponseErrorBody(t *testing.T) {
 		}
 		if !slices.Equal(names, []string{"name", "email"}) {
 			t.Errorf("fields = %v, want [name email]", names)
+		}
+	})
+
+	t.Run("an exposed cause", func(t *testing.T) {
+		dev := router.New(newContext)
+		dev.Logger(slog.New(slog.DiscardHandler))
+		dev.ErrorHandler(router.JSONErrorHandler[*appContext](true))
+		dev.GET("/", func(*appContext) error { return router.ErrConflict.WithError(errors.New("row locked")) })
+
+		body, err := routertest.Get(dev, "/").ErrorBody()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body.Status != http.StatusConflict || body.Cause != "row locked" {
+			t.Errorf("body = %+v, want a 409 with the cause", body)
 		}
 	})
 

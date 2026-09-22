@@ -23,6 +23,9 @@ type Response struct {
 	Status    int
 	Size      int64
 	Committed bool
+	// committing is up while the callbacks of Before run, so a write from
+	// inside one does not run them again.
+	committing bool
 }
 
 // Unwrap reports the writer underneath, which lets
@@ -46,24 +49,46 @@ func (r *Response) Before(fn func()) {
 // callbacks of [Response.Before]. A 1xx other than 101 passes through as an
 // informational response and commits nothing. A second call is dropped and
 // logged at debug level.
+//
+// A callback that writes commits the response on the spot with the status
+// being written and the header as it stands, and the callbacks do not run
+// again.
 func (r *Response) WriteHeader(code int) {
 	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		r.ResponseWriter.WriteHeader(code)
 		return
 	}
 	if r.Committed {
-		if l := slog.Default(); l.Enabled(context.Background(), slog.LevelDebug) {
-			l.Debug("router: the response is already committed",
-				slog.Int("dropped", code), slog.Int("status", r.Status))
+		r.dropStatus(code)
+		return
+	}
+	if r.committing {
+		// A callback wrote. The status on its way out wins over the one
+		// this write asks for.
+		if code != r.Status {
+			r.dropStatus(code)
 		}
+		r.ResponseWriter.WriteHeader(r.Status)
+		r.Committed = true
 		return
 	}
 	r.Status = code
+	r.committing = true
 	for _, fn := range r.before {
 		fn()
 	}
-	r.ResponseWriter.WriteHeader(code)
-	r.Committed = true
+	r.committing = false
+	if !r.Committed {
+		r.ResponseWriter.WriteHeader(code)
+		r.Committed = true
+	}
+}
+
+func (r *Response) dropStatus(code int) {
+	if l := slog.Default(); l.Enabled(context.Background(), slog.LevelDebug) {
+		l.Debug("router: the response is already committed",
+			slog.Int("dropped", code), slog.Int("status", r.Status))
+	}
 }
 
 // Write writes b, committing the response with a 200 when no status went out
@@ -88,14 +113,21 @@ func (r *Response) WriteString(s string) (int, error) {
 	return n, err
 }
 
-// Flush sends what is buffered to the client, committing the response with a
-// 200 when no status went out yet. A writer that cannot flush is left alone.
+// Flush is [Response.FlushError] without the error, for [http.Flusher].
 func (r *Response) Flush() {
+	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
+	r.FlushError()
+}
+
+// FlushError sends what is buffered to the client, committing the response
+// with a 200 when no status went out yet. It reports the error of the writer
+// underneath, or [http.ErrNotSupported] when that writer cannot flush; the
+// response is committed either way. [http.NewResponseController] calls it.
+func (r *Response) FlushError() error {
 	if !r.Committed {
 		r.WriteHeader(http.StatusOK)
 	}
-	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
-	http.NewResponseController(r.ResponseWriter).Flush()
+	return http.NewResponseController(r.ResponseWriter).Flush()
 }
 
 // ReadFrom copies src to the client, committing the response with a 200 when

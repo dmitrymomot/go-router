@@ -37,7 +37,7 @@ The apex sells the product and makes workspaces. It has no login and no session 
 
 ```go
 r.Host(baseDomain, apexRoutes)
-r.RedirectHost("www."+baseDomain, baseDomain, http.StatusMovedPermanently)
+r.RedirectHost("www."+baseDomain, http.StatusMovedPermanently, baseDomain)
 r.Host(tenantHost, workspaceRoutes) // "{tenant}.lvh.me"
 r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })
 ```

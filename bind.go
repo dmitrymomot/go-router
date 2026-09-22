@@ -356,7 +356,7 @@ func validate[T any](v *T) error {
 		return err
 	}
 	if sc, ok := errors.AsType[StatusCoder](err); ok && sc.StatusCode() != 0 {
-		return NewHTTPError(sc.StatusCode()).WithError(err)
+		return NewHTTPError(sc.StatusCode(), "").WithError(err)
 	}
 	if fields := FieldErrorsOf(err); fields != nil {
 		return ErrUnprocessableEntity.WithDetails(fields).WithError(err)
