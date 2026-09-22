@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"testing"
@@ -57,6 +58,22 @@ func ExampleNewContext() {
 		tb.Fatal(err)
 	}
 	routertest.Recorded(rec).Expect(tb).Status(http.StatusOK).Body("user 7")
+}
+
+// Recorded reads back what a handler wrote to a recorder of its own.
+func ExampleRecorded() {
+	r := router.New(newContext)
+	r.POST("/users", func(c *appContext) error {
+		c.SetHeader(router.HeaderLocation, "/users/7")
+		return c.String(http.StatusCreated, "created")
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/users", nil))
+	res := routertest.Recorded(rec)
+	fmt.Println(res.StatusCode, res.Header.Get(router.HeaderLocation), res.String())
+	// Output:
+	// 201 /users/7 created
 }
 
 type tenantKey struct{}
