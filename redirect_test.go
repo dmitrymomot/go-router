@@ -65,6 +65,23 @@ func TestRedirectNeverPointsAtAnotherHost(t *testing.T) {
 	}
 }
 
+// A Location of "/new/.." would take the browser to "/".
+func TestRedirectRefusesADotSegment(t *testing.T) {
+	captureLogs(t)
+	r := newTestRouter()
+	r.Redirect("/old/{id}", "/new/{id}", http.StatusMovedPermanently)
+	r.Redirect("/files/{p...}", "/docs/{p...}", http.StatusMovedPermanently)
+
+	for _, target := range []string{"/old/%2E%2E", "/old/%2e", "/files/a/%2E%2E/%2E%2E/admin"} {
+		if code, loc := follow(r, http.MethodGet, "", target); code != http.StatusNotFound {
+			t.Errorf("GET %s = %d to %q, want 404", target, code, loc)
+		}
+	}
+	if code, loc := follow(r, http.MethodGet, "", "/old/..."); code != http.StatusMovedPermanently || loc != "/new/..." {
+		t.Errorf("GET /old/... = %d to %q, want 301 to /new/...", code, loc)
+	}
+}
+
 func TestRedirectKeepsTheRequestQuery(t *testing.T) {
 	r := newTestRouter()
 	r.Redirect("/old", "/new", http.StatusMovedPermanently)

@@ -17,7 +17,8 @@ import (
 // it; when target has a query of its own, the target's pairs come first, so
 // Query().Get reads the target's value, and a handler that reads every value
 // sees the request's too. A value the target pattern refuses, or one that would
-// make the Location start with "//", answers [ErrNotFound]. A method-preserving
+// make the Location start with "//" or hold a "." or ".." segment, answers
+// [ErrNotFound]. A method-preserving
 // move of a POST needs a handler that calls [Base.Redirect].
 //
 // Redirect panics on a status that is not a redirect, a target that is not a

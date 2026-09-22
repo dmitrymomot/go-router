@@ -26,7 +26,8 @@ import (
 // that does not start with one, a wildcard host, a name the pattern lacks, a name
 // given twice or not at all, an odd number of arguments, an empty value for a
 // plain path segment or a host label, a path that would start with "//" (which a
-// browser reads as another host), and a value that would not route back to the
+// browser reads as another host) or hold a "." or ".." segment (which a
+// browser resolves to another path), and a value that would not route back to the
 // same parameters, such as "web-api" in "/r/{env}-{name}" or "Acme" in a host.
 // The pattern is meant to be a constant shared with the registration.
 func Expand(pattern string, pairs ...string) (string, error) {
@@ -266,6 +267,9 @@ func (t *urlTemplate) expand(value func(name string) (string, bool)) (string, er
 	if strings.HasPrefix(path, "//") {
 		return "", fmt.Errorf("router: %q builds %q, which a browser reads as a link to another host", t.pattern, path)
 	}
+	if hasDotSegment(path) {
+		return "", fmt.Errorf("router: %q builds %q, whose dot segment a browser resolves to another path", t.pattern, path)
+	}
 	if t.recheck && !t.routesBack(path, value) {
 		return "", fmt.Errorf("router: %q builds %q, which does not route back to the same values", t.pattern, path)
 	}
@@ -320,6 +324,19 @@ func (t *urlTemplate) expandHost(value func(name string) (string, bool)) (string
 		}
 	}
 	return host, nil
+}
+
+// hasDotSegment reports a segment of path that is "." or "..", which a browser
+// removes or resolves against the segment before it. PathEscape leaves the
+// dots alone, and a literal of a pattern holds no '%', so the escaped forms
+// such as "%2e" never reach here.
+func hasDotSegment(path string) bool {
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func needsRoundTrip(segs []segment) bool {

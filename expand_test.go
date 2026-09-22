@@ -171,6 +171,32 @@ func TestExpandRefusesANetworkPathReference(t *testing.T) {
 	}
 }
 
+// A browser resolves "/users/../delete" to "/delete", so such a path does not
+// reach the route it was built from.
+func TestExpandRefusesADotSegment(t *testing.T) {
+	for _, tc := range []struct{ pattern, name, value string }{
+		{"/users/{id}/delete", "id", ".."},
+		{"/users/{id}", "id", "."},
+		{"/files/{p...}", "p", "a/../../admin"},
+		{"/files/{p...}", "p", "./a"},
+		{"/r/{id:[a-z.]+}", "id", ".."},
+		{"/r/{n}.", "n", "."},
+	} {
+		if got, err := Expand(tc.pattern, tc.name, tc.value); err == nil {
+			t.Errorf("Expand(%s, %q) = %q, want an error", tc.pattern, tc.value, got)
+		}
+	}
+	for _, tc := range []struct{ pattern, name, value, want string }{
+		{"/users/{id}", "id", "...", "/users/..."},
+		{"/users/{id}", "id", ".env", "/users/.env"},
+		{"/files/{p...}", "p", "a/..b", "/files/a/..b"},
+	} {
+		if got, err := Expand(tc.pattern, tc.name, tc.value); err != nil || got != tc.want {
+			t.Errorf("Expand(%s, %q) = %q, %v; want %q", tc.pattern, tc.value, got, err, tc.want)
+		}
+	}
+}
+
 func TestExpandChecksBuiltinClassesAndAdmitsDeclaredOnes(t *testing.T) {
 	tests := []struct {
 		pattern, name, value string
