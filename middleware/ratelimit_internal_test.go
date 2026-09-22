@@ -423,9 +423,11 @@ func BenchmarkMemoryStoreAtCapacityUniqueIDs(b *testing.B) {
 		}
 	}
 	b.ReportAllocs()
+	// A full store evicts the entry that expires first, so each new client is
+	// admitted and the store stays at its bound.
 	for i := 0; b.Loop(); i++ {
 		allowed, _, err := s.Allow(nil, strconv.Itoa(i+maxEntries))
-		if err != nil || allowed {
+		if err != nil || !allowed {
 			b.Fatalf("request %d: allowed = %t, err = %v", i, allowed, err)
 		}
 	}
