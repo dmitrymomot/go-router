@@ -756,6 +756,11 @@ func (r *Router[C]) mustOwnFallbacks(what string) {
 // which covers the routes of that scope alone. Without a call the router uses
 // [DefaultErrorHandler].
 //
+// The router logs every failure itself, skips h for a response that already
+// committed and for an error that is [context.Canceled], and answers a bare
+// 500 when h returns an error having written nothing. To give a domain error
+// its status, make it a [StatusCoder] rather than mapping it inside h.
+//
 // ErrorHandler panics if h is nil, if the scope has neither a prefix nor a
 // host, or after the router started serving.
 func (r *Router[C]) ErrorHandler(h ErrorHandlerFunc[C]) {
@@ -804,8 +809,9 @@ func (r *Router[C]) MaxMultipartMemory(n int64) {
 	r.root.ropts.maxMultipart = n
 }
 
-// Logger installs the logger that [Base.Logger] and the error handler use. A
-// nil logger takes [slog.Default].
+// Logger installs the logger that [Base.Logger] and the log of failed requests
+// use. A nil logger takes [slog.Default]. To quiet the log of failed requests,
+// pass a logger whose handler drops the levels you do not want.
 //
 // Logger panics after the router started serving.
 func (r *Router[C]) Logger(l *slog.Logger) {
@@ -1584,7 +1590,7 @@ func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
 }
 
 func (r *Router[C]) handleError(c C, err error) {
-	runErrorHandler(c, err, r.eng.errorHandlerFor(c.base()))
+	answerError(c, err, r.eng.errorHandlerFor(c.base()))
 }
 
 func (e *engine[C]) errorHandlerFor(b *Base) ErrorHandlerFunc[C] {

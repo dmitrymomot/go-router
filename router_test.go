@@ -668,9 +668,45 @@ func TestErrorHandlerReturningAnErrorWithoutWritingAnswers500(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
-	if len(sink.records) == 0 || sink.records[0].Message != "router: the error handler failed" ||
-		sink.records[0].Level != slog.LevelError {
-		t.Errorf("records = %v, want the handler failure first, at Error", sink.records)
+	if len(sink.records) != 2 {
+		t.Fatalf("logged %d records, want the handler failure and the request failure", len(sink.records))
+	}
+	for i, want := range []string{"router: the error handler failed", "router: request failed"} {
+		if got := sink.records[i]; got.Message != want || got.Level != slog.LevelError {
+			t.Errorf("record %d = %v %q, want ERROR %q", i, got.Level, got.Message, want)
+		}
+	}
+	if status, _ := intAttr(sink.records[1], "status"); status != http.StatusInternalServerError {
+		t.Errorf("the request failure logged status=%d, want 500", status)
+	}
+}
+
+func TestCustomErrorHandlerLeavesACommittedResponseAlone(t *testing.T) {
+	sink := captureLogs(t)
+
+	calls := 0
+	r := newTestRouter()
+	r.ErrorHandler(func(c *tctx, err error) error {
+		calls++
+		return c.JSON(StatusOf(err), map[string]string{"error": "failed"})
+	})
+	r.GET("/", func(c *tctx) error {
+		_ = c.String(http.StatusOK, "partial")
+		return errors.New("the stream broke")
+	})
+
+	rec := do(r, http.MethodGet, "/")
+	if got := rec.Body.String(); got != "partial" {
+		t.Errorf("body = %q, want %q; the error handler wrote over a committed response", got, "partial")
+	}
+	if calls != 0 {
+		t.Errorf("the error handler ran %d times, want 0", calls)
+	}
+	if len(sink.records) != 1 || sink.records[0].Level != slog.LevelError {
+		t.Fatalf("records = %v, want one at Error", sink.records)
+	}
+	if status, _ := intAttr(sink.records[0], "status"); status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", status)
 	}
 }
 

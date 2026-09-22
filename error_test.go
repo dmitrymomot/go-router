@@ -359,7 +359,7 @@ func (h *levelRecorder) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
+func TestEveryErrorHandlerLogsAClientThatWentAwayAtDebug(t *testing.T) {
 	tests := []struct {
 		name   string
 		cancel bool
@@ -370,29 +370,98 @@ func TestDefaultErrorHandlerLogsAClientDisconnectAtDebug(t *testing.T) {
 		{"the client cancelled", true, errors.New("write: broken pipe"), slog.LevelDebug},
 		{"the error is the cancellation", false, context.Canceled, slog.LevelDebug},
 	}
+	for _, custom := range []bool{false, true} {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("custom=%v/%s", custom, tc.name), func(t *testing.T) {
+				rec := &levelRecorder{Handler: slog.Default().Handler()}
+				old := slog.Default()
+				slog.SetDefault(slog.New(rec))
+				defer slog.SetDefault(old)
+
+				calls := 0
+				r := newTestRouter()
+				if custom {
+					r.ErrorHandler(func(c *tctx, err error) error {
+						calls++
+						return c.JSON(StatusOf(err), map[string]string{"error": "failed"})
+					})
+				}
+				r.GET("/", func(c *tctx) error {
+					if tc.cancel {
+						ctx, cancel := context.WithCancel(c.Request().Context())
+						c.SetContext(ctx)
+						cancel()
+					}
+					return tc.err
+				})
+				do(r, http.MethodGet, "/")
+
+				if len(rec.levels) != 1 {
+					t.Fatalf("logged %d records, want 1", len(rec.levels))
+				}
+				if rec.levels[0] != tc.want {
+					t.Errorf("level = %v, want %v", rec.levels[0], tc.want)
+				}
+				if custom && errors.Is(tc.err, context.Canceled) && calls != 0 {
+					t.Errorf("the error handler ran %d times for a canceled error, want 0", calls)
+				}
+			})
+		}
+	}
+}
+
+// errSignIn is a plain error that a custom handler turns into a redirect.
+var errSignIn = errors.New("sign in first")
+
+func TestEveryErrorHandlerIsLoggedByThePolicy(t *testing.T) {
+	errDenied := errors.New("denied")
+	tests := []struct {
+		name       string
+		err        error
+		wantLogged bool
+		wantLevel  slog.Level
+		wantStatus int64
+	}{
+		{"a plain error", errors.New("boom"), true, slog.LevelError, http.StatusInternalServerError},
+		{"a StatusCoder 404", &codedError{http.StatusNotFound}, true, slog.LevelWarn, http.StatusNotFound},
+		{"a bare ErrNotFound", ErrNotFound, false, 0, 0},
+		{"a bare ErrInternalServerError", ErrInternalServerError, true, slog.LevelError, http.StatusInternalServerError},
+		{"a 4xx with a cause", ErrBadRequest.WithError(errors.New("bad id")), true, slog.LevelWarn, http.StatusBadRequest},
+		{"mapped to 403 by the handler", errDenied, true, slog.LevelWarn, http.StatusForbidden},
+		{"mapped to a redirect by the handler", errSignIn, false, 0, 0},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := &levelRecorder{Handler: slog.Default().Handler()}
-			old := slog.Default()
-			slog.SetDefault(slog.New(rec))
-			defer slog.SetDefault(old)
+			sink := captureLogs(t)
 
 			r := newTestRouter()
-			r.GET("/", func(c *tctx) error {
-				if tc.cancel {
-					ctx, cancel := context.WithCancel(c.Request().Context())
-					c.SetRequest(c.Request().WithContext(ctx))
-					cancel()
+			r.ErrorHandler(func(c *tctx, err error) error {
+				switch {
+				case errors.Is(err, errDenied):
+					return c.String(http.StatusForbidden, "denied")
+				case errors.Is(err, errSignIn):
+					return c.Redirect(http.StatusSeeOther, "/login")
 				}
-				return tc.err
+				return c.NoContent(StatusOf(err))
 			})
+			r.GET("/", func(*tctx) error { return tc.err })
 			do(r, http.MethodGet, "/")
 
-			if len(rec.levels) != 1 {
-				t.Fatalf("logged %d records, want 1", len(rec.levels))
+			if !tc.wantLogged {
+				if len(sink.records) != 0 {
+					t.Errorf("logged %d records, want none", len(sink.records))
+				}
+				return
 			}
-			if rec.levels[0] != tc.want {
-				t.Errorf("level = %v, want %v", rec.levels[0], tc.want)
+			if len(sink.records) != 1 {
+				t.Fatalf("logged %d records, want 1", len(sink.records))
+			}
+			got := sink.records[0]
+			if got.Level != tc.wantLevel {
+				t.Errorf("level = %v, want %v", got.Level, tc.wantLevel)
+			}
+			if status, _ := intAttr(got, "status"); status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", status, tc.wantStatus)
 			}
 		})
 	}

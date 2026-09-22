@@ -247,56 +247,41 @@ func HTTPErrorOf(err error) *HTTPError {
 }
 
 // ErrorHandlerFunc writes the answer for a handler that returned an error, and
-// returns the error of that write. [Router.ErrorHandler] installs one, and the
-// router calls it once per failed request. When it returns an error having
-// written nothing, the router answers a bare 500.
+// returns the error of that write. [Router.ErrorHandler] installs one.
+//
+// The router calls it at most once per request, and never for a response
+// that already committed or for an error that is [context.Canceled]. The
+// router logs the failure itself, and answers a bare 500 when the handler
+// returns an error having written nothing.
 type ErrorHandlerFunc[C Context] func(c C, err error) error
 
-// DefaultErrorHandler writes the status and the message of err as plain text,
-// one line per [FieldError] in its Details. It logs any 5xx and any error that
-// carries a cause, and it keeps the cause out of the response.
+// DefaultErrorHandler writes the status and the message of [HTTPErrorOf] as
+// plain text, one line per [FieldError] in its Details. The cause stays out
+// of the response.
 //
-// A response that already committed is logged and not written again.
+// It is a plain writer: called directly, it neither logs nor checks for a
+// committed response. The router does both around every error handler.
 func DefaultErrorHandler[C Context](c C, err error) error {
-	return writeError(c.base(), err, false)
+	return writeText(c.base(), err, false)
 }
 
 // ErrorHandler is [DefaultErrorHandler] with a say over the cause. With
 // exposeCause set, the wrapped cause follows the message in the body, which
 // suits a development server and leaks internals anywhere else.
 func ErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
-	return func(c C, err error) error { return writeError(c.base(), err, exposeCause) }
+	return func(c C, err error) error { return writeText(c.base(), err, exposeCause) }
 }
 
-func writeError(b *Base, err error, exposeCause bool) error {
-	if err == nil {
-		return nil
-	}
-
-	he, ok := errors.AsType[*HTTPError](err)
-	if !ok {
-		he = NewHTTPError(StatusOf(err)).WithError(err)
-	}
-
-	// The fields are exported, so a caller can build one with no status, and
-	// WriteHeader panics on 0. Read it here rather than mutating the caller's
-	// error.
-	status := he.Status
-	if status == 0 {
-		status = http.StatusInternalServerError
-	}
-
-	if status >= http.StatusInternalServerError || he.Err != nil {
-		logFailure(b, err, status)
-	}
-	if !writableFailure(b, err) {
+func writeText(b *Base, err error, exposeCause bool) error {
+	he := HTTPErrorOf(err)
+	if he == nil {
 		return nil
 	}
 
 	// Plain text, always. A handler that wants JSON or HTML for its errors
 	// says so in its own ErrorHandler, which knows what its clients read.
 	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
-	b.res.WriteHeader(status)
+	b.res.WriteHeader(he.Status)
 	if b.req.Method == http.MethodHead {
 		return nil
 	}
@@ -317,6 +302,17 @@ func writeError(b *Base, err error, exposeCause bool) error {
 		return err
 	}
 	return nil
+}
+
+// answerError is the error pipeline of a request: the guard, the handler,
+// then the log.
+func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
+	b := c.base()
+	committedBefore := b.res.Committed
+	if !committedBefore && !errors.Is(err, context.Canceled) {
+		runErrorHandler(c, err, h)
+	}
+	logFailure(b, err, committedBefore)
 }
 
 // runErrorHandler runs h and answers a bare 500 when h fails before it wrote
@@ -350,12 +346,32 @@ func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	}
 }
 
-func logFailure(b *Base, err error, status int) {
+// logFailure logs err with the status that went out: the one the error
+// handler wrote, or the one err asks for when the response committed before.
+// A bare HTTPError under 500 is an answer, not a failure, so it goes unlogged.
+func logFailure(b *Base, err error, committedBefore bool) {
+	he, isHTTP := errors.AsType[*HTTPError](err)
+	var status int
+	switch {
+	case !committedBefore && b.res.Committed:
+		status = b.res.Status
+	case isHTTP && he.Status != 0:
+		status = he.Status
+	default:
+		status = StatusOf(err)
+	}
+	if isHTTP && he.Err == nil && status < http.StatusInternalServerError {
+		return
+	}
+
 	level := slog.LevelError
 	switch {
 	case errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled):
 		level = slog.LevelDebug
-	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
+	case status < http.StatusBadRequest:
+		// The error handler turned the error into a redirect or a success.
+		return
+	case status < http.StatusInternalServerError:
 		level = slog.LevelWarn
 	}
 	b.Logger().Log(b.req.Context(), level, "router: request failed",
@@ -365,11 +381,4 @@ func logFailure(b *Base, err error, status int) {
 		slog.Int("status", status),
 		slog.Any("error", err),
 	)
-}
-
-func writableFailure(b *Base, err error) bool {
-	if b.res.Committed || errors.Is(err, context.Canceled) {
-		return false
-	}
-	return true
 }
