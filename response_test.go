@@ -807,7 +807,8 @@ type failingWriter struct {
 	*httptest.ResponseRecorder
 }
 
-func (failingWriter) Write([]byte) (int, error)       { return 0, errors.New("the client went away") }
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("the client went away") }
+
 func (failingWriter) WriteString(string) (int, error) { return 0, errors.New("the client went away") }
 
 func TestCaptureRecordsWhatTheHandlerMeantWhenTheWriteFails(t *testing.T) {

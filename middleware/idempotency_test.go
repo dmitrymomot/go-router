@@ -648,7 +648,8 @@ type brokenWriter struct {
 	*httptest.ResponseRecorder
 }
 
-func (brokenWriter) Write([]byte) (int, error)       { return 0, errors.New("the client went away") }
+func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("the client went away") }
+
 func (brokenWriter) WriteString(string) (int, error) { return 0, errors.New("the client went away") }
 
 func TestIdempotencyKeepsTheKeyOfASuccessWhoseWriteFailed(t *testing.T) {
