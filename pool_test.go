@@ -544,3 +544,34 @@ func TestPoolDoesNotCarryRouteMetaBetweenRequests(t *testing.T) {
 		})
 	}
 }
+
+// The pool builds the Response afresh for each request, so a capture a handler
+// never stopped does not record the next request on the same context.
+func TestPoolDropsACaptureThatWasNotStopped(t *testing.T) {
+	var seen []*pctx
+	r := newPooledRouter()
+	r.GET("/capture", func(c *pctx) error {
+		seen = append(seen, c)
+		c.Response().Capture(64)
+		return c.String(http.StatusOK, "captured")
+	})
+	r.GET("/plain", func(c *pctx) error {
+		seen = append(seen, c)
+		if _, ok := c.Response().ResponseWriter.(*captureWriter); ok {
+			return c.String(http.StatusInternalServerError, "an earlier capture is still in place")
+		}
+		return c.String(http.StatusOK, "plain")
+	})
+
+	for range 3 {
+		if rec := do(r, http.MethodGet, "/capture"); rec.Body.String() != "captured" {
+			t.Fatalf("capture: body = %q", rec.Body)
+		}
+		if rec := do(r, http.MethodGet, "/plain"); rec.Code != http.StatusOK {
+			t.Fatalf("plain: %d %s", rec.Code, rec.Body)
+		}
+	}
+	if seen[0] != seen[1] {
+		t.Skip("the pool did not hand the same context back")
+	}
+}
