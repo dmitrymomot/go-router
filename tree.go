@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 )
@@ -15,26 +14,28 @@ type methodHandler[C Context] struct {
 }
 
 type node[C Context] struct {
-	prefix    string
-	indices   string
-	statics   []*node[C]
-	templates []*node[C]
-	regexes   []*node[C]
-	param     *node[C]
-	wildcard  *node[C]
-	kind      edgeKind
-	name      string
-	re        *regexp.Regexp
-	parts     []segPart
-	raw       string
-	routes    []methodHandler[C]
-	catchAll  HandlerFunc[C]
-	pattern   string
-	names     []string
+	prefix      string
+	indices     string
+	statics     []*node[C]
+	templates   []*node[C]
+	constrained []*node[C]
+	param       *node[C]
+	wildcard    *node[C]
+	kind        edgeKind
+	name        string
+	m           *matcher
+	parts       []segPart
+	raw         string
+	routes      []methodHandler[C]
+	catchAll    HandlerFunc[C]
+	pattern     string
+	names       []string
 }
 
-func (n *node[C]) insert(method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string) error {
-	segs, names, err := parsePattern(pattern)
+func (n *node[C]) insert(
+	method, pattern string, hostNames []string, h HandlerFunc[C], autoOptions bool, allow map[*node[C]]string, classes classLookup,
+) error {
+	segs, names, err := parsePattern(pattern, classes)
 	if err != nil {
 		return err
 	}
@@ -124,9 +125,9 @@ func (n *node[C]) insertSpecial(e edge) (*node[C], error) {
 		n.templates = append(n.templates, c)
 		return c, nil
 
-	case edgeRegex:
-		for _, c := range n.regexes {
-			if c.re.String() != e.re.String() {
+	case edgeConstraint:
+		for _, c := range n.constrained {
+			if c.m.key != e.m.key {
 				continue
 			}
 			if c.name != e.name {
@@ -134,8 +135,8 @@ func (n *node[C]) insertSpecial(e edge) (*node[C], error) {
 			}
 			return c, nil
 		}
-		c := &node[C]{kind: edgeRegex, name: e.name, re: e.re}
-		n.regexes = append(n.regexes, c)
+		c := &node[C]{kind: edgeConstraint, name: e.name, m: e.m}
+		n.constrained = append(n.constrained, c)
 		return c, nil
 
 	case edgeWildcard:
@@ -206,7 +207,7 @@ func (n *node[C]) recacheAllow(autoOptions bool, allow map[*node[C]]string) {
 	for _, c := range n.templates {
 		c.recacheAllow(autoOptions, allow)
 	}
-	for _, c := range n.regexes {
+	for _, c := range n.constrained {
 		c.recacheAllow(autoOptions, allow)
 	}
 	if n.param != nil {
@@ -297,7 +298,7 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 		return nil, nil
 	}
 
-	if n.templates != nil || n.regexes != nil || n.param != nil {
+	if n.templates != nil || n.constrained != nil || n.param != nil {
 		body := rest[1:]
 		seg, tail := body, ""
 		if i := strings.IndexByte(body, '/'); i >= 0 {
@@ -321,8 +322,8 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 			}
 			clear(w[len(vals):])
 		}
-		for _, c := range n.regexes {
-			if c.re.MatchString(decoded) {
+		for _, c := range n.constrained {
+			if c.m.match(decoded) {
 				w := append(vals, decoded)
 				if m, v := search(c, tail, method, w, st, escaped); m != nil {
 					return m, v
@@ -362,7 +363,7 @@ func (n *node[C]) walk(fn func(pattern, method string, params int)) {
 	for _, c := range n.templates {
 		c.walk(fn)
 	}
-	for _, c := range n.regexes {
+	for _, c := range n.constrained {
 		c.walk(fn)
 	}
 	if n.param != nil {

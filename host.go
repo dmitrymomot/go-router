@@ -3,7 +3,6 @@ package router
 import (
 	"fmt"
 	"net"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,7 +76,7 @@ func (e *hostEntry[C]) match(host string, dst []string) ([]string, bool) {
 		if label == "" || strings.IndexByte(label, '.') >= 0 {
 			return dst, false
 		}
-		if e.head.re != nil && !e.head.re.MatchString(label) {
+		if e.head.m != nil && !e.head.m.match(label) {
 			return dst, false
 		}
 		if e.head.name != "" {
@@ -106,7 +105,7 @@ func (e *hostEntry[C]) match(host string, dst []string) ([]string, bool) {
 
 		switch {
 		case l.whole != nil:
-			if seg == "" || (l.whole.re != nil && !l.whole.re.MatchString(seg)) {
+			if seg == "" || (l.whole.m != nil && !l.whole.m.match(seg)) {
 				return dst, false
 			}
 			out[l.off] = seg
@@ -130,7 +129,7 @@ func (e *hostEntry[C]) match(host string, dst []string) ([]string, bool) {
 	return dst, true
 }
 
-func parseHostPattern(pattern string) (hostSpec, error) {
+func parseHostPattern(pattern string, classes classLookup) (hostSpec, error) {
 	raw := pattern
 	if n := len(pattern); n > 0 && pattern[n-1] == '.' {
 		pattern = pattern[:n-1]
@@ -155,7 +154,7 @@ func parseHostPattern(pattern string) (hostSpec, error) {
 		return hostSpec{}, err
 	}
 	for i, text := range labels {
-		l, names, err := parseHostLabel(text, pattern)
+		l, names, err := parseHostLabel(text, pattern, classes)
 		if err != nil {
 			return hostSpec{}, err
 		}
@@ -289,7 +288,7 @@ func splitHostLabels(pattern string) ([]string, error) {
 	return append(labels, pattern[start:]), nil
 }
 
-func parseHostLabel(text, pattern string) (hostLabel, []string, error) {
+func parseHostLabel(text, pattern string, classes classLookup) (hostLabel, []string, error) {
 	switch {
 	case text == "*":
 		return hostLabel{}, nil, nil
@@ -302,17 +301,14 @@ func parseHostLabel(text, pattern string) (hostLabel, []string, error) {
 		if rest {
 			return hostLabel{parts: []segPart{{name: name}}, rest: true}, []string{name}, nil
 		}
-		var re *regexp.Regexp
-		if expr != "" {
-			re, err = regexp.Compile("^(?:" + expr + ")$")
-			if err != nil {
-				return hostLabel{}, nil, fmt.Errorf("router: bad regular expression for %q in %q: %w", name, pattern, err)
-			}
+		m, err := constraintOf(name, expr, pattern, classes)
+		if err != nil {
+			return hostLabel{}, nil, err
 		}
-		return hostLabel{parts: []segPart{{name: name, re: re}}}, []string{name}, nil
+		return hostLabel{parts: []segPart{{name: name, m: m}}}, []string{name}, nil
 
 	case strings.ContainsAny(text, "{}"):
-		parts, names, err := parseTemplate(text, pattern)
+		parts, names, err := parseTemplate(text, pattern, classes)
 		if err != nil {
 			return hostLabel{}, nil, err
 		}
@@ -371,7 +367,7 @@ func hostLabelSpecificity(l hostLabel) int {
 		return 4
 	case l.parts != nil && l.whole == nil:
 		return 3
-	case l.whole != nil && l.whole.re != nil:
+	case l.whole != nil && l.whole.m != nil:
 		return 2
 	case l.whole != nil:
 		return 1
@@ -396,9 +392,9 @@ func hostShape(s *hostSpec) string {
 		case l.parts != nil && l.whole == nil:
 			b.WriteString("t:")
 			b.WriteString(templateSkeleton(l.parts))
-		case l.whole != nil && l.whole.re != nil:
+		case l.whole != nil && l.whole.m != nil:
 			b.WriteString("r:")
-			b.WriteString(l.whole.re.String())
+			b.WriteString(l.whole.m.key)
 		case l.rest:
 			b.WriteString("rest")
 		case l.whole != nil:

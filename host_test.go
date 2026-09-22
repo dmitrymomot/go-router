@@ -570,6 +570,65 @@ func TestDynamicHostPrecedenceIsStructural(t *testing.T) {
 	}
 }
 
+func TestHostParamClass(t *testing.T) {
+	r := newTestRouter()
+	r.Host("{tenant:slug}.example.com", func(h *Router[*tctx]) { h.GET("/", echoHost) })
+	r.Host("*", func(h *Router[*tctx]) {
+		h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "any") })
+	})
+
+	for host, want := range map[string]string{
+		"acme.example.com": "{tenant:slug}.example.com|/ tenant=acme",
+		"ACME.example.com": "{tenant:slug}.example.com|/ tenant=acme",
+		"a_b.example.com":  "any",
+	} {
+		if got := doHost(r, http.MethodGet, host, "/").Body.String(); got != want {
+			t.Errorf("%s = %q, want %q", host, got, want)
+		}
+	}
+}
+
+func TestClassHostPrecedenceIsStructural(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			r := newTestRouter()
+			register := []func(){
+				func() {
+					r.Host("{a:int}.example.com", func(h *Router[*tctx]) {
+						h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "class "+c.Param("a")) })
+					})
+				},
+				func() {
+					r.Host("{w:[a-z]+}.example.com", func(h *Router[*tctx]) {
+						h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "regex "+c.Param("w")) })
+					})
+				},
+				func() {
+					r.Host("{z}.example.com", func(h *Router[*tctx]) {
+						h.GET("/", func(c *tctx) error { return c.String(http.StatusOK, "parameter "+c.Param("z")) })
+					})
+				},
+			}
+			if reverse {
+				slices.Reverse(register)
+			}
+			for _, add := range register {
+				add()
+			}
+
+			for host, want := range map[string]string{
+				"123.example.com":  "class 123",
+				"acme.example.com": "regex acme",
+				"a-1.example.com":  "parameter a-1",
+			} {
+				if got := doHost(r, http.MethodGet, host, "/").Body.String(); got != want {
+					t.Errorf("%s chose %q, want %q", host, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestEquivalentDynamicHostPatternsAreRejected(t *testing.T) {
 	r := newTestRouter()
 	r.Host("{tenant}.example.com", func(h *Router[*tctx]) { h.GET("/a", echoHost) })

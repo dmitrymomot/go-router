@@ -27,9 +27,9 @@ Nothing is stored. The users live in a map that goes away with the process.
 | `GET /healthz` | no | `204`, and no rate limit |
 | `GET /v1/users` | no | every user, ordered by id |
 | `POST /v1/users` | yes | `201` and the new user, or `422` and the fields that failed |
-| `GET /v1/users/{id}` | no | the user, or `404` |
-| `PUT /v1/users/{id}` | yes | the replaced user, or `404` |
-| `DELETE /v1/users/{id}` | yes | `204`, or `404` |
+| `GET /v1/users/{id:int}` | no | the user, or `404` |
+| `PUT /v1/users/{id:int}` | yes | the replaced user, or `404` |
+| `DELETE /v1/users/{id:int}` | yes | `204`, or `404` |
 
 ## The five pieces worth copying
 

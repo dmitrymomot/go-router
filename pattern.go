@@ -12,7 +12,7 @@ type segKind uint8
 const (
 	segStatic segKind = iota
 	segTemplate
-	segRegex
+	segConstraint
 	segParam
 	segWildcard
 )
@@ -20,14 +20,22 @@ const (
 type segment struct {
 	kind  segKind
 	value string
-	re    *regexp.Regexp
+	m     *matcher
 	parts []segPart
 }
 
 type segPart struct {
 	lit  string
 	name string
-	re   *regexp.Regexp
+	m    *matcher
+}
+
+// matcher is the constraint of one parameter, a regular expression or a class.
+// key tells two constraints apart, so two routes share a node only when they
+// constrain alike.
+type matcher struct {
+	match func(value string) bool
+	key   string
 }
 
 const mountParam = "*"
@@ -64,12 +72,16 @@ func joinPattern(prefix, pattern string) string {
 // scope prefix or the host pattern already names, a route that collides with
 // one registered earlier, and a name a scope has already used. A nil here does
 // not promise that Handle will accept the pattern in every scope.
+//
+// It knows the built-in classes int, slug and uuid. Any other word that
+// [Router.ParamClass] could declare passes, and Handle checks that the router
+// declares it.
 func ValidatePattern(pattern string) error {
-	_, _, err := parsePattern(pattern)
+	_, _, err := parsePattern(pattern, anyClass)
 	return err
 }
 
-func parsePattern(pattern string) ([]segment, []string, error) {
+func parsePattern(pattern string, classes classLookup) ([]segment, []string, error) {
 	pattern = normalizePattern(pattern)
 	if pattern == "/" {
 		return nil, nil, nil
@@ -109,17 +121,17 @@ func parsePattern(pattern string) ([]segment, []string, error) {
 			case wildcard:
 				segs = append(segs, segment{kind: segWildcard, value: name})
 			case expr != "":
-				re, err := regexp.Compile("^(?:" + expr + ")$")
+				m, err := constraintOf(name, expr, pattern, classes)
 				if err != nil {
-					return nil, nil, fmt.Errorf("router: bad regular expression for %q in %q: %w", name, pattern, err)
+					return nil, nil, err
 				}
-				segs = append(segs, segment{kind: segRegex, value: name, re: re})
+				segs = append(segs, segment{kind: segConstraint, value: name, m: m})
 			default:
 				segs = append(segs, segment{kind: segParam, value: name})
 			}
 
 		case strings.ContainsAny(raw, "{}"):
-			parts, partNames, err := parseTemplate(raw, pattern)
+			parts, partNames, err := parseTemplate(raw, pattern, classes)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -216,7 +228,7 @@ func closingBrace(raw string, start int) (int, bool) {
 	return 0, false
 }
 
-func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
+func parseTemplate(raw, pattern string, classes classLookup) ([]segPart, []string, error) {
 	var (
 		parts []segPart
 		names []string
@@ -259,20 +271,16 @@ func parseTemplate(raw, pattern string) ([]segPart, []string, error) {
 			return nil, nil, fmt.Errorf("router: a catch-all must span a whole segment, but %q does not in %q", raw, pattern)
 		}
 
-		var re *regexp.Regexp
-		if expr != "" {
-			compiled, err := regexp.Compile("^(?:" + expr + ")$")
-			if err != nil {
-				return nil, nil, fmt.Errorf("router: bad regular expression for %q in %q: %w", name, pattern, err)
-			}
-			re = compiled
+		m, err := constraintOf(name, expr, pattern, classes)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		flush()
 		if n := len(parts); n > 0 && parts[n-1].lit == "" {
 			return nil, nil, fmt.Errorf("router: %q puts two parameters side by side in %q; separate them with text", raw, pattern)
 		}
-		parts = append(parts, segPart{name: name, re: re})
+		parts = append(parts, segPart{name: name, m: m})
 		names = append(names, name)
 	}
 	flush()
@@ -343,7 +351,7 @@ func matchTemplate(out []string, parts []segPart, seg string) bool {
 }
 
 func setTemplateValue(dst []string, i int, p segPart, value string) bool {
-	if value == "" || (p.re != nil && !p.re.MatchString(value)) {
+	if value == "" || (p.m != nil && !p.m.match(value)) {
 		return false
 	}
 	dst[i] = value
@@ -356,8 +364,8 @@ func segmentMatches(seg segment, value string) bool {
 		return value == seg.value
 	case segTemplate:
 		return matchTemplate(make([]string, templateArity(seg.parts)), seg.parts, value)
-	case segRegex:
-		return seg.re.MatchString(value)
+	case segConstraint:
+		return seg.m.match(value)
 	case segParam:
 		return value != ""
 	default:
@@ -371,7 +379,7 @@ func segmentSpecificity(kind segKind) int {
 		return 4
 	case segTemplate:
 		return 3
-	case segRegex:
+	case segConstraint:
 		return 2
 	case segParam:
 		return 1
@@ -388,8 +396,8 @@ func templateSkeleton(parts []segPart) string {
 			continue
 		}
 		b.WriteByte(0)
-		if p.re != nil {
-			b.WriteString(p.re.String())
+		if p.m != nil {
+			b.WriteString(p.m.key)
 		}
 		b.WriteByte(0)
 	}
@@ -431,12 +439,119 @@ func parseBraceSegment(raw, pattern string) (name, expr string, wildcard bool, e
 	return body, "", false, nil
 }
 
+// classLookup finds the parameter class a constraint names, or nil.
+type classLookup func(name string) *matcher
+
+var builtinClasses = map[string]*matcher{
+	"int":  {key: "class int", match: isDigits},
+	"slug": {key: "class slug", match: isSlug},
+	"uuid": {key: "class uuid", match: isUUID},
+}
+
+func builtinClass(name string) *matcher { return builtinClasses[name] }
+
+// declaredClass stands in for a class that ValidatePattern cannot see, which
+// a router may declare. It admits any value.
+var declaredClass = &matcher{key: "class ?", match: func(string) bool { return true }}
+
+// anyClass is the lookup of a pattern checked without a router: a built-in
+// class, or any name that [Router.ParamClass] could declare.
+func anyClass(name string) *matcher {
+	if m := builtinClass(name); m != nil {
+		return m
+	}
+	if validClassName(name) {
+		return declaredClass
+	}
+	return nil
+}
+
+// isClassWord reports whether a constraint names a class rather than holding
+// a regular expression: it is one word of letters, digits and '_'.
+func isClassWord(expr string) bool {
+	for i := range len(expr) {
+		if c := expr[i]; !isLetter(c) && !isDigit(c) && c != '_' {
+			return false
+		}
+	}
+	return expr != ""
+}
+
+func validClassName(name string) bool { return isClassWord(name) && isLetter(name[0]) }
+
+func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+func isDigits(s string) bool {
+	for i := range len(s) {
+		if !isDigit(s[i]) {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func isSlug(s string) bool {
+	if s == "" || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := range len(s) {
+		if c := s[i]; (c < 'a' || c > 'z') && !isDigit(c) && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// isUUID admits the canonical 8-4-4-4-12 form alone, in either case, so one
+// resource has one URL.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := range len(s) {
+		switch i {
+		case 8, 13, 18, 23:
+			if s[i] != '-' {
+				return false
+			}
+		default:
+			if _, ok := hexDigit(s[i]); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// constraintOf builds the matcher of the constraint expr that parameter name
+// carries, or nil when it carries none. A word names a class; anything else is
+// a regular expression.
+func constraintOf(name, expr, pattern string, classes classLookup) (*matcher, error) {
+	if expr == "" {
+		return nil, nil
+	}
+	if isClassWord(expr) {
+		if m := classes(expr); m != nil {
+			return m, nil
+		}
+		return nil, fmt.Errorf("router: {%s:%s} in %q names no parameter class; int, slug and uuid are built in "+
+			"and Router.ParamClass declares more, and a literal word is (?:%s)", name, expr, pattern, expr)
+	}
+	re, err := regexp.Compile("^(?:" + expr + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("router: bad regular expression for %q in %q: %w", name, pattern, err)
+	}
+	return &matcher{key: re.String(), match: re.MatchString}, nil
+}
+
 type edgeKind uint8
 
 const (
 	edgeLiteral edgeKind = iota
 	edgeTemplate
-	edgeRegex
+	edgeConstraint
 	edgeParam
 	edgeWildcard
 )
@@ -445,7 +560,7 @@ type edge struct {
 	kind  edgeKind
 	lit   string
 	name  string
-	re    *regexp.Regexp
+	m     *matcher
 	parts []segPart
 	raw   string
 }
@@ -477,9 +592,9 @@ func patternEdges(segs []segment) []edge {
 		case segTemplate:
 			flush()
 			edges = append(edges, edge{kind: edgeTemplate, name: sg.value, parts: sg.parts, raw: sg.value})
-		case segRegex:
+		case segConstraint:
 			flush()
-			edges = append(edges, edge{kind: edgeRegex, name: sg.value, re: sg.re})
+			edges = append(edges, edge{kind: edgeConstraint, name: sg.value, m: sg.m})
 		default:
 			flush()
 			edges = append(edges, edge{kind: edgeParam, name: sg.value})

@@ -87,15 +87,15 @@ func TestAMissingUserKeepsItsTextOnTheServer(t *testing.T) {
 	}
 }
 
-func TestABadIDIsARejection(t *testing.T) {
+func TestABadIDIsNotFound(t *testing.T) {
 	r := newRouter(NewStore(), testKey)
-	routertest.Get(r, "/v1/users/abc").AssertStatus(t, http.StatusBadRequest)
+	routertest.Get(r, "/v1/users/abc").AssertStatus(t, http.StatusNotFound)
 }
 
 func TestTheMountAppearsInTheRouteTable(t *testing.T) {
 	r := newRouter(NewStore(), testKey)
 
-	want := "GET /v1/users/{id}"
+	want := "GET /v1/users/{id:int}"
 	for _, rt := range r.Routes() {
 		if rt.Method+" "+rt.Pattern == want {
 			return

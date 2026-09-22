@@ -60,6 +60,11 @@ func BenchmarkRegexParam(b *testing.B) {
 	benchServe(b, r, w, "/orders/123456")
 }
 
+func BenchmarkClassParam(b *testing.B) {
+	r, w := benchRouter("/orders/{id:uuid}")
+	benchServe(b, r, w, "/orders/0198c5b6-3f0e-7b3a-9c1d-2f4e6a8b0c1d")
+}
+
 func BenchmarkBacktrack(b *testing.B) {
 	r, w := benchRouter("/a/{x}/c", "/a/b/d")
 	benchServe(b, r, w, "/a/b/c")

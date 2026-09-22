@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -38,6 +39,10 @@ const defaultMaxMultipartMemory int64 = 32 << 20
 // headers, and the JSON members before the one that failed.
 // errors.AsType[*HTTPError] finds one in every error, and [StatusOf] reports
 // its status, so a handler can return it as it stands.
+//
+// A path is the exception: [Base.BindPath] and [Base.ParamAs] report an
+// [ErrNotFound] for a value that does not decode, because such a path names no
+// resource.
 func (b *Base) Bind[T any]() (T, error) {
 	var v T
 
@@ -172,7 +177,9 @@ func (b *Base) BindQuery[T any]() (T, error) {
 }
 
 // BindPath fills a T from the route parameters and validates it, through the
-// `param` tag. It reports errors as [Base.Bind] does.
+// `param` tag. A field that does not decode reports an [ErrNotFound] with no
+// Details, because such a path names no resource; [FieldErrorsOf] still finds
+// the fields in its cause. Validation reports errors as [Base.Bind] does.
 func (b *Base) BindPath[T any]() (T, error) {
 	var v T
 	vals := make(url.Values, len(b.paramNames))
@@ -181,7 +188,11 @@ func (b *Base) BindPath[T any]() (T, error) {
 			vals[n] = b.paramVals[i : i+1 : i+1]
 		}
 	}
-	if err := b.decodeInto(vals, &v, "param"); err != nil {
+	fields, err := decodeFields(vals, &v, "param")
+	if fields != nil {
+		return v, ErrNotFound.WithError(err)
+	}
+	if err != nil {
 		return v, err
 	}
 	return v, validate(&v)
@@ -260,18 +271,28 @@ func validate[T any](v *T) error {
 }
 
 func (b *Base) decodeInto(vals url.Values, dst any, tag string) error {
+	fields, err := decodeFields(vals, dst, tag)
+	if fields != nil {
+		return badFields(fields, err)
+	}
+	return err
+}
+
+// decodeFields decodes vals into dst. When some fields fail, it reports them
+// together with their join as the error.
+func decodeFields(vals url.Values, dst any, tag string) ([]FieldError, error) {
 	fields, err := decodeValues(vals, dst, tag)
 	if err != nil {
-		return ErrBadRequest.WithError(err)
+		return nil, ErrBadRequest.WithError(err)
 	}
 	if len(fields) == 0 {
-		return nil
+		return nil, nil
 	}
 	errs := make([]error, len(fields))
 	for i, f := range fields {
 		errs[i] = f
 	}
-	return badFields(fields, errors.Join(errs...))
+	return fields, errors.Join(errs...)
 }
 
 // badFields is the 400 of a value that did not decode, one [FieldError] per
@@ -407,20 +428,27 @@ func removeSpilledParts(req *http.Request) {
 	})
 }
 
-// ParamAs reads route parameter name as a T. T may be any string, bool,
-// integer, float, time.Duration or time.Time, or a type that implements
-// encoding.TextUnmarshaler. A bool takes what strconv.ParseBool takes, and
-// also on and off.
+// ParamAs reads route parameter name, of the path or the host, as a T. T may
+// be any string, bool, integer, float, time.Duration or time.Time, or a type
+// that implements encoding.TextUnmarshaler. A bool takes what
+// strconv.ParseBool takes, and also on and off.
 //
-// A missing parameter and one that does not parse each report an
-// [ErrBadRequest].
+// A value that does not parse names no resource and reports an [ErrNotFound]
+// that wraps the parse error; a class in the pattern, such as "{id:int}",
+// usually turns such a value away before the handler runs. A name the route
+// does not have is a bug in the caller and reports an
+// [ErrInternalServerError].
 func (b *Base) ParamAs[T any](name string) (T, error) {
 	raw, ok := b.ParamOK(name)
 	if !ok {
 		var v T
-		return v, ErrBadRequest.WithMessage("the route has no parameter %q", name)
+		return v, ErrInternalServerError.WithError(fmt.Errorf("router: the route %q has no parameter %q", b.pattern, name))
 	}
-	return parseAs[T](raw, "route parameter", name)
+	v, err := ParseValue[T](raw)
+	if err != nil {
+		return v, ErrNotFound.WithError(fmt.Errorf("route parameter %s: %w", name, err))
+	}
+	return v, nil
 }
 
 // ParamAsDefault reads route parameter name as a T, or reports def when the

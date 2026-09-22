@@ -89,6 +89,7 @@ type Router[C Context] struct {
 	errHandler   ErrorHandlerFunc[C]
 	preMws       []Middleware[C]
 	info         map[routeKey]routeInfo
+	classes      map[string]*matcher
 }
 
 // engine is the route table as the request path sees it: everything routing
@@ -180,9 +181,19 @@ func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 // "{name...}" takes the rest of the path. A parameter may sit inside a
 // segment, as in "/reports/rep-{date}.csv".
 //
-// Handle panics on an empty method, a nil handler, a nil middleware, a pattern
-// that conflicts with one already registered, or a call that arrives after the
-// router started serving.
+// A constraint after a colon narrows what a parameter admits, and a value
+// outside it does not match the route. A word names a class: "{id:int}" takes
+// ASCII digits, "{t:slug}" lowercase letters, digits and inner hyphens, and
+// "{id:uuid}" the canonical 8-4-4-4-12 form of a UUID in either case, and no
+// other spelling of one. Any other word must name a class that
+// [Router.ParamClass] declares; a literal word is spelled "(?:word)". Anything
+// else is a regular expression that must match the whole value, as in
+// "{id:[0-9]{6}}".
+//
+// Handle panics on an empty method, a nil handler, a nil middleware, a
+// constraint that names no class or does not compile, a pattern that conflicts
+// with one already registered, or a call that arrives after the router started
+// serving.
 func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.handle(method, pattern, h, mws)
 }
@@ -227,14 +238,14 @@ func (r *Router[C]) install(reg registration[C]) {
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
 		eng.anyHostRoutes = true
-		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache); err != nil {
+		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, nil, full)
 		return
 	}
 	for _, e := range entries {
-		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache); err != nil {
+		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
 			panic(err.Error())
 		}
 		r.record(reg, e, full)
@@ -428,7 +439,7 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 		panic("router: cannot create a scope after the router started serving")
 	}
 	r.mustBeOpen("open a scope")
-	if _, _, err := parsePattern(prefix); err != nil {
+	if _, _, err := parsePattern(prefix, r.class); err != nil {
 		panic(err.Error())
 	}
 	c := &Router[C]{root: r.root, owner: r, prefix: prefix, mws: mws, inHost: r.inHost || len(r.hosts) > 0}
@@ -488,6 +499,62 @@ func (r *Router[C]) Pre(mws ...Middleware[C]) {
 	r.settingChanged()
 }
 
+// ParamClass declares a class of parameter values that a pattern names after
+// a colon, as in "/r/{code:shortid}". A value outside the class does not match
+// the route, so matching moves on, and a request that matches nothing else
+// ends in a 404. The class applies to every pattern this router registers,
+// including host patterns and scope prefixes, from the call on.
+//
+// match receives the decoded value, never an empty one. It runs on every
+// request that reaches the segment, so it must be fast and safe for concurrent
+// use. The MatchString of a regular expression anchored with ^ and $ works.
+// A router that [Router.Mount] grafts keeps the classes it declared.
+//
+// ParamClass panics on a scope; on a name that does not start with an ASCII
+// letter or holds anything but letters, digits and '_'; on a built-in or
+// already declared name; on a nil match; on a mounted router; or after the
+// router started serving.
+func (r *Router[C]) ParamClass(name string, match func(value string) bool) {
+	if r.root != r {
+		panic("router: ParamClass belongs to the root router, because a class applies to all of its patterns")
+	}
+	r.mustNotBeServing("the parameter classes")
+	if !validClassName(name) {
+		panic(fmt.Sprintf("router: ParamClass needs a name of letters, digits and '_' that starts with a letter, not %q", name))
+	}
+	if builtinClass(name) != nil {
+		panic("router: ParamClass cannot redeclare the built-in class " + name)
+	}
+	if _, ok := r.classes[name]; ok {
+		panic("router: ParamClass got the class " + name + " twice")
+	}
+	if match == nil {
+		panic("router: ParamClass needs a match function for " + name)
+	}
+	if r.classes == nil {
+		r.classes = make(map[string]*matcher)
+	}
+	// The key tells this declaration from a same-named one of another router,
+	// and orders host patterns the same way on every run.
+	r.classes[name] = &matcher{
+		key:   fmt.Sprintf("class %s#%016x", name, classSeq.Add(1)),
+		match: func(s string) bool { return s != "" && match(s) },
+	}
+}
+
+var classSeq atomic.Uint64
+
+// class finds a class from the scope that registers outward, so a mounted
+// router finds its own classes before those of the router it is mounted into.
+func (r *Router[C]) class(name string) *matcher {
+	for s := r; s != nil; s = s.owner {
+		if m, ok := s.classes[name]; ok {
+			return m
+		}
+	}
+	return builtinClass(name)
+}
+
 // Meta attaches v to the routes that the returned scope registers.
 // [Router.Routes] reports it, which lets a route table drive a permission
 // list or an OpenAPI document.
@@ -516,8 +583,9 @@ func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 
 // Hosts opens a scope that answers for any of patterns. A pattern is an exact
 // host, a leading wildcard such as "*.example.com", or a host parameter such
-// as "{tenant}.example.com", which [Base.Param] then reads. A route outside
-// any host scope answers for every host.
+// as "{tenant}.example.com", which [Base.Param] then reads. A host parameter
+// takes the constraints of [Router.Handle], as in "{tenant:slug}.example.com".
+// A route outside any host scope answers for every host.
 //
 // Hosts panics on an empty patterns or on a pattern it cannot parse.
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
@@ -526,7 +594,7 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 	}
 	specs := make([]hostSpec, 0, len(patterns))
 	for _, p := range patterns {
-		spec, err := parseHostPattern(p)
+		spec, err := parseHostPattern(p, r.class)
 		if err != nil {
 			panic(err.Error())
 		}
@@ -590,10 +658,11 @@ func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
 // sub is closed to further registration afterwards, and it must be a top-level
 // router that carries no setting belonging to the router that serves, such as
 // MaxBodyBytes, a logger or a cookie codec. An error handler of sub stays with
-// its routes.
+// its routes, and so do the classes that sub declared with [Router.ParamClass].
 //
 // Mount panics if sub is nil, is a scope of another router, is mounted inside
-// itself, or carries such a setting.
+// itself, or carries such a setting, or if sub and this router register one
+// host pattern whose classes they declare apart.
 func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")
@@ -977,7 +1046,7 @@ func (r *Router[C]) compile(eng *engine[C]) {
 			default:
 				sets := own.take(rt)
 				if normalizePattern(rt.prefix) != "/" || sets {
-					pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m, depth: depth, fb: own})
+					pending = append(pending, pendingScope[C]{prefix: p, host: e, mws: m, depth: depth, fb: own, classes: rt.class})
 				}
 			}
 
@@ -1008,7 +1077,7 @@ func (r *Router[C]) compile(eng *engine[C]) {
 		})
 	}
 	for _, ps := range pending {
-		segs, names, _ := parsePattern(ps.prefix) //nolint:errcheck // newChild rejected a bad prefix already.
+		segs, names, _ := parsePattern(ps.prefix, ps.classes) //nolint:errcheck // newChild rejected a bad prefix already.
 		s := &scopeFallback[C]{prefix: ps.prefix, names: names, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
@@ -1062,11 +1131,12 @@ func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern strin
 func (r *Router[C]) preTerminal(c C) error { return r.eng.route(c, c.base().req, false) }
 
 type pendingScope[C Context] struct {
-	prefix string
-	host   *hostEntry[C]
-	mws    []Middleware[C]
-	fb     scopeFallbacks[C]
-	depth  int
+	prefix  string
+	host    *hostEntry[C]
+	mws     []Middleware[C]
+	fb      scopeFallbacks[C]
+	classes classLookup
+	depth   int
 }
 
 type scopeFallbacks[C Context] struct {
@@ -1215,6 +1285,10 @@ func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
 	hs := eng.hostSet
 	for _, e := range hs.all {
 		if e.pattern == spec.pattern {
+			if !sameHostShape(&e.hostSpec, &spec) {
+				return nil, fmt.Errorf("router: host pattern %q resolves a parameter class differently in a mounted router; "+
+					"declare the class once, on the parent", spec.pattern)
+			}
 			return e, nil
 		}
 		if sameHostShape(&e.hostSpec, &spec) {
