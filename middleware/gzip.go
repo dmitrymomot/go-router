@@ -32,6 +32,9 @@ type GzipConfig struct {
 // that flushes keeps its data moving to the client.
 //
 // A HEAD gets the headers its GET would carry and no body.
+//
+// Put it outside [Idempotency], so a replay is compressed for the client that
+// asks again; see Order in the package doc.
 func Gzip[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return GzipWithConfig[C](GzipConfig{})(next)
 }

@@ -36,6 +36,8 @@ type MinDurationConfig struct {
 // A hijacked connection and a 1xx informational answer are not held, because
 // they do not run the callbacks of Before.
 //
+// See Order in the package doc for where it goes.
+//
 // MinDuration panics on a d of zero or less.
 func MinDuration[C router.Context](d time.Duration) router.Middleware[C] {
 	return MinDurationWithConfig[C](MinDurationConfig{Duration: d})

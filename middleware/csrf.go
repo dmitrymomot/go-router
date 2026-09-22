@@ -72,6 +72,8 @@ type CSRFConfig struct {
 // trusted. A request with no such header needs the token.
 //
 // [CSRFTokenFrom] reads the token for a template.
+//
+// See Order in the package doc for where it goes.
 func CSRF[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return CSRFWithConfig[C](CSRFConfig{})(next)
 }

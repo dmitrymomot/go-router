@@ -20,8 +20,9 @@ type RecoverConfig struct {
 
 // Recover turns a panic in a later handler into an
 // [router.ErrInternalServerError] that carries a [router.PanicValue], so the
-// error handler answers and the server stays up. Put it inside [Logger] and
-// outside everything else.
+// error handler answers and the server stays up. Put it right inside
+// [Logger], outside every middleware that can panic; see Order in the package
+// doc.
 //
 // It passes [http.ErrAbortHandler] on, which is how net/http is told to drop
 // the connection without a log line.

@@ -25,6 +25,8 @@ type ParseFormConfig struct {
 // through MultipartReader.
 //
 // As in net/http, a URL-encoded body is read only for POST, PUT and PATCH.
+//
+// See Order in the package doc for where it goes.
 func ParseForm[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return ParseFormWithConfig[C](ParseFormConfig{})(next)
 }

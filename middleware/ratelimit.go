@@ -66,6 +66,8 @@ type MemoryStoreConfig struct {
 // Retry-After header. The client is the address that [ClientIP] reports, so
 // put [RealIP] in front where a proxy is.
 //
+// See Order in the package doc for where it goes.
+//
 // RateLimit panics if store is nil.
 func RateLimit[C router.Context](store RateLimitStore[C]) router.Middleware[C] {
 	return RateLimitWithConfig[C](RateLimitConfig[C]{Store: store})

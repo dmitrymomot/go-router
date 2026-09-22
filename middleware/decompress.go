@@ -35,6 +35,8 @@ const emptyGzipStream = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x0
 // small body that expands to a huge one from filling the memory. A body that
 // is not gzip reports [router.ErrBadRequest], and one over the limit reports
 // [router.ErrPayloadTooLarge].
+//
+// See Order in the package doc for where it goes.
 func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return DecompressWithConfig[C](DecompressConfig{})(next)
 }

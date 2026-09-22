@@ -37,6 +37,8 @@ type SecureConfig struct {
 // Secure adds the security headers that suit any site: nosniff, SAMEORIGIN and
 // a strict referrer policy. It sends no HSTS and no content security policy,
 // because both need a decision that belongs to the site.
+//
+// See Order in the package doc for where it goes.
 func Secure[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return SecureWithConfig[C](SecureConfig{})(next)
 }
