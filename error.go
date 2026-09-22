@@ -280,7 +280,7 @@ func ErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
 
 // ErrorBody is the object [JSONErrorHandler] writes under "error". Details is
 // the Details of the [HTTPError], such as the []FieldError of a failed
-// [Base.Bind], and it is left out when empty.
+// [Base.Bind], and it is left out when nil.
 type ErrorBody struct {
 	Status  int    `json:"status"`
 	Message string `json:"message"`
