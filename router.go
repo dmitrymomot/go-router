@@ -18,7 +18,10 @@ type Route struct {
 	Method  string
 	Pattern string
 	Host    string
-	Meta    any
+
+	// Meta holds the values of every [Router.Meta] scope around the route,
+	// outermost first. Routes hands out a copy.
+	Meta []any
 
 	// Params counts the host and path parameters together. A route over
 	// InlineParamBudget costs one allocation per request.
@@ -41,8 +44,14 @@ type registration[C Context] struct {
 	pattern string
 	handler HandlerFunc[C]
 	mws     []Middleware[C]
-	meta    any
+	// claim is set on the routes of a RedirectHost, which own their host in
+	// every table they are installed into, a Mount replay included.
+	claim *hostClaim
 }
+
+// hostClaim is the hold one RedirectHost call has on its host. It is not zero
+// size, so two claims never share an address.
+type hostClaim struct{ _ byte }
 
 // Router matches a request to a handler. C is the context type of the
 // application, and every handler and middleware of this router takes it.
@@ -82,8 +91,7 @@ type Router[C Context] struct {
 	hasRoutes    bool
 	closed       bool
 	refreshDepth int
-	meta         any
-	tagged       bool
+	meta         []any
 	hosts        []hostSpec
 	inHost       bool
 	errHandler   ErrorHandlerFunc[C]
@@ -199,6 +207,11 @@ func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Midd
 }
 
 func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middleware[C]) {
+	r.register(registration[C]{method: method, pattern: pattern, handler: h, mws: mws})
+}
+
+func (r *Router[C]) register(reg registration[C]) {
+	method, pattern := reg.method, reg.pattern
 	// Ordered against the freeze: without it the check below is a guess, and a
 	// route could go into a trie a request had already started reading.
 	r.root.regMu.Lock()
@@ -210,20 +223,14 @@ func (r *Router[C]) handle(method, pattern string, h HandlerFunc[C], mws []Middl
 	if method == "" {
 		panic("router: Handle needs a method")
 	}
-	if h == nil {
+	if reg.handler == nil {
 		panic("router: Handle needs a handler for " + method + " " + pattern)
 	}
-	validateMiddleware(mws)
+	validateMiddleware(reg.mws)
 	for s := r; s != nil; s = s.owner {
 		s.hasRoutes = true
 	}
-	reg := registration[C]{
-		method:  method,
-		pattern: pattern,
-		handler: h,
-		mws:     slices.Clone(mws),
-		meta:    r.meta,
-	}
+	reg.mws = slices.Clone(reg.mws)
 	r.regs = append(r.regs, reg)
 	r.install(reg)
 }
@@ -234,6 +241,12 @@ func (r *Router[C]) install(reg registration[C]) {
 	eng := r.top().eng
 	full := joinPattern(r.scopePrefix(), reg.pattern)
 	handler := chain(reg.handler, concatMiddleware(r.scopeMiddleware(), reg.mws))
+	// Read here rather than at registration, so a route that Mount replays
+	// takes the Meta scopes above the mount too.
+	meta := r.scopeMeta()
+	if len(meta) > 0 {
+		handler = withRouteMeta(handler, &routeRecord{pattern: normalizePattern(full), meta: meta})
+	}
 
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
@@ -241,19 +254,34 @@ func (r *Router[C]) install(reg registration[C]) {
 		if err := eng.tree.insert(reg.method, full, nil, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
 			panic(err.Error())
 		}
-		r.record(reg, nil, full)
+		r.record(reg, nil, full, meta)
 		return
 	}
+	if reg.claim != nil && normalizePattern(r.scopePrefix()) != "/" {
+		panic(errRedirectHostPrefix)
+	}
 	for _, e := range entries {
+		claim := reg.claim != nil && e.redirect != reg.claim
+		switch {
+		case reg.claim == nil && e.redirect != nil:
+			panic("router: the host " + e.pattern + " belongs to RedirectHost; register its routes on the target host")
+		case claim && e.redirect != nil:
+			panic("router: the host " + e.pattern + " already has a RedirectHost")
+		case claim && !e.tree.empty():
+			panic("router: the host " + e.pattern + " already holds routes, so RedirectHost cannot own it")
+		}
 		if err := e.tree.insert(reg.method, full, e.names, handler, eng.autoOptions, eng.allowCache, r.class); err != nil {
 			panic(err.Error())
 		}
-		r.record(reg, e, full)
+		if claim {
+			e.redirect = reg.claim
+		}
+		r.record(reg, e, full, meta)
 	}
 }
 
-func (r *Router[C]) record(reg registration[C], e *hostEntry[C], full string) {
-	r.top().describe(reg, e, normalizePattern(full))
+func (r *Router[C]) record(reg registration[C], e *hostEntry[C], full string, meta []any) {
+	r.top().describe(reg, e, normalizePattern(full), meta)
 }
 
 // scopePrefix joins the prefixes of every scope between the root and this one.
@@ -263,6 +291,16 @@ func (r *Router[C]) scopePrefix() string {
 		prefix = joinPattern(prefix, s.prefix)
 	}
 	return prefix
+}
+
+// scopeMeta joins the values of every Meta scope between the root and this
+// one, outermost first.
+func (r *Router[C]) scopeMeta() []any {
+	var meta []any
+	for _, s := range slices.Backward(r.lineage()) {
+		meta = append(meta, s.meta...)
+	}
+	return meta
 }
 
 func (r *Router[C]) scopeMiddleware() []Middleware[C] {
@@ -382,6 +420,13 @@ func (r *Router[C]) Match(methods []string, pattern string, h HandlerFunc[C], mw
 // registers after the call, outermost first, and it does not reach a route
 // registered before it.
 //
+// The middleware of the root, of a host scope and of a scope with a prefix also
+// wraps the 404, the 405 and the automatic OPTIONS answer for the paths under
+// it, with the host and prefix parameters bound, so it can answer a path that
+// has no route. A [Router.Group] or [Router.With] scope adds no such answer of
+// its own: its middleware reaches a 404 only through a scope with a prefix
+// opened inside it.
+//
 // Use panics on a nil middleware, on a scope that already holds routes, or
 // after the router started serving.
 func (r *Router[C]) Use(mws ...Middleware[C]) {
@@ -451,7 +496,8 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C]) *Router[C] {
 }
 
 // Group opens a scope with no prefix, for middleware that covers some routes
-// and not others. fn registers into the scope, which Group also returns.
+// and not others. fn registers into the scope, which Group also returns. Its
+// middleware does not wrap the 404 and 405 answers; see [Router.Use].
 func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
@@ -464,7 +510,8 @@ func (r *Router[C]) Group(fn func(g *Router[C])) *Router[C] {
 }
 
 // Route opens a scope under prefix. The patterns that fn registers are
-// relative to it, and the scope carries the middleware of its parent.
+// relative to it, and the scope carries the middleware of its parent. Its
+// middleware also wraps the 404 and 405 answers under prefix; see [Router.Use].
 func (r *Router[C]) Route(prefix string, fn func(g *Router[C])) *Router[C] {
 	var c *Router[C]
 	r.inOneScope(func() {
@@ -555,24 +602,25 @@ func (r *Router[C]) class(name string) *matcher {
 	return builtinClass(name)
 }
 
-// Meta attaches v to the routes that the returned scope registers.
-// [Router.Routes] reports it, which lets a route table drive a permission
-// list or an OpenAPI document.
-func (r *Router[C]) Meta(v any) *Router[C] {
-	c := r.tag()
-	c.meta = v
-	return c
-}
-
-func (r *Router[C]) tag() *Router[C] {
-	if r.root.started.Load() {
-		panic("router: cannot name or tag a route after the router started serving")
+// Meta opens a scope whose routes carry v on top of the values of the scopes
+// around it. A Route, Group, With or Host opened inside it, and a router
+// mounted into it, inherit the values. [Router.Routes] reports them, which lets
+// a route table drive a permission list or an OpenAPI document, and
+// [Base.RouteMeta] and [MetaAs] read them while the route answers. Values are
+// shared by every request, so keep them immutable. A router mounted with its
+// own context type (MountRouter, HostRouter) does not see them.
+//
+// Meta panics on no value, on a nil value, or after the router started serving.
+func (r *Router[C]) Meta(v ...any) *Router[C] {
+	r.mustNotBeServing("the route metadata")
+	if len(v) == 0 {
+		panic("router: Meta needs at least one value")
 	}
-	if r.tagged {
-		return r
+	if slices.Contains(v, nil) {
+		panic("router: Meta got a nil value; register the route outside the Meta scope instead")
 	}
 	c := r.newChild("", nil)
-	c.tagged = true
+	c.meta = slices.Clone(v)
 	return c
 }
 
@@ -586,6 +634,11 @@ func (r *Router[C]) Host(pattern string, fn func(h *Router[C])) *Router[C] {
 // as "{tenant}.example.com", which [Base.Param] then reads. A host parameter
 // takes the constraints of [Router.Handle], as in "{tenant:slug}.example.com".
 // A route outside any host scope answers for every host.
+//
+// The middleware of the scope also wraps the 404 and 405 answers for its hosts.
+// When several Host or Hosts calls open one pattern, the middleware of the
+// first scope wraps those answers, and each route keeps the middleware of the
+// scope that registered it.
 //
 // Hosts panics on an empty patterns or on a pattern it cannot parse.
 func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
@@ -631,7 +684,8 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 
 // HostRouter gives pattern to a router with a context type of its own. sub
 // answers every request for that host, and it keeps its own middleware, error
-// handler and context.
+// handler and context. The [Router.Meta] values of this router do not reach
+// its routes.
 //
 // HostRouter panics if sub is nil.
 func (r *Router[C]) HostRouter[D Context](pattern string, sub *Router[D]) {
@@ -661,8 +715,9 @@ func (r *Router[C]) HostHandler(pattern string, h http.Handler) {
 // its routes, and so do the classes that sub declared with [Router.ParamClass].
 //
 // Mount panics if sub is nil, is a scope of another router, is mounted inside
-// itself, or carries such a setting, or if sub and this router register one
-// host pattern whose classes they declare apart.
+// itself, or carries such a setting, if sub and this router register one
+// host pattern whose classes they declare apart, or if a [Router.RedirectHost]
+// of sub lands under a prefix or on a host that this router already uses.
 func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	if sub == nil {
 		panic("router: Mount needs a router")
@@ -744,7 +799,8 @@ func (r *Router[C]) installSubtree() {
 
 // MountRouter grafts a router with a context type of its own under prefix. Use
 // it where [Router.Mount] cannot go: sub keeps its own context, middleware and
-// error handler, and it sees the path with prefix removed.
+// error handler, and it sees the path with prefix removed. The [Router.Meta]
+// values of this router do not reach its routes.
 //
 // MountRouter panics if sub is nil.
 func (r *Router[C]) MountRouter[D Context](prefix string, sub *Router[D]) {
@@ -954,6 +1010,8 @@ func (r *Router[C]) Observe(fn func(c Context, status int, size int64, d time.Du
 }
 
 // Routes reports the table as it stands. Registration stays open afterwards.
+// It lists routes alone: the 404, 405 and OPTIONS answers that a scope's
+// middleware wraps are not in it.
 func (r *Router[C]) Routes() []Route { return r.top().collectRoutes() }
 
 // freeze closes the graph for registration on the first request.
@@ -1078,7 +1136,10 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	}
 	for _, ps := range pending {
 		segs, names, _ := parsePattern(ps.prefix, ps.classes) //nolint:errcheck // newChild rejected a bad prefix already.
-		s := &scopeFallback[C]{prefix: ps.prefix, names: names, pattern: segs, hostIdx: -1, depth: ps.depth, errorIdx: -1}
+		s := &scopeFallback[C]{
+			prefix: ps.prefix, rec: &routeRecord{pattern: ps.prefix}, names: names, pattern: segs,
+			hostIdx: -1, depth: ps.depth, errorIdx: -1,
+		}
 		if ps.host != nil {
 			s.hostIdx = ps.host.idx
 		}
@@ -1113,9 +1174,9 @@ func (r *Router[C]) compile(eng *engine[C]) {
 	eng.rootErrorHandler = rootErrHandler
 }
 
-// describe records the metadata a route was tagged with, for Routes.
-func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string) {
-	if reg.meta == nil {
+// describe records the metadata a route carries, for Routes.
+func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern string, meta []any) {
+	if len(meta) == 0 {
 		return
 	}
 	host := ""
@@ -1125,7 +1186,7 @@ func (r *Router[C]) describe(reg registration[C], e *hostEntry[C], pattern strin
 	if r.info == nil {
 		r.info = make(map[routeKey]routeInfo)
 	}
-	r.info[routeKey{host: host, method: reg.method, pattern: pattern}] = routeInfo{meta: reg.meta}
+	r.info[routeKey{host: host, method: reg.method, pattern: pattern}] = routeInfo{meta: meta}
 }
 
 func (r *Router[C]) preTerminal(c C) error { return r.eng.route(c, c.base().req, false) }
@@ -1153,6 +1214,7 @@ func (f *scopeFallbacks[C]) take(rt *Router[C]) bool {
 
 type scopeFallback[C Context] struct {
 	prefix          string
+	rec             *routeRecord
 	names           []string
 	pattern         []segment
 	depth           int
@@ -1265,7 +1327,7 @@ func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) 
 		names = append(slices.Clip(b.paramNames), s.names...)
 	}
 	b.needsCleanup = true
-	b.setRoute(s.prefix, names, vals)
+	b.setRoute(s.rec, names, vals)
 }
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
@@ -1314,7 +1376,7 @@ func (eng *engine[C]) hostEntry(spec hostSpec) (*hostEntry[C], error) {
 
 type routeKey struct{ host, method, pattern string }
 
-type routeInfo struct{ meta any }
+type routeInfo struct{ meta []any }
 
 func (r *Router[C]) collectRoutes() []Route {
 	var out []Route
@@ -1322,7 +1384,7 @@ func (r *Router[C]) collectRoutes() []Route {
 		return func(pattern, method string, params int) {
 			rt := Route{Host: host, Method: method, Pattern: pattern, Params: params}
 			if info, ok := r.info[routeKey{host: host, method: method, pattern: pattern}]; ok {
-				rt.Meta = info.meta
+				rt.Meta = slices.Clone(info.meta)
 			}
 			out = append(out, rt)
 		}
@@ -1490,7 +1552,7 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		}
 		if host != nil {
 			b.hostIdx, b.hostPattern = host.idx, host.pattern
-			b.setRoute("", host.names, hostVals)
+			b.setRoute(nil, host.names, hostVals)
 		}
 	}
 
@@ -1530,8 +1592,8 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 				vals[len(vals)-1] = decoded
 			}
 		}
-		b.setRoute(n.pattern, n.names, vals)
-		req.Pattern = n.pattern
+		b.setRoute(n.rec, n.names, vals)
+		req.Pattern = n.rec.pattern
 		h := n.handler(req.Method)
 		if handleErrors {
 			return e.owner.dispatch(c, h)
@@ -1555,8 +1617,8 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 			e.selectErrorTarget(b, host, trimmed, escaped)
 		}
 		b.needsCleanup = true
-		b.setRoute(match.pattern, match.names, matched)
-		req.Pattern = match.pattern
+		b.setRoute(match.rec, match.names, matched)
+		req.Pattern = match.rec.pattern
 		b.res.Header().Set(HeaderAllow, e.allowHeader(&hostSt, &anySt))
 
 		_, _, notAllowed, options := e.fallbackChains(host, trimmed, escaped)

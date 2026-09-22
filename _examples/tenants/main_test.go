@@ -89,15 +89,23 @@ func sessionOf(t *testing.T, res *routertest.Response) *http.Cookie {
 	return nil
 }
 
-func TestTheApexAnswersOnItselfAndOnWWW(t *testing.T) {
+func TestTheApexAnswersOnItself(t *testing.T) {
 	h := newTestRouter(t)
 
-	for _, at := range []string{apex, "www." + apex} {
-		res := routertest.Get(h, "http://"+at+"/", routertest.Host(at))
-		res.AssertStatus(t, http.StatusOK)
-		if !strings.Contains(res.String(), "Create a workspace") {
-			t.Errorf("%s: the landing page has no signup link", at)
-		}
+	res := routertest.Get(h, "http://"+apex+"/", routertest.Host(apex))
+	res.AssertStatus(t, http.StatusOK)
+	if !strings.Contains(res.String(), "Create a workspace") {
+		t.Errorf("the landing page has no signup link")
+	}
+}
+
+func TestWWWSendsEveryRequestToTheApex(t *testing.T) {
+	h := newTestRouter(t)
+
+	for _, target := range []string{"/", "/signup", "/signup?plan=pro&ref=a%20b", "/nothing/here"} {
+		res := routertest.Get(h, "http://www."+apex+target, routertest.Host("www."+apex))
+		res.AssertStatus(t, http.StatusMovedPermanently)
+		res.AssertHeader(t, router.HeaderLocation, "http://"+apex+target)
 	}
 }
 

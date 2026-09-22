@@ -213,3 +213,14 @@ func BenchmarkSetContext(b *testing.B) {
 		base.SetContext(ctx)
 	}
 }
+
+func BenchmarkExpand(b *testing.B) {
+	const pattern = "/agents/{agent}/tickets/{id:int}"
+	if _, err := Expand(pattern, "agent", "ann", "id", "42"); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = Expand(pattern, "agent", "ann", "id", "42")
+	}
+}

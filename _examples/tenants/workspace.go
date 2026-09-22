@@ -13,7 +13,7 @@ func workspaceRoutes(h *router.Router[Ctx]) {
 	h.Use(loadWorkspace)
 
 	h.GET("/", dashboard)
-	h.GET("/enter", enter)
+	h.GET(enterPath, enter)
 	h.GET("/login", loginForm)
 	h.POST("/login", login)
 	h.POST("/signout", signout)

@@ -139,6 +139,32 @@ func TestSetRouteForTestPublishesRouteState(t *testing.T) {
 	}
 }
 
+func TestRouteMetaIsNilWithoutARouter(t *testing.T) {
+	for name, b := range map[string]*Base{"NewBase": newBase("/"), "SetRouteForTest": newBase("/users/7")} {
+		if name == "SetRouteForTest" {
+			SetRouteForTest(b, "/users/{id}", []string{"id"}, []string{"7"})
+		}
+		if got := b.RouteMeta(); got != nil {
+			t.Errorf("%s: RouteMeta() = %v, want nil", name, got)
+		}
+		if v, ok := MetaAs[string](b); ok {
+			t.Errorf("%s: MetaAs[string] = %q, true; want false", name, v)
+		}
+	}
+}
+
+func TestSetRouteForTestWithNoPatternLeavesNoRoute(t *testing.T) {
+	b := newBase("/users/7")
+	SetRouteForTest(b, "/users/{id}", nil, nil)
+	SetRouteForTest(b, "", []string{"id"}, []string{"7"})
+	if got := b.RoutePattern(); got != "" {
+		t.Errorf("RoutePattern() = %q, want none", got)
+	}
+	if got := b.Param("id"); got != "7" {
+		t.Errorf("Param(id) = %q, want %q", got, "7")
+	}
+}
+
 func TestContextConstructionRejectsNilInputs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -382,7 +408,7 @@ func TestSetContextCarriesCancellation(t *testing.T) {
 
 func TestParamNamesReturnsACopy(t *testing.T) {
 	b := newBase("/")
-	b.setRoute("/users/{id}", []string{"id"}, []string{"7"})
+	b.setRoute(&routeRecord{pattern: "/users/{id}"}, []string{"id"}, []string{"7"})
 	names := b.ParamNames()
 	names[0] = "corrupt"
 	if got := b.Param("id"); got != "7" {

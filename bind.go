@@ -442,7 +442,7 @@ func (b *Base) ParamAs[T any](name string) (T, error) {
 	raw, ok := b.ParamOK(name)
 	if !ok {
 		var v T
-		return v, ErrInternalServerError.WithError(fmt.Errorf("router: the route %q has no parameter %q", b.pattern, name))
+		return v, ErrInternalServerError.WithError(fmt.Errorf("router: the route %q has no parameter %q", b.RoutePattern(), name))
 	}
 	v, err := ParseValue[T](raw)
 	if err != nil {

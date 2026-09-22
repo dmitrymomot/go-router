@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -444,7 +445,7 @@ func TestRoutesIntrospection(t *testing.T) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if !reflect.DeepEqual(got[i], want[i]) {
 			t.Errorf("route %d = %v, want %v", i, got[i], want[i])
 		}
 	}
@@ -1080,14 +1081,14 @@ func TestRoutesReportsTheMetadata(t *testing.T) {
 	got := r.Routes()
 	want := []Route{
 		{Method: http.MethodGet, Pattern: "/health"},
-		{Method: http.MethodPost, Pattern: "/users", Meta: op{Summary: "create a user"}},
-		{Method: http.MethodGet, Pattern: "/users/{id}", Meta: op{Summary: "read a user"}, Params: 1},
+		{Method: http.MethodPost, Pattern: "/users", Meta: []any{op{Summary: "create a user"}}},
+		{Method: http.MethodGet, Pattern: "/users/{id}", Meta: []any{op{Summary: "read a user"}}, Params: 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d routes, want %d: %v", len(got), len(want), got)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if !reflect.DeepEqual(got[i], want[i]) {
 			t.Errorf("route %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
@@ -1100,7 +1101,7 @@ func TestMetaScopeCarriesEveryRouteOnIt(t *testing.T) {
 	tagged.POST("/b", echoRoute)
 
 	for _, rt := range g.Routes() {
-		if rt.Meta != "shared" {
+		if !reflect.DeepEqual(rt.Meta, []any{"shared"}) {
 			t.Errorf("route %s %s carries %v, want %q", rt.Method, rt.Pattern, rt.Meta, "shared")
 		}
 	}
@@ -1174,7 +1175,7 @@ func TestAnyRegistersOneRoute(t *testing.T) {
 
 	got := r.Routes()
 	want := []Route{{Method: "*", Pattern: "/rpc"}}
-	if len(got) != len(want) || got[0] != want[0] {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Routes() = %v, want %v", got, want)
 	}
 }
@@ -3133,5 +3134,371 @@ func TestHostOrderIsStableAcrossClassDeclarations(t *testing.T) {
 		if got := doHost(build(), http.MethodGet, "x.example.com", "/").Body.String(); got != "parent" {
 			t.Fatalf("build %d reached %q, want the host whose class was declared first", i, got)
 		}
+	}
+}
+
+// A middleware of a scope with a prefix runs for a path under it that has no
+// route, so it can answer that path itself.
+func TestScopeMiddlewareAnswersAPathWithNoRoute(t *testing.T) {
+	r := newTestRouter()
+	r.Route("/auth", func(g *Router[*tctx]) {
+		g.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+			return func(c *tctx) error {
+				if c.Path() == "/auth/restore-link" {
+					return c.Redirect(http.StatusSeeOther, "/auth/login")
+				}
+				return next(c)
+			}
+		})
+		g.GET("/login", echoRoute)
+	})
+
+	rec := do(r, http.MethodGet, "/auth/restore-link")
+	if rec.Code != http.StatusSeeOther || rec.Header().Get(HeaderLocation) != "/auth/login" {
+		t.Errorf("GET /auth/restore-link = %d to %q, want 303 to /auth/login", rec.Code, rec.Header().Get(HeaderLocation))
+	}
+	if rec := do(r, http.MethodGet, "/auth/typo"); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /auth/typo = %d, want 404", rec.Code)
+	}
+}
+
+func TestGroupMiddlewareSkipsTheFallback(t *testing.T) {
+	r := newTestRouter()
+	r.Group(func(g *Router[*tctx]) {
+		g.Use(setHeader("X-Group", "group"))
+		g.GET("/a", echoRoute)
+		g.Route("/api", func(api *Router[*tctx]) {
+			api.GET("/users", echoRoute)
+		})
+	})
+	r.With(setHeader("X-With", "with")).GET("/b", echoRoute)
+
+	tests := []struct {
+		name, method, path string
+		code               int
+		group, with        string
+	}{
+		{"a route of the group", http.MethodGet, "/a", http.StatusOK, "group", ""},
+		{"a 404 outside any prefix", http.MethodGet, "/typo", http.StatusNotFound, "", ""},
+		{"a 405 on a route of the group", http.MethodPost, "/a", http.StatusMethodNotAllowed, "", ""},
+		{"a 405 on a route of With", http.MethodPost, "/b", http.StatusMethodNotAllowed, "", ""},
+		{"a 404 under a Route inside the group", http.MethodGet, "/api/typo", http.StatusNotFound, "group", ""},
+		{"a 405 under a Route inside the group", http.MethodPost, "/api/users", http.StatusMethodNotAllowed, "group", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(r, tc.method, tc.path)
+			if rec.Code != tc.code {
+				t.Errorf("status = %d, want %d", rec.Code, tc.code)
+			}
+			if got := rec.Header().Get("X-Group"); got != tc.group {
+				t.Errorf("X-Group = %q, want %q", got, tc.group)
+			}
+			if got := rec.Header().Get("X-With"); got != tc.with {
+				t.Errorf("X-With = %q, want %q", got, tc.with)
+			}
+		})
+	}
+}
+
+func TestRoutePatternUnchangedOnEveryPath(t *testing.T) {
+	var pre, pattern, reqPattern string
+	r := newTestRouter()
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			pre = c.RoutePattern()
+			return next(c)
+		}
+	})
+	record := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			pattern, reqPattern = c.RoutePattern(), c.Request().Pattern
+			return next(c)
+		}
+	}
+	r.Use(record)
+	r.GET("/users/{id}", echoRoute)
+	r.Route("/t/{tid}", func(g *Router[*tctx]) {
+		g.Use(record)
+		g.GET("/home", echoRoute)
+	})
+	r.Host("example.com", func(h *Router[*tctx]) {
+		h.Use(record)
+		h.GET("/only", echoRoute)
+	})
+
+	tests := []struct {
+		name, method, host, path string
+		code                     int
+		pattern, reqPattern      string
+	}{
+		{"a match", http.MethodGet, "", "/users/7", http.StatusOK, "/users/{id}", "/users/{id}"},
+		{"a 405", http.MethodPost, "", "/users/7", http.StatusMethodNotAllowed, "/users/{id}", "/users/{id}"},
+		{"an automatic OPTIONS", http.MethodOptions, "", "/users/7", http.StatusNoContent, "/users/{id}", "/users/{id}"},
+		{"a scope 404", http.MethodGet, "", "/t/acme/typo", http.StatusNotFound, "/t/{tid}", ""},
+		{"a root 404", http.MethodGet, "", "/typo", http.StatusNotFound, "", ""},
+		{"a host 404", http.MethodGet, "example.com", "/typo", http.StatusNotFound, "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pre, pattern, reqPattern = "unset", "unset", "unset"
+			rec := doHost(r, tc.method, tc.host, tc.path)
+			if rec.Code != tc.code {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.code)
+			}
+			if pre != "" {
+				t.Errorf("Pre saw RoutePattern %q, want none", pre)
+			}
+			if pattern != tc.pattern {
+				t.Errorf("RoutePattern = %q, want %q", pattern, tc.pattern)
+			}
+			if reqPattern != tc.reqPattern {
+				t.Errorf("Request().Pattern = %q, want %q", reqPattern, tc.reqPattern)
+			}
+		})
+	}
+}
+
+type perm string
+
+type setup struct{}
+
+func (p perm) String() string { return "perm " + string(p) }
+
+// metaOf is a handler that reports the Meta values of its route.
+func metaOf(c *tctx) error {
+	p, ok := MetaAs[perm](c)
+	return c.Stringf(http.StatusOK, "%v %q/%v", c.RouteMeta(), string(p), ok)
+}
+
+func TestMetaAccumulatesAcrossScopes(t *testing.T) {
+	r := newTestRouter()
+	r.Meta(perm("staff")).Route("/onboarding", func(g *Router[*tctx]) {
+		g.Meta(setup{}).GET("/", metaOf)
+	})
+
+	if got, want := r.Routes()[0].Meta, []any{perm("staff"), setup{}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Routes()[0].Meta = %v, want %v", got, want)
+	}
+	if got, want := do(r, http.MethodGet, "/onboarding").Body.String(), `[perm staff {}] "staff"/true`; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestMetaAsReadsTheRouteNotThePath(t *testing.T) {
+	r := newTestRouter()
+	r.Use(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			if _, ok := MetaAs[setup](c); ok {
+				c.Response().Header().Set("X-Setup", "yes")
+			}
+			return next(c)
+		}
+	})
+	r.Meta(setup{}).GET("/onboarding", echoRoute)
+	r.GET("/onboardingX", echoRoute)
+
+	if got := do(r, http.MethodGet, "/onboarding").Header().Get("X-Setup"); got != "yes" {
+		t.Errorf("/onboarding: X-Setup = %q, want yes", got)
+	}
+	if got := do(r, http.MethodGet, "/onboardingX").Header().Get("X-Setup"); got != "" {
+		t.Errorf("/onboardingX: X-Setup = %q, want none", got)
+	}
+}
+
+func TestMetaAsPicksTheNearestValue(t *testing.T) {
+	r := newTestRouter()
+	r.Meta(perm("outer")).Meta(perm("inner")).GET("/nested", metaOf)
+	r.Meta(perm("first"), setup{}, perm("last")).GET("/one-call", metaOf)
+	r.Meta(setup{}).GET("/none", metaOf)
+
+	tests := []struct{ path, want string }{
+		{"/nested", `[perm outer perm inner] "inner"/true`},
+		{"/one-call", `[perm first {} perm last] "last"/true`},
+		{"/none", `[{}] ""/false`},
+	}
+	for _, tc := range tests {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("%s: body = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestMetaAsMatchesAnInterfaceType(t *testing.T) {
+	r := newTestRouter()
+	r.Meta(setup{}, perm("admin")).GET("/", func(c *tctx) error {
+		s, ok := MetaAs[fmt.Stringer](c)
+		if !ok {
+			return c.String(http.StatusOK, "none")
+		}
+		return c.String(http.StatusOK, s.String())
+	})
+
+	if got := do(r, http.MethodGet, "/").Body.String(); got != "perm admin" {
+		t.Errorf("body = %q, want %q", got, "perm admin")
+	}
+}
+
+func TestScopeMiddlewareSeesMetaOfANestedRoute(t *testing.T) {
+	var seen []string
+	see := func(where string) Middleware[*tctx] {
+		return func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+			return func(c *tctx) error {
+				p, _ := MetaAs[perm](c)
+				seen = append(seen, where+"="+string(p))
+				return next(c)
+			}
+		}
+	}
+	r := newTestRouter()
+	r.Use(see("root"))
+	r.ErrorHandler(func(c *tctx, err error) error {
+		p, _ := MetaAs[perm](c)
+		seen = append(seen, "error="+string(p))
+		return c.NoContent(StatusOf(err))
+	})
+	r.Observe(func(c Context, _ int, _ int64, _ time.Duration, _ error) {
+		p, _ := MetaAs[perm](c)
+		seen = append(seen, "observe="+string(p))
+	})
+	r.Group(func(g *Router[*tctx]) {
+		g.Use(see("group"))
+		g.Meta(perm("admin")).GET("/x", func(*tctx) error { return ErrConflict }, see("route"))
+	})
+
+	do(r, http.MethodGet, "/x")
+	want := "root=admin group=admin route=admin error=admin observe=admin"
+	if got := strings.Join(seen, " "); got != want {
+		t.Errorf("seen %q, want %q", got, want)
+	}
+}
+
+func TestMetaIsPerMethod(t *testing.T) {
+	r := newTestRouter()
+	r.Meta(perm("a")).GET("/x", metaOf)
+	r.POST("/x", metaOf)
+
+	tests := []struct{ method, want string }{
+		{http.MethodGet, `[perm a] "a"/true`},
+		{http.MethodPost, `[] ""/false`},
+	}
+	for _, tc := range tests {
+		if got := do(r, tc.method, "/x").Body.String(); got != tc.want {
+			t.Errorf("%s /x: body = %q, want %q", tc.method, got, tc.want)
+		}
+	}
+	var headMeta []any
+	r2 := newTestRouter()
+	r2.Meta(perm("a")).GET("/x", func(c *tctx) error {
+		headMeta = c.RouteMeta()
+		return c.NoContent(http.StatusOK)
+	})
+	do(r2, http.MethodHead, "/x")
+	if !reflect.DeepEqual(headMeta, []any{perm("a")}) {
+		t.Errorf("HEAD saw %v, want [perm a]", headMeta)
+	}
+}
+
+func TestRouteMetaIsNilOnAFallback(t *testing.T) {
+	type seen struct {
+		pattern string
+		meta    []any
+		ok      bool
+	}
+	var pre, mw seen
+	r := newTestRouter()
+	r.Pre(func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			_, ok := MetaAs[perm](c)
+			pre = seen{c.RoutePattern(), c.RouteMeta(), ok}
+			return next(c)
+		}
+	})
+	record := func(next HandlerFunc[*tctx]) HandlerFunc[*tctx] {
+		return func(c *tctx) error {
+			_, ok := MetaAs[perm](c)
+			mw = seen{c.RoutePattern(), c.RouteMeta(), ok}
+			return next(c)
+		}
+	}
+	r.Use(record)
+	r.Meta(perm("a")).GET("/users/{id}", echoRoute)
+	r.Meta(perm("a")).Route("/t/{tid}", func(g *Router[*tctx]) {
+		g.Use(record)
+		g.GET("/home", echoRoute)
+	})
+
+	tests := []struct {
+		name, method, path, pattern string
+	}{
+		{"a 404", http.MethodGet, "/typo", ""},
+		{"a 405", http.MethodPost, "/users/7", "/users/{id}"},
+		{"an automatic OPTIONS", http.MethodOptions, "/users/7", "/users/{id}"},
+		{"a scope 404", http.MethodGet, "/t/acme/typo", "/t/{tid}"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mw = seen{"unset", []any{"unset"}, true}
+			do(r, tc.method, tc.path)
+			if want := (seen{pattern: tc.pattern}); !reflect.DeepEqual(mw, want) {
+				t.Errorf("middleware saw %+v, want %+v", mw, want)
+			}
+			if want := (seen{}); !reflect.DeepEqual(pre, want) {
+				t.Errorf("Pre saw %+v, want %+v", pre, want)
+			}
+		})
+	}
+}
+
+func TestMountedRoutesInheritTheMetaOfTheMount(t *testing.T) {
+	sub := newTestRouter()
+	sub.Meta(setup{}).GET("/inner", metaOf)
+	sub.GET("/plain", metaOf)
+	r := newTestRouter()
+	r.Meta(perm("admin")).Mount("/admin", sub)
+
+	tests := []struct{ path, want string }{
+		{"/admin/inner", `[perm admin {}] "admin"/true`},
+		{"/admin/plain", `[perm admin] "admin"/true`},
+	}
+	for _, tc := range tests {
+		if got := do(r, http.MethodGet, tc.path).Body.String(); got != tc.want {
+			t.Errorf("%s: body = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestRoutesHandsOutACopyOfMeta(t *testing.T) {
+	r := newTestRouter()
+	r.Meta(perm("a")).GET("/x", metaOf)
+
+	r.Routes()[0].Meta[0] = perm("changed")
+	if got := r.Routes()[0].Meta[0]; got != perm("a") {
+		t.Errorf("Routes()[0].Meta[0] = %v after a caller changed its copy, want perm a", got)
+	}
+	if got := do(r, http.MethodGet, "/x").Body.String(); got != `[perm a] "a"/true` {
+		t.Errorf("body = %q, want the values as registered", got)
+	}
+}
+
+func TestMetaPanics(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(r *Router[*tctx])
+		want string
+	}{
+		{"no value", func(r *Router[*tctx]) { r.Meta() }, "at least one value"},
+		{"a nil value", func(r *Router[*tctx]) { r.Meta(nil) }, "nil value"},
+		{"a nil among values", func(r *Router[*tctx]) { r.Meta("a", nil) }, "nil value"},
+		{"after serving", func(r *Router[*tctx]) {
+			do(r, http.MethodGet, "/")
+			r.Meta("a")
+		}, "cannot change the route metadata after the router started serving"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer wantPanic(t, tc.want)
+			tc.call(newTestRouter())
+		})
 	}
 }

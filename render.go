@@ -119,15 +119,21 @@ func (b *Base) NoContent(status int) error {
 // 302, 303, 307 and 308. Any other status reports an
 // [ErrInternalServerError] and writes nothing.
 func (b *Base) Redirect(status int, location string) error {
-	switch status {
-	case http.StatusMultipleChoices, http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
-		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
-	default:
+	if !isRedirectStatus(status) {
 		return ErrInternalServerError.WithError(fmt.Errorf("router: %d is not a redirect status", status))
 	}
 	b.res.Header().Set(HeaderLocation, location)
 	b.res.WriteHeader(status)
 	return nil
+}
+
+func isRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMultipleChoices, http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
 }
 
 // Attachment writes data as a download named filename, through a

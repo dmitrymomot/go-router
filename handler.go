@@ -26,6 +26,16 @@ func chain[C Context](h HandlerFunc[C], mws []Middleware[C]) HandlerFunc[C] {
 	return h
 }
 
+// withRouteMeta publishes rec, the route with its Meta values, before the chain
+// of the route runs. init resets the field on every request, so a pooled
+// context needs no cleanup.
+func withRouteMeta[C Context](h HandlerFunc[C], rec *routeRecord) HandlerFunc[C] {
+	return func(c C) error {
+		c.base().route = rec
+		return h(c)
+	}
+}
+
 // WrapHandler turns a standard library handler into a [HandlerFunc]. The
 // wrapped handler reads the route parameters through [http.Request.PathValue],
 // and the returned handler never reports an error.

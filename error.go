@@ -484,7 +484,7 @@ func logFailure(b *Base, err error, committedBefore bool) {
 	b.Logger().Log(b.req.Context(), level, "router: request failed",
 		slog.String("method", b.req.Method),
 		slog.String("path", b.req.URL.Path),
-		slog.String("route", b.pattern),
+		slog.String("route", b.RoutePattern()),
 		slog.Int("status", status),
 		slog.Any("error", err),
 	)

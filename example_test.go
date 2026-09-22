@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1174,4 +1175,159 @@ func ExampleValidator() {
 	// 422 "Unprocessable Entity\nevents: is required"
 	// 422 "the batch holds 3 events, 2 at most\nevents: too many"
 	// 400 "invalid request\nevents: has the wrong JSON type"
+}
+
+func ExampleExpand() {
+	const suspendAgent = "/agents/{agent}/suspend"
+
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.POST(suspendAgent, func(c *Context) error {
+		return c.Stringf(http.StatusOK, "suspended %s", c.Param("agent"))
+	})
+
+	link, _ := router.Expand(suspendAgent, "agent", "a b")
+	fmt.Println(link)
+	fmt.Println(serve(r, http.MethodPost, link))
+
+	login, _ := router.Expand("/login/link?token={token}", "token", "k=v&x")
+	fmt.Println(login)
+
+	_, err := router.Expand(suspendAgent)
+	fmt.Println(err)
+	// Output:
+	// /agents/a%20b/suspend
+	// 200 suspended a b
+	// /login/link?token=k%3Dv%26x
+	// router: "/agents/{agent}/suspend" needs a value for "agent"
+}
+
+func ExampleMustExpand() {
+	fmt.Println(router.MustExpand("{tenant}.example.com", "tenant", "acme"))
+	fmt.Println(router.MustExpand("/files/{path...}", "path", "docs/read me.txt"))
+	// Output:
+	// acme.example.com
+	// /files/docs/read%20me.txt
+}
+
+// serveLocation reports the status and the Location of the answer.
+func serveLocation(h http.Handler, host, target string) string {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	if host != "" {
+		req.Host = host
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return fmt.Sprint(rec.Code, " ", rec.Header().Get(router.HeaderLocation))
+}
+
+func ExampleRouter_Redirect() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Redirect("/bonuses/{agent}", "/bonus?agent={agent}", http.StatusFound)
+	r.Redirect("/old", "/new", http.StatusMovedPermanently)
+
+	fmt.Println(serveLocation(r, "", "/bonuses/a%20b"))
+	fmt.Println(serveLocation(r, "", "/old?page=2"))
+	// Output:
+	// 302 /bonus?agent=a+b
+	// 301 /new?page=2
+}
+
+func ExampleRouter_RedirectHost() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Host("example.com", func(h *router.Router[*Context]) {
+		h.GET("/pricing", func(c *Context) error { return c.String(http.StatusOK, "pricing") })
+	})
+	r.RedirectHost("www.example.com", "example.com", http.StatusMovedPermanently)
+	r.RedirectHost("{tenant}.example.org", "{tenant}.example.com", http.StatusPermanentRedirect)
+
+	fmt.Println(serveLocation(r, "www.example.com", "/pricing?plan=pro"))
+	fmt.Println(serveLocation(r, "acme.example.org:8080", "/orders"))
+	fmt.Println(serveHost(r, http.MethodGet, "example.com", "/pricing"))
+	// Output:
+	// 301 http://example.com/pricing?plan=pro
+	// 308 http://acme.example.com:8080/orders
+	// 200 pricing
+}
+
+type permission string
+
+type public struct{}
+
+func ExampleRouter_Meta() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	ok := func(c *Context) error { return c.NoContent(http.StatusNoContent) }
+
+	r.Meta(public{}).GET("/login", ok)
+	r.Meta(permission("staff")).Route("/admin", func(g *router.Router[*Context]) {
+		g.GET("/users", ok)
+		g.Meta(permission("billing")).GET("/invoices", ok)
+	})
+
+	for _, rt := range r.Routes() {
+		fmt.Println(rt.Method, rt.Pattern, rt.Meta)
+	}
+	// Output:
+	// GET /admin/invoices [staff billing]
+	// GET /admin/users [staff]
+	// GET /login [{}]
+}
+
+func ExampleMetaAs() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
+		return &Context{User: &User{Name: "ann"}}
+	})
+	grants := map[string][]permission{"ann": {"staff"}}
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			if _, ok := router.MetaAs[public](c); ok {
+				return next(c)
+			}
+			need, ok := router.MetaAs[permission](c)
+			if !ok || !slices.Contains(grants[c.User.Name], need) {
+				return router.ErrForbidden
+			}
+			return next(c)
+		}
+	})
+	ok := func(c *Context) error { return c.String(http.StatusOK, c.RoutePattern()) }
+	r.Meta(public{}).GET("/login", ok)
+	r.Meta(permission("staff")).GET("/admin", ok)
+	r.Meta(permission("billing")).GET("/invoices", ok)
+	r.GET("/untagged", ok)
+
+	for _, path := range []string{"/login", "/admin", "/invoices", "/untagged"} {
+		fmt.Println(serve(r, http.MethodGet, path))
+	}
+	// Output:
+	// 200 /login
+	// 200 /admin
+	// 403 Forbidden
+	// 403 Forbidden
+}
+
+func ExampleBase_RouteMeta() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
+		return &Context{User: &User{Name: "ann"}}
+	})
+	grants := map[string][]permission{"ann": {"staff"}}
+	r.Use(func(next router.HandlerFunc[*Context]) router.HandlerFunc[*Context] {
+		return func(c *Context) error {
+			for _, v := range c.RouteMeta() {
+				if need, ok := v.(permission); ok && !slices.Contains(grants[c.User.Name], need) {
+					return router.ErrForbidden.WithMessage("needs %s", need)
+				}
+			}
+			return next(c)
+		}
+	})
+	r.Meta(permission("staff")).Route("/admin", func(g *router.Router[*Context]) {
+		g.GET("/users", func(c *Context) error { return c.String(http.StatusOK, "users") })
+		g.Meta(permission("billing")).GET("/invoices", func(c *Context) error { return c.String(http.StatusOK, "invoices") })
+	})
+
+	fmt.Println(serve(r, http.MethodGet, "/admin/users"))
+	fmt.Println(serve(r, http.MethodGet, "/admin/invoices"))
+	// Output:
+	// 200 users
+	// 403 needs billing
 }

@@ -28,7 +28,7 @@ type node[C Context] struct {
 	raw         string
 	routes      []methodHandler[C]
 	catchAll    HandlerFunc[C]
-	pattern     string
+	rec         *routeRecord
 	names       []string
 }
 
@@ -61,8 +61,8 @@ func (n *node[C]) insert(
 		cur = next
 	}
 
-	if cur.pattern == "" {
-		cur.pattern = normalizePattern(pattern)
+	if cur.rec == nil {
+		cur.rec = &routeRecord{pattern: normalizePattern(pattern)}
 		cur.names = names
 	}
 	for _, mh := range cur.routes {
@@ -159,6 +159,11 @@ func (n *node[C]) insertSpecial(e edge) (*node[C], error) {
 
 func namingConflict(existing, want string) error {
 	return fmt.Errorf("the parameter at this position is already named %q, not %q", existing, want)
+}
+
+func (n *node[C]) empty() bool {
+	return len(n.routes) == 0 && len(n.statics) == 0 && len(n.templates) == 0 && len(n.constrained) == 0 &&
+		n.param == nil && n.wildcard == nil
 }
 
 func (n *node[C]) handler(method string) HandlerFunc[C] {
@@ -352,9 +357,9 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 }
 
 func (n *node[C]) walk(fn func(pattern, method string, params int)) {
-	if n.pattern != "" {
+	if n.rec != nil {
 		for _, mh := range n.routes {
-			fn(n.pattern, mh.method, len(n.names))
+			fn(n.rec.pattern, mh.method, len(n.names))
 		}
 	}
 	for _, c := range n.statics {
