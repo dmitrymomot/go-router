@@ -638,6 +638,37 @@ func ExampleBase_ClearCookie() {
 	// 303 session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax
 }
 
+func ExampleRouter_CookieCodec() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	// The key signs every cookie. NewCookieCodec panics under 32 bytes, so read
+	// it from the environment rather than writing one here.
+	r.CookieCodec(router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac")))
+
+	r.POST("/signin", func(c *Context) error {
+		if err := c.SetSignedCookie(c.NewCookie("session", "ann", 12*time.Hour)); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+	r.GET("/me", func(c *Context) error {
+		name, err := c.SignedCookie("session")
+		if err != nil {
+			return router.ErrUnauthorized
+		}
+		return c.String(http.StatusOK, name)
+	})
+
+	signin := serveRequest(r, httptest.NewRequest(http.MethodPost, "/signin", nil))
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Cookie", signin.Header().Get("Set-Cookie"))
+
+	fmt.Println(signin.Code)
+	fmt.Println(serveRequest(r, req).Body)
+	// Output:
+	// 204
+	// ann
+}
+
 func ExampleNewCookieCodec_rotation() {
 	oldKey := []byte("32-bytes-of-key-material-for-hmac")
 	newKey := []byte("32-more-bytes-of-fresh-key-material")
@@ -687,6 +718,43 @@ func ExampleBase_AddFlash() {
 	// Output:
 	// 303 /users
 	// [{success user created}]
+}
+
+// CookieCodecOf hands test tooling the codec of a router, so it can read the
+// signed cookies the router set.
+func ExampleCookieCodecOf() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
+	r.CookieCodec(codec)
+
+	fmt.Println(router.CookieCodecOf(r) == codec)
+	fmt.Println(router.CookieCodecOf(http.NotFoundHandler()) != nil)
+	// Output:
+	// true
+	// false
+}
+
+// SetCookieCodecForTest lets a test call a handler that signs cookies without
+// building a router.
+func ExampleSetCookieCodecForTest() {
+	codec := router.NewCookieCodec([]byte("32-bytes-of-key-material-for-hmac"))
+	rec := httptest.NewRecorder()
+	b := router.NewBase(rec, httptest.NewRequest(http.MethodPost, "/signin", nil))
+	router.SetCookieCodecForTest(b, codec)
+
+	if err := b.SetSignedCookie(b.NewCookie("session", "ann", time.Hour)); err != nil {
+		fmt.Println(err)
+		return
+	}
+	c, err := http.ParseSetCookie(rec.Header().Get("Set-Cookie"))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	value, err := codec.Decode("session", c.Value)
+	fmt.Println(string(value), err)
+	// Output:
+	// ann <nil>
 }
 
 func serveRequest(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
