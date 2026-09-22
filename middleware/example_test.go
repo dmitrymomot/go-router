@@ -530,20 +530,31 @@ func ExampleNewIdempotencyMemoryStoreWithConfig() {
 		MaxEntries: 10000,
 	})
 
+	passwords := map[string]string{"alice": "a-pass", "bob": "b-pass"}
+	signedIn := func(c *Context) string {
+		user, _, _ := c.Request().BasicAuth()
+		return user
+	}
+
 	r := newAPI()
+	r.Use(middleware.BasicAuth(func(_ *Context, user, pass string) (bool, error) {
+		want, ok := passwords[user]
+		return ok && middleware.SecureCompare(pass, want), nil
+	}))
 	r.Use(middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*Context]{
 		Store: store,
-		// Each user has keys of their own.
-		Scope: func(c *Context) (string, error) { return c.Request().Header.Get("X-User"), nil },
+		// Each user has keys of their own. BasicAuth in front checked the
+		// password, so the name is that of the signed-in user.
+		Scope: func(c *Context) (string, error) { return signedIn(c), nil },
 	}))
 	r.POST("/orders", func(c *Context) error {
-		return c.Stringf(http.StatusCreated, "order for %s", c.Request().Header.Get("X-User"))
+		return c.Stringf(http.StatusCreated, "order for %s", signedIn(c))
 	})
 
 	for _, user := range []string{"alice", "bob"} {
 		res := routertest.Do(r, http.MethodPost, "/orders",
 			routertest.Header(router.HeaderIdempotencyKey, "k1"),
-			routertest.Header("X-User", user))
+			func(req *http.Request) { req.SetBasicAuth(user, passwords[user]) })
 		fmt.Println(res.StatusCode, res.String())
 	}
 	// Output:
