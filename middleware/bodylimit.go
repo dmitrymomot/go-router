@@ -17,8 +17,9 @@ type BodyLimitConfig struct {
 //
 // A Content-Length over the limit is refused before the handler runs, and a
 // body that understates its length is cut off as it is read. Both report
-// [router.ErrPayloadTooLarge], and the connection is closed after the answer.
-// Of two BodyLimits on one route, the smaller wins.
+// [router.ErrPayloadTooLarge]. A body that is cut off also closes the
+// connection after the answer. Of two BodyLimits on one route, the smaller
+// wins.
 //
 // Whatever reads the body before BodyLimit runs, such as CSRF with FromForm or
 // an outer ParseForm, reads it under the cap in force then. For a body that
