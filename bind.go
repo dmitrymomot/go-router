@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
@@ -59,25 +60,81 @@ func (b *Base) Bind[T any]() (T, error) {
 }
 
 // BindJSON decodes the body as JSON into a T and validates it. opts win over
-// the options of [Router.JSONOptions].
+// the options of [Router.JSONOptions]. It reports errors as [Base.Bind] does.
 //
-// An empty body, a malformed one and a body over the limit each report their
-// own [HTTPError].
+// A member of the wrong JSON type, a value that its UnmarshalText or
+// UnmarshalJSON rejects, and an unknown member under RejectUnknownMembers
+// each report a 400 "invalid request" with one [FieldError] at the path of the
+// member, such as events[3].amount. Decoding stops at the first member that
+// does not fit, so T holds the members before it. A malformed body reports
+// "malformed JSON body", and an empty body and a body over the limit each
+// report their own [HTTPError]. The text of the decoder stays in Err.
+//
+// Options of the v1 legacy semantics make the decoder report errors of
+// another type, so such a member reports "malformed JSON body" and no field.
 func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 	var v T
 	body := countingBody{r: b.limitedBody()}
 	if err := json.UnmarshalRead(&body, &v, b.jsonOptions(opts)...); err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			return v, ErrPayloadTooLarge.WithError(err)
-		}
 		// json/v2 reports an empty body with the same syntax error as a
 		// truncated one, so the byte count tells them apart.
-		if body.read == 0 {
-			return v, ErrBadRequest.WithMessage("the request body is empty").WithError(err)
-		}
-		return v, ErrBadRequest.WithMessage("malformed JSON body: %s", err).WithError(err)
+		return v, jsonError(err, body.read == 0)
 	}
 	return v, validate(&v)
+}
+
+// jsonError keeps the text of json/v2 out of the message: it names Go types,
+// and its wording changes from run to run.
+func jsonError(err error, empty bool) *HTTPError {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		return ErrPayloadTooLarge.WithError(err)
+	}
+	if empty {
+		return ErrBadRequest.WithMessage("the request body is empty").WithError(err)
+	}
+	// A SemanticError can wrap a SyntacticError, so the syntax check goes
+	// first.
+	if _, ok := errors.AsType[*jsontext.SyntacticError](err); ok || errors.Is(err, io.ErrUnexpectedEOF) {
+		return ErrBadRequest.WithMessage("malformed JSON body").WithError(err)
+	}
+	se, ok := errors.AsType[*json.SemanticError](err)
+	if !ok {
+		return ErrBadRequest.WithMessage("malformed JSON body").WithError(err)
+	}
+	if field := jsonField(se.JSONPointer); field != "" {
+		return badFields([]FieldError{{Field: field, Message: jsonProblem(se)}}, err)
+	}
+	return ErrBadRequest.WithMessage("the request body has the wrong JSON type").WithError(err)
+}
+
+func jsonProblem(se *json.SemanticError) string {
+	switch {
+	case errors.Is(se.Err, json.ErrUnknownName):
+		return "is not a known field"
+	case se.Err == nil:
+		return "has the wrong JSON type"
+	default:
+		return "is not a valid value"
+	}
+}
+
+// jsonField spells a JSON pointer the way a client reads a field: /events/3/amount
+// becomes events[3].amount.
+func jsonField(p jsontext.Pointer) string {
+	var sb strings.Builder
+	for tok := range p.Tokens() {
+		if tok != "" && strings.Trim(tok, "0123456789") == "" {
+			sb.WriteByte('[')
+			sb.WriteString(tok)
+			sb.WriteByte(']')
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteByte('.')
+		}
+		sb.WriteString(tok)
+	}
+	return sb.String()
 }
 
 // BindForm fills a T from the form of the body and validates it. It reads a
