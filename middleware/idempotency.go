@@ -121,13 +121,13 @@ func Idempotency[C router.Context](store IdempotencyStore[C]) router.Middleware[
 // unless a status under 400 went out before it; then the key stays held until
 // it expires, and a repeat gets 409.
 //
-// A replay carries the header fields the handler set, and the Set-Cookie lines
-// it added, on top of what the middleware in front set for the repeat. A
-// recorded cookie is left out when the repeat sets one of the same name. The
-// header is recorded after the callbacks of [router.Response.Before] ran, those
-// of the middleware in front included, so a cookie that such a callback sets
-// only on the first request goes out again with the replay. A replay never
-// calls the error handler itself: an error goes back up the chain.
+// A replay carries the header fields the handler set or removed, and the
+// Set-Cookie lines it added, on top of what the middleware in front set for the
+// repeat. A recorded cookie is left out when the repeat sets one of the same
+// name. The header is recorded after the callbacks of [router.Response.Before]
+// ran, those of the middleware in front included, so a cookie that such a
+// callback sets only on the first request goes out again with the replay. A
+// replay never calls the error handler itself: an error goes back up the chain.
 //
 // The default fingerprint covers the method, the path and a form body; see
 // [IdempotencyFormFingerprint]. Set Fingerprint for a JSON body.
@@ -340,7 +340,11 @@ func replayIdempotent(res *router.Response, rec *router.Recorded) error {
 
 	h := res.Header()
 	for k, vs := range rec.Header {
-		if k != headerSetCookie {
+		switch {
+		case k == headerSetCookie:
+		case len(vs) == 0:
+			delete(h, k)
+		default:
 			h[k] = slices.Clone(vs)
 		}
 	}
@@ -458,7 +462,8 @@ type IdempotencyEntry struct {
 // Complete stores the answer and Release deletes the entry, both only while
 // the entry is still running. They run after the handler, when c may already
 // be done, so a store that goes over the network uses context.WithoutCancel(c).
-// Keep every field of the [router.Recorded], Truncated included.
+// Keep every field of the [router.Recorded], Truncated included, and a header
+// field with no value, which stands for one the handler removed.
 //
 // An error from Claim answers 500. An error from Complete or Release is
 // logged, and the key stays held until it expires.
@@ -635,9 +640,15 @@ func setCookieName(line string) string {
 
 // idempotencyHeaderDelta reports what changed in the header while the handler
 // ran, the callbacks of [router.Response.Before] included: the fields that
-// changed, and the Set-Cookie lines that were added.
+// changed, the Set-Cookie lines that were added, and a field with no value for
+// each one that was removed.
 func idempotencyHeaderDelta(before, after http.Header) http.Header {
 	delta := make(http.Header, len(after))
+	for k := range before {
+		if _, ok := after[k]; !ok && k != headerSetCookie {
+			delta[k] = nil
+		}
+	}
 	for k, vs := range after {
 		old := before[k]
 		if k == headerSetCookie {

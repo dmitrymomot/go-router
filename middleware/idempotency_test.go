@@ -852,6 +852,27 @@ func TestIdempotencyDoesNotReplayACookieAnOuterCallbackSet(t *testing.T) {
 	}
 }
 
+// Regression: a replay kept a header the handler had removed from the answer.
+func TestIdempotencyReplaysAHeaderTheHandlerRemoved(t *testing.T) {
+	noStore := func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+		return func(c *appContext) error {
+			c.Response().Header().Set(router.HeaderCacheControl, "no-store")
+			return next(c)
+		}
+	}
+	r := idempotencyRouter(nil, noStore, middleware.Idempotency(middleware.NewIdempotencyMemoryStore[*appContext](0)))
+	r.POST("/pay", func(c *appContext) error {
+		c.Response().Header().Del(router.HeaderCacheControl)
+		return c.String(http.StatusCreated, "paid")
+	})
+
+	first := postKey(r, "/pay", "k", amount("5"))
+	replay := postKey(r, "/pay", "k", amount("5"))
+	if got, want := replay.Header().Values(router.HeaderCacheControl), first.Header().Values(router.HeaderCacheControl); len(got) != 0 || len(want) != 0 {
+		t.Errorf("Cache-Control: first %q, replay %q, want neither", want, got)
+	}
+}
+
 func TestIdempotencyUnderAnOuterHTMXRedirect(t *testing.T) {
 	var runs atomic.Int32
 	r := idempotencyRouter(nil,
