@@ -3481,3 +3481,32 @@ func TestMetaPanics(t *testing.T) {
 		})
 	}
 }
+
+// A catch-all takes the path with its slash and decides itself, so the router
+// must not strip a slash that a file server then puts back.
+func TestRedirectTrailingSlashLeavesACatchAllAlone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "f.txt"), []byte("file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestRouter()
+	r.RedirectTrailingSlash(true)
+	r.MountHandler("/static", http.FileServer(http.Dir(dir)))
+	r.GET("/files/{p...}", echoRoute)
+	r.GET("/users", echoRoute)
+
+	if rec := do(r, http.MethodGet, "/static/sub/"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "f.txt") {
+		t.Errorf("GET /static/sub/ = %d, Location %q; want the directory listing",
+			rec.Code, rec.Header().Get(HeaderLocation))
+	}
+	if rec := do(r, http.MethodGet, "/files/a/"); rec.Code != http.StatusOK {
+		t.Errorf("GET /files/a/ = %d, Location %q; want the catch-all route",
+			rec.Code, rec.Header().Get(HeaderLocation))
+	}
+	if rec := do(r, http.MethodGet, "/users/"); rec.Header().Get(HeaderLocation) != "/users" {
+		t.Errorf("GET /users/ Location = %q, want /users", rec.Header().Get(HeaderLocation))
+	}
+}

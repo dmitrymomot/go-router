@@ -150,10 +150,16 @@ func (e *engine[C]) allowHeader(host, anyHost *matchState[C]) string {
 	return strings.Join(out, ", ")
 }
 
+// canMatch reports whether the path without its trailing slash reaches a
+// route that the slash redirect may point at. A catch-all, and an Any route
+// such as a MountHandler, takes the path with its slash and decides itself:
+// a file server answers a directory with that slash, and stripping it would
+// loop.
 func (e *engine[C]) canMatch(host *hostEntry[C], path, method string, scratch []string, escaped bool) bool {
 	if host != nil {
 		var st matchState[C]
-		if n, _ := search(host.tree, path, method, scratch, &st, escaped); n != nil || st.pathMatch != nil {
+		n, _ := search(host.tree, path, method, scratch, &st, escaped)
+		if st.redirectable(n) {
 			return true
 		}
 	}
@@ -162,7 +168,33 @@ func (e *engine[C]) canMatch(host *hostEntry[C], path, method string, scratch []
 	}
 	var st matchState[C]
 	n, _ := search(e.tree, path, method, scratch, &st, escaped)
-	return n != nil || st.pathMatch != nil
+	return st.redirectable(n)
+}
+
+// redirectable reports whether n, the route search found, or a node that
+// matched the path for another method, is one the slash redirect may point at.
+func (st *matchState[C]) redirectable(n *node[C]) bool {
+	if n != nil && n.slashRedirectable() {
+		return true
+	}
+	if st.pathMatch == nil {
+		return false
+	}
+	if st.pathMatch.slashRedirectable() {
+		return true
+	}
+	if st.rest != nil {
+		for _, m := range *st.rest {
+			if m.slashRedirectable() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (n *node[C]) slashRedirectable() bool {
+	return n.kind != edgeWildcard && (n.catchAll == 0 || len(n.routes) > 1)
 }
 
 // A second leading separator collapses: "//evil.com/" arrives as a path, and a
