@@ -16,8 +16,6 @@ const FlashCookieName = "_flash"
 // it.
 const FlashMaxAge = 5 * time.Minute
 
-const headerSetCookie = "Set-Cookie"
-
 // ErrFlashTooLarge reports that the messages exceed [MaxCookieSize] once
 // signed. The cookie is left as it was, so no message is lost, and the caller
 // has to shorten or drop one.
@@ -104,7 +102,7 @@ func (b *Base) flashes(cc *CookieCodec) []Flash {
 // It reads the response before the request, so a second call sees what the
 // first one wrote rather than handing the same messages out twice.
 func (b *Base) flashCookie(cc *CookieCodec) (flashes []Flash, ok bool) {
-	lines := b.res.Header()[headerSetCookie]
+	lines := b.res.Header()[HeaderSetCookie]
 	for _, line := range slices.Backward(lines) {
 		if c, found := parseFlashLine(line); found {
 			if c.Value == "" {
@@ -143,29 +141,29 @@ func (b *Base) writeFlashCookie(c *http.Cookie) {
 		return
 	}
 	header := b.res.Header()
-	lines := header[headerSetCookie]
+	lines := header[HeaderSetCookie]
 	for i, l := range lines {
 		if _, ok := parseFlashLine(l); ok {
 			lines[i] = line
 			return
 		}
 	}
-	header[headerSetCookie] = append(lines, line)
+	header[HeaderSetCookie] = append(lines, line)
 }
 
 // dropFlashCookie takes back the flash cookie this response set, for a
 // request that carried none and so has nothing to clear on the client.
 func (b *Base) dropFlashCookie() {
 	header := b.res.Header()
-	lines := slices.DeleteFunc(header[headerSetCookie], func(l string) bool {
+	lines := slices.DeleteFunc(header[HeaderSetCookie], func(l string) bool {
 		_, ok := parseFlashLine(l)
 		return ok
 	})
 	if len(lines) == 0 {
-		delete(header, headerSetCookie)
+		delete(header, HeaderSetCookie)
 		return
 	}
-	header[headerSetCookie] = lines
+	header[HeaderSetCookie] = lines
 }
 
 func parseFlashLine(line string) (*http.Cookie, bool) {
