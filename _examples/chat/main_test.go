@@ -36,8 +36,10 @@ func TestIndexIssuesCSRFAndPinsAssets(t *testing.T) {
 
 	token := hiddenToken(t, rec.Body.String())
 	cookie := responseCookie(t, rec, middleware.DefaultCSRFCookieName)
-	if cookie.Value != token {
-		t.Errorf("CSRF cookie = %q, form token = %q", cookie.Value, token)
+	// The form carries the token under a fresh mask on every render, so it
+	// never equals the cookie; the join test proves it is accepted.
+	if token == "" || cookie.Value == "" {
+		t.Errorf("CSRF cookie = %q, form token = %q, want both set", cookie.Value, token)
 	}
 	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" {
 		t.Errorf("CSRF cookie = %#v", cookie)
@@ -95,8 +97,8 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	if !strings.Contains(invalid.Body.String(), `role="alert"`) {
 		t.Error("invalid join did not return the form error")
 	}
-	if got := hiddenToken(t, invalid.Body.String()); got != s.csrfToken {
-		t.Errorf("replacement form token = %q, want %q", got, s.csrfToken)
+	if got := hiddenToken(t, invalid.Body.String()); got == "" {
+		t.Error("the replacement form carries no CSRF token")
 	}
 	wantNoResponseCookie(t, invalid, cookieName)
 
@@ -122,7 +124,7 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	if !strings.Contains(body, "<strong>Alice</strong>") {
 		t.Error("chat page did not authenticate Alice")
 	}
-	if strings.Count(body, `name="_csrf" value="`+s.csrfToken+`"`) != 2 {
+	if strings.Count(body, `name="_csrf" value="`) != 2 {
 		t.Error("chat page did not carry the token in both state-changing forms")
 	}
 	for _, form := range []string{
