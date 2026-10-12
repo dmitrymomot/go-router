@@ -339,7 +339,7 @@ func TestKeyAuthContinueOnIgnoredError(t *testing.T) {
 	}
 }
 
-func TestKeyAuthBoundsTheValidatorCalls(t *testing.T) {
+func TestKeyAuthValidatesOnlyTheFirstKey(t *testing.T) {
 	calls := 0
 	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
 		Validator: func(*appContext, string) (bool, error) {
@@ -356,8 +356,38 @@ func TestKeyAuthBoundsTheValidatorCalls(t *testing.T) {
 	if rec := do(r, req); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
-	if calls != middleware.MaxTokensPerRequest {
-		t.Errorf("the validator ran %d times, want %d", calls, middleware.MaxTokensPerRequest)
+	if calls != 1 {
+		t.Errorf("the validator ran %d times, want once", calls)
+	}
+}
+
+func TestKeyAuthStopsAtTheFirstSourceWithAKey(t *testing.T) {
+	var seen []string
+	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
+		Sources: []middleware.TokenSource{
+			middleware.FromHeader("X-Api-Key", ""),
+			middleware.FromHeader(router.HeaderAuthorization, "Bearer "),
+		},
+		Validator: func(_ *appContext, key string) (bool, error) {
+			seen = append(seen, key)
+			return key == "good", nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Api-Key", "bad")
+	req.Header.Set(router.HeaderAuthorization, "Bearer good")
+	if rec := do(r, req); rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401: the key of a later source is never tried", rec.Code)
+	}
+	if len(seen) != 1 || seen[0] != "bad" {
+		t.Errorf("the validator saw %q, want only the first key", seen)
+	}
+
+	seen = nil
+	req.Header.Del("X-Api-Key")
+	if rec := do(r, req); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 from the first source that holds a key", rec.Code)
 	}
 }
 
