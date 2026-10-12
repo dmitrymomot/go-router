@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"io"
 	"log/slog"
@@ -463,6 +464,77 @@ func TestBodylessStatusWritesNoBody(t *testing.T) {
 					if rec.Level >= slog.LevelError {
 						t.Errorf("logged %q at %v", rec.Message, rec.Level)
 					}
+				}
+			})
+		}
+	}
+}
+
+func TestJSONMatchesMarshal(t *testing.T) {
+	v := struct {
+		A []int  `json:"a"`
+		B string `json:"b"`
+	}{[]int{1, 2}, "<&>"}
+	want, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestRouter()
+	r.GET("/", func(c *tctx) error { return c.JSON(http.StatusOK, v) })
+	rec := do(r, http.MethodGet, "/")
+	if rec.Body.String() != string(want) {
+		t.Errorf("body = %q, want %q", rec.Body, want)
+	}
+	if rec.Header().Get(HeaderContentLength) == "" {
+		t.Errorf("no Content-Length")
+	}
+}
+
+func TestJSONUnencodableWritesNothing(t *testing.T) {
+	r := quietRouter()
+	var got error
+	r.GET("/", func(c *tctx) error {
+		got = c.JSON(http.StatusOK, make(chan int))
+		return nil
+	})
+	rec := do(r, http.MethodGet, "/")
+	if StatusOf(got) != 500 || rec.Body.Len() != 0 || rec.Header().Get(HeaderContentType) != "" {
+		t.Errorf("err %v, body %q, headers %v", got, rec.Body, rec.Header())
+	}
+}
+
+func TestInvalidStatusWritesNothing(t *testing.T) {
+	writers := map[string]func(c *tctx, status int) error{
+		"Blob":       func(c *tctx, s int) error { return c.Blob(s, MIMETextPlain, []byte("x")) },
+		"String":     func(c *tctx, s int) error { return c.String(s, "x") },
+		"HTML":       func(c *tctx, s int) error { return c.HTML(s, "x") },
+		"JSON":       func(c *tctx, s int) error { return c.JSON(s, 1) },
+		"Stream":     func(c *tctx, s int) error { return c.Stream(s, MIMETextPlain, strings.NewReader("x")) },
+		"NoContent":  func(c *tctx, s int) error { return c.NoContent(s) },
+		"Attachment": func(c *tctx, s int) error { return c.Attachment(s, MIMETextPlain, "a.txt", []byte("x")) },
+		"Inline":     func(c *tctx, s int) error { return c.Inline(s, MIMETextPlain, "a.txt", []byte("x")) },
+		"Render":     func(c *tctx, s int) error { return c.Render(s, comp("x")) },
+		"RenderStream": func(c *tctx, s int) error {
+			return c.RenderStream(s, comp("x"))
+		},
+	}
+	for name, w := range writers {
+		for _, status := range []int{0, 99, 1000, -1} {
+			t.Run(name, func(t *testing.T) {
+				r := quietRouter()
+				var got error
+				r.GET("/", func(c *tctx) error {
+					got = w(c, status)
+					return nil
+				})
+				rec := httptest.NewRecorder()
+				r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+				if got == nil || StatusOf(got) != 500 || !strings.Contains(got.Error(), "invalid status") {
+					t.Errorf("status %d: err = %v", status, got)
+					return
+				}
+				if rec.Body.Len() != 0 || rec.Header().Get(HeaderContentDisposition) != "" {
+					t.Errorf("status %d wrote %q %v", status, rec.Body, rec.Header())
 				}
 			})
 		}

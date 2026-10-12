@@ -483,3 +483,44 @@ func wantPanic(t *testing.T, want string) {
 		t.Errorf("panic = %q, want one that mentions %q", msg, want)
 	}
 }
+
+func TestIsLocalURL(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"/", true},
+		{"/a/b?x=1#f", true},
+		{"", false},
+		{"a", false},
+		{"//evil.com", false},
+		{`/\evil.com`, false},
+		{"https://evil.com", false},
+		{"javascript:alert(1)", false},
+		{"/a\tb", false},
+		{"/a\nb", false},
+		{"/a\x00b", false},
+		{"/a\x7fb", false},
+		{"/\t/evil.com", false},
+	}
+	for _, tt := range tests {
+		if got := IsLocalURL(tt.in); got != tt.want {
+			t.Errorf("IsLocalURL(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestLocalRedirect(t *testing.T) {
+	r := quietRouter()
+	r.GET("/", func(c *tctx) error { return c.LocalRedirect(http.StatusSeeOther, c.Query("next")) })
+	rec := do(r, http.MethodGet, "/?next=/home")
+	if rec.Code != 303 || rec.Header().Get(HeaderLocation) != "/home" {
+		t.Errorf("status %d, location %q", rec.Code, rec.Header().Get(HeaderLocation))
+	}
+	for _, next := range []string{"//evil.com", "https://evil.com", "", "%5C%5Cevil.com"} {
+		rec := do(r, http.MethodGet, "/?next="+next)
+		if rec.Code != 400 || rec.Header().Get(HeaderLocation) != "" || !strings.Contains(rec.Body.String(), "redirect target is not a local path") {
+			t.Errorf("next=%q: status %d, location %q, body %q", next, rec.Code, rec.Header().Get(HeaderLocation), rec.Body)
+		}
+	}
+}

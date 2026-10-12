@@ -618,3 +618,18 @@ func TestClientIPAllocatesNothing(t *testing.T) {
 		t.Errorf("ClientIP() allocates %v times, want 0", n)
 	}
 }
+
+func TestTrailingSlash(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/files/{path...}", func(c *tctx) error {
+		if c.TrailingSlash() {
+			return c.String(http.StatusOK, "slash")
+		}
+		return c.String(http.StatusOK, "plain")
+	})
+	for target, want := range map[string]string{"/files/a": "plain", "/files/a/": "slash"} {
+		if got := do(r, http.MethodGet, target).Body.String(); got != want {
+			t.Errorf("%s = %q, want %q", target, got, want)
+		}
+	}
+}

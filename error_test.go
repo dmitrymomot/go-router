@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -926,4 +927,140 @@ func TestATypedNilHTTPErrorDoesNotHideALaterOne(t *testing.T) {
 			t.Errorf("GET /v = %d %q, want 409", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func quietRouter() *Router[*tctx] {
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	return r
+}
+
+// dirty sets the headers of a successful response that an error must not keep.
+func dirty(c *tctx) {
+	h := c.res.Header()
+	h.Set(HeaderCacheControl, "public, max-age=31536000")
+	h.Set(HeaderETag, `"v1"`)
+	h.Set("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+	h.Set(HeaderContentDisposition, `attachment; filename="a.bin"`)
+	h.Set(HeaderContentEncoding, "gzip")
+	h.Set(HeaderContentLength, "999")
+}
+
+func TestErrorHandlersDropTheHeadersOfTheFailedHandler(t *testing.T) {
+	handlers := map[string]ErrorHandlerFunc[*tctx]{
+		"text":    TextErrorHandler[*tctx](false),
+		"json":    JSONErrorHandler[*tctx](false),
+		"problem": ProblemErrorHandler[*tctx](false),
+	}
+	for name, h := range handlers {
+		t.Run(name, func(t *testing.T) {
+			r := quietRouter()
+			r.ErrorHandler(h)
+			r.GET("/", func(c *tctx) error {
+				dirty(c)
+				return errors.New("boom")
+			})
+			rec := do(r, http.MethodGet, "/")
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			for _, k := range []string{HeaderCacheControl, HeaderETag, "Last-Modified", HeaderContentDisposition, HeaderContentEncoding} {
+				if v := rec.Header().Get(k); v != "" {
+					t.Errorf("%s = %q, want it removed", k, v)
+				}
+			}
+			if got := rec.Header().Get(HeaderXContentTypeOptions); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q", got)
+			}
+			if cl := rec.Header().Get(HeaderContentLength); cl == "999" {
+				t.Errorf("Content-Length kept the stale value")
+			}
+		})
+	}
+}
+
+func TestBareErrorResponseDropsTheHeadersToo(t *testing.T) {
+	r := quietRouter()
+	r.ErrorHandler(func(*tctx, error) error { return errors.New("the handler failed") })
+	r.GET("/", func(c *tctx) error {
+		dirty(c)
+		return errors.New("boom")
+	})
+	rec := do(r, http.MethodGet, "/")
+	if rec.Code != 500 || rec.Header().Get(HeaderCacheControl) != "" || rec.Header().Get(HeaderETag) != "" {
+		t.Errorf("status %d, headers %v", rec.Code, rec.Header())
+	}
+}
+
+func TestResetForError(t *testing.T) {
+	h := http.Header{}
+	h.Set(HeaderCacheControl, "x")
+	h.Set(HeaderContentType, "image/png")
+	h.Set("X-Other", "kept")
+	ResetForError(h)
+	if h.Get(HeaderCacheControl) != "" || h.Get("X-Other") != "kept" || h.Get(HeaderContentType) != "image/png" {
+		t.Errorf("header = %v", h)
+	}
+	if h.Get(HeaderXContentTypeOptions) != "nosniff" {
+		t.Errorf("no nosniff: %v", h)
+	}
+}
+
+func TestProblemErrorHandler(t *testing.T) {
+	r := quietRouter()
+	r.ErrorHandler(ProblemErrorHandler[*tctx](true))
+	r.GET("/users/{id}", func(c *tctx) error {
+		return ErrNotFound.WithMessage("no user %s", c.Param("id")).WithError(errors.New("sql: no rows"))
+	})
+	r.POST("/users", func(c *tctx) error {
+		return ErrUnprocessableEntity.WithDetails([]FieldError{{Field: "email", Message: "required"}})
+	})
+	r.PUT("/other", func(c *tctx) error { return ErrConflict.WithDetails(map[string]int{"n": 1}) })
+
+	rec := do(r, http.MethodGet, "/users/9")
+	if rec.Code != 404 || rec.Header().Get(HeaderContentType) != "application/problem+json" {
+		t.Fatalf("status %d, type %q", rec.Code, rec.Header().Get(HeaderContentType))
+	}
+	want := `{"type":"about:blank","title":"Not Found","status":404,"detail":"no user 9","instance":"/users/9","cause":"sql: no rows"}`
+	if rec.Body.String() != want {
+		t.Errorf("body = %s\nwant   %s", rec.Body, want)
+	}
+
+	rec = do(r, http.MethodPost, "/users")
+	want = `{"type":"about:blank","title":"Unprocessable Entity","status":422,"detail":"Unprocessable Entity","instance":"/users","errors":[{"field":"email","message":"required"}]}`
+	if rec.Body.String() != want {
+		t.Errorf("body = %s\nwant   %s", rec.Body, want)
+	}
+
+	rec = do(r, http.MethodPut, "/other")
+	if !strings.Contains(rec.Body.String(), `"details":{"n":1}`) {
+		t.Errorf("body = %s", rec.Body)
+	}
+
+	rec = do(r, http.MethodHead, "/users/9")
+	if rec.Code != 404 || rec.Body.Len() != 0 || rec.Header().Get(HeaderContentLength) == "" {
+		t.Errorf("HEAD: status %d, body %q, headers %v", rec.Code, rec.Body, rec.Header())
+	}
+
+	var p Problem
+	if err := json.Unmarshal(do(r, http.MethodGet, "/users/9").Body.Bytes(), &p); err != nil || p.Status != 404 {
+		t.Errorf("round trip: %v %+v", err, p)
+	}
+}
+
+func TestProblemErrorHandlerHidesTheCause(t *testing.T) {
+	r := quietRouter()
+	r.ErrorHandler(ProblemErrorHandler[*tctx](false))
+	r.GET("/", func(*tctx) error { return ErrBadGateway.WithError(errors.New("secret")) })
+	if body := do(r, http.MethodGet, "/").Body.String(); strings.Contains(body, "secret") {
+		t.Errorf("body leaks the cause: %s", body)
+	}
+}
+
+func TestInvalidStatusInAnErrorGivesABare500(t *testing.T) {
+	r := quietRouter()
+	r.GET("/", func(*tctx) error { return &HTTPError{Status: 1000, Message: "x"} })
+	if rec := do(r, http.MethodGet, "/"); rec.Code != 500 {
+		t.Errorf("status = %d", rec.Code)
+	}
 }
