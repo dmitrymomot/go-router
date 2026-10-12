@@ -1164,7 +1164,7 @@ func TestDrainEndsLongLivedRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer res.Body.Close() //nolint:errcheck // A test body.
 	<-entered
 
 	s.cancel()
@@ -1196,7 +1196,7 @@ func TestDrainKeepsTheBaseContextOfOnServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	res.Body.Close() //nolint:errcheck // A test body.
 	if v := <-got; v != "mine" {
 		t.Errorf("value = %v, want the one OnServer's BaseContext set", v)
 	}

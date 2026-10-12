@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -22,7 +23,10 @@ var errMethod = errors.New("static: the method is neither GET nor HEAD")
 const allowedMethods = "GET, HEAD"
 
 // ServeHTTP serves the set as a standard library handler, which suits a mux
-// that is not this router. It reads the path below Prefix, so put it behind
+// that is not this router. A path the set does not hold gets the handler of
+// Config.NotFound, or a plain-text 404 without one; no router error handler
+// runs on this path, unlike [Handler], which reports [router.ErrNotFound]. It
+// reads the path below Prefix, so put it behind
 // [http.StripPrefix] with [Assets.Prefix], or [router.Router.MountHandler],
 // which strips it too; the URLs of [Assets.URL] then reach it. See [Mount] for
 // a router.
@@ -106,6 +110,9 @@ func (a *Assets) writePath(
 	versioned bool,
 	allowDirectoryIndex bool,
 ) error {
+	if a.isSibling(name) {
+		return errNoFile
+	}
 	f, info, err := a.openFile(name)
 	if err != nil {
 		return classifyFileError(name, err)
@@ -166,17 +173,37 @@ func (a *Assets) send(w http.ResponseWriter, r *http.Request, name string, f fs.
 	}
 
 	h := w.Header()
+	h.Set("Cache-Control", a.cacheControl(name, versioned))
+	if sib := a.precompressed(w, r, name); sib != nil {
+		//nolint:errcheck // The file is read only.
+		defer sib.Close()
+		h.Set("Etag", sib.etag)
+		h.Set("Content-Encoding", sib.encoding)
+		h.Set("Content-Type", contentType(name))
+		http.ServeContent(w, r, path.Base(name), sib.modTime, sib.f)
+		return nil
+	}
 	if tag := a.etag(name, info); tag != "" {
 		h.Set("Etag", tag)
 	}
-	h.Set("Cache-Control", a.cacheControl(name, versioned))
 	http.ServeContent(w, r, path.Base(name), info.ModTime(), rs)
 	return nil
+}
+
+func contentType(name string) string {
+	if t := mime.TypeByExtension(path.Ext(name)); t != "" {
+		return t
+	}
+	// ServeContent would sniff the compressed bytes, which says nothing.
+	return "application/octet-stream"
 }
 
 func (a *Assets) openFile(name string) (fs.File, fs.FileInfo, error) {
 	if !fs.ValidPath(name) {
 		return nil, nil, fs.ErrInvalid
+	}
+	if !a.dotfiles && hasDotSegment(name) {
+		return nil, nil, fs.ErrNotExist
 	}
 	f, err := a.fsys.Open(name)
 	if err != nil {

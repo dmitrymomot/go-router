@@ -232,7 +232,7 @@ func (in *instance) withDrainContext(ctx context.Context) {
 	in.draining, in.cancelDraining = context.WithCancelCause(context.Background())
 	user := in.srv.BaseContext
 	in.srv.BaseContext = func(l net.Listener) context.Context {
-		var base context.Context = context.WithoutCancel(ctx)
+		base := context.WithoutCancel(ctx)
 		if user != nil {
 			if b := user(l); b != nil {
 				base = b
