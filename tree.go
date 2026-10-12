@@ -16,6 +16,9 @@ type methodHandler[C Context] struct {
 	errIdx *int32
 	// meta holds the values of the Meta scopes around the route, for Routes.
 	meta []any
+	// site is the file:line that registered the route, for the panics of a
+	// later registration that collides with it.
+	site string
 }
 
 type node[C Context] struct {
@@ -35,13 +38,31 @@ type node[C Context] struct {
 	catchAll    int // 1 + the index in routes of the Any route, or 0
 	rec         *routeRecord
 	names       []string
+	// allow is the Allow header of a node that holds routes, ready to put in
+	// a header map: its capacity is one, so an append copies it.
+	allow []string
+	// origin is the route that made a parameter, constraint, template or
+	// catch-all node, which a conflicting route is told about.
+	origin routeOrigin
+}
+
+// routeOrigin names the route that first went through a node.
+type routeOrigin struct {
+	pattern string
+	site    string
+}
+
+func (o routeOrigin) String() string {
+	if o.site == "" {
+		return fmt.Sprintf("%q", o.pattern)
+	}
+	return fmt.Sprintf("%q (registered at %s)", o.pattern, o.site)
 }
 
 // insert adds mh under segs, which the caller parsed from pattern with names
 // as its parameters. pattern names the route in errors and in the table.
 func (n *node[C]) insert(
-	pattern string, segs []segment, names, hostNames []string, mh methodHandler[C],
-	autoOptions bool, allow map[*node[C]]string,
+	pattern string, segs []segment, names, hostNames []string, mh methodHandler[C], autoOptions bool,
 ) error {
 	if len(hostNames) > 0 {
 		for _, hn := range hostNames {
@@ -52,15 +73,16 @@ func (n *node[C]) insert(
 		names = append(slices.Clone(hostNames), names...)
 	}
 
+	origin := routeOrigin{pattern: normalizePattern(pattern), site: mh.site}
 	cur := n
 	for _, e := range patternEdges(segs) {
 		if e.kind == edgeLiteral {
 			cur = cur.insertLiteral(e.lit)
 			continue
 		}
-		next, err := cur.insertSpecial(e)
+		next, err := cur.insertSpecial(e, origin)
 		if err != nil {
-			return fmt.Errorf("router: %q conflicts with an existing route: %w", normalizePattern(pattern), err)
+			return fmt.Errorf("router: %v conflicts with an existing route: %w", origin, err)
 		}
 		cur = next
 	}
@@ -71,14 +93,18 @@ func (n *node[C]) insert(
 	}
 	for _, have := range cur.routes {
 		if have.method == mh.method {
-			return fmt.Errorf("router: %s %q is already registered", mh.method, normalizePattern(pattern))
+			if have.site == "" || mh.site == "" {
+				return fmt.Errorf("router: %s %q is already registered", mh.method, origin.pattern)
+			}
+			return fmt.Errorf("router: %s %q is already registered at %s; the second registration is at %s",
+				mh.method, origin.pattern, have.site, mh.site)
 		}
 	}
 	cur.routes = append(cur.routes, mh)
 	if mh.method == anyMethod {
 		cur.catchAll = len(cur.routes)
 	}
-	allow[cur] = strings.Join(cur.allowed(autoOptions), ", ")
+	cur.cacheAllow(autoOptions)
 	return nil
 }
 
@@ -110,7 +136,7 @@ func (n *node[C]) insertLiteral(text string) *node[C] {
 	return cur
 }
 
-func (n *node[C]) insertSpecial(e edge) (*node[C], error) {
+func (n *node[C]) insertSpecial(e edge, origin routeOrigin) (*node[C], error) {
 	switch e.kind {
 	case edgeTemplate:
 		want := templateSkeleton(e.parts)
@@ -120,12 +146,12 @@ func (n *node[C]) insertSpecial(e edge) (*node[C], error) {
 				continue
 			}
 			if !slices.Equal(templateNames(c.parts), names) {
-				return nil, fmt.Errorf("%q has the shape of %q, which already uses the parameter names %v",
-					e.raw, c.raw, templateNames(c.parts))
+				return nil, fmt.Errorf("%q has the shape of %q, which already uses the parameter names %v in %v",
+					e.raw, c.raw, templateNames(c.parts), c.origin)
 			}
 			return c, nil
 		}
-		c := &node[C]{kind: edgeTemplate, name: e.name, parts: e.parts, raw: e.raw}
+		c := &node[C]{kind: edgeTemplate, name: e.name, parts: e.parts, raw: e.raw, origin: origin}
 		n.templates = append(n.templates, c)
 		return c, nil
 
@@ -135,34 +161,34 @@ func (n *node[C]) insertSpecial(e edge) (*node[C], error) {
 				continue
 			}
 			if c.name != e.name {
-				return nil, namingConflict(c.name, e.name)
+				return nil, namingConflict(c, e.name)
 			}
 			return c, nil
 		}
-		c := &node[C]{kind: edgeConstraint, name: e.name, m: e.m}
+		c := &node[C]{kind: edgeConstraint, name: e.name, m: e.m, origin: origin}
 		n.constrained = append(n.constrained, c)
 		return c, nil
 
 	case edgeWildcard:
 		if n.wildcard == nil {
-			n.wildcard = &node[C]{kind: edgeWildcard, name: e.name}
+			n.wildcard = &node[C]{kind: edgeWildcard, name: e.name, origin: origin}
 		} else if n.wildcard.name != e.name {
-			return nil, namingConflict(n.wildcard.name, e.name)
+			return nil, namingConflict(n.wildcard, e.name)
 		}
 		return n.wildcard, nil
 
 	default:
 		if n.param == nil {
-			n.param = &node[C]{kind: edgeParam, name: e.name}
+			n.param = &node[C]{kind: edgeParam, name: e.name, origin: origin}
 		} else if n.param.name != e.name {
-			return nil, namingConflict(n.param.name, e.name)
+			return nil, namingConflict(n.param, e.name)
 		}
 		return n.param, nil
 	}
 }
 
-func namingConflict(existing, want string) error {
-	return fmt.Errorf("the parameter at this position is already named %q, not %q", existing, want)
+func namingConflict[C Context](have *node[C], want string) error {
+	return fmt.Errorf("the parameter at this position is already named %q, not %q, by %v", have.name, want, have.origin)
 }
 
 func (n *node[C]) empty() bool {
@@ -210,33 +236,29 @@ func (n *node[C]) allowed(autoOptions bool) []string {
 	return out
 }
 
-// insert keeps every entry current, so this only runs when the OPTIONS setting
-// changes after some routes are already in.
-func (n *node[C]) recacheAllow(autoOptions bool, allow map[*node[C]]string) {
-	if len(n.routes) > 0 {
-		allow[n] = strings.Join(n.allowed(autoOptions), ", ")
-	}
-	for _, c := range n.statics {
-		c.recacheAllow(autoOptions, allow)
-	}
-	for _, c := range n.templates {
-		c.recacheAllow(autoOptions, allow)
-	}
-	for _, c := range n.constrained {
-		c.recacheAllow(autoOptions, allow)
-	}
-	if n.param != nil {
-		n.param.recacheAllow(autoOptions, allow)
-	}
-	if n.wildcard != nil {
-		n.wildcard.recacheAllow(autoOptions, allow)
-	}
+func (n *node[C]) cacheAllow(autoOptions bool) {
+	n.allow = []string{strings.Join(n.allowed(autoOptions), ", ")}
 }
 
+// insert keeps every entry current, so this only runs when the OPTIONS setting
+// changes after some routes are already in.
+func (n *node[C]) recacheAllow(autoOptions bool) {
+	n.walk(func(n *node[C]) { n.cacheAllow(autoOptions) })
+}
+
+// matchState is what search leaves behind: the route it took, or else the
+// nodes that matched the path for other methods.
 type matchState[C Context] struct {
+	// hit is the route of the node search returned, so the caller does not
+	// look the method up a second time.
+	hit       *methodHandler[C]
 	pathMatch *node[C]
-	pathVals  []string
-	rest      *[]*node[C]
+	// The values of pathMatch: in pathArr up to maxInlineParams, so a 405 or
+	// a preflight does not allocate for them, and in pathVals past that.
+	pathVals []string
+	pathArr  [maxInlineParams]string
+	pathN    int
+	rest     *[]*node[C]
 }
 
 func (st *matchState[C]) record(n *node[C], vals []string) {
@@ -245,7 +267,11 @@ func (st *matchState[C]) record(n *node[C], vals []string) {
 	}
 	if st.pathMatch == nil {
 		st.pathMatch = n
-		st.pathVals = slices.Clone(vals)
+		if len(vals) <= maxInlineParams {
+			st.pathN = copy(st.pathArr[:], vals)
+		} else {
+			st.pathVals = slices.Clone(vals)
+		}
 		return
 	}
 	if n == st.pathMatch {
@@ -281,13 +307,15 @@ func (st *matchState[C]) allowedMethods(dst []string, autoOptions bool) []string
 
 func search[C Context](n *node[C], rest, method string, vals []string, st *matchState[C], escaped bool) (*node[C], []string) {
 	if rest == "" {
-		if n.lookup(method) != nil {
+		if mh := n.lookup(method); mh != nil {
+			st.hit = mh
 			return n, vals
 		}
 		st.record(n, vals)
 		if n.wildcard != nil {
 			w := append(vals, "")
-			if n.wildcard.lookup(method) != nil {
+			if mh := n.wildcard.lookup(method); mh != nil {
+				st.hit = mh
 				return n.wildcard, w
 			}
 			st.record(n.wildcard, w)
@@ -357,7 +385,8 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 
 	if n.wildcard != nil {
 		w := append(vals, rest[1:])
-		if n.wildcard.lookup(method) != nil {
+		if mh := n.wildcard.lookup(method); mh != nil {
+			st.hit = mh
 			return n.wildcard, w
 		}
 		st.record(n.wildcard, w)

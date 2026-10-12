@@ -3,7 +3,6 @@ package router
 import (
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 )
@@ -130,8 +129,9 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 	if path == "" || path[0] != '/' {
 		path = "/" + path
 	}
-	// Trimmed by the same rule as the scope prefixes. Written out because route
-	// is too large for the inliner to fold a call in.
+	// Trimmed by the same rule as the scope prefixes, for the slash redirect
+	// and the scope fallbacks; a route takes the path as sent. Written out
+	// because route is too large for the inliner to fold a call in.
 	trimmed := path
 	for len(trimmed) > 1 && trimmed[len(trimmed)-1] == '/' {
 		trimmed = trimmed[:len(trimmed)-1]
@@ -158,22 +158,26 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		}
 	}
 
-	if e.redirectSlash && trimmed != path && !hasDotSegmentEscaped(trimmed) && e.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
+	if e.redirectSlash && b.tailSlash && !hasDotSegmentEscaped(trimmed) && e.canMatch(host, trimmed, req.Method, hostVals[len(hostVals):], escaped) {
 		redirectTo(b.res, req, trimmed, escaped)
 		return nil
 	}
 
+	// The path as sent, so one that differs from a route by a trailing slash
+	// does not reach it. A catch-all still takes it, and loses the slash below.
 	var (
 		hostSt, anySt matchState[C]
 		n             *node[C]
+		mh            *methodHandler[C]
 		vals          []string
 	)
 	if host != nil {
-		n, vals = search(host.tree, trimmed, req.Method, hostVals, &hostSt, escaped)
+		n, vals = search(host.tree, path, req.Method, hostVals, &hostSt, escaped)
+		mh = hostSt.hit
 	}
 	if n == nil && e.anyHostRoutes {
-		if m, v := search(e.tree, trimmed, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
-			n, vals = m, v
+		if m, v := search(e.tree, path, req.Method, hostVals[len(hostVals):], &anySt, escaped); m != nil {
+			n, vals, mh = m, v, anySt.hit
 			b.hostPattern = ""
 		}
 	}
@@ -181,15 +185,15 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 	switch {
 	case n != nil:
 		if n.kind == edgeWildcard && len(vals) > 0 {
-			b.rawTail = vals[len(vals)-1]
+			b.rawTail = strings.TrimRight(vals[len(vals)-1], "/")
 			b.needsCleanup = b.needsCleanup || b.rawTail != ""
+			vals[len(vals)-1] = b.rawTail
 			if decoded, ok := decodePathSegment(b.rawTail, escaped); ok {
 				vals[len(vals)-1] = decoded
 			}
 		}
 		b.setRoute(n.rec, n.names, vals)
 		req.Pattern = n.rec.pattern
-		mh := n.lookup(req.Method)
 		b.errIdx = *mh.errIdx
 		h := mh.handler
 		if handleErrors {
@@ -198,22 +202,31 @@ func (e *engine[C]) route(c C, req *http.Request, handleErrors bool) error {
 		return h(c)
 
 	case hostSt.pathMatch != nil || anySt.pathMatch != nil:
-		match, matched, skip := hostSt.pathMatch, hostSt.pathVals, len(hostVals)
-		if match == nil {
-			match, matched, skip = anySt.pathMatch, anySt.pathVals, 0
+		st, skip := &hostSt, len(hostVals)
+		if st.pathMatch == nil {
+			st, skip = &anySt, 0
 			host = nil
 			b.hostPattern = ""
 		}
-		if match.kind == edgeWildcard && len(matched) > skip {
-			matched = slices.Clone(matched)
-			if decoded, ok := decodePathSegment(matched[len(matched)-1], escaped); ok {
+		// Search is done with the inline array, so the values move back into
+		// it rather than into a copy of their own.
+		matched := st.pathVals
+		if matched == nil {
+			matched = b.paramArr[:copy(b.paramArr[:], st.pathArr[:st.pathN])]
+		}
+		if st.pathMatch.kind == edgeWildcard && len(matched) > skip {
+			tail := strings.TrimRight(matched[len(matched)-1], "/")
+			matched[len(matched)-1] = tail
+			if decoded, ok := decodePathSegment(tail, escaped); ok {
 				matched[len(matched)-1] = decoded
 			}
 		}
 		b.needsCleanup = true
-		b.setRoute(match.rec, match.names, matched)
-		req.Pattern = match.rec.pattern
-		b.res.Header().Set(HeaderAllow, e.allowHeader(&hostSt, &anySt))
+		b.setRoute(st.pathMatch.rec, st.pathMatch.names, matched)
+		req.Pattern = st.pathMatch.rec.pattern
+		// Shared by every request that ends here: net/http writes it and
+		// copies on Add, and the router never changes it.
+		b.res.Header()[HeaderAllow] = e.allowHeader(&hostSt, &anySt)
 
 		_, _, notAllowed, options, errIdx := e.fallbackChains(host, trimmed, escaped)
 		b.errIdx = errIdx

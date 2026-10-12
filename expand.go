@@ -121,7 +121,7 @@ func compileTemplate(pattern string, classes classLookup) (*urlTemplate, error) 
 		path, query, hasQuery = pattern[:i], pattern[i+1:], true
 	}
 	path = normalizePattern(path)
-	segs, names, err := parsePattern(path, classes)
+	segs, names, err := parseSegments(path, classes, true)
 	if err != nil {
 		return nil, err
 	}

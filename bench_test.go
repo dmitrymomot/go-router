@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -243,5 +244,33 @@ func BenchmarkExpand(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_, _ = Expand(pattern, "agent", "ann", "id", "42")
+	}
+}
+
+// benchManyScopes opens n top-level scopes with a parameter in the prefix, the
+// shape of a large API that gives every resource its own Route.
+func benchManyScopes(n int) *Router[*tctx] {
+	ok := func(c *tctx) error { return c.NoContent(http.StatusOK) }
+	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+	for i := range n {
+		r.Route("/r"+strconv.Itoa(i)+"/{id}", func(g *Router[*tctx]) { g.GET("/", ok) })
+	}
+	return r
+}
+
+func BenchmarkScopes1000NotFound(b *testing.B) {
+	r := benchManyScopes(1000)
+	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/r500/7/missing")
+}
+
+func BenchmarkScopes1000NoScope(b *testing.B) {
+	r := benchManyScopes(1000)
+	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/nothing/here")
+}
+
+func BenchmarkRegisterScopes1000(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		benchManyScopes(1000)
 	}
 }

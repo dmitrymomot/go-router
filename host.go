@@ -49,6 +49,10 @@ type hostEntry[C Context] struct {
 	// redirect marks a host that RedirectHost owns: no other route may be
 	// registered for it.
 	redirect *hostClaim
+	// scopeIdx indexes the scopes of the host that have a prefix. compiled
+	// marks an entry the last compile saw.
+	scopeIdx *scopeNode[C]
+	compiled bool
 }
 
 type hostSet[C Context] struct {
@@ -586,10 +590,10 @@ func (r *Router[C]) Hosts(patterns []string, fn func(h *Router[C])) *Router[C] {
 			}
 		}
 		unlock()
+		c.scopeOpened()
 		if fn != nil {
 			fn(c)
 		}
-		c.settingChanged()
 	})
 	return c
 }
