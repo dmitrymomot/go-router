@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -3579,6 +3580,44 @@ func TestHandleRefusesAMethodNoRequestCarries(t *testing.T) {
 	if rec := do(r, "PROPFIND", "/x"); rec.Code != http.StatusOK {
 		t.Errorf("PROPFIND /x = %d, want 200", rec.Code)
 	}
+}
+
+// A conflict names the route already there and where both were registered.
+func TestAConflictNamesTheRouteAlreadyThere(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/users/{id}", echoRoute)
+	r.GET("/files/{p...}", echoRoute)
+	r.GET("/n/{id:int}", echoRoute)
+	first := lineOf(t, -3)
+	for pattern, want := range map[string]string{
+		"/users/{name}/x":  `"/users/{id}" (registered at ` + first,
+		"/files/{rest...}": `"/files/{p...}" (registered at `,
+		"/n/{num:int}/x":   `"/n/{id:int}" (registered at `,
+	} {
+		msg := panicOf(func() { r.GET(pattern, echoRoute) })
+		if !strings.Contains(msg, want) || !strings.Contains(msg, "router_test.go:") {
+			t.Errorf("GET %s panic = %q, want one that mentions %q", pattern, msg, want)
+		}
+	}
+	msg := panicOf(func() { r.GET("/users/{id}", echoRoute) })
+	second := lineOf(t, -1)
+	if !strings.Contains(msg, "registered at "+first) || !strings.Contains(msg, second) {
+		t.Errorf("duplicate panic = %q, want one that names %s and %s", msg, first, second)
+	}
+}
+
+// lineOf returns the site, as callerSite spells it, of the line delta lines
+// from the call.
+func lineOf(t *testing.T, delta int) string {
+	t.Helper()
+	_, file, line, _ := runtime.Caller(1)
+	return filepath.Join(filepath.Base(filepath.Dir(file)), filepath.Base(file)) + ":" + strconv.Itoa(line+delta)
+}
+
+func panicOf(fn func()) (msg string) {
+	defer func() { msg = fmt.Sprint(recover()) }()
+	fn()
+	return ""
 }
 
 // A preflight and a 405 reuse the cached Allow header and the inline

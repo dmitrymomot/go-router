@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +34,9 @@ type registration[C Context] struct {
 	// rest appends a catch-all under mountParam, a name no pattern can spell,
 	// so MountHandler and RedirectHost take the rest of the path.
 	rest bool
+	// site is the file:line of the call that registered the route, which a
+	// Mount replay keeps.
+	site string
 }
 
 // hostClaim is the hold one RedirectHost call has on its host. It is not zero
@@ -260,6 +266,7 @@ func (r *Router[C]) register(reg registration[C]) {
 		s.hasRoutes = true
 	}
 	reg.mws = slices.Clone(reg.mws)
+	reg.site = callerSite()
 	r.regs = append(r.regs, reg)
 	r.install(reg)
 }
@@ -288,7 +295,7 @@ func (r *Router[C]) install(reg registration[C]) {
 	if len(meta) > 0 {
 		handler = withRouteMeta(handler, &routeRecord{pattern: normalizePattern(full), meta: meta})
 	}
-	mh := methodHandler[C]{method: reg.method, handler: handler, meta: meta}
+	mh := methodHandler[C]{method: reg.method, handler: handler, meta: meta, site: reg.site}
 
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
@@ -349,6 +356,28 @@ func checkMethod(method string) error {
 // isTokenByte reports whether c is a tchar of RFC 9110.
 func isTokenByte(c byte) bool {
 	return isLetter(c) || isDigit(c) || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+}
+
+// routerDir is the directory of this package's source, which callerSite skips.
+var routerDir = func() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Dir(file)
+}()
+
+// callerSite returns the file:line of the nearest caller outside this package,
+// a test of it included, or "" when there is none.
+func callerSite() string {
+	var pcs [32]uintptr
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs[:])])
+	for {
+		f, more := frames.Next()
+		if f.File != "" && (filepath.Dir(f.File) != routerDir || strings.HasSuffix(f.File, "_test.go")) {
+			return filepath.Join(filepath.Base(filepath.Dir(f.File)), filepath.Base(f.File)) + ":" + strconv.Itoa(f.Line)
+		}
+		if !more {
+			return ""
+		}
+	}
 }
 
 // GET registers h for GET. See [Router.Handle].
