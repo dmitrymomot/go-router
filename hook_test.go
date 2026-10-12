@@ -1,6 +1,14 @@
 package router
 
-import "testing"
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"slices"
+	"testing"
+
+	"github.com/dmitrymomot/go-router/internal/routerhook"
+)
 
 func TestFillPatternWritesEveryPartAndKeepsAnUnbalancedBrace(t *testing.T) {
 	value := func(name, constraint string) string { return "<" + name + ":" + constraint + ">" }
@@ -21,5 +29,43 @@ func TestFillPatternWritesEveryPartAndKeepsAnUnbalancedBrace(t *testing.T) {
 		if got, _ := fillPattern(tt.pattern, tt.host, value); got != tt.want {
 			t.Errorf("fillPattern(%q) = %q, want %q", tt.pattern, got, tt.want)
 		}
+	}
+}
+
+func TestOnHandlerDoneRunsBeforeTheErrorHandlerInReverse(t *testing.T) {
+	var got []string
+	r := newPooledRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.ErrorHandler(func(c *pctx, err error) error {
+		got = append(got, "error handler")
+		return c.NoContent(http.StatusTeapot)
+	})
+	r.GET("/hook", func(c *pctx) error {
+		routerhook.OnHandlerDone(&c.Base, func() { got = append(got, "first") })
+		routerhook.OnHandlerDone(&c.Base, func() { got = append(got, "second") })
+		return errors.New("boom")
+	})
+	r.GET("/plain", func(c *pctx) error { return c.NoContent(http.StatusNoContent) })
+	r.GET("/panic", func(c *pctx) error {
+		routerhook.OnHandlerDone(&c.Base, func() { got = append(got, "panic") })
+		panic("boom")
+	})
+
+	do(r, http.MethodGet, "/hook")
+	if want := []string{"second", "first", "error handler"}; !slices.Equal(got, want) {
+		t.Errorf("order = %q, want %q", got, want)
+	}
+
+	// The pooled context comes back without the functions of the last request.
+	got = nil
+	do(r, http.MethodGet, "/plain")
+	if got != nil {
+		t.Errorf("a later request ran %q", got)
+	}
+
+	got = nil
+	do(r, http.MethodGet, "/panic")
+	if want := []string{"panic", "error handler"}; !slices.Equal(got, want) {
+		t.Errorf("order after a panic = %q, want %q", got, want)
 	}
 }
