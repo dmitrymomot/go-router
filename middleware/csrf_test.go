@@ -27,6 +27,21 @@ func csrfRouter(cfg middleware.CSRFConfig[*appContext]) *router.Router[*appConte
 	return r
 }
 
+// unmaskToken reverses the mask that CSRFTokenFrom puts on a token: the pad,
+// then the token XOR the pad, in base64url.
+func unmaskToken(t *testing.T, masked string) string {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(masked)
+	if err != nil || len(raw) != 64 {
+		t.Fatalf("%q is not a masked token: %d bytes, %v", masked, len(raw), err)
+	}
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = raw[i] ^ raw[32+i]
+	}
+	return base64.RawURLEncoding.EncodeToString(out)
+}
+
 func csrfCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	for _, c := range rec.Result().Cookies() {
@@ -63,15 +78,16 @@ func TestCSRFIssuesATokenOnASafeRequest(t *testing.T) {
 	if token == "" {
 		t.Fatal("no token on the context")
 	}
-	if got := csrfCookie(t, rec).Value; got != token {
-		t.Errorf("cookie = %q, want the token that the handler read", got)
+	cookie := csrfCookie(t, rec).Value
+	if got := unmaskToken(t, token); got != cookie {
+		t.Errorf("cookie = %q, want the token that the handler read, which is %q unmasked", cookie, got)
 	}
 
 	if got := rec.Header().Values(router.HeaderVary); !containsFold(got, router.HeaderCookie) {
 		t.Errorf("vary = %q, want it to name Cookie", got)
 	}
 
-	raw, err := base64.RawURLEncoding.DecodeString(token)
+	raw, err := base64.RawURLEncoding.DecodeString(cookie)
 	if err != nil {
 		t.Fatalf("the token is not raw URL base64: %v", err)
 	}
@@ -95,10 +111,10 @@ func TestCSRFTokensDiffer(t *testing.T) {
 
 func TestCSRFKeepsTheTokenOfTheCookie(t *testing.T) {
 	r := csrfRouter(middleware.CSRFConfig[*appContext]{})
-	token, cookie := csrfSession(t, r)
+	_, cookie := csrfSession(t, r)
 
 	rec := do(r, withCookie(httptest.NewRequest(http.MethodGet, "/", nil), cookie))
-	if got := rec.Body.String(); got != token {
+	if got := unmaskToken(t, rec.Body.String()); got != cookie.Value {
 		t.Errorf("token = %q, want the one that the cookie carries", got)
 	}
 	if got := rec.Result().Cookies(); len(got) != 0 {
@@ -424,7 +440,7 @@ func TestCSRFCookieAttributes(t *testing.T) {
 		if len(cookies) != 1 || cookies[0].Name != "session_csrf" {
 			t.Fatalf("cookies = %v, want one named session_csrf", cookies)
 		}
-		if cookies[0].Value != rec.Body.String() {
+		if cookies[0].Value != unmaskToken(t, rec.Body.String()) {
 			t.Error("the cookie does not carry the token that the handler read")
 		}
 	})
@@ -450,9 +466,14 @@ func TestCSRFTokenReachesAComponent(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
 	}
-	want := `<input type="hidden" name="_csrf" value="` + csrfCookie(t, rec).Value + `">`
-	if got := rec.Body.String(); got != want {
-		t.Errorf("page = %q, want %q", got, want)
+	const prefix, suffix = `<input type="hidden" name="_csrf" value="`, `">`
+	page := rec.Body.String()
+	if !strings.HasPrefix(page, prefix) || !strings.HasSuffix(page, suffix) {
+		t.Fatalf("page = %q, want a hidden input", page)
+	}
+	token := unmaskToken(t, strings.TrimSuffix(strings.TrimPrefix(page, prefix), suffix))
+	if want := csrfCookie(t, rec).Value; token != want {
+		t.Errorf("token = %q, want the cookie %q", token, want)
 	}
 }
 
@@ -498,7 +519,10 @@ func containsFold(values []string, want string) bool {
 func TestCSRFHostCookieOverHTTPS(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.CSRF[*appContext])
-	r.GET("/", func(c *appContext) error { return c.NoContent(http.StatusOK) })
+	r.GET("/", func(c *appContext) error {
+		middleware.CSRFTokenFrom(c)
+		return c.NoContent(http.StatusOK)
+	})
 	req := httptest.NewRequest(http.MethodGet, "https://app.example/", nil)
 	rec := do(r, req)
 	cookies := rec.Result().Cookies()

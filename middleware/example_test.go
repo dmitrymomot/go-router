@@ -40,7 +40,8 @@ func ExampleCSRF() {
 	r.Use(middleware.CSRF[*Context])
 
 	// The token reaches the page through the context, and comes back in the
-	// _csrf form field. It is also the value of the _csrf cookie.
+	// _csrf form field. The page carries the token under a mask that changes
+	// on every render, so it differs from the value of the _csrf cookie.
 	r.GET("/form", func(c *Context) error {
 		return c.String(http.StatusOK, fmt.Sprintf(`<input name="_csrf" value=%q>`,
 			middleware.CSRFTokenFrom(c)))
@@ -49,13 +50,14 @@ func ExampleCSRF() {
 
 	form := routertest.Get(r, "/form")
 	cookie := form.Cookies()[0]
+	token := strings.Split(form.String(), `"`)[3]
 
 	saved := routertest.Do(r, http.MethodPost, "/save",
 		routertest.Cookie(cookie),
-		routertest.FormBody(url.Values{"_csrf": {cookie.Value}}))
+		routertest.FormBody(url.Values{"_csrf": {token}}))
 	forged := routertest.Do(r, http.MethodPost, "/save", routertest.Cookie(cookie))
 
-	fmt.Println(cookie.Name, strings.Contains(form.String(), cookie.Value))
+	fmt.Println(cookie.Name, token != cookie.Value)
 	fmt.Println(saved.StatusCode, saved.String())
 	fmt.Println(forged.StatusCode, forged.String())
 	// Output:

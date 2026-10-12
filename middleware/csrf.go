@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"net/http"
 	"slices"
@@ -11,7 +12,8 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// CSRFTokenKey is where [CSRF] stores the token on the context.
+// CSRFTokenKey is the context key under which [CSRF] keeps the state that
+// [CSRFTokenFrom] reads. The value is not a string; call [CSRFTokenFrom].
 const CSRFTokenKey = "csrf_token"
 
 // The cookies and the form field that [CSRF] uses when the configuration names
@@ -74,11 +76,13 @@ type CSRFConfig[C router.Context] struct {
 	AllowSecFetchSite func(c C) (bool, error)
 }
 
-// CSRF issues a token, puts it in a cookie and on the context, and refuses an
-// unsafe request that does not send it back. GET, HEAD, OPTIONS, TRACE and
-// QUERY pass through and still get a token. A cookie that does not hold a
-// token of the shape CSRF issues counts as absent, and a new token replaces
-// it.
+// CSRF issues a token in a cookie, and refuses an unsafe request that does not
+// send it back. GET, HEAD, OPTIONS, TRACE and QUERY pass through. The cookie
+// goes out, and Cookie joins Vary, only when something needs the token: a call
+// of [CSRFTokenFrom] during the request, or the check of an unsafe request. A
+// safe request that never reads the token gets neither, so a page that has no
+// form stays cacheable. A cookie that does not hold a token of the shape CSRF
+// issues counts as absent, and a new token replaces it.
 //
 // A request that Sec-Fetch-Site marks as same-origin passes without a token,
 // which is what lets a browser that sends the header carry an ordinary form.
@@ -126,7 +130,13 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig[C]) router.Middleware[C] {
 	if cfg.AllowSecFetchSite == nil {
 		cfg.AllowSecFetchSite = secFetchSite[C](trusted, cfg.CookieName)
 	}
-	maxAge := int(cfg.CookieMaxAge.Seconds())
+	cookie := &csrfCookie{
+		path:     cfg.CookiePath,
+		domain:   cfg.CookieDomain,
+		maxAge:   int(cfg.CookieMaxAge.Seconds()),
+		httpOnly: cfg.CookieHTTPOnly,
+		sameSite: cfg.CookieSameSite,
+	}
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
@@ -134,30 +144,21 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig[C]) router.Middleware[C] {
 				return next(c)
 			}
 
-			router.AddVary(c.Response().Header(), router.HeaderCookie)
-
 			https := router.SchemeOf(c.Request()) == "https"
-			name := csrfCookieName(cfg.CookieName, https)
-			token := csrfCookieToken(c.Request(), name)
-			if token == "" {
-				token = newCSRFToken()
-				http.SetCookie(c.Response(), &http.Cookie{
-					Name:     name,
-					Value:    token,
-					Path:     cfg.CookiePath,
-					Domain:   cfg.CookieDomain,
-					MaxAge:   maxAge,
-					Secure:   alwaysSecure || https,
-					HttpOnly: cfg.CookieHTTPOnly,
-					SameSite: cfg.CookieSameSite,
-				})
+			state := &csrfState{
+				res:    c.Response(),
+				req:    c.Request(),
+				name:   csrfCookieName(cfg.CookieName, https),
+				cookie: cookie,
+				secure: alwaysSecure || https,
 			}
-			c.Set(CSRFTokenKey, token)
+			c.Set(CSRFTokenKey, state)
 
 			if isSafeMethod(c.Request().Method) {
 				return next(c)
 			}
 
+			token := state.token()
 			allowed, err := cfg.AllowSecFetchSite(c)
 			if err != nil {
 				return err
@@ -170,11 +171,103 @@ func CSRFWithConfig[C router.Context](cfg CSRFConfig[C]) router.Middleware[C] {
 	}
 }
 
-// CSRFTokenFrom reports the token that [CSRF] stored, for a template to render
-// into a hidden form field. It reports "" when the middleware did not run.
+// CSRFTokenFrom reports the token of the request for a template to render into
+// a hidden form field, or "" when [CSRF] did not run. The first call issues the
+// cookie and adds Cookie to Vary, so call it before the handler writes the
+// answer: a cookie set after that never reaches the client.
+//
+// Each call returns a new string, the token under a random mask, so that the
+// bytes of a page that carries it differ from one render to the next and a
+// compression oracle cannot learn it (BREACH). [CSRF] unmasks what comes back,
+// and still takes the bare token that the cookie holds, which a script may
+// read and send in a header.
 func CSRFTokenFrom(c router.Context) string {
-	s, _ := c.Value(CSRFTokenKey).(string)
-	return s
+	s, ok := c.Value(CSRFTokenKey).(*csrfState)
+	if !ok {
+		return ""
+	}
+	return maskCSRFToken(s.token())
+}
+
+// csrfCookie holds the attributes of the cookie that carries the token.
+type csrfCookie struct {
+	path     string
+	domain   string
+	maxAge   int
+	httpOnly bool
+	sameSite http.SameSite
+}
+
+// csrfState is what [CSRF] keeps on the context. It reads the cookie, or issues
+// one, the first time something needs the token.
+type csrfState struct {
+	res    http.ResponseWriter
+	req    *http.Request
+	name   string
+	cookie *csrfCookie
+	secure bool
+	value  string
+}
+
+// token reports the bare token of the request. On the first call it adds Cookie
+// to Vary, and sets the cookie unless the request carries a good one.
+func (s *csrfState) token() string {
+	if s.value != "" {
+		return s.value
+	}
+	router.AddVary(s.res.Header(), router.HeaderCookie)
+	s.value = csrfCookieToken(s.req, s.name)
+	if s.value == "" {
+		s.value = newCSRFToken()
+		http.SetCookie(s.res, &http.Cookie{
+			Name:     s.name,
+			Value:    s.value,
+			Path:     s.cookie.path,
+			Domain:   s.cookie.domain,
+			MaxAge:   s.cookie.maxAge,
+			Secure:   s.secure,
+			HttpOnly: s.cookie.httpOnly,
+			SameSite: s.cookie.sameSite,
+		})
+	}
+	return s.value
+}
+
+// csrfMaskedLength is the length of a masked token: the pad and the masked
+// token side by side.
+var csrfMaskedLength = base64.RawURLEncoding.EncodedLen(2 * csrfTokenBytes)
+
+// maskCSRFToken XORs the token with a fresh random pad of its own length and
+// reports the pad followed by the result, in base64url.
+func maskCSRFToken(token string) string {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(raw) != csrfTokenBytes {
+		return token
+	}
+	var out [2 * csrfTokenBytes]byte
+	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program instead.
+	rand.Read(out[:csrfTokenBytes])
+	for i := range csrfTokenBytes {
+		out[csrfTokenBytes+i] = out[i] ^ raw[i]
+	}
+	return base64.RawURLEncoding.EncodeToString(out[:])
+}
+
+// csrfSentMatches reports whether sent is the token, bare or masked.
+func csrfSentMatches(sent, token string) bool {
+	if len(sent) != csrfMaskedLength {
+		return SecureCompare(sent, token)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(sent)
+	want, werr := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || werr != nil || len(raw) != 2*csrfTokenBytes || len(want) != csrfTokenBytes {
+		return false
+	}
+	var unmasked [csrfTokenBytes]byte
+	for i := range csrfTokenBytes {
+		unmasked[i] = raw[i] ^ raw[csrfTokenBytes+i]
+	}
+	return subtle.ConstantTimeCompare(unmasked[:], want) == 1
 }
 
 // csrfCookieName reports the name of the cookie in use: the configured one,
@@ -217,7 +310,7 @@ func isCSRFToken(s string) bool {
 
 func csrfTokenMatches(c router.Context, sources []TokenSource, token string) bool {
 	for sent := range readTokens(c, sources) {
-		if SecureCompare(sent, token) {
+		if csrfSentMatches(sent, token) {
 			return true
 		}
 	}
