@@ -3,10 +3,10 @@
 # Pinned here and not in go.mod: a tool directive would put the linter tree
 # into the module graph of every importer.
 gofumpt := "mvdan.cc/gofumpt@v0.11.0"
-goimports := "golang.org/x/tools/cmd/goimports@v0.49.0"
-modernize := "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@v0.49.0"
-betteralign := "github.com/dkorunic/betteralign/cmd/betteralign@v0.15.0"
-golangci := "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2"
+goimports := "golang.org/x/tools/cmd/goimports@v0.52.0"
+modernize := "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@v0.52.0"
+betteralign := "github.com/dkorunic/betteralign/cmd/betteralign@v0.15.3"
+golangci := "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0"
 govulncheck := "golang.org/x/vuln/cmd/govulncheck@v1.7.0"
 actionlint := "github.com/rhysd/actionlint/cmd/actionlint@v1.7.12"
 
