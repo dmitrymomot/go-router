@@ -2504,7 +2504,7 @@ func TestScopeFallbackPrefersTheDeeperScopeOnAnEqualPrefix(t *testing.T) {
 }
 
 // The host comes first, before any of the specificity above: a scope belongs to
-// the host it was declared under, and scopeFallback.hostIdx keeps it there. A
+// the host it was declared under, and the scope index of each host keeps it there. A
 // request that matched a host never reaches an any-host scope, however much
 // more specific that scope's prefix is.
 func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
@@ -3508,5 +3508,27 @@ func TestRedirectTrailingSlashLeavesACatchAllAlone(t *testing.T) {
 	}
 	if rec := do(r, http.MethodGet, "/users/"); rec.Header().Get(HeaderLocation) != "/users" {
 		t.Errorf("GET /users/ Location = %q, want /users", rec.Header().Get(HeaderLocation))
+	}
+}
+
+// A preflight and a 405 reuse the cached Allow header and the inline
+// parameter array, so a pooled router answers them without allocating.
+func TestPreflightAndMethodNotAllowedDoNotAllocate(t *testing.T) {
+	r := NewPooled(func() *tctx { return new(tctx) }, func(*tctx) {})
+	r.GET("/users/{id}", echoRoute)
+	w := &nopWriter{h: make(http.Header)}
+	for _, method := range []string{http.MethodOptions, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/users/42", nil)
+		r.ServeHTTP(w, req)
+		if got := w.h.Get(HeaderAllow); got != "GET, HEAD, OPTIONS" {
+			t.Fatalf("%s Allow = %q", method, got)
+		}
+		if method == http.MethodDelete {
+			// The error answer writes a body; only routing is measured here.
+			continue
+		}
+		if allocs := testing.AllocsPerRun(100, func() { r.ServeHTTP(w, req) }); allocs != 0 {
+			t.Errorf("%s allocates %v times per request, want 0", method, allocs)
+		}
 	}
 }

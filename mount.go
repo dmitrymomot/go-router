@@ -34,7 +34,11 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 		panic("router: a router is mounted inside itself")
 	}
 	sub.mustNotCarryRootOnlySettings()
+	// One compile at the end, of the shim and the subtree it now holds.
+	r.inOneScope(func() { r.mount(prefix, sub) })
+}
 
+func (r *Router[C]) mount(prefix string, sub *Router[C]) {
 	shim := r.newChild(prefix, nil, nil)
 	defer r.guard("mount a router")()
 	shim.children = append(shim.children, sub)
@@ -51,7 +55,7 @@ func (r *Router[C]) Mount(prefix string, sub *Router[C]) {
 	}
 	sub.installSubtree()
 	closeSubtree(sub)
-	r.settingChanged()
+	shim.settingChanged()
 }
 
 // closeSubtree shuts a mounted subtree to further registration: its routes are

@@ -35,13 +35,15 @@ type node[C Context] struct {
 	catchAll    int // 1 + the index in routes of the Any route, or 0
 	rec         *routeRecord
 	names       []string
+	// allow is the Allow header of a node that holds routes, ready to put in
+	// a header map: its capacity is one, so an append copies it.
+	allow []string
 }
 
 // insert adds mh under segs, which the caller parsed from pattern with names
 // as its parameters. pattern names the route in errors and in the table.
 func (n *node[C]) insert(
-	pattern string, segs []segment, names, hostNames []string, mh methodHandler[C],
-	autoOptions bool, allow map[*node[C]]string,
+	pattern string, segs []segment, names, hostNames []string, mh methodHandler[C], autoOptions bool,
 ) error {
 	if len(hostNames) > 0 {
 		for _, hn := range hostNames {
@@ -78,7 +80,7 @@ func (n *node[C]) insert(
 	if mh.method == anyMethod {
 		cur.catchAll = len(cur.routes)
 	}
-	allow[cur] = strings.Join(cur.allowed(autoOptions), ", ")
+	cur.cacheAllow(autoOptions)
 	return nil
 }
 
@@ -210,33 +212,29 @@ func (n *node[C]) allowed(autoOptions bool) []string {
 	return out
 }
 
-// insert keeps every entry current, so this only runs when the OPTIONS setting
-// changes after some routes are already in.
-func (n *node[C]) recacheAllow(autoOptions bool, allow map[*node[C]]string) {
-	if len(n.routes) > 0 {
-		allow[n] = strings.Join(n.allowed(autoOptions), ", ")
-	}
-	for _, c := range n.statics {
-		c.recacheAllow(autoOptions, allow)
-	}
-	for _, c := range n.templates {
-		c.recacheAllow(autoOptions, allow)
-	}
-	for _, c := range n.constrained {
-		c.recacheAllow(autoOptions, allow)
-	}
-	if n.param != nil {
-		n.param.recacheAllow(autoOptions, allow)
-	}
-	if n.wildcard != nil {
-		n.wildcard.recacheAllow(autoOptions, allow)
-	}
+func (n *node[C]) cacheAllow(autoOptions bool) {
+	n.allow = []string{strings.Join(n.allowed(autoOptions), ", ")}
 }
 
+// insert keeps every entry current, so this only runs when the OPTIONS setting
+// changes after some routes are already in.
+func (n *node[C]) recacheAllow(autoOptions bool) {
+	n.walk(func(n *node[C]) { n.cacheAllow(autoOptions) })
+}
+
+// matchState is what search leaves behind: the route it took, or else the
+// nodes that matched the path for other methods.
 type matchState[C Context] struct {
+	// hit is the route of the node search returned, so the caller does not
+	// look the method up a second time.
+	hit       *methodHandler[C]
 	pathMatch *node[C]
-	pathVals  []string
-	rest      *[]*node[C]
+	// The values of pathMatch: in pathArr up to maxInlineParams, so a 405 or
+	// a preflight does not allocate for them, and in pathVals past that.
+	pathVals []string
+	pathArr  [maxInlineParams]string
+	pathN    int
+	rest     *[]*node[C]
 }
 
 func (st *matchState[C]) record(n *node[C], vals []string) {
@@ -245,7 +243,11 @@ func (st *matchState[C]) record(n *node[C], vals []string) {
 	}
 	if st.pathMatch == nil {
 		st.pathMatch = n
-		st.pathVals = slices.Clone(vals)
+		if len(vals) <= maxInlineParams {
+			st.pathN = copy(st.pathArr[:], vals)
+		} else {
+			st.pathVals = slices.Clone(vals)
+		}
 		return
 	}
 	if n == st.pathMatch {
@@ -281,13 +283,15 @@ func (st *matchState[C]) allowedMethods(dst []string, autoOptions bool) []string
 
 func search[C Context](n *node[C], rest, method string, vals []string, st *matchState[C], escaped bool) (*node[C], []string) {
 	if rest == "" {
-		if n.lookup(method) != nil {
+		if mh := n.lookup(method); mh != nil {
+			st.hit = mh
 			return n, vals
 		}
 		st.record(n, vals)
 		if n.wildcard != nil {
 			w := append(vals, "")
-			if n.wildcard.lookup(method) != nil {
+			if mh := n.wildcard.lookup(method); mh != nil {
+				st.hit = mh
 				return n.wildcard, w
 			}
 			st.record(n.wildcard, w)
@@ -357,7 +361,8 @@ func search[C Context](n *node[C], rest, method string, vals []string, st *match
 
 	if n.wildcard != nil {
 		w := append(vals, rest[1:])
-		if n.wildcard.lookup(method) != nil {
+		if mh := n.wildcard.lookup(method); mh != nil {
+			st.hit = mh
 			return n.wildcard, w
 		}
 		st.record(n.wildcard, w)

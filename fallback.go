@@ -13,7 +13,6 @@ type scopeFallback[C Context] struct {
 	names           []string
 	pattern         []segment
 	depth           int
-	hostIdx         int32
 	errIdx          int32
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
@@ -73,20 +72,160 @@ func cutSegment(p string) (seg, rest string) {
 	return p, ""
 }
 
-func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path string, escaped bool) *scopeFallback[C] {
-	if len(scopes) == 0 {
-		return nil
+// scopeNode indexes the scope prefixes of one host by segment, so the fallback
+// of a path costs a walk down its own segments rather than a test of every
+// scope. An edge holds every prefix whose segments match it alike: one literal,
+// one template shape, one constraint, any parameter, or the catch-all.
+type scopeNode[C Context] struct {
+	statics     map[string]*scopeNode[C]
+	templates   []*scopeNode[C]
+	constrained []*scopeNode[C]
+	param       *scopeNode[C]
+	wildcard    *scopeNode[C]
+	seg         segment
+	key         string
+	// here holds the scopes whose prefix ends at this node, best first.
+	here []*scopeFallback[C]
+}
+
+// child returns the node under n for seg, adding it when add is set.
+func (n *scopeNode[C]) child(seg segment, add bool) *scopeNode[C] {
+	var list *[]*scopeNode[C]
+	key := ""
+	switch seg.kind {
+	case segStatic:
+		if c := n.statics[seg.value]; c != nil || !add {
+			return c
+		}
+		if n.statics == nil {
+			n.statics = make(map[string]*scopeNode[C])
+		}
+		c := &scopeNode[C]{seg: seg}
+		n.statics[seg.value] = c
+		return c
+	case segParam:
+		if n.param == nil && add {
+			n.param = &scopeNode[C]{seg: seg}
+		}
+		return n.param
+	case segWildcard:
+		if n.wildcard == nil && add {
+			n.wildcard = &scopeNode[C]{seg: seg}
+		}
+		return n.wildcard
+	case segTemplate:
+		list, key = &n.templates, templateSkeleton(seg.parts)
+	default:
+		list, key = &n.constrained, seg.m.key
 	}
-	idx := int32(-1)
-	if host != nil {
-		idx = host.idx
-	}
-	for _, s := range scopes {
-		if s.hostIdx == idx && s.covers(path, escaped) {
-			return s
+	for _, c := range *list {
+		if c.key == key {
+			return c
 		}
 	}
+	if !add {
+		return nil
+	}
+	c := &scopeNode[C]{seg: seg, key: key}
+	*list = append(*list, c)
+	return c
+}
+
+// add puts s in the index after every scope that sorts before it or ties with
+// it, so a tie keeps the order in which compile walked the scopes. It reports
+// false, adding nothing, when unique is set and a scope with the same prefix,
+// depth and host is already in: the walk order alone decides between those.
+func (n *scopeNode[C]) add(s *scopeFallback[C], unique bool) bool {
+	cur := n
+	for _, seg := range s.pattern {
+		cur = cur.child(seg, true)
+	}
+	if unique && slices.ContainsFunc(cur.here, func(o *scopeFallback[C]) bool { return compareScopes(s, o) == 0 }) {
+		return false
+	}
+	i := slices.IndexFunc(cur.here, func(o *scopeFallback[C]) bool { return compareScopes(s, o) < 0 })
+	if i < 0 {
+		i = len(cur.here)
+	}
+	cur.here = slices.Insert(cur.here, i, s)
+	return true
+}
+
+// find returns the scope that sorts first among those whose prefix covers
+// path, as compareScopes orders them: at each segment a literal beats a
+// template, a template a constraint, a constraint a parameter and a parameter
+// the catch-all, and a longer prefix beats one it extends.
+func (n *scopeNode[C]) find(path string, escaped bool) *scopeFallback[C] {
+	if path != "" {
+		raw, rest := cutSegment(path)
+		if c := n.statics[raw]; c != nil {
+			if s := c.find(rest, escaped); s != nil {
+				return s
+			}
+		}
+		if n.templates != nil || n.constrained != nil || n.param != nil {
+			if decoded, ok := decodePathSegment(raw, escaped); ok {
+				// Siblings of one kind tie on this segment, so the rest of the
+				// prefix decides between their candidates.
+				for _, group := range [2][]*scopeNode[C]{n.templates, n.constrained} {
+					var best *scopeFallback[C]
+					for _, c := range group {
+						if !segmentMatches(c.seg, decoded) {
+							continue
+						}
+						if s := c.find(rest, escaped); s != nil && (best == nil || compareScopes(s, best) < 0) {
+							best = s
+						}
+					}
+					if best != nil {
+						return best
+					}
+				}
+				if n.param != nil && decoded != "" {
+					if s := n.param.find(rest, escaped); s != nil {
+						return s
+					}
+				}
+			}
+		}
+	}
+	if n.wildcard != nil && len(n.wildcard.here) > 0 {
+		return n.wildcard.here[0]
+	}
+	if len(n.here) > 0 {
+		return n.here[0]
+	}
 	return nil
+}
+
+// compareScopes orders scope prefixes most specific first: segment by segment
+// by kind, then the longer prefix, then the deeper scope, then the text.
+func compareScopes[C Context](a, b *scopeFallback[C]) int {
+	for i := range min(len(a.pattern), len(b.pattern)) {
+		as := segmentSpecificity(a.pattern[i].kind)
+		bs := segmentSpecificity(b.pattern[i].kind)
+		if as != bs {
+			return bs - as
+		}
+	}
+	if len(a.pattern) != len(b.pattern) {
+		return len(b.pattern) - len(a.pattern)
+	}
+	if a.depth != b.depth {
+		return b.depth - a.depth
+	}
+	return strings.Compare(a.prefix, b.prefix)
+}
+
+func (e *engine[C]) scopeFor(host *hostEntry[C], path string, escaped bool) *scopeFallback[C] {
+	idx := e.scopeIdx
+	if host != nil {
+		idx = host.scopeIdx
+	}
+	if idx == nil {
+		return nil
+	}
+	return idx.find(path, escaped)
 }
 
 // fallbackChains picks the 404, 405 and OPTIONS answers for a path no route
@@ -94,7 +233,7 @@ func scopeFor[C Context](scopes []*scopeFallback[C], host *hostEntry[C], path st
 func (e *engine[C]) fallbackChains(
 	host *hostEntry[C], path string, escaped bool,
 ) (scope *scopeFallback[C], notFound, notAllowed, options HandlerFunc[C], errIdx int32) {
-	if s := scopeFor(e.scopes, host, path, escaped); s != nil {
+	if s := e.scopeFor(host, path, escaped); s != nil {
 		return s, s.notFoundChain, s.notAllowedChain, s.optionsChain, s.errIdx
 	}
 	if host != nil {
@@ -129,25 +268,21 @@ func (s *scopeFallback[C]) bindPrefixParams(b *Base, path string, escaped bool) 
 
 func autoOptions[C Context](c C) error { return c.base().NoContent(http.StatusNoContent) }
 
-func (e *engine[C]) allowHeader(host, anyHost *matchState[C]) string {
+// allowHeader returns the values of the Allow header: the cached ones of the
+// node when one node matched the path, else a list built for this request.
+func (e *engine[C]) allowHeader(host, anyHost *matchState[C]) []string {
 	if host.rest == nil && anyHost.rest == nil {
-		var only *node[C]
 		switch {
 		case host.pathMatch != nil && anyHost.pathMatch == nil:
-			only = host.pathMatch
+			return host.pathMatch.allow
 		case anyHost.pathMatch != nil && host.pathMatch == nil:
-			only = anyHost.pathMatch
-		}
-		if only != nil {
-			if s, ok := e.allowCache[only]; ok {
-				return s
-			}
+			return anyHost.pathMatch.allow
 		}
 	}
 	out := host.allowedMethods(nil, e.autoOptions)
 	out = anyHost.allowedMethods(out, e.autoOptions)
 	slices.Sort(out)
-	return strings.Join(out, ", ")
+	return []string{strings.Join(out, ", ")}
 }
 
 // canMatch reports whether the path without its trailing slash reaches a

@@ -73,6 +73,12 @@ type Router[C Context] struct {
 	hasRoutes    bool
 	closed       bool
 	refreshDepth int
+	// fresh marks a scope opened since the last compile; freshScopes, on the
+	// root, lists them, and fullCompile asks the next refresh for the whole
+	// graph.
+	fresh       bool
+	fullCompile bool
+	freshScopes []*Router[C]
 	meta         []any
 	hosts        []hostSpec
 	inHost       bool
@@ -90,8 +96,8 @@ type engine[C Context] struct {
 	tree    *node[C]
 	hostSet *hostSet[C]
 
-	allowCache      map[*node[C]]string
-	scopes          []*scopeFallback[C]
+	// scopeIdx indexes the scopes with a prefix that answer for every host.
+	scopeIdx        *scopeNode[C]
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
@@ -106,6 +112,7 @@ type engine[C Context] struct {
 	// routes read it, and the value compile resolved for it.
 	errSlots    map[errKey[C]]*int32
 	errResolved map[errKey[C]]int32
+	owners      map[*Router[C]]int32
 	mountPaths  map[mountPath[C]]*mountPath[C]
 }
 
@@ -144,7 +151,6 @@ func (e *engine[C]) mountIn(outer *mountPath[C], shim *Router[C]) *mountPath[C] 
 func newEngine[C Context]() *engine[C] {
 	return &engine[C]{
 		tree:        new(node[C]),
-		allowCache:  map[*node[C]]string{},
 		autoOptions: true,
 		// A router that never calls a setter still has to answer.
 		notFoundChain:   defaultNotFound[C],
@@ -278,7 +284,7 @@ func (r *Router[C]) install(reg registration[C]) {
 	if len(entries) == 0 {
 		eng.anyHostRoutes = true
 		mh.errIdx = r.errSlot(eng, nil)
-		if err := eng.tree.insert(full, segs, names, nil, mh, eng.autoOptions, eng.allowCache); err != nil {
+		if err := eng.tree.insert(full, segs, names, nil, mh, eng.autoOptions); err != nil {
 			panic(err.Error())
 		}
 		return
@@ -297,7 +303,7 @@ func (r *Router[C]) install(reg registration[C]) {
 			panic("router: the host " + e.pattern + " already holds routes, so RedirectHost cannot own it")
 		}
 		mh.errIdx = r.errSlot(eng, e)
-		if err := e.tree.insert(full, segs, names, e.names, mh, eng.autoOptions, eng.allowCache); err != nil {
+		if err := e.tree.insert(full, segs, names, e.names, mh, eng.autoOptions); err != nil {
 			panic(err.Error())
 		}
 		if claim {
@@ -504,10 +510,10 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 	defer r.guard("change the OPTIONS setting")()
 	root := r.root
 	root.eng.autoOptions = on
-	root.eng.tree.recacheAllow(on, root.eng.allowCache)
+	root.eng.tree.recacheAllow(on)
 	if root.eng.hostSet != nil {
 		for _, e := range root.eng.hostSet.all {
-			e.tree.recacheAllow(on, root.eng.allowCache)
+			e.tree.recacheAllow(on)
 		}
 	}
 }
