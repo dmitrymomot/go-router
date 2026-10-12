@@ -407,7 +407,7 @@ func TestTimeoutsReachTheServer(t *testing.T) {
 	}{
 		{
 			name: "the zero config bounds the headers alone",
-			want: timeouts{header: serve.DefaultReadHeaderTimeout},
+			want: timeouts{header: serve.DefaultReadHeaderTimeout, idle: serve.DefaultIdleTimeout},
 		},
 		{
 			name: "every timeout passes through",
@@ -422,7 +422,12 @@ func TestTimeoutsReachTheServer(t *testing.T) {
 		{
 			name: "a negative header timeout removes the deadline",
 			cfg:  serve.Config{ReadHeaderTimeout: -1},
-			want: timeouts{},
+			want: timeouts{idle: serve.DefaultIdleTimeout},
+		},
+		{
+			name: "a negative idle timeout removes the deadline",
+			cfg:  serve.Config{IdleTimeout: -1},
+			want: timeouts{header: serve.DefaultReadHeaderTimeout},
 		},
 	}
 
@@ -1140,5 +1145,59 @@ func TestRunChecksTheServerForAContextAlreadyDone(t *testing.T) {
 	}
 	if listened {
 		t.Error("Run bound an address for a context that is already done")
+	}
+}
+
+func TestDrainEndsLongLivedRequests(t *testing.T) {
+	var cause atomic.Value
+	entered := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(entered)
+		<-r.Context().Done()
+		cause.Store(context.Cause(r.Context()))
+	})
+	s := start(t, h, serve.Config{ShutdownTimeout: 2 * time.Second})
+
+	res, err := http.Get("http://" + s.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	<-entered
+
+	s.cancel()
+	select {
+	case err := <-s.errc:
+		s.stopped = true
+		if err != nil {
+			t.Fatalf("Run = %v, want nil: the stream should end with the drain", err)
+		}
+	case <-time.After(wait):
+		t.Fatal("Run did not return while a request stayed open")
+	}
+	if got, _ := cause.Load().(error); !errors.Is(got, serve.ErrDraining) {
+		t.Errorf("cause = %v, want ErrDraining", got)
+	}
+}
+
+func TestDrainKeepsTheBaseContextOfOnServer(t *testing.T) {
+	type key struct{}
+	got := make(chan any, 1)
+	h := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got <- r.Context().Value(key{}) })
+	s := start(t, h, serve.Config{OnServer: func(srv *http.Server) error {
+		srv.BaseContext = func(net.Listener) context.Context {
+			return context.WithValue(context.Background(), key{}, "mine")
+		}
+		return nil
+	}})
+	res, err := http.Get("http://" + s.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if v := <-got; v != "mine" {
+		t.Errorf("value = %v, want the one OnServer's BaseContext set", v)
 	}
 }
