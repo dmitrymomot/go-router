@@ -626,6 +626,10 @@ func (r *Router[C]) Logger(l *slog.Logger) {
 // JSONOptions sets the options that [Base.JSON], [Base.BindJSON] and the
 // SendJSON of package sse apply. The options of a single call win over these.
 //
+// json/v2 matches member names case-sensitively, so a member "Name" does not
+// fill a field tagged `json:"name"`; pass json.MatchCaseInsensitiveNames(true)
+// to match in any case.
+//
 // JSONOptions panics on a scope, on a mounted router, or after the router started
 // serving.
 func (r *Router[C]) JSONOptions(opts ...json.Options) {

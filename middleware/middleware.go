@@ -21,24 +21,36 @@
 // outermost. The middleware here fits together in this order, outermost
 // first:
 //
-//  1. [RealIP]
-//  2. [RequestID]
-//  3. [Logger]
-//  4. [Recover]
-//  5. [Secure] and [CORS]
-//  6. [Gzip]
-//  7. [HTMXRedirect]
-//  8. [BodyLimit], then [Decompress]
-//  9. [RateLimit] and auth: [KeyAuth] or [BasicAuth]
-//  10. [CSRF] or [CrossOrigin]
-//  11. [ParseForm]
-//  12. [MinDuration]
-//  13. [Idempotency]
-//  14. [Timeout]
-//  15. the handler
+//  1. [Heartbeat]
+//  2. [RealIP]
+//  3. [RequestID]
+//  4. [Logger]
+//  5. [Recover]
+//  6. [Secure] and [CORS], with [NoCache] and [Deprecation]
+//  7. [Gzip]
+//  8. [ETag]
+//  9. [HTMXRedirect]
+//  10. [Throttle]
+//  11. [BodyLimit], then [Decompress] and [AllowContentType]
+//  12. [RateLimit] and auth: [KeyAuth] or [BasicAuth]
+//  13. [CSRF] or [CrossOrigin]
+//  14. [ParseForm]
+//  15. [MinDuration]
+//  16. [Idempotency]
+//  17. [Timeout]
+//  18. the handler
 //
-// RealIP goes first, so everything after it sees the address and the scheme
-// of the client. RequestID goes before Logger, so the line carries the id.
+// [StripSlashes] and [MethodOverride] change the path or the method that picks
+// the route, so they wrap the router itself, as in
+// http.ListenAndServe(addr, middleware.StripSlashes(r)), rather than go in Use.
+//
+// Heartbeat goes first, so a probe skips the log, the limits and the rest.
+//
+// RealIP goes before the rest, so everything after it sees the address and
+// the scheme of the client. Secure and CSRF read the scheme through
+// router.SchemeOf, which trusts X-Forwarded-Proto as it stands; RealIP is what
+// keeps only a trusted proxy's value, so mount it whenever either runs.
+// RequestID goes before Logger, so the line carries the id.
 //
 // Logger goes outside Recover, so it logs the 500 of a panic. It answers the
 // error before it logs, so it also goes outside every middleware that replaces
@@ -47,13 +59,23 @@
 // Gzip and HTMXRedirect go outside Idempotency, so a replay is compressed, or
 // its redirect turned, for the request that asks again.
 //
+// ETag goes inside Gzip, so it hashes the body the handler wrote and Gzip
+// marks the tag of the encoding it sends. NoCache drops the conditional
+// headers of the request, so a route under it never answers 304: do not cover
+// a route with both.
+//
 // HTMXRedirect answers the error of a partial request itself, so that a
 // redirect of the error handler is turned too. Like Logger, it goes outside
 // Timeout, BodyLimit and Decompress, which replace an error on the way out.
 //
-// BodyLimit goes before anything that reads the body. ParseForm reads it under
-// the cap in force, and it goes after auth and CSRF, so a stranger cannot make
-// it read a large body. It goes outside Idempotency, so a form that is too
+// Throttle goes after Logger and Recover, so a request it turns away is
+// logged, and before the body is read and auth runs, so the slots it counts
+// cover that work too.
+//
+// BodyLimit goes before anything that reads the body, and AllowContentType
+// refuses a body of the wrong type before anything reads it. ParseForm reads
+// the body under the cap in force, and it goes after auth and CSRF, so a
+// stranger cannot make it read a large body. It goes outside Idempotency, so a form that is too
 // large or does not parse is refused before a key is read from it.
 //
 // RateLimit goes before auth when it counts addresses, and after it when it

@@ -415,6 +415,9 @@ func (b *Base) Scheme() string { return SchemeOf(b.req) }
 //
 // The header counts whoever sent it. The RealIP middleware in front by default
 // keeps only a trusted proxy's header, reduced to one value.
+// Mount the RealIP middleware wherever the scheme matters: without it a client
+// sets the scheme by sending X-Forwarded-Proto itself, and Secure (HSTS) and
+// CSRF (the Secure flag and the __Host- prefix of its cookie) trust that.
 func SchemeOf(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
