@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -56,54 +57,69 @@ func TestThrottleRejectsBeyondTheLimit(t *testing.T) {
 }
 
 func TestThrottleBacklogWaitsForASlot(t *testing.T) {
-	r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
-		Limit: 1, Backlog: 1, BacklogTimeout: 5 * time.Second,
-	})
-	codes := make(chan int, 2)
-	go func() { codes <- get(r, "/slow").Code }()
-	<-started
-	go func() { codes <- get(r, "/slow").Code }()
+	synctest.Test(t, func(t *testing.T) {
+		r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
+			Limit: 1, Backlog: 1, BacklogTimeout: 5 * time.Second,
+		})
+		codes := make(chan int, 2)
+		go func() { codes <- get(r, "/slow").Code }()
+		<-started
+		go func() { codes <- get(r, "/slow").Code }()
 
-	// Give the second request time to take the one place in the backlog; the
-	// third then finds the limit and the backlog both full.
-	time.Sleep(100 * time.Millisecond)
-	if rec := get(r, "/slow"); rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("third request = %d, want 429", rec.Code)
-	}
-	close(release)
-	for range 2 {
-		if code := <-codes; code != http.StatusOK {
-			t.Errorf("queued request = %d, want 200", code)
+		// Once every goroutine blocks, the second request holds the one place
+		// in the backlog; the third then finds the limit and the backlog both
+		// full.
+		synctest.Wait()
+		if rec := get(r, "/slow"); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("third request = %d, want 429", rec.Code)
 		}
-	}
+		close(release)
+		for range 2 {
+			if code := <-codes; code != http.StatusOK {
+				t.Errorf("queued request = %d, want 200", code)
+			}
+		}
+	})
 }
 
 func TestThrottleBacklogTimeoutAnd503(t *testing.T) {
-	r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
-		Limit: 1, Backlog: 1, BacklogTimeout: 20 * time.Millisecond, Status: http.StatusServiceUnavailable,
+	synctest.Test(t, func(t *testing.T) {
+		r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
+			Limit: 1, Backlog: 1, BacklogTimeout: 20 * time.Millisecond, Status: http.StatusServiceUnavailable,
+		})
+		defer close(release)
+		go get(r, "/slow")
+		<-started
+		begin := time.Now()
+		if rec := get(r, "/slow"); rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", rec.Code)
+		}
+		if waited := time.Since(begin); waited != 20*time.Millisecond {
+			t.Errorf("the request waited %s, want the BacklogTimeout of 20ms", waited)
+		}
 	})
-	defer close(release)
-	go get(r, "/slow")
-	<-started
-	if rec := get(r, "/slow"); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
-	}
 }
 
 func TestThrottleContextEndsTheWait(t *testing.T) {
-	r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
-		Limit: 1, Backlog: 1, BacklogTimeout: time.Minute,
-	})
-	defer close(release)
-	go get(r, "/slow")
-	<-started
+	synctest.Test(t, func(t *testing.T) {
+		r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
+			Limit: 1, Backlog: 1, BacklogTimeout: time.Minute,
+		})
+		defer close(release)
+		go get(r, "/slow")
+		<-started
 
-	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(20*time.Millisecond, cancel)
-	req := httptest.NewRequest(http.MethodGet, "/slow", nil).WithContext(ctx)
-	if rec := do(r, req); rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", rec.Code)
-	}
+		ctx, cancel := context.WithCancel(t.Context())
+		time.AfterFunc(20*time.Millisecond, cancel)
+		begin := time.Now()
+		req := httptest.NewRequest(http.MethodGet, "/slow", nil).WithContext(ctx)
+		if rec := do(r, req); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429", rec.Code)
+		}
+		if waited := time.Since(begin); waited != 20*time.Millisecond {
+			t.Errorf("the request waited %s, want 20ms, until its context ended", waited)
+		}
+	})
 }
 
 func TestThrottleOnRejectAndSkip(t *testing.T) {

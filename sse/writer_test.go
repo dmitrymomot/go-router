@@ -38,30 +38,33 @@ func TestWriteTimeout(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := &deadlineLog{ResponseRecorder: httptest.NewRecorder()}
-			before := time.Now()
-			serveTo(open(func(s *Writer) error {
-				return s.SendData("x")
-			}, tt.opts...), newReq(), w)
+			// The clock of the bubble stands still, so the deadline is exact.
+			synctest.Test(t, func(t *testing.T) {
+				w := &deadlineLog{ResponseRecorder: httptest.NewRecorder()}
+				before := time.Now()
+				serveTo(open(func(s *Writer) error {
+					return s.SendData("x")
+				}, tt.opts...), newReq(), w)
 
-			if len(w.deadlines) == 0 || !w.deadlines[0].IsZero() {
-				t.Fatalf("deadlines = %v, want the first to clear the deadline", w.deadlines)
-			}
-			rest := w.deadlines[1:]
-			if tt.want == 0 {
-				if len(rest) != 0 {
-					t.Fatalf("deadlines after the clear = %v, want none", rest)
+				if len(w.deadlines) == 0 || !w.deadlines[0].IsZero() {
+					t.Fatalf("deadlines = %v, want the first to clear the deadline", w.deadlines)
 				}
-				return
-			}
-			if len(rest) == 0 {
-				t.Fatal("no write deadline was set")
-			}
-			for _, d := range rest {
-				if got := d.Sub(before); got < tt.want || got > tt.want+5*time.Second {
-					t.Errorf("deadline in %s, want about %s", got, tt.want)
+				rest := w.deadlines[1:]
+				if tt.want == 0 {
+					if len(rest) != 0 {
+						t.Fatalf("deadlines after the clear = %v, want none", rest)
+					}
+					return
 				}
-			}
+				if len(rest) == 0 {
+					t.Fatal("no write deadline was set")
+				}
+				for _, d := range rest {
+					if got := d.Sub(before); got != tt.want {
+						t.Errorf("deadline in %s, want %s", got, tt.want)
+					}
+				}
+			})
 		})
 	}
 }
