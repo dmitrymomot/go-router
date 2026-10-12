@@ -15,12 +15,12 @@ import (
 	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
-// DecompressConfig configures [DecompressWithConfig]. MaxDecompressedSize is
+// DecompressConfig configures [DecompressWithConfig]. MaxBytes is
 // how many bytes a body expands to before the expansion stops, and zero takes
 // [router.DefaultMaxBodyBytes].
 type DecompressConfig[C router.Context] struct {
-	Skip                func(c C) bool
-	MaxDecompressedSize int64
+	Skip     func(c C) bool
+	MaxBytes int64
 }
 
 var gzipReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
@@ -58,12 +58,12 @@ func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc
 
 // DecompressWithConfig is [Decompress] with a configuration.
 //
-// DecompressWithConfig panics on a negative MaxDecompressedSize.
+// DecompressWithConfig panics on a negative MaxBytes.
 func DecompressWithConfig[C router.Context](cfg DecompressConfig[C]) router.Middleware[C] {
-	if cfg.MaxDecompressedSize < 0 {
-		panic("middleware: DecompressWithConfig needs a MaxDecompressedSize of zero or more")
+	if cfg.MaxBytes < 0 {
+		panic("middleware: DecompressWithConfig needs a MaxBytes of zero or more")
 	}
-	limit := cmp.Or(cfg.MaxDecompressedSize, router.DefaultMaxBodyBytes)
+	limit := cmp.Or(cfg.MaxBytes, router.DefaultMaxBodyBytes)
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {

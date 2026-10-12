@@ -295,7 +295,7 @@ func TestReadmeContracts(t *testing.T) {
 	store := middleware.NewRateLimitMemoryStoreWithConfig(middleware.RateLimitMemoryStoreConfig{
 		Rate:       10,
 		Burst:      30,
-		ExpiresIn:  time.Minute,
+		MaxAge:     time.Minute,
 		MaxEntries: 1024,
 	})
 	if middleware.RateLimit[*Context](store) == nil {

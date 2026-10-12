@@ -43,7 +43,7 @@ func TestRequestIDKeepsTheInboundValue(t *testing.T) {
 }
 
 func TestRequestIDIgnoreInbound(t *testing.T) {
-	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{IgnoreInbound: true})
+	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{DisableInbound: true})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(router.HeaderXRequestID, "abc-123")

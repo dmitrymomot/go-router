@@ -15,7 +15,7 @@ import (
 // The defaults of the memory store: how long it keeps a client it has not
 // heard from, and how many clients it tracks.
 const (
-	DefaultRateLimitExpiry     = 3 * time.Minute
+	DefaultRateLimitMaxAge     = 3 * time.Minute
 	DefaultRateLimitMaxEntries = 64 << 10
 )
 
@@ -38,20 +38,35 @@ type RateLimitStore interface {
 // signed-in user rather than an address. An empty id is one client like any
 // other.
 //
-// OnDeny answers a refused request itself, in place of the 429 with
-// Retry-After.
+// OnReject answers a refused request. The Retry-After header is already set
+// when it runs, and err is the 429 the middleware would report, wrapping a
+// [*RateLimitError] that names the client and its wait. Return an error to
+// report it in place of the request, or nil to say that OnReject wrote the
+// answer itself; either way the request goes no further. A nil OnReject
+// reports err.
 type RateLimitConfig[C router.Context] struct {
-	Skip   func(c C) bool
-	Store  RateLimitStore
-	Client func(c C) string
-	OnDeny func(c C, id string, retryAfter time.Duration) error
+	Skip     func(c C) bool
+	Store    RateLimitStore
+	Client   func(c C) string
+	OnReject func(c C, err error) error
+}
+
+// RateLimitError is the cause of the 429 of [RateLimit]: the client the store
+// turned away, and how long it has to wait. Reach it with [errors.As].
+type RateLimitError struct {
+	Client     string
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("middleware: rate limit reached for %q; retry after %s", e.Client, e.RetryAfter)
 }
 
 // RateLimitMemoryStoreConfig configures [NewRateLimitMemoryStoreWithConfig].
 // Rate is the requests per second that refill the bucket, and it is required.
-// Burst is how many the bucket holds, and zero takes one. ExpiresIn is how
+// Burst is how many the bucket holds, and zero takes one. MaxAge is how
 // long a client that went quiet is remembered, and zero takes
-// [DefaultRateLimitExpiry].
+// [DefaultRateLimitMaxAge].
 //
 // MaxEntries caps how many clients the store tracks, so a flood of one-off
 // clients cannot exhaust the memory, and zero takes
@@ -64,7 +79,7 @@ type RateLimitConfig[C router.Context] struct {
 type RateLimitMemoryStoreConfig struct {
 	Rate       float64
 	Burst      int
-	ExpiresIn  time.Duration
+	MaxAge     time.Duration
 	MaxEntries int
 }
 
@@ -89,9 +104,6 @@ func RateLimitWithConfig[C router.Context](cfg RateLimitConfig[C]) router.Middle
 	if cfg.Client == nil {
 		cfg.Client = func(c C) string { return clientNetwork(c) }
 	}
-	if cfg.OnDeny == nil {
-		cfg.OnDeny = denyTooManyRequests[C]
-	}
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
@@ -106,38 +118,46 @@ func RateLimitWithConfig[C router.Context](cfg RateLimitConfig[C]) router.Middle
 					fmt.Errorf("middleware: rate limit store: %w", err))
 			}
 			if !allowed {
-				return cfg.OnDeny(c, id, retryAfter)
+				setRetryAfter(c.Response(), retryAfter)
+				err := router.ErrTooManyRequests.WithError(&RateLimitError{Client: id, RetryAfter: retryAfter})
+				if cfg.OnReject == nil {
+					return err
+				}
+				return cfg.OnReject(c, err)
 			}
 			return next(c)
 		}
 	}
 }
 
-func denyTooManyRequests[C router.Context](c C, _ string, retryAfter time.Duration) error {
-	if retryAfter > 0 {
-		seconds := retryAfter / time.Second
-		if retryAfter%time.Second != 0 {
+// setRetryAfter sets Retry-After to wait, rounded up to whole seconds, when
+// wait is above zero.
+func setRetryAfter(res *router.Response, wait time.Duration) {
+	if wait > 0 {
+		// Rounding up by division and remainder, so the largest wait does not
+		// overflow.
+		seconds := wait / time.Second
+		if wait%time.Second != 0 {
 			seconds++
 		}
-		c.Response().Header().Set(router.HeaderRetryAfter, strconv.FormatInt(int64(seconds), 10))
+		res.Header().Set(router.HeaderRetryAfter, strconv.FormatInt(int64(seconds), 10))
 	}
-	return router.ErrTooManyRequests
 }
 
 // NewRateLimitMemoryStore builds a token bucket store in this process: rate
 // tokens per second, burst tokens at most, and a client forgotten after
-// expiresIn of quiet. A burst of zero takes one, and an expiresIn of zero
-// takes [DefaultRateLimitExpiry].
+// maxAge of quiet. A burst of zero takes one, and a maxAge of zero
+// takes [DefaultRateLimitMaxAge].
 //
 // The counters live in one process, so several instances each hold their own.
 //
 // NewRateLimitMemoryStore panics on a rate that is not above zero, and on a
-// negative burst or expiresIn.
-func NewRateLimitMemoryStore(rate float64, burst int, expiresIn time.Duration) RateLimitStore {
+// negative burst or maxAge.
+func NewRateLimitMemoryStore(rate float64, burst int, maxAge time.Duration) RateLimitStore {
 	return NewRateLimitMemoryStoreWithConfig(RateLimitMemoryStoreConfig{
-		Rate:      rate,
-		Burst:     burst,
-		ExpiresIn: expiresIn,
+		Rate:   rate,
+		Burst:  burst,
+		MaxAge: maxAge,
 	})
 }
 
@@ -145,7 +165,7 @@ func NewRateLimitMemoryStore(rate float64, burst int, expiresIn time.Duration) R
 // configuration, which also caps how many clients the store tracks.
 //
 // NewRateLimitMemoryStoreWithConfig panics on a Rate that is not above zero,
-// and on a negative Burst, ExpiresIn or MaxEntries.
+// and on a negative Burst, MaxAge or MaxEntries.
 func NewRateLimitMemoryStoreWithConfig(cfg RateLimitMemoryStoreConfig) RateLimitStore {
 	if cfg.Rate <= 0 || math.IsNaN(cfg.Rate) || math.IsInf(cfg.Rate, 0) {
 		panic("middleware: NewRateLimitMemoryStore needs a Rate above zero")
@@ -153,8 +173,8 @@ func NewRateLimitMemoryStoreWithConfig(cfg RateLimitMemoryStoreConfig) RateLimit
 	if cfg.Burst < 0 {
 		panic("middleware: NewRateLimitMemoryStore needs a Burst of zero or more")
 	}
-	if cfg.ExpiresIn < 0 {
-		panic("middleware: NewRateLimitMemoryStore needs an ExpiresIn of zero or more")
+	if cfg.MaxAge < 0 {
+		panic("middleware: NewRateLimitMemoryStore needs a MaxAge of zero or more")
 	}
 	if cfg.MaxEntries < 0 {
 		panic("middleware: NewRateLimitMemoryStore needs a MaxEntries of zero or more")
@@ -164,7 +184,7 @@ func NewRateLimitMemoryStoreWithConfig(cfg RateLimitMemoryStoreConfig) RateLimit
 		seed:       maphash.MakeSeed(),
 		rate:       cfg.Rate,
 		burst:      float64(cmp.Or(cfg.Burst, 1)),
-		expiresIn:  cmp.Or(cfg.ExpiresIn, DefaultRateLimitExpiry),
+		maxAge:     cmp.Or(cfg.MaxAge, DefaultRateLimitMaxAge),
 		maxEntries: maxEntries,
 		nshards:    uint64(min(maxEntries, memoryStoreShards)),
 	}
@@ -214,7 +234,7 @@ type memoryStore struct {
 	nshards    uint64
 	rate       float64
 	burst      float64
-	expiresIn  time.Duration
+	maxAge     time.Duration
 	maxEntries int
 }
 
@@ -282,7 +302,7 @@ func (s *memoryStore) shard(id string) *memoryShard {
 }
 
 func (s *memoryStore) schedule(shard *memoryShard, b *bucket, now time.Time) {
-	lifetime := s.expiresIn
+	lifetime := s.maxAge
 	if refill := tokenDuration(s.burst-b.tokens, s.rate); refill > lifetime {
 		lifetime = refill
 	}

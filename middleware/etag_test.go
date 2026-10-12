@@ -113,8 +113,8 @@ func TestETagPassesThrough(t *testing.T) {
 		{"not a 200", middleware.ETagConfig[*appContext]{}, func(c *appContext) error {
 			return c.String(http.StatusCreated, "hello")
 		}},
-		{"over the cap", middleware.ETagConfig[*appContext]{MaxSize: 4}, hello},
-		{"declared over the cap", middleware.ETagConfig[*appContext]{MaxSize: 4}, func(c *appContext) error {
+		{"over the cap", middleware.ETagConfig[*appContext]{MaxBytes: 4}, hello},
+		{"declared over the cap", middleware.ETagConfig[*appContext]{MaxBytes: 4}, func(c *appContext) error {
 			c.Response().Header().Set(router.HeaderContentLength, "5")
 			return c.String(http.StatusOK, "hello")
 		}},
@@ -133,7 +133,7 @@ func TestETagPassesThrough(t *testing.T) {
 }
 
 func TestETagGrowingPastTheCapKeepsEveryByte(t *testing.T) {
-	r := etagRouter(middleware.ETagConfig[*appContext]{MaxSize: 8}, func(c *appContext) error {
+	r := etagRouter(middleware.ETagConfig[*appContext]{MaxBytes: 8}, func(c *appContext) error {
 		c.Response().Header().Set(router.HeaderContentType, "text/plain")
 		c.Response().WriteHeader(http.StatusOK)
 		for range 3 {
@@ -196,8 +196,8 @@ func TestETagSkipAndPanics(t *testing.T) {
 	}
 	defer func() {
 		if recover() == nil {
-			t.Error("a negative MaxSize did not panic")
+			t.Error("a negative MaxBytes did not panic")
 		}
 	}()
-	middleware.ETagWithConfig(middleware.ETagConfig[*appContext]{MaxSize: -1})
+	middleware.ETagWithConfig(middleware.ETagConfig[*appContext]{MaxBytes: -1})
 }

@@ -638,15 +638,15 @@ func recordIncoming(incoming **http.Request) router.Middleware[*appContext] {
 }
 
 func TestRealIPPassesATrustedRequestWithoutForwardingHeadersThrough(t *testing.T) {
-	for _, dropProto := range []bool{false, true} {
-		t.Run("DropProto "+strconv.FormatBool(dropProto), func(t *testing.T) {
+	for _, disableProto := range []bool{false, true} {
+		t.Run("DisableForwardedProto "+strconv.FormatBool(disableProto), func(t *testing.T) {
 			var incoming, handled *http.Request
 			r := newRouter()
 			r.Use(recordIncoming(&incoming))
 			r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*appContext]{
-				Headers:   []string{router.HeaderXForwardedFor},
-				Trust:     lanProxies,
-				DropProto: dropProto,
+				Headers:               []string{router.HeaderXForwardedFor},
+				Trust:                 lanProxies,
+				DisableForwardedProto: disableProto,
 			}))
 			r.GET("/", func(c *appContext) error {
 				handled = c.Request()
@@ -685,7 +685,7 @@ func TestRealIPDropProto(t *testing.T) {
 	}{
 		{
 			name:   "X-Forwarded-Proto of a trusted proxy is deleted",
-			cfg:    middleware.RealIPConfig[*appContext]{Headers: []string{router.HeaderXForwardedFor}, DropProto: true},
+			cfg:    middleware.RealIPConfig[*appContext]{Headers: []string{router.HeaderXForwardedFor}, DisableForwardedProto: true},
 			header: map[string]string{router.HeaderXForwardedFor: "198.51.100.5", router.HeaderXForwardedProto: "https"},
 			peer:   "10.0.0.1:9000",
 			echo:   router.HeaderXForwardedProto,
@@ -693,7 +693,7 @@ func TestRealIPDropProto(t *testing.T) {
 		},
 		{
 			name:   "Forwarded proto= is ignored and Forwarded kept",
-			cfg:    middleware.RealIPConfig[*appContext]{Headers: []string{router.HeaderForwarded}, DropProto: true},
+			cfg:    middleware.RealIPConfig[*appContext]{Headers: []string{router.HeaderForwarded}, DisableForwardedProto: true},
 			header: map[string]string{router.HeaderForwarded: "for=198.51.100.9;proto=https"},
 			peer:   "10.0.0.1:9000",
 			echo:   router.HeaderForwarded,
@@ -701,7 +701,7 @@ func TestRealIPDropProto(t *testing.T) {
 		},
 		{
 			name: "Forwarded proto= sets no X-Forwarded-Proto",
-			cfg:  middleware.RealIPConfig[*appContext]{Headers: []string{router.HeaderForwarded}, DropProto: true},
+			cfg:  middleware.RealIPConfig[*appContext]{Headers: []string{router.HeaderForwarded}, DisableForwardedProto: true},
 			header: map[string]string{
 				router.HeaderForwarded: "for=198.51.100.9;proto=https", router.HeaderXForwardedProto: "https",
 			},
@@ -712,7 +712,7 @@ func TestRealIPDropProto(t *testing.T) {
 		{
 			name: "Leftmost vouches for no scheme",
 			cfg: middleware.RealIPConfig[*appContext]{
-				Headers: []string{router.HeaderXForwardedFor}, Leftmost: true, DropProto: true,
+				Headers: []string{router.HeaderXForwardedFor}, Leftmost: true, DisableForwardedProto: true,
 			},
 			header: map[string]string{router.HeaderXForwardedFor: "203.0.113.9", router.HeaderXForwardedProto: "https"},
 			peer:   "192.0.2.1:1234",
@@ -751,7 +751,7 @@ func TestRealIPForwardedWithoutProtoKeepsTheSchemeHeader(t *testing.T) {
 func TestRealIPWithConfigPanicsWhenHeadersNameTheScheme(t *testing.T) {
 	for _, name := range []string{router.HeaderXForwardedProto, "x-forwarded-proto"} {
 		t.Run(name, func(t *testing.T) {
-			mustPanicContaining(t, "DropProto", func() {
+			mustPanicContaining(t, "DisableForwardedProto", func() {
 				middleware.RealIPWithConfig(middleware.RealIPConfig[*appContext]{
 					Headers: []string{router.HeaderXForwardedFor, name},
 				})

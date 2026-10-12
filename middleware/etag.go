@@ -11,15 +11,15 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// DefaultETagMaxSize is the largest body [ETag] buffers when MaxSize is zero.
-const DefaultETagMaxSize = 1 << 20
+// DefaultETagMaxBytes is the largest body [ETag] buffers when MaxBytes is zero.
+const DefaultETagMaxBytes = 1 << 20
 
-// ETagConfig configures [ETagWithConfig]. MaxSize is the largest body to
-// buffer, in bytes, and zero takes [DefaultETagMaxSize]. A response that grows
+// ETagConfig configures [ETagWithConfig]. MaxBytes is the largest body to
+// buffer, in bytes, and zero takes [DefaultETagMaxBytes]. A response that grows
 // past it goes out untouched.
 type ETagConfig[C router.Context] struct {
-	Skip    func(c C) bool
-	MaxSize int64
+	Skip     func(c C) bool
+	MaxBytes int64
 }
 
 // ETag makes a GET or HEAD request conditional for a response the handler
@@ -29,7 +29,7 @@ type ETagConfig[C router.Context] struct {
 // comparison is weak, as RFC 9110 asks for If-None-Match.
 //
 // A response passes through untouched when it is not a 200, when its
-// Cache-Control says no-store, when it holds more than [DefaultETagMaxSize]
+// Cache-Control says no-store, when it holds more than [DefaultETagMaxBytes]
 // bytes, or when the handler flushes it, which commits it and ends the
 // buffering. A handler that sets an ETag itself costs no buffer: the answer is
 // 304 or 200 at once.
@@ -44,13 +44,13 @@ func ETag[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 
 // ETagWithConfig is [ETag] with a configuration.
 //
-// ETagWithConfig panics on a negative MaxSize.
+// ETagWithConfig panics on a negative MaxBytes.
 func ETagWithConfig[C router.Context](cfg ETagConfig[C]) router.Middleware[C] {
-	if cfg.MaxSize < 0 {
-		panic(fmt.Sprintf("middleware: ETagConfig.MaxSize is %d; set a size in bytes, or zero for the default", cfg.MaxSize))
+	if cfg.MaxBytes < 0 {
+		panic(fmt.Sprintf("middleware: ETagConfig.MaxBytes is %d; set a size in bytes, or zero for the default", cfg.MaxBytes))
 	}
-	if cfg.MaxSize == 0 {
-		cfg.MaxSize = DefaultETagMaxSize
+	if cfg.MaxBytes == 0 {
+		cfg.MaxBytes = DefaultETagMaxBytes
 	}
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -64,7 +64,7 @@ func ETagWithConfig[C router.Context](cfg ETagConfig[C]) router.Middleware[C] {
 				ResponseWriter: res.ResponseWriter,
 				res:            res,
 				inm:            req.Header.Values(router.HeaderIfNoneMatch),
-				max:            cfg.MaxSize,
+				max:            cfg.MaxBytes,
 			}
 			size, status, committed := res.Size, res.Status, res.Committed
 			res.ResponseWriter = w

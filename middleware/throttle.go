@@ -17,12 +17,17 @@ const DefaultThrottleBacklogTimeout = 30 * time.Second
 // requests that run at once, and is required. Backlog is how many more may
 // wait for a slot; zero means none wait. BacklogTimeout is how long one waits,
 // and zero takes [DefaultThrottleBacklogTimeout]. Status is the answer to a
-// request that is turned away: 429 or 503, and zero takes 429. OnReject
-// builds the error to answer with instead of Status. RetryAfter, when set,
-// goes into the Retry-After header of a rejection, in whole seconds.
+// request that is turned away: 429 or 503, and zero takes 429. RetryAfter,
+// when set, goes into the Retry-After header of a rejection, in whole seconds.
+//
+// OnReject answers a request that is turned away. The Retry-After header is
+// already set when it runs, and err is the error of Status that the
+// middleware would report. Return an error to report it in place of the
+// request, or nil to say that OnReject wrote the answer itself; either way the
+// request goes no further. A nil OnReject reports err.
 type ThrottleConfig[C router.Context] struct {
 	Skip           func(c C) bool
-	OnReject       func(c C) error
+	OnReject       func(c C, err error) error
 	Limit          int
 	Backlog        int
 	BacklogTimeout time.Duration
@@ -82,13 +87,14 @@ func ThrottleWithConfig[C router.Context](cfg ThrottleConfig[C]) router.Middlewa
 		if retryAfter != "" {
 			c.Response().Header().Set(router.HeaderRetryAfter, retryAfter)
 		}
-		if cfg.OnReject != nil {
-			return cfg.OnReject(c)
-		}
+		err := router.ErrTooManyRequests
 		if cfg.Status == http.StatusServiceUnavailable {
-			return router.ErrServiceUnavailable
+			err = router.ErrServiceUnavailable
 		}
-		return router.ErrTooManyRequests
+		if cfg.OnReject != nil {
+			return cfg.OnReject(c, err)
+		}
+		return err
 	}
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {

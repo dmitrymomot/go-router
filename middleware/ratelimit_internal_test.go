@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-func newTestMemoryStore(t *testing.T, rate float64, burst int, expiresIn time.Duration) *memoryStore {
+func newTestMemoryStore(t *testing.T, rate float64, burst int, maxAge time.Duration) *memoryStore {
 	t.Helper()
-	s, ok := NewRateLimitMemoryStore(rate, burst, expiresIn).(*memoryStore)
+	s, ok := NewRateLimitMemoryStore(rate, burst, maxAge).(*memoryStore)
 	if !ok {
 		t.Fatal("NewRateLimitMemoryStore no longer returns a *memoryStore")
 	}
@@ -243,8 +243,8 @@ func TestMemoryStoreConfigDefaults(t *testing.T) {
 	if s.burst != 1 {
 		t.Errorf("burst = %v, want 1", s.burst)
 	}
-	if s.expiresIn != DefaultRateLimitExpiry {
-		t.Errorf("expiry = %s, want %s", s.expiresIn, DefaultRateLimitExpiry)
+	if s.maxAge != DefaultRateLimitMaxAge {
+		t.Errorf("expiry = %s, want %s", s.maxAge, DefaultRateLimitMaxAge)
 	}
 	if s.maxEntries != DefaultRateLimitMaxEntries {
 		t.Errorf("max entries = %d, want %d", s.maxEntries, DefaultRateLimitMaxEntries)
@@ -268,7 +268,7 @@ func TestMemoryStoreCapacityDropsTheFirstToExpire(t *testing.T) {
 	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      2,
-		ExpiresIn:  time.Hour,
+		MaxAge:     time.Hour,
 		MaxEntries: 2 * memoryStoreShards,
 	})
 	ada := shardID(s, 0)
@@ -326,7 +326,7 @@ func TestMemoryStoreCapacityRecoversAfterExpiry(t *testing.T) {
 		s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 			Rate:       1000,
 			Burst:      1,
-			ExpiresIn:  time.Second,
+			MaxAge:     time.Second,
 			MaxEntries: 1,
 		})
 		first := shardID(s, 0)
@@ -353,7 +353,7 @@ func TestMemoryStoreCapacityIsRaceSafe(t *testing.T) {
 	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      1,
-		ExpiresIn:  time.Hour,
+		MaxAge:     time.Hour,
 		MaxEntries: maxEntries,
 	})
 	start := make(chan struct{})
@@ -394,7 +394,7 @@ func TestMemoryStoreCardinalityStaysBoundedForUniqueIDs(t *testing.T) {
 	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      1,
-		ExpiresIn:  time.Hour,
+		MaxAge:     time.Hour,
 		MaxEntries: maxEntries,
 	})
 	allowed := 0
@@ -433,7 +433,7 @@ func BenchmarkMemoryStoreParallel(b *testing.B) {
 			s := NewRateLimitMemoryStoreWithConfig(RateLimitMemoryStoreConfig{
 				Rate:       1e9,
 				Burst:      1,
-				ExpiresIn:  time.Hour,
+				MaxAge:     time.Hour,
 				MaxEntries: bm.maxEntries,
 			})
 			ids := make([]string, clients)
@@ -465,7 +465,7 @@ func BenchmarkMemoryStoreAtCapacityUniqueIDs(b *testing.B) {
 	s := NewRateLimitMemoryStoreWithConfig(RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      1,
-		ExpiresIn:  time.Hour,
+		MaxAge:     time.Hour,
 		MaxEntries: maxEntries,
 	}).(*memoryStore)
 	for i := range maxEntries {

@@ -14,13 +14,13 @@ const MaxRequestIDLength = 128
 
 // RequestIDConfig configures [RequestIDWithConfig]. Header is the header to
 // read and write, and an empty one takes [router.HeaderXRequestID]. Generator
-// builds an id, and a nil one takes a UUIDv7. IgnoreInbound drops the id the
+// builds an id, and a nil one takes a UUIDv7. DisableInbound drops the id the
 // client sent and always generates one, which suits a public endpoint.
 type RequestIDConfig[C router.Context] struct {
-	Skip          func(c C) bool
-	Header        string
-	Generator     func() string
-	IgnoreInbound bool
+	Skip           func(c C) bool
+	Header         string
+	Generator      func() string
+	DisableInbound bool
 }
 
 // RequestID gives each request an id: the one the client sent, or a new UUIDv7.
@@ -51,7 +51,7 @@ func RequestIDWithConfig[C router.Context](cfg RequestIDConfig[C]) router.Middle
 				return next(c)
 			}
 			id := ""
-			if !cfg.IgnoreInbound {
+			if !cfg.DisableInbound {
 				id = c.Request().Header.Get(cfg.Header)
 			}
 			if !validRequestID(id) {

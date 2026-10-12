@@ -578,7 +578,7 @@ func TestIdempotencyKeepsTheKeyOfAnAnswerTooLargeToKeep(t *testing.T) {
 	var runs atomic.Int32
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-		Store: middleware.NewIdempotencyMemoryStore(0), MaxBody: 4,
+		Store: middleware.NewIdempotencyMemoryStore(0), MaxBytes: 4,
 	}))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
@@ -1126,8 +1126,8 @@ func TestIdempotencyWithConfigPanics(t *testing.T) {
 		{name: "too many sources", want: "token sources", cfg: middleware.IdempotencyConfig[*appContext]{
 			Store: store, Sources: make([]middleware.TokenSource, middleware.MaxTokenSources+1),
 		}},
-		{name: "negative MaxBody", want: "MaxBody", cfg: middleware.IdempotencyConfig[*appContext]{
-			Store: store, MaxBody: -1,
+		{name: "negative MaxBytes", want: "MaxBytes", cfg: middleware.IdempotencyConfig[*appContext]{
+			Store: store, MaxBytes: -1,
 		}},
 	}
 	for _, tt := range tests {
@@ -1280,8 +1280,8 @@ func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
 	var runs atomic.Int32
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-		Store:   middleware.NewIdempotencyMemoryStore(0),
-		MaxBody: 8,
+		Store:    middleware.NewIdempotencyMemoryStore(0),
+		MaxBytes: 8,
 	}))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
@@ -1298,7 +1298,7 @@ func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
 		return do(r, req)
 	}
 
-	// Two bodies that share the first MaxBody bytes must not share an answer.
+	// Two bodies that share the first MaxBytes bytes must not share an answer.
 	for _, body := range []string{"01234567-pay-1", "01234567-pay-999"} {
 		for _, length := range []int64{int64(len(body)), -1} {
 			if rec := send(body, length); rec.Code != http.StatusRequestEntityTooLarge {
@@ -1310,18 +1310,18 @@ func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
 		}
 	}
 	if n := runs.Load(); n != 0 {
-		t.Fatalf("runs = %d, want 0 for a body over MaxBody", n)
+		t.Fatalf("runs = %d, want 0 for a body over MaxBytes", n)
 	}
 
-	// A body of MaxBody bytes reaches the handler whole, and counts whole.
+	// A body of MaxBytes bytes reaches the handler whole, and counts whole.
 	if rec := send("01234567", -1); rec.Code != http.StatusOK || rec.Body.String() != "01234567" {
-		t.Errorf("a body at MaxBody: %d %q, want 200 with the body", rec.Code, rec.Body)
+		t.Errorf("a body at MaxBytes: %d %q, want 200 with the body", rec.Code, rec.Body)
 	}
 	if rec := send("01234567", -1); rec.Code != http.StatusOK || runs.Load() != 1 {
 		t.Errorf("a repeat: %d after %d runs, want a replay", rec.Code, runs.Load())
 	}
 	if rec := send("01234568", -1); rec.Code != http.StatusUnprocessableEntity {
-		t.Errorf("another body of MaxBody bytes: status = %d, want 422", rec.Code)
+		t.Errorf("another body of MaxBytes bytes: status = %d, want 422", rec.Code)
 	}
 }
 

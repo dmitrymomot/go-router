@@ -35,20 +35,20 @@ import (
 // is set.
 //
 // A trusted proxy that passes the client's X-Forwarded-Proto through unchanged
-// lets the client choose the scheme. Set DropProto behind such a proxy: it
-// deletes X-Forwarded-Proto and ignores Forwarded proto=, so
+// lets the client choose the scheme. Set DisableForwardedProto behind such a
+// proxy: it deletes X-Forwarded-Proto and ignores Forwarded proto=, so
 // [router.Base.Scheme] follows the connection alone.
 //
 // Leftmost takes the first address of the chain in place of the nearest
 // untrusted hop, and vouches for the scheme of any peer. The first address is
 // whatever the client wrote, so use it only where the chain itself is trusted.
 type RealIPConfig[C router.Context] struct {
-	Skip      func(c C) bool
-	Trust     *TrustSet
-	Headers   []string
-	Hops      int
-	Leftmost  bool
-	DropProto bool
+	Skip                  func(c C) bool
+	Trust                 *TrustSet
+	Headers               []string
+	Hops                  int
+	Leftmost              bool
+	DisableForwardedProto bool
 }
 
 // loopbackOnly is the TrustSet of a RealIPConfig that names none.
@@ -102,7 +102,7 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 		return strings.EqualFold(name, router.HeaderXForwardedProto)
 	}) {
 		panic("middleware: RealIPConfig.Headers names X-Forwarded-Proto, which carries no address; " +
-			"a trusted peer's scheme is kept without it, and DropProto deletes it")
+			"a trusted peer's scheme is kept without it, and DisableForwardedProto deletes it")
 	}
 	switch {
 	case cfg.Hops < 0:
@@ -120,7 +120,7 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 	cfg.Headers = canonicalHeaders(cfg.Headers...)
 	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {
 		if name == router.HeaderXForwardedProto {
-			return !cfg.DropProto
+			return !cfg.DisableForwardedProto
 		}
 		return slices.ContainsFunc(cfg.Headers, func(named string) bool {
 			return strings.EqualFold(name, named)
@@ -137,7 +137,7 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 
 			var proto string
 			var fix bool
-			if vouched && !cfg.DropProto {
+			if vouched && !cfg.DisableForwardedProto {
 				proto, fix = keptProto(cfg.Leftmost, h.proto,
 					req.Header.Values(router.HeaderXForwardedProto))
 			}

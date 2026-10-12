@@ -112,11 +112,11 @@ func ExampleRealIPWithConfig() {
 		Trust:   proxies,
 	})))
 
-	// DropProto takes the scheme from the connection alone.
+	// DisableForwardedProto takes the scheme from the connection alone.
 	fmt.Println(report(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
-		Headers:   []string{router.HeaderXForwardedFor},
-		Trust:     proxies,
-		DropProto: true,
+		Headers:               []string{router.HeaderXForwardedFor},
+		Trust:                 proxies,
+		DisableForwardedProto: true,
 	})))
 	// Output:
 	// 192.0.2.1 http
@@ -311,12 +311,12 @@ func ExampleBodyLimit() {
 func ExampleDecompress() {
 	r := newAPI()
 	// BodyLimit bounds the bytes on the wire and what Bind reads of their
-	// expansion; MaxDecompressedSize bounds the expansion for any reader. A
+	// expansion; MaxBytes bounds the expansion for any reader. A
 	// zip bomb needs both.
 	r.Use(
 		middleware.BodyLimit[*Context](1<<20),
 		middleware.DecompressWithConfig(middleware.DecompressConfig[*Context]{
-			MaxDecompressedSize: 1 << 20,
+			MaxBytes: 1 << 20,
 		}),
 	)
 	r.POST("/echo", func(c *Context) error {
@@ -391,8 +391,8 @@ func ExampleRequestIDWithConfig() {
 	r.Use(middleware.RequestIDWithConfig(middleware.RequestIDConfig[*Context]{
 		// A real program leaves Generator nil, for a UUIDv7 per request.
 		Generator: func() string { return "req-1" },
-		// IgnoreInbound refuses the id a client sends, which nothing verifies.
-		IgnoreInbound: true,
+		// DisableInbound refuses the id a client sends, which nothing verifies.
+		DisableInbound: true,
 	}))
 	r.GET("/", func(c *Context) error {
 		return c.String(http.StatusOK, middleware.RequestIDFrom(c))
@@ -518,7 +518,7 @@ func ExampleNewIdempotencyMemoryStoreWithConfig() {
 	// Keep a key for a day, and at most 10000 of them. A full store drops the
 	// oldest key whose answer it holds.
 	store := middleware.NewIdempotencyMemoryStoreWithConfig(middleware.IdempotencyMemoryStoreConfig{
-		ExpiresIn:  24 * time.Hour,
+		MaxAge:     24 * time.Hour,
 		MaxEntries: 10000,
 	})
 

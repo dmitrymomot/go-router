@@ -208,7 +208,7 @@ func TestDecompressRejectsABodyThatIsNotDeflate(t *testing.T) {
 }
 
 func TestDecompressStopsADeflateBomb(t *testing.T) {
-	r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: 1 << 10})
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxBytes: 1 << 10})
 
 	req := decompressPost("/read", deflated(t, strings.Repeat("0", 40<<10)))
 	req.Header.Set(router.HeaderContentEncoding, "deflate")
@@ -265,7 +265,7 @@ func TestDecompressStopsAZipBomb(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: tc.limit})
+			r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxBytes: tc.limit})
 			if rec := do(r, decompressPost("/read", bomb)); rec.Code != tc.want {
 				t.Errorf("status = %d, want %d", rec.Code, tc.want)
 			}
@@ -358,15 +358,15 @@ func TestDecompressDoesNotHandOneReaderToTwoRequests(t *testing.T) {
 func TestDecompressRejectsANegativeCap(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("no panic for a negative MaxDecompressedSize")
+			t.Error("no panic for a negative MaxBytes")
 		}
 	}()
-	middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: -1})
+	middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxBytes: -1})
 }
 
 func TestDecompressTooLargeClosesTheConnection(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: 10}))
+	r.Use(middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxBytes: 10}))
 	r.POST("/", func(c *appContext) error {
 		_, err := io.ReadAll(c.Request().Body)
 		return err

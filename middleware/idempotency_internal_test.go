@@ -56,14 +56,14 @@ func storeKeys(t *testing.T, s *idempotencyMemoryStore) []string {
 
 func TestIdempotencyMemoryStoreDefaults(t *testing.T) {
 	s := newTestIdempotencyStore(t, IdempotencyMemoryStoreConfig{})
-	if s.expiresIn != DefaultIdempotencyExpiry || s.maxEntries != DefaultIdempotencyMaxEntries {
-		t.Errorf("defaults = %v/%d, want %v/%d", s.expiresIn, s.maxEntries,
-			DefaultIdempotencyExpiry, DefaultIdempotencyMaxEntries)
+	if s.maxAge != DefaultIdempotencyMaxAge || s.maxEntries != DefaultIdempotencyMaxEntries {
+		t.Errorf("defaults = %v/%d, want %v/%d", s.maxAge, s.maxEntries,
+			DefaultIdempotencyMaxAge, DefaultIdempotencyMaxEntries)
 	}
 	if DefaultIdempotencyMaxEntries != 65536 {
 		t.Errorf("DefaultIdempotencyMaxEntries = %d, want 65536", DefaultIdempotencyMaxEntries)
 	}
-	mustPanicWith(t, "ExpiresIn", func() { NewIdempotencyMemoryStore(-time.Second) })
+	mustPanicWith(t, "MaxAge", func() { NewIdempotencyMemoryStore(-time.Second) })
 	mustPanicWith(t, "MaxEntries", func() {
 		NewIdempotencyMemoryStoreWithConfig(IdempotencyMemoryStoreConfig{MaxEntries: -1})
 	})
@@ -171,7 +171,7 @@ func TestIdempotencyMemoryStoreKeepsItsListWhole(t *testing.T) {
 // list stays in the order the entries expire in.
 func TestIdempotencyMemoryStoreExpiresFromTheClaim(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s := newTestIdempotencyStore(t, IdempotencyMemoryStoreConfig{ExpiresIn: time.Minute})
+		s := newTestIdempotencyStore(t, IdempotencyMemoryStoreConfig{MaxAge: time.Minute})
 		mustClaim(t, s, "a", "fp")
 		time.Sleep(30 * time.Second)
 		mustClaim(t, s, "b", "fp")

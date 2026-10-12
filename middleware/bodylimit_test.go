@@ -51,7 +51,7 @@ func bodyLimitPost(target, body string, contentLength int64) *http.Request {
 
 func TestBodyLimitRejectsALongContentLength(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 8}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{MaxBytes: 8}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", strings.Repeat("x", 64), 0))
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -64,7 +64,7 @@ func TestBodyLimitRejectsALongContentLength(t *testing.T) {
 
 func TestBodyLimitStopsABodyThatUnderstatesItsLength(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 8}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{MaxBytes: 8}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", strings.Repeat("x", 64), -1))
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -77,7 +77,7 @@ func TestBodyLimitStopsABodyThatUnderstatesItsLength(t *testing.T) {
 
 func TestBodyLimitLetsAShortBodyThrough(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 64}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{MaxBytes: 64}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", "0123456789", 0))
 	if rec.Code != http.StatusOK {
@@ -90,7 +90,7 @@ func TestBodyLimitLetsAShortBodyThrough(t *testing.T) {
 
 func TestBodyLimitKeepsTheStatusThatBindReports(t *testing.T) {
 	ran := false
-	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{Limit: 8}, &ran)
+	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{MaxBytes: 8}, &ran)
 
 	rec := do(r, bodyLimitPost("/bind", `{"name":"a long enough name"}`, -1))
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -126,8 +126,8 @@ func TestBodyLimitPlainFormTakesTheLimit(t *testing.T) {
 func TestBodyLimitSkip(t *testing.T) {
 	ran := false
 	r := bodyLimitRouter(middleware.BodyLimitConfig[*appContext]{
-		Limit: 8,
-		Skip:  skipPath("/read"),
+		MaxBytes: 8,
+		Skip:     skipPath("/read"),
 	}, &ran)
 
 	rec := do(r, bodyLimitPost("/read", strings.Repeat("x", 64), 0))
@@ -300,8 +300,8 @@ func TestBodyLimitClosesTheConnectionBehindGzip(t *testing.T) {
 }
 
 func TestBodyLimitRejectsANegativeLimit(t *testing.T) {
-	mustPanicContaining(t, "Limit", func() { middleware.BodyLimit[*appContext](-1) })
-	mustPanicContaining(t, "Limit", func() {
-		middleware.BodyLimitWithConfig(middleware.BodyLimitConfig[*appContext]{Limit: -1})
+	mustPanicContaining(t, "MaxBytes", func() { middleware.BodyLimit[*appContext](-1) })
+	mustPanicContaining(t, "MaxBytes", func() {
+		middleware.BodyLimitWithConfig(middleware.BodyLimitConfig[*appContext]{MaxBytes: -1})
 	})
 }

@@ -2,6 +2,8 @@ package middleware_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -107,7 +109,10 @@ func TestThrottleContextEndsTheWait(t *testing.T) {
 func TestThrottleOnRejectAndSkip(t *testing.T) {
 	r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
 		Limit: 1,
-		OnReject: func(*appContext) error {
+		OnReject: func(_ *appContext, err error) error {
+			if !errors.Is(err, router.ErrTooManyRequests) {
+				return fmt.Errorf("OnReject got %v, want the 429", err)
+			}
 			return router.ErrBadGateway
 		},
 		Skip: func(c *appContext) bool { return c.Request().Header.Get("X-Skip") != "" },

@@ -75,7 +75,7 @@ func TestCrossOriginSkip(t *testing.T) {
 func TestCrossOriginOnDeny(t *testing.T) {
 	var reason error
 	r := crossOriginRouter(middleware.CrossOriginConfig[*appContext]{
-		OnDeny: func(c *appContext, err error) error {
+		OnReject: func(c *appContext, err error) error {
 			reason = err
 			return router.ErrConflict.WithMessage("no")
 		},
@@ -86,17 +86,17 @@ func TestCrossOriginOnDeny(t *testing.T) {
 		t.Errorf("status = %d, want 409", rec.Code)
 	}
 	if reason == nil {
-		t.Error("OnDeny got no reason")
+		t.Error("OnReject got no reason")
 	}
 
 	r = crossOriginRouter(middleware.CrossOriginConfig[*appContext]{
-		OnDeny: func(c *appContext, _ error) error {
+		OnReject: func(c *appContext, _ error) error {
 			return c.String(http.StatusConflict, "handled")
 		},
 	})
 	rec := do(r, req.Clone(req.Context()))
 	if rec.Code != http.StatusConflict || rec.Body.String() != "handled" {
-		t.Errorf("got %d %q, want the answer that OnDeny wrote", rec.Code, rec.Body.String())
+		t.Errorf("got %d %q, want the answer that OnReject wrote", rec.Code, rec.Body.String())
 	}
 }
 

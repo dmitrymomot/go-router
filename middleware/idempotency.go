@@ -27,15 +27,15 @@ const (
 	// DefaultIdempotencyFormField is the form field that carries the key of a
 	// plain HTML form.
 	DefaultIdempotencyFormField = "_idempotency_key"
-	// DefaultIdempotencyMaxBody is the longest answer that is kept for a
+	// DefaultIdempotencyMaxBytes is the longest answer that is kept for a
 	// replay, and the longest request body, other than a form, that the
 	// default fingerprint takes.
-	DefaultIdempotencyMaxBody = 64 << 10
+	DefaultIdempotencyMaxBytes = 64 << 10
 	// DefaultIdempotencyWait is how long a repeat waits for the request that
 	// holds its key.
 	DefaultIdempotencyWait = 10 * time.Second
-	// DefaultIdempotencyExpiry is how long the memory store keeps a key.
-	DefaultIdempotencyExpiry = 24 * time.Hour
+	// DefaultIdempotencyMaxAge is how long the memory store keeps a key.
+	DefaultIdempotencyMaxAge = 24 * time.Hour
 	// DefaultIdempotencyMaxEntries is how many keys the memory store holds.
 	DefaultIdempotencyMaxEntries = 64 << 10
 	// MaxIdempotencyKeyLength is the longest key a client may send.
@@ -50,7 +50,7 @@ var (
 	ErrIdempotencyInProgress  = errors.New("middleware: a request with this idempotency key is still running")
 	ErrIdempotencyTooLarge    = errors.New("middleware: the answer to this idempotency key was too large to keep")
 	// ErrIdempotencyBodyTooLarge is the cause of the 413 that the default
-	// fingerprint answers to a body over MaxBody.
+	// fingerprint answers to a body over MaxBytes.
 	ErrIdempotencyBodyTooLarge = errors.New("middleware: the request body is too large to fingerprint")
 )
 
@@ -74,7 +74,7 @@ var errIdempotencyStoreFull = errors.New("middleware: every idempotency key in t
 // fields, in any order and without the [DefaultCSRFFormField] and
 // [DefaultIdempotencyFormField] fields, and an uploaded file by its field,
 // name, size and type; so the form counts the same whether or not [ParseForm]
-// read it first. Any other body counts whole, so it may be MaxBody bytes at
+// read it first. Any other body counts whole, so it may be MaxBytes bytes at
 // most: a longer one is refused with a 413 and [ErrIdempotencyBodyTooLarge]
 // before the handler runs, and so is a body over the cap in force. The parameters
 // of Content-Type do not count, since a multipart boundary changes on every
@@ -84,9 +84,9 @@ var errIdempotencyStoreFull = errors.New("middleware: every idempotency key in t
 // Idempotency-Key header, then the [DefaultIdempotencyFormField] form field.
 // The first key found counts.
 //
-// MaxBody is the longest answer kept for a replay, and under the default
+// MaxBytes is the longest answer kept for a replay, and under the default
 // fingerprint the longest request body, other than a form, that a request with
-// a key may send; zero takes [DefaultIdempotencyMaxBody]. Wait is
+// a key may send; zero takes [DefaultIdempotencyMaxBytes]. Wait is
 // how long a repeat waits for the request that holds its key, and zero takes
 // [DefaultIdempotencyWait]; a negative Wait answers 409 at once. Required
 // refuses an unsafe request that carries no key with a 400.
@@ -96,7 +96,7 @@ type IdempotencyConfig[C router.Context] struct {
 	Client      func(c C) string
 	Fingerprint func(c C) ([]byte, error)
 	Sources     []TokenSource
-	MaxBody     int
+	MaxBytes    int
 	Wait        time.Duration
 	Required    bool
 }
@@ -132,7 +132,7 @@ func Idempotency[C router.Context](store IdempotencyStore) router.Middleware[C] 
 //   - Under Required, an unsafe request without a key gets 400.
 //   - A key longer than [MaxIdempotencyKeyLength] bytes gets 400.
 //   - Under the default fingerprint, a body other than a form that is longer
-//     than MaxBody gets 413.
+//     than MaxBytes gets 413.
 //
 // The causes of these answers are [ErrIdempotencyKeyReused],
 // [ErrIdempotencyInProgress], [ErrIdempotencyKeyRequired] and
@@ -142,7 +142,7 @@ func Idempotency[C router.Context](store IdempotencyStore) router.Middleware[C] 
 // The key is released, so a repeat runs again, when the handler answers 5xx,
 // when it returns an error before a status under 400 went out, and when it
 // hijacks the connection. Any other answer is stored, a 4xx the handler wrote
-// itself included. An answer over MaxBody keeps the key without its body, and
+// itself included. An answer over MaxBytes keeps the key without its body, and
 // a repeat gets 409 with [ErrIdempotencyTooLarge]. A panic releases the key,
 // unless a status under 400 went out before it; then the key stays held until
 // it expires, and a repeat gets 409.
@@ -157,13 +157,13 @@ func Idempotency[C router.Context](store IdempotencyStore) router.Middleware[C] 
 // and ParseForm refuses it first. See Order in the package doc.
 //
 // IdempotencyWithConfig panics on a nil Store, a nil token source, more than
-// [MaxTokenSources] of them, and a negative MaxBody.
+// [MaxTokenSources] of them, and a negative MaxBytes.
 func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Middleware[C] {
 	if cfg.Store == nil {
 		panic("middleware: IdempotencyWithConfig needs a Store")
 	}
-	if cfg.MaxBody < 0 {
-		panic("middleware: IdempotencyWithConfig needs a MaxBody of zero or more")
+	if cfg.MaxBytes < 0 {
+		panic("middleware: IdempotencyWithConfig needs a MaxBytes of zero or more")
 	}
 	if len(cfg.Sources) == 0 {
 		cfg.Sources = []TokenSource{
@@ -174,8 +174,8 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 		cfg.Sources = slices.Clone(cfg.Sources)
 		checkTokenSources("IdempotencyConfig", cfg.Sources)
 	}
-	if cfg.MaxBody == 0 {
-		cfg.MaxBody = DefaultIdempotencyMaxBody
+	if cfg.MaxBytes == 0 {
+		cfg.MaxBytes = DefaultIdempotencyMaxBytes
 	}
 	if cfg.Wait == 0 {
 		cfg.Wait = DefaultIdempotencyWait
@@ -184,7 +184,7 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 		cfg.Client = func(c C) string { return clientNetwork(c) }
 	}
 	if cfg.Fingerprint == nil {
-		maxBody := cfg.MaxBody
+		maxBody := cfg.MaxBytes
 		cfg.Fingerprint = func(c C) ([]byte, error) { return idempotencyFingerprint(c, maxBody) }
 	}
 
@@ -221,7 +221,7 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 				return err
 			}
 			if claimed {
-				return runIdempotent(c, cfg.Store, cfg.MaxBody, key, next)
+				return runIdempotent(c, cfg.Store, cfg.MaxBytes, key, next)
 			}
 			return replayIdempotent(c.Response(), held.Answer)
 		}
@@ -523,23 +523,23 @@ type IdempotencyStore interface {
 }
 
 // IdempotencyMemoryStoreConfig configures [NewIdempotencyMemoryStoreWithConfig].
-// ExpiresIn is how long a key lives, counted from its claim, and zero takes
-// [DefaultIdempotencyExpiry]. MaxEntries caps how many keys the store holds,
+// MaxAge is how long a key lives, counted from its claim, and zero takes
+// [DefaultIdempotencyMaxAge]. MaxEntries caps how many keys the store holds,
 // and zero takes [DefaultIdempotencyMaxEntries].
 type IdempotencyMemoryStoreConfig struct {
-	ExpiresIn  time.Duration
+	MaxAge     time.Duration
 	MaxEntries int
 }
 
 // NewIdempotencyMemoryStore builds an [IdempotencyStore] in this process that
-// keeps a key for expiresIn after its claim. An expiresIn of zero takes
-// [DefaultIdempotencyExpiry].
+// keeps a key for maxAge after its claim. An maxAge of zero takes
+// [DefaultIdempotencyMaxAge].
 //
 // The keys live in one process, so several instances each hold their own.
 //
-// NewIdempotencyMemoryStore panics on a negative expiresIn.
-func NewIdempotencyMemoryStore(expiresIn time.Duration) IdempotencyStore {
-	return NewIdempotencyMemoryStoreWithConfig(IdempotencyMemoryStoreConfig{ExpiresIn: expiresIn})
+// NewIdempotencyMemoryStore panics on a negative maxAge.
+func NewIdempotencyMemoryStore(maxAge time.Duration) IdempotencyStore {
+	return NewIdempotencyMemoryStoreWithConfig(IdempotencyMemoryStoreConfig{MaxAge: maxAge})
 }
 
 // NewIdempotencyMemoryStoreWithConfig is [NewIdempotencyMemoryStore] with a
@@ -549,30 +549,30 @@ func NewIdempotencyMemoryStore(expiresIn time.Duration) IdempotencyStore {
 // before that key expires, and logs a warning through the logger of the router.
 // A retry with that key then runs the handler again. So MaxEntries trades
 // memory for the guarantee: the store holds up to MaxEntries answers of up to
-// the MaxBody of the middleware each, 4 GiB at the defaults if every answer
+// the MaxBytes of the middleware each, 4 GiB at the defaults if every answer
 // were that large. The keys belong to one client each by default, so one
 // client can push out the keys of another only by filling the whole store;
 // put [RateLimit] in front to make that slow. A store full of running keys
 // refuses a new one, and the request gets a 500.
 //
-// A key lives for ExpiresIn from its claim, however long its request runs. A
+// A key lives for MaxAge from its claim, however long its request runs. A
 // request that outlives it can store its answer on, or release, the claim of a
 // later request with the same key.
 //
-// NewIdempotencyMemoryStoreWithConfig panics on a negative ExpiresIn or
+// NewIdempotencyMemoryStoreWithConfig panics on a negative MaxAge or
 // MaxEntries.
 func NewIdempotencyMemoryStoreWithConfig(cfg IdempotencyMemoryStoreConfig) IdempotencyStore {
-	if cfg.ExpiresIn < 0 {
-		panic("middleware: NewIdempotencyMemoryStore needs an ExpiresIn of zero or more")
+	if cfg.MaxAge < 0 {
+		panic("middleware: NewIdempotencyMemoryStore needs a MaxAge of zero or more")
 	}
 	if cfg.MaxEntries < 0 {
 		panic("middleware: NewIdempotencyMemoryStore needs a MaxEntries of zero or more")
 	}
-	cfg.ExpiresIn = cmp.Or(cfg.ExpiresIn, DefaultIdempotencyExpiry)
+	cfg.MaxAge = cmp.Or(cfg.MaxAge, DefaultIdempotencyMaxAge)
 	cfg.MaxEntries = cmp.Or(cfg.MaxEntries, DefaultIdempotencyMaxEntries)
 	return &idempotencyMemoryStore{
 		entries:    make(map[string]*idempotencyMemoryEntry),
-		expiresIn:  cfg.ExpiresIn,
+		maxAge:     cfg.MaxAge,
 		maxEntries: cfg.MaxEntries,
 	}
 }
@@ -582,7 +582,7 @@ func NewIdempotencyMemoryStoreWithConfig(cfg IdempotencyMemoryStoreConfig) Idemp
 type idempotencyMemoryStore struct {
 	entries    map[string]*idempotencyMemoryEntry
 	head, tail *idempotencyMemoryEntry
-	expiresIn  time.Duration
+	maxAge     time.Duration
 	maxEntries int
 	mu         sync.Mutex
 }
@@ -632,7 +632,7 @@ func (s *idempotencyMemoryStore) claim(key string, fp []byte) (IdempotencyEntry,
 		s.remove(victim)
 	}
 
-	e := &idempotencyMemoryEntry{key: key, fp: slices.Clone(fp), expires: now.Add(s.expiresIn), prev: s.tail}
+	e := &idempotencyMemoryEntry{key: key, fp: slices.Clone(fp), expires: now.Add(s.maxAge), prev: s.tail}
 	if s.tail != nil {
 		s.tail.next = e
 	} else {
