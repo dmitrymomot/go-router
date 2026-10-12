@@ -260,7 +260,7 @@ func TestCSRFSecFetchSiteDecidesFirst(t *testing.T) {
 
 func TestCSRFTrustedOriginPasses(t *testing.T) {
 	r := csrfRouter(middleware.CSRFConfig[*appContext]{
-		TrustedOrigins: []string{"https://APP.example", "http://localhost:3000"},
+		TrustedOrigins: []string{"https://APP.example", "http://localhost:3000", "https://api.example:443"},
 	})
 	_, cookie := csrfSession(t, r)
 
@@ -269,6 +269,8 @@ func TestCSRFTrustedOriginPasses(t *testing.T) {
 		origin string
 		want   int
 	}{
+		{"a configured default port", "https://api.example", http.StatusOK},
+		{"a default port sent", "https://app.example:443", http.StatusOK},
 		{"a trusted origin", "https://app.example", http.StatusOK},
 		{"a trusted origin with a port", "http://localhost:3000", http.StatusOK},
 		{"the host in another case", "https://App.Example", http.StatusOK},

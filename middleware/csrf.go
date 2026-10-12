@@ -255,9 +255,7 @@ func secFetchSite[C router.Context](trusted []string, cookieName string) func(C)
 			return false, nil
 		}
 		origin := c.Request().Header.Get(router.HeaderOrigin)
-		if origin != "" && slices.ContainsFunc(trusted, func(t string) bool {
-			return strings.EqualFold(t, origin)
-		}) {
+		if origin != "" && sameOrigin(trusted, origin) {
 			return true, nil
 		}
 		if site == "same-site" && hostOnlyCSRFCookie(c.Request(), cookieName) {
