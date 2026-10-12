@@ -39,6 +39,15 @@ func main() {
 		log.Fatal(err)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := serve.Run(ctx, newRouter(db), serve.Config{Addr: ":8080"}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func newRouter(db *sql.DB) *router.Router[*Context] {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context {
 		return &Context{DB: db}
 	})
@@ -52,13 +61,24 @@ func main() {
 		}
 		return c.JSON(http.StatusOK, u)
 	})
+	return r
+}
+```
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+And its test, with package `routertest`, which sends a request through the whole router and checks the answer:
 
-	if err := serve.Run(ctx, r, serve.Config{Addr: ":8080"}); err != nil {
-		log.Fatal(err)
-	}
+```go
+func TestShowUser(t *testing.T) {
+	r := newRouter(testDB(t)) // testDB is yours: a database that holds user 7, Ann.
+
+	routertest.Get(r, "/users/7").Expect(t).
+		Status(http.StatusOK).
+		ContentType(router.MIMEApplicationJSON).
+		JSONPath("name", "Ann")
+
+	routertest.Get(r, "/users/8").Expect(t).
+		Status(http.StatusNotFound).
+		Contains("no user 8")
 }
 ```
 
@@ -72,18 +92,47 @@ Each line links to the example that proves it.
 - [Links built from the route patterns](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Expand), path, query or [host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-MustExpand), escaped and checked to route back.
 - [Redirect routes](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Redirect) that keep their values and the query, and [a canonical host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.RedirectHost) such as www to the apex.
 - [Route metadata](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Meta) that nested scopes inherit and [middleware reads while the route answers](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-MetaAs), such as the permission a route needs.
-- [Binding](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Bind) from JSON, [a form](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.BindForm) with its checkboxes, the query, the path or the headers, with [validation that keeps its own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Validator), [field errors a form can show again](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-FieldErrorsOf), and [a body cap for one route](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.SetBodyLimit) above or below the router's.
-- [Errors that carry their own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPError.WithMessage), and one handler that writes them: [JSON on an API host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-JSONErrorHandler), or [an error page of your own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPErrorOf).
+- [Binding](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Bind) from JSON, [a form](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.BindForm) with its checkboxes, the query, the path or the headers, with [validation that keeps its own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Validator), [field errors a form can show again](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-FieldErrorsOf), and [a body cap for one route](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.SetBodyLimit) above or below the router's. The query and a form also fill [comma lists, defaults, nested structs and maps](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.BindQuery), and [a decoder you register](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Router.Decoder) adds a body type such as XML.
+- [Errors that carry their own status](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPError.WithMessage), and one handler that writes them: [JSON on an API host](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-JSONErrorHandler), [RFC 9457 problem details](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-ProblemErrorHandler), or [an error page of your own](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HTTPErrorOf).
 - [Middleware that logs or measures the status the error handler wrote](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-HandleError).
 - [Rendering](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Render), [buffered or streamed](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderStream).
+- [A redirect that stays on the site](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.LocalRedirect), for a `next` parameter, and [a 304 for a client that already holds the page](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.CheckETag).
 - [Server-sent events](https://pkg.go.dev/github.com/dmitrymomot/go-router/sse#example-Serve) that send JSON, text or rendered HTML, in package `sse`.
 - htmx 4, in package `htmx`: [a fragment or the whole page](https://pkg.go.dev/github.com/dmitrymomot/go-router/htmx#example-RenderPartial) from one handler, and [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router/htmx#example-NewResponse): retarget, reswap, trigger, redirect.
-- [Cookies with safe defaults](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.NewCookie), and, in package `cookie`, [signed cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec) with a codec your context holds, [key rotation](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-NewCodec-Rotation), and [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec.Flashes) that survive a redirect or show in an htmx partial.
-- [Middlewares](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware): [CSRF](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CSRF), [rate limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RateLimit), [real IP](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RealIPWithConfig), [key auth](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-KeyAuth), [CORS](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CORSWithConfig), [a body limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-BodyLimit), [form parsing before the handler](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-ParseForm), [a timing floor against account enumeration](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-MinDuration), [idempotent submits](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-Idempotency), and the rest.
-- [Fingerprinted static assets](https://pkg.go.dev/github.com/dmitrymomot/go-router/static#example-package) from an `embed.FS`.
+- [Cookies with safe defaults](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.NewCookie), and, in package `cookie`, [signed cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec) with a codec your context holds, [encrypted ones](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-NewEncryptedCodec), [key rotation](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-NewCodec-Rotation), and [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec.Flashes) that survive a redirect or show in an htmx partial.
+- [Middlewares](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware): [CSRF](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CSRF), [rate limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RateLimit), [real IP](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-RealIPWithConfig), [key auth](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-KeyAuth), [CORS](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CORSWithConfig), [a body limit](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-BodyLimit), [form parsing before the handler](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-ParseForm), [a timing floor against account enumeration](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-MinDuration), [idempotent submits](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-Idempotency), [a concurrency cap](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-Throttle), [ETags for dynamic pages](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-ETag), [gzip and deflate](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-Gzip), [a token-less cross-origin guard](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-CrossOrigin), [a health probe](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-Heartbeat), [deprecation and sunset headers](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-Deprecation), [a body type allowlist](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-AllowContentType), [no-cache headers](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-NoCache), [trailing-slash stripping](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-StripSlashes), [a method override for HTML forms](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware#example-MethodOverride), and the rest. [The client address](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.ClientIP) comes from `c.ClientIP()`, and [pprof and expvar](https://pkg.go.dev/github.com/dmitrymomot/go-router/middleware/profiler#example-Handler) mount from package `middleware/profiler`.
+- [Fingerprinted static assets](https://pkg.go.dev/github.com/dmitrymomot/go-router/static#example-package) from an `embed.FS`, with the precompressed `.br` or `.gz` sibling of a file sent to a client that accepts it.
 - [A server that drains on Ctrl-C](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-Run), [leaves rotation before it drains](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-Config-DrainDelay), and [a private server that outlives the public one](https://pkg.go.dev/github.com/dmitrymomot/go-router/serve#example-RunAll).
-- [Test helpers](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-package) for a router, [a browser session that keeps its cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-Client), [one request for each route](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-Requests), a bare handler, an SSE stream, [a signed cookie](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-SignedCookie), [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-Flashes) and a golden file.
+- [Test helpers](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-package) for a router, [a browser session that keeps its cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-Client), [one request for each route](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-Requests), a bare handler, an SSE stream, [a signed cookie](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-SignedCookie), [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-Flashes), [a JSON body compared by value](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-Expect.JSON), [the first events of a live stream](https://pkg.go.dev/github.com/dmitrymomot/go-router/routertest#example-ReadEvents) and a golden file.
 - [A stdlib handler](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-WrapHandler) still works, route parameters and all.
+
+## Coming from chi or echo
+
+| chi or echo | go-router |
+| --- | --- |
+| `echo.Context`, or `r.Context()` values in chi | your struct embedding `router.Base`, with the database and the user as fields |
+| `func(w, r)`, or `func(c echo.Context) error` | `func(c *Context) error` |
+| `chi.URLParam(r, "id")`, `c.Param("id")` | `c.Param("id")`, or `c.ParamAs[int]("id")` |
+| `c.QueryParam("q")` | `c.Query("q")`, `c.QueryAs[int]("page")` |
+| `c.Bind(&v)` | `v, err := c.Bind[T]()`, or `BindJSON`, `BindForm`, `BindQuery`, `BindPath`, `BindHeader` |
+| `c.RealIP()` | `c.ClientIP()`, behind `middleware.RealIP` |
+| `r.Group(fn)`, `r.Route("/api", fn)`, `e.Group("/api")` | `r.Group(fn)`, `r.Route("/api", fn)` |
+| `r.With(mw)` | `r.With(mw)` |
+| `r.Mount("/admin", sub)` | `r.Mount("/admin", sub)`, or `r.MountHandler("/admin", h)` for any `http.Handler` |
+| `e.Host("api.example.com")` | `r.Host("api.example.com", fn)`, host parameters included |
+| `e.Pre(mw)` | `r.Pre(mw)` |
+| `e.HTTPErrorHandler = fn` | `r.ErrorHandler(fn)`, per scope if you like |
+| `echo.NewHTTPError(404, "msg")` | `router.ErrNotFound.WithMessage("msg")` |
+| a reverse lookup by route name | `router.Expand("/users/{id}", "id", id)` |
+| `echo.WrapHandler(h)` | `router.WrapHandler[*Context](h)` |
+| `middleware.Static`, `http.FileServer` | `static.Mount(r, assets)` |
+| `middleware.Compress`, echo `middleware.Gzip` | `middleware.Gzip` |
+| `middleware.Recoverer`, echo `middleware.Recover` | `middleware.Recover` |
+| `middleware.Throttle` | `middleware.Throttle` |
+| `middleware.Heartbeat`, `middleware.StripSlashes`, `middleware.NoCache`, `middleware.AllowContentType` | the same names in package `middleware` |
+| `middleware.Profiler` | `r.MountHandler("/debug", profiler.Handler())`, behind auth |
+| echo `middleware.RateLimiter` | `middleware.RateLimit` |
+| `http.ListenAndServe`, `e.Start` | `serve.Run(ctx, r, serve.Config{Addr: ":8080"})` |
 
 ## Examples you can run
 
