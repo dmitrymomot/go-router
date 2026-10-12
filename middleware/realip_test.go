@@ -15,9 +15,21 @@ import (
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
+// lanProxies trusts the private ranges, where the load balancer of these
+// tests sits at 10.0.0.1.
+var lanProxies = middleware.NewTrustSet()
+
+// behindLB trusts lanProxies unless cfg names its own set or counts hops.
+func behindLB(cfg middleware.RealIPConfig[*appContext]) middleware.RealIPConfig[*appContext] {
+	if cfg.Trust == nil && cfg.Hops == 0 {
+		cfg.Trust = lanProxies
+	}
+	return cfg
+}
+
 func realIPRouter(cfg middleware.RealIPConfig[*appContext]) *router.Router[*appContext] {
 	r := newRouter()
-	r.Use(middleware.RealIPWithConfig[*appContext](cfg))
+	r.Use(middleware.RealIPWithConfig[*appContext](behindLB(cfg)))
 	r.GET("/", func(c *appContext) error {
 		return c.String(http.StatusOK, middleware.ClientIP(c))
 	})
@@ -25,7 +37,7 @@ func realIPRouter(cfg middleware.RealIPConfig[*appContext]) *router.Router[*appC
 }
 
 func namedRealIP(names ...string) router.Middleware[*appContext] {
-	return middleware.RealIPWithConfig(middleware.RealIPConfig[*appContext]{Headers: names})
+	return middleware.RealIPWithConfig(behindLB(middleware.RealIPConfig[*appContext]{Headers: names}))
 }
 
 func fromProxy(req *http.Request, addr string) *http.Request {
@@ -332,7 +344,7 @@ func TestRealIPSkip(t *testing.T) {
 
 func headerEchoRouter(cfg middleware.RealIPConfig[*appContext], name string) *router.Router[*appContext] {
 	r := newRouter()
-	r.Use(middleware.RealIPWithConfig[*appContext](cfg))
+	r.Use(middleware.RealIPWithConfig[*appContext](behindLB(cfg)))
 	r.GET("/", func(c *appContext) error {
 		return c.String(http.StatusOK, middleware.ClientIP(c)+" "+c.Scheme()+" "+
 			strings.Join(c.Request().Header.Values(name), "|"))
@@ -545,6 +557,7 @@ func TestRealIPSecuresTheCookiesBehindATLSProxy(t *testing.T) {
 	r.Use(
 		middleware.RealIPWithConfig(middleware.RealIPConfig[*appContext]{
 			Headers: []string{router.HeaderXForwardedFor},
+			Trust:   lanProxies,
 		}),
 		middleware.SecureWithConfig(middleware.SecureConfig[*appContext]{HSTSMaxAge: 365 * 24 * time.Hour}),
 		middleware.CSRF[*appContext],
@@ -629,6 +642,7 @@ func TestRealIPPassesATrustedRequestWithoutForwardingHeadersThrough(t *testing.T
 			r.Use(recordIncoming(&incoming))
 			r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*appContext]{
 				Headers:   []string{router.HeaderXForwardedFor},
+				Trust:     lanProxies,
 				DropProto: dropProto,
 			}))
 			r.GET("/", func(c *appContext) error {
@@ -817,6 +831,87 @@ func BenchmarkRealIP(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
+		})
+	}
+}
+
+func TestRealIPDefaultTrustsOnlyTheLoopback(t *testing.T) {
+	r := newRouter()
+	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*appContext]{
+		Headers: []string{router.HeaderXForwardedFor},
+	}))
+	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, middleware.ClientIP(c)) })
+
+	tests := []struct {
+		name, peer, want string
+	}{
+		{"a private peer", "10.0.0.1:9000", "10.0.0.1"},
+		{"a link-local peer", "169.254.1.1:9000", "169.254.1.1"},
+		{"a loopback peer", "127.0.0.1:9000", "10.0.5.7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := forwarded(router.HeaderXForwardedFor, "203.0.113.9, 10.0.5.7", tt.peer)
+			if got := do(r, req).Body.String(); got != tt.want {
+				t.Errorf("client ip = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRealIPHops(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		value  string
+		peer   string
+		hops   int
+		want   string
+		scheme string
+	}{
+		{"one proxy takes the last entry", router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9", "10.0.0.1:9000", 1, "203.0.113.9", "https"},
+		{"two proxies take the second from the right", router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9, 10.0.5.7", "10.0.0.1:9000", 2, "203.0.113.9", "https"},
+		{"a public peer counts like any other", router.HeaderXForwardedFor, "203.0.113.9", "198.51.100.1:9000", 1, "203.0.113.9", "https"},
+		{"a chain that is too short is ignored", router.HeaderXForwardedFor, "203.0.113.9", "10.0.0.1:9000", 2, "10.0.0.1", "http"},
+		{"an entry with no address keeps the peer", router.HeaderXForwardedFor, "unknown", "10.0.0.1:9000", 1, "10.0.0.1", "https"},
+		{"Forwarded counts its elements", router.HeaderForwarded, "for=1.2.3.4, for=203.0.113.9;proto=https, for=10.0.5.7", "10.0.0.1:9000", 2, "203.0.113.9", "https"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := headerEchoRouter(middleware.RealIPConfig[*appContext]{
+				Headers: []string{tt.header},
+				Hops:    tt.hops,
+			}, "none")
+
+			req := forwarded(tt.header, tt.value, tt.peer)
+			req.Header.Set(router.HeaderXForwardedProto, "https")
+			want := tt.want + " " + tt.scheme + " "
+			if got := do(r, req).Body.String(); got != want {
+				t.Errorf("client ip and scheme = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRealIPWithConfigPanicsOnABadHops(t *testing.T) {
+	xff := []string{router.HeaderXForwardedFor}
+	tests := []struct {
+		name string
+		cfg  middleware.RealIPConfig[*appContext]
+	}{
+		{"negative", middleware.RealIPConfig[*appContext]{Headers: xff, Hops: -1}},
+		{"beside Trust", middleware.RealIPConfig[*appContext]{Headers: xff, Hops: 1, Trust: lanProxies}},
+		{"beside Leftmost", middleware.RealIPConfig[*appContext]{Headers: xff, Hops: 1, Leftmost: true}},
+		{"without Headers", middleware.RealIPConfig[*appContext]{Hops: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("RealIPWithConfig did not panic")
+				}
+			}()
+			middleware.RealIPWithConfig(tt.cfg)
 		})
 	}
 }
