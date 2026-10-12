@@ -3,11 +3,11 @@ package static
 import (
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/accept"
 )
 
 // The precompressed encodings in order of preference, with the file suffix
@@ -66,7 +66,7 @@ func (a *Assets) precompressed(w http.ResponseWriter, r *http.Request, name stri
 
 	header := strings.Join(r.Header.Values("Accept-Encoding"), ",")
 	for _, e := range encodings {
-		if _, ok := a.etags[name+e.suffix]; !ok || !acceptsEncoding(header, e.name) {
+		if _, ok := a.etags[name+e.suffix]; !ok || accept.EncodingQuality(header, e.name) <= 0 {
 			continue
 		}
 		f, info, err := a.openFile(name + e.suffix)
@@ -88,39 +88,4 @@ func (a *Assets) precompressed(w http.ResponseWriter, r *http.Request, name stri
 		}
 	}
 	return nil
-}
-
-// acceptsEncoding reports whether an Accept-Encoding header admits enc. An
-// explicit entry wins over "*", and a q of 0 refuses. An encoding the header
-// does not mention is not accepted, because the identity file is the safe
-// answer.
-func acceptsEncoding(header, enc string) bool {
-	star := false
-	for part := range strings.SplitSeq(header, ",") {
-		token, params, _ := strings.Cut(part, ";")
-		token = strings.TrimSpace(token)
-		q := encodingQuality(params)
-		switch {
-		case strings.EqualFold(token, enc):
-			return q > 0
-		case token == "*":
-			star = q > 0
-		}
-	}
-	return star
-}
-
-func encodingQuality(params string) float64 {
-	for p := range strings.SplitSeq(params, ";") {
-		k, v, ok := strings.Cut(p, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
-			continue
-		}
-		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil || q < 0 || q > 1 {
-			return 0
-		}
-		return q
-	}
-	return 1
 }
