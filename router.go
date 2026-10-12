@@ -217,6 +217,11 @@ func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 // "{name...}" takes the rest of the path. A parameter may sit inside a
 // segment, as in "/reports/rep-{date}.csv".
 //
+// A route takes the path as sent, so "/users/" does not reach "/users"; see
+// [Router.RedirectTrailingSlash]. A catch-all is the exception: it takes a
+// path with a trailing slash too, and its value leaves the slash out, so
+// "/files/{p...}" gives "dir" for "/files/dir/".
+//
 // A constraint after a colon narrows what a parameter admits, and a value
 // outside it does not match the route. A word names a class: "{id:int}" takes
 // ASCII digits, "{t:slug}" lowercase letters, digits and inner hyphens, and

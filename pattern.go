@@ -17,6 +17,9 @@ const (
 	segWildcard
 )
 
+// segment is one piece of a pattern between slashes. A catch-all, {name...},
+// takes the rest of the path without its trailing slashes: "/files/{p...}"
+// gives "dir" for both "/files/dir" and "/files/dir/", and "" for "/files/".
 type segment struct {
 	kind  segKind
 	value string

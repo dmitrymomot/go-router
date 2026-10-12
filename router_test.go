@@ -93,7 +93,6 @@ func TestMatch(t *testing.T) {
 	}{
 		{"/", "/"},
 		{"/users", "/users"},
-		{"/users/", "/users"},
 		{"/users/new", "/users/new"},
 		{"/users/42", "/users/{id} id=42"},
 		{"/users/42/posts/7", "/users/{id}/posts/{postID} id=42 postID=7"},
@@ -247,16 +246,17 @@ func TestRedirectTrailingSlash(t *testing.T) {
 }
 
 // The trie matches a dot segment literally, but a browser resolves one in a
-// Location, so a redirect to /x/.. would land on /, another route.
+// Location, so a redirect to /x/.. would land on /, another route. Without
+// the redirect the path keeps its slash and misses the route.
 func TestRedirectTrailingSlashLeavesADotSegmentAlone(t *testing.T) {
 	r := newTestRouter()
 	r.RedirectTrailingSlash(true)
 	r.GET("/{a}/{b}", echoRoute)
 
 	for _, target := range []string{"/x/../", "/x/./", "/x/%2e%2E/", "/x/%2e/"} {
-		// No redirect: the route answers as it does with the option off.
-		if rec := do(r, http.MethodGet, target); rec.Code != http.StatusOK || rec.Header().Get(HeaderLocation) != "" {
-			t.Errorf("GET %s = %d, Location %q; want 200 and no redirect",
+		// No redirect: the path misses the route as it does with the option off.
+		if rec := do(r, http.MethodGet, target); rec.Code != http.StatusNotFound || rec.Header().Get(HeaderLocation) != "" {
+			t.Errorf("GET %s = %d, Location %q; want 404 and no redirect",
 				target, rec.Code, rec.Header().Get(HeaderLocation))
 		}
 	}
@@ -3508,6 +3508,53 @@ func TestRedirectTrailingSlashLeavesACatchAllAlone(t *testing.T) {
 	}
 	if rec := do(r, http.MethodGet, "/users/"); rec.Header().Get(HeaderLocation) != "/users" {
 		t.Errorf("GET /users/ Location = %q, want /users", rec.Header().Get(HeaderLocation))
+	}
+}
+
+// With RedirectTrailingSlash off, a path that differs from a route by a
+// trailing slash does not reach it; v0.3.0 matched the trimmed path and
+// answered 200. A catch-all still takes the path, without the slash.
+func TestATrailingSlashMissesTheRoute(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", echoRoute)
+	r.GET("/users", echoRoute)
+	r.GET("/users/{id}", echoRoute)
+	r.GET("/files/{p...}", echoRoute)
+	r.Any("/any", echoRoute)
+
+	tests := []struct {
+		method, target string
+		code           int
+		body           string
+	}{
+		{http.MethodGet, "/users/", http.StatusNotFound, ""},
+		{http.MethodGet, "/users//", http.StatusNotFound, ""},
+		{http.MethodPost, "/users/", http.StatusNotFound, ""},
+		{http.MethodGet, "/users/42/", http.StatusNotFound, ""},
+		{http.MethodGet, "//", http.StatusNotFound, ""},
+		{http.MethodGet, "/any/", http.StatusNotFound, ""},
+		{http.MethodGet, "/users", http.StatusOK, "/users"},
+		{http.MethodGet, "/", http.StatusOK, "/"},
+		{http.MethodGet, "/files/dir/", http.StatusOK, "/files/{p...} p=dir"},
+		{http.MethodGet, "/files/dir//", http.StatusOK, "/files/{p...} p=dir"},
+		{http.MethodGet, "/files/", http.StatusOK, "/files/{p...} p="},
+		{http.MethodPost, "/files/dir/", http.StatusMethodNotAllowed, ""},
+	}
+	for _, tc := range tests {
+		rec := do(r, tc.method, tc.target)
+		if rec.Code != tc.code || tc.body != "" && rec.Body.String() != tc.body {
+			t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.target, rec.Code, rec.Body.String(), tc.code, tc.body)
+		}
+	}
+}
+
+// A scope still answers the 404 of a path under it that ends in a slash.
+func TestATrailingSlashKeepsTheScopeFallback(t *testing.T) {
+	r := newTestRouter()
+	scopeAnswering(r, "/api")
+	r.Route("/api", func(g *Router[*tctx]) { g.GET("/users", echoRoute) })
+	if rec := do(r, http.MethodGet, "/api/users/"); rec.Code != http.StatusNotFound || rec.Body.String() != "/api" {
+		t.Errorf("GET /api/users/ = %d %q, want the 404 of /api", rec.Code, rec.Body.String())
 	}
 }
 
