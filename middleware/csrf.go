@@ -13,8 +13,9 @@ import (
 )
 
 // CSRFTokenKey is the context key under which [CSRF] keeps the state that
-// [CSRFTokenFrom] reads. The value is not a string; call [CSRFTokenFrom].
-const CSRFTokenKey = "csrf_token"
+// [CSRFTokenFrom] reads. The value is not a string; call [CSRFTokenFrom]. The
+// "middleware." prefix keeps it apart from the keys of the application.
+const CSRFTokenKey = "middleware.csrf_token"
 
 // The cookies and the form field that [CSRF] uses when the configuration names
 // none. The cookie over HTTPS carries the __Host- prefix, so the browser keeps

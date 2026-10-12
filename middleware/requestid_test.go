@@ -42,7 +42,7 @@ func TestRequestIDKeepsTheInboundValue(t *testing.T) {
 	}
 }
 
-func TestRequestIDIgnoreInbound(t *testing.T) {
+func TestRequestIDDisableInbound(t *testing.T) {
 	r := requestIDRouter(middleware.RequestIDConfig[*appContext]{DisableInbound: true})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -94,5 +94,25 @@ func TestRequestIDReplacesAMalformedInboundID(t *testing.T) {
 	req.Header.Set(router.HeaderXRequestID, "abc-123_x.y")
 	if got := do(r, req).Header().Get(router.HeaderXRequestID); got != "abc-123_x.y" {
 		t.Errorf("a good inbound id was replaced by %q", got)
+	}
+}
+
+func TestMiddlewareContextKeysLeaveTheApplicationKeysAlone(t *testing.T) {
+	for _, key := range []string{middleware.RequestIDKey, middleware.CSRFTokenKey} {
+		if !strings.HasPrefix(key, "middleware.") {
+			t.Errorf("key %q has no middleware. prefix", key)
+		}
+	}
+
+	r := newRouter()
+	r.Use(middleware.RequestID[*appContext])
+	r.GET("/", func(c *appContext) error {
+		c.Set("request_id", 42)
+		return c.String(http.StatusOK, middleware.RequestIDFrom(c))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderXRequestID, "abc-123")
+	if got := do(r, req).Body.String(); got != "abc-123" {
+		t.Errorf("RequestIDFrom = %q after the application set its own request_id, want abc-123", got)
 	}
 }

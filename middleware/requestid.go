@@ -6,8 +6,9 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// RequestIDKey is where [RequestID] stores the id on the context.
-const RequestIDKey = "request_id"
+// RequestIDKey is where [RequestID] stores the id on the context. The
+// "middleware." prefix keeps it apart from the keys of the application.
+const RequestIDKey = "middleware.request_id"
 
 // MaxRequestIDLength is the longest id [RequestID] takes from a client.
 const MaxRequestIDLength = 128
