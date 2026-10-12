@@ -10,6 +10,8 @@ import (
 	"expvar"
 	"net/http"
 	"net/http/pprof"
+
+	"github.com/dmitrymomot/go-router"
 )
 
 // Handler returns a handler that serves the pprof pages and the expvar
@@ -32,27 +34,33 @@ import (
 // [http.DefaultServeMux], which a router does not use. If the program serves
 // that mux anywhere, those pages are open there; serve the router instead.
 func Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/pprof", func(w http.ResponseWriter, req *http.Request) {
+	r := router.New(func(http.ResponseWriter, *http.Request) *profilerContext { return new(profilerContext) })
+	r.GET("/pprof", func(c *profilerContext) error {
 		// A relative Location, which the client resolves against the URL it asked
 		// for, with the prefix of the mount.
-		w.Header().Set("Location", "pprof/")
-		w.WriteHeader(http.StatusMovedPermanently)
+		return c.Redirect(http.StatusMovedPermanently, "pprof/")
 	})
-	// Index looks for the profile name after "/debug/pprof/" in the path, which
-	// MountHandler has cut down, so put that prefix back.
-	mux.HandleFunc("/pprof/{rest...}", func(w http.ResponseWriter, req *http.Request) {
-		out := req.WithContext(req.Context())
+	// Index serves the index and every named profile. It reads the name after
+	// "/debug/pprof/" in the path, which the mount has cut down, so put that
+	// prefix back.
+	r.GET("/pprof/{name...}", func(c *profilerContext) error {
+		req := c.Request()
 		u := *req.URL
-		u.Path = "/debug/pprof/" + req.PathValue("rest")
+		u.Path = "/debug/pprof/" + c.Param("name")
 		u.RawPath = ""
+		out := req.Clone(req.Context())
 		out.URL = &u
-		pprof.Index(w, out)
+		pprof.Index(c.Response(), out)
+		return nil
 	})
-	mux.HandleFunc("/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/pprof/trace", pprof.Trace)
-	mux.Handle("/vars", expvar.Handler())
-	return mux
+	r.GET("/pprof/cmdline", router.WrapHandlerFunc[*profilerContext](pprof.Cmdline))
+	r.GET("/pprof/profile", router.WrapHandlerFunc[*profilerContext](pprof.Profile))
+	r.GET("/pprof/trace", router.WrapHandlerFunc[*profilerContext](pprof.Trace))
+	// The pprof tool posts the addresses it looks up.
+	r.Match([]string{http.MethodGet, http.MethodPost}, "/pprof/symbol", router.WrapHandlerFunc[*profilerContext](pprof.Symbol))
+	r.GET("/vars", router.WrapHandler[*profilerContext](expvar.Handler()))
+	return r
 }
+
+// profilerContext is the context of the profiler's own router.
+type profilerContext struct{ router.Base }
