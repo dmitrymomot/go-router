@@ -23,10 +23,9 @@ Ordered by risk, the silent ones first.
 11. **A struct that Bind cannot fill fails every Bind.** A tagged field of a type its source cannot fill (a chan, a func, a map with non-string keys, a slice of structs, a struct in a header or the path), a `,split` option on a field that is not a slice, and a `default` that does not parse as its field make every Bind of that type answer 500 with a cause that names the field, where the field used to be skipped or to fail only when a value arrived. Migrate: fix the field the log names.
 12. **`Handle` refuses a method that is not an RFC 9110 token.** `"GET "` used to register a dead route and corrupt `Allow`; it now panics, and so does a standard method in the wrong case such as `"get"`, with a message that suggests the uppercase one.
 13. **A pattern or a scope prefix with an empty segment panics.** `"/a//b"` is refused by the route methods, `Route`, `Mount`, `MountHandler` and `ValidatePattern`.
-14. **RateLimit and Throttle take `OnReject func(c C, err error) error` and set `Retry-After` before it runs.** `RateLimitConfig.OnDeny(c, id, retryAfter)` is `OnReject`, whose error is the 429 wrapping a `*RateLimitError` that carries the client and its wait (read it with `errors.As`); `ThrottleConfig.OnReject(c)` now gets the error of `Status`. Migrate: return `err`, or an answer of your own, from the hook.
+14. **RateLimit takes `OnReject func(c C, err error) error` and sets `Retry-After` before it runs.** `RateLimitConfig.OnDeny(c, id, retryAfter)` is `OnReject`, whose error is the 429 wrapping a `*RateLimitError` that carries the client and its wait (read it with `errors.As`). Migrate: return `err`, or an answer of your own, from the hook.
 15. **Every middleware option takes one name per concept.** Byte caps are `MaxBytes`, entry lifetimes are `MaxAge`, rejection hooks are `OnReject func(c C, err error) error`, and switches read as `Disable…`. The table below lists every rename.
-16. **`middleware.Profiler()` moved to package `middleware/profiler` as `profiler.Handler()`.** Importing `net/http/pprof` and `expvar` registers their handlers on `http.DefaultServeMux`, so only a program that imports `middleware/profiler` pays for that now.
-17. **`router.Context` gains `ClientIP() string`.** A context that embeds `Base` gets it; one that declares its own `ClientIP` with another signature no longer satisfies `Context`.
+16. **`router.Context` gains `ClientIP() string`.** A context that embeds `Base` gets it; one that declares its own `ClientIP` with another signature no longer satisfies `Context`.
 
 #### Renamed
 
@@ -34,18 +33,14 @@ Ordered by risk, the silent ones first.
 |---|---|
 | `BodyLimitConfig.Limit` | `MaxBytes` |
 | `DecompressConfig.MaxDecompressedSize` | `MaxBytes` |
-| `ETagConfig.MaxSize`, `DefaultETagMaxSize` | `MaxBytes`, `DefaultETagMaxBytes` |
 | `IdempotencyConfig.MaxBody`, `DefaultIdempotencyMaxBody` | `MaxBytes`, `DefaultIdempotencyMaxBytes` |
 | `IdempotencyMemoryStoreConfig.ExpiresIn`, `DefaultIdempotencyExpiry` | `MaxAge`, `DefaultIdempotencyMaxAge` |
 | `RateLimitMemoryStoreConfig.ExpiresIn`, `DefaultRateLimitExpiry` | `MaxAge`, `DefaultRateLimitMaxAge` |
-| `CrossOriginConfig.OnDeny` | `OnReject` |
 | `KeyAuthConfig.OnError` | `OnReject` |
 | `KeyAuthConfig.ContinueOnIgnoredError` | `ContinueOnNilReject` |
 | `RateLimitConfig.OnDeny func(c, id, retryAfter)` | `OnReject func(c C, err error) error` |
-| `ThrottleConfig.OnReject func(c)` | `OnReject func(c C, err error) error` |
 | `RequestIDConfig.IgnoreInbound` | `DisableInbound` |
 | `RealIPConfig.DropProto` | `DisableForwardedProto` |
-| `middleware.Profiler()` | `profiler.Handler()` in package `middleware/profiler` |
 | `RequestIDKey` value `"request_id"` | `"middleware.request_id"` |
 | `CSRFTokenKey` value `"csrf_token"` | `"middleware.csrf_token"` |
 
