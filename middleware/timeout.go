@@ -17,7 +17,8 @@ const DefaultTimeout = 30 * time.Second
 // TimeoutConfig configures [TimeoutWithConfig]. Duration is the deadline, and
 // zero takes [DefaultTimeout]. Status and Message shape the answer, and they
 // default to 503 with its standard text; a Status has to be a 4xx or a 5xx.
-// OnTimeout answers the request itself, in place of that error.
+// OnTimeout answers the request itself, in place of that error; it runs only
+// for a handler that returned an error after the deadline.
 type TimeoutConfig[C router.Context] struct {
 	Skip      func(c C) bool
 	OnTimeout func(c C, err error) error
@@ -27,7 +28,12 @@ type TimeoutConfig[C router.Context] struct {
 }
 
 // Timeout gives the handler a context that ends after [DefaultTimeout] and
-// answers 503 when the handler runs out of time.
+// answers 503 when the handler fails after the deadline passed.
+//
+// A handler that returns nil keeps its answer, even past the deadline: the
+// work is done, and a 503 would tell the client to repeat it. Only an error
+// returned after the deadline is replaced, since it is most likely the
+// cancellation itself.
 //
 // It cancels the context; it does not stop the goroutine. A handler that
 // ignores its context runs to the end, and the answer is already out.
@@ -82,7 +88,7 @@ func TimeoutWithConfig[C router.Context](cfg TimeoutConfig[C]) router.Middleware
 
 			err := next(c)
 
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) && !c.Response().Committed {
+			if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) && !c.Response().Committed {
 				cause := errors.Join(err, context.DeadlineExceeded)
 				if cfg.OnTimeout != nil {
 					return cfg.OnTimeout(c, cause)

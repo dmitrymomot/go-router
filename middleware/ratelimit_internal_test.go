@@ -78,16 +78,6 @@ func shardID(s *memoryStore, shard int) string {
 	}
 }
 
-func shardIndex(s *memoryStore, id string) int {
-	want := s.shard(id)
-	for i := range s.shards {
-		if want == &s.shards[i] {
-			return i
-		}
-	}
-	panic("unreachable")
-}
-
 func TestMemoryStoreSweepDropsARefilledBucket(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := newTestMemoryStore(t, 2, 2, time.Second)
@@ -100,7 +90,6 @@ func TestMemoryStoreSweepDropsARefilledBucket(t *testing.T) {
 		}
 
 		time.Sleep(2 * time.Second)
-		s.cleanupCursor.Store(uint64(shardIndex(s, "ada")))
 		take(t, s, "ada")
 
 		if got := memoryStoreSize(s); got != 1 {
@@ -121,7 +110,6 @@ func TestMemoryStoreSweepKeepsABucketThatOwesTokens(t *testing.T) {
 		}
 
 		time.Sleep(2 * time.Second)
-		s.cleanupCursor.Store(uint64(shardIndex(s, "ada")))
 		take(t, s, grace)
 
 		if got := memoryStoreSize(s); got != 2 {
@@ -157,7 +145,9 @@ func TestMemoryStoreCleanupIsBoundedPerRequest(t *testing.T) {
 		shard.mu.Lock()
 		before := len(shard.visitors)
 		shard.mu.Unlock()
-		s.cleanupCursor.Store(0)
+		// The next call of shard 1 sweeps shard 0.
+		s.shards[1].calls = memorySweepEvery - 1
+		s.shards[1].sweepNext = 0
 		take(t, s, shardID(s, 1))
 		shard.mu.Lock()
 		after := len(shard.visitors)
@@ -179,9 +169,8 @@ func TestMemoryStoreCleanupAdvancesAcrossShards(t *testing.T) {
 		}
 
 		time.Sleep(2 * time.Second)
-		s.cleanupCursor.Store(0)
 		hot := ids[memoryStoreShards-1]
-		for range memoryStoreShards {
+		for range memoryStoreShards * memorySweepEvery {
 			take(t, s, hot)
 		}
 
@@ -201,11 +190,10 @@ func TestMemoryStoreCleanupAdvancesAcrossShardsConcurrently(t *testing.T) {
 		}
 
 		time.Sleep(2 * time.Second)
-		s.cleanupCursor.Store(0)
 		hot := ids[memoryStoreShards-1]
 		var failures atomic.Int64
 		var wg sync.WaitGroup
-		for range memoryStoreShards * 2 {
+		for range memoryStoreShards * memorySweepEvery * 2 {
 			wg.Go(func() {
 				if _, _, err := s.Allow(nil, hot); err != nil {
 					failures.Add(1)
@@ -276,30 +264,60 @@ func TestMemoryStoreRejectsNegativeCapacity(t *testing.T) {
 }
 
 func TestMemoryStoreCapacityDropsTheFirstToExpire(t *testing.T) {
+	// Two clients a shard, and every client below lands in shard 0.
 	s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{
 		Rate:       1,
 		Burst:      2,
 		ExpiresIn:  time.Hour,
-		MaxEntries: 2,
+		MaxEntries: 2 * memoryStoreShards,
 	})
-	if !take(t, s, "ada") || !take(t, s, "grace") {
+	ada := shardID(s, 0)
+	grace := sameShardID(s, ada, 0)
+	linus := ada
+	for i := 0; linus == ada || linus == grace; i++ {
+		linus = sameShardID(s, ada, i)
+	}
+	other := shardID(s, 1)
+	if !take(t, s, other) || !take(t, s, ada) || !take(t, s, grace) {
 		t.Fatal("the store denied an entry before reaching capacity")
 	}
-	// ada expires first, so the new client takes her place.
-	if !take(t, s, "linus") {
+	// ada expires first in her shard, so the new client takes her place.
+	if !take(t, s, linus) {
 		t.Fatal("a new client was refused at capacity")
 	}
-	if !take(t, s, "grace") {
+	if !take(t, s, grace) {
 		t.Error("a tracked client lost its remaining token at capacity")
 	}
-	if take(t, s, "grace") {
+	if take(t, s, grace) {
 		t.Error("a tracked client exceeded its burst at capacity")
 	}
-	if got := memoryStoreSize(s); got != 2 {
-		t.Errorf("the store holds %d buckets, want 2", got)
+	if !take(t, s, other) || take(t, s, other) {
+		t.Error("a full shard touched the client of another shard")
 	}
-	if got := s.entries.Load(); got != 2 {
-		t.Errorf("entry count = %d, want 2", got)
+	if got := memoryStoreSize(s); got != 3 {
+		t.Errorf("the store holds %d buckets, want 3", got)
+	}
+}
+
+func TestMemoryStoreSharesMaxEntriesAcrossShards(t *testing.T) {
+	for _, maxEntries := range []int{1, 2, 31, 32, 33, 127, DefaultRateLimitMaxEntries} {
+		t.Run(strconv.Itoa(maxEntries), func(t *testing.T) {
+			s := newTestMemoryStoreWithConfig(t, RateLimitMemoryStoreConfig{Rate: 1, MaxEntries: maxEntries})
+			total := 0
+			for i := range s.nshards {
+				c := s.shards[i].capacity
+				if c < 1 {
+					t.Errorf("shard %d holds %d clients, want one at least", i, c)
+				}
+				total += c
+			}
+			if total != maxEntries {
+				t.Errorf("the shards hold %d clients together, want %d", total, maxEntries)
+			}
+			if want := uint64(min(maxEntries, memoryStoreShards)); s.nshards != want {
+				t.Errorf("shards = %d, want %d", s.nshards, want)
+			}
+		})
 	}
 }
 
@@ -323,9 +341,6 @@ func TestMemoryStoreCapacityRecoversAfterExpiry(t *testing.T) {
 		}
 		if got := memoryStoreSize(s); got != 1 {
 			t.Errorf("the store holds %d buckets, want 1", got)
-		}
-		if got := s.entries.Load(); got != 1 {
-			t.Errorf("entry count = %d, want 1", got)
 		}
 	})
 }
@@ -369,9 +384,6 @@ func TestMemoryStoreCapacityIsRaceSafe(t *testing.T) {
 	if got := memoryStoreSize(s); got != maxEntries {
 		t.Errorf("the store holds %d buckets, want %d", got, maxEntries)
 	}
-	if got := s.entries.Load(); got != maxEntries {
-		t.Errorf("entry count = %d, want %d", got, maxEntries)
-	}
 }
 
 func TestMemoryStoreCardinalityStaysBoundedForUniqueIDs(t *testing.T) {
@@ -404,8 +416,47 @@ func TestMemoryStoreCardinalityStaysBoundedForUniqueIDs(t *testing.T) {
 	if got := memoryStoreExpirySize(s); got != maxEntries {
 		t.Errorf("the expiry heaps hold %d buckets, want %d", got, maxEntries)
 	}
-	if got := s.entries.Load(); got != maxEntries {
-		t.Errorf("entry count = %d, want %d", got, maxEntries)
+}
+
+func BenchmarkMemoryStoreParallel(b *testing.B) {
+	const clients = 1024
+	benchmarks := []struct {
+		name       string
+		maxEntries int
+		unique     bool
+	}{
+		{"returning clients", 0, false},
+		{"new clients in a full store", clients, true},
+	}
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			s := NewRateLimitMemoryStoreWithConfig(RateLimitMemoryStoreConfig{
+				Rate:       1e9,
+				Burst:      1,
+				ExpiresIn:  time.Hour,
+				MaxEntries: bm.maxEntries,
+			})
+			ids := make([]string, clients)
+			for i := range ids {
+				ids[i] = strconv.Itoa(i)
+				_, _, _ = s.Allow(nil, ids[i])
+			}
+			var worker atomic.Int64
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				prefix := strconv.FormatInt(worker.Add(1), 10) + "-"
+				for i := 0; pb.Next(); i++ {
+					id := ids[i%clients]
+					if bm.unique {
+						id = prefix + strconv.Itoa(i)
+					}
+					if _, _, err := s.Allow(nil, id); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
 	}
 }
 

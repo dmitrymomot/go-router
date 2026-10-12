@@ -14,10 +14,19 @@ import (
 
 // RealIPConfig configures [RealIPWithConfig].
 //
-// Trust names the peers whose forwarding headers count, and a nil one takes
-// [NewTrustSet]. Headers names the headers to read the client address from, in
-// order of preference; an empty list reads none, so a server behind a proxy has
-// to name them.
+// Trust names the peers whose forwarding headers count, and a nil one trusts
+// the loopback alone, which is where a proxy on the same machine comes from.
+// A server behind a load balancer inside the network sets Trust to
+// [NewTrustSet], which adds the private and the link-local ranges, or to a set
+// that names the balancer. Headers names the headers to read the client
+// address from, in order of preference; an empty list reads none, so a server
+// behind a proxy has to name them.
+//
+// Hops counts the proxies in front instead, for a chain of known length: the
+// client is the entry Hops places from the right of the chain, the peer being
+// the first proxy, and Trust does not count. Hops of 1 takes the last entry,
+// the one the peer wrote. A request whose chain is shorter than Hops did not
+// pass every proxy, so it is treated as an untrusted peer's.
 //
 // X-Forwarded-Proto carries no address and does not go in Headers. A trusted
 // peer's scheme is kept, reduced to "http" or "https": the entry that peer
@@ -37,9 +46,13 @@ type RealIPConfig[C router.Context] struct {
 	Skip      func(c C) bool
 	Trust     *TrustSet
 	Headers   []string
+	Hops      int
 	Leftmost  bool
 	DropProto bool
 }
+
+// loopbackOnly is the TrustSet of a RealIPConfig that names none.
+var loopbackOnly = &TrustSet{loopback: true}
 
 var forwardingHeaders = canonicalHeaders(
 	router.HeaderForwarded, router.HeaderXForwardedFor, router.HeaderXRealIP,
@@ -62,6 +75,12 @@ func canonicalHeaders(names ...string) []string {
 // Name the headers your proxy actually sets, through [RealIPWithConfig], to
 // have the address of the client replace RemoteAddr.
 //
+// RealIP is the step that vouches for the scheme. [router.SchemeOf] reads
+// X-Forwarded-Proto as it stands, and both [Secure], which sends HSTS over
+// https alone, and [CSRF], which marks its cookie Secure and gives it the
+// __Host- prefix over https, take the scheme from it. Without RealIP in front,
+// a client sets the scheme the server sees by sending the header itself.
+//
 // See Order in the package doc for where it goes.
 func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
 	return RealIPWithConfig(RealIPConfig[C]{})(next)
@@ -76,7 +95,8 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // https behind a proxy that ends TLS. Every forwarding header of an untrusted
 // peer is deleted, unless Leftmost is set.
 //
-// RealIPWithConfig panics when Headers names X-Forwarded-Proto.
+// RealIPWithConfig panics when Headers names X-Forwarded-Proto, on a negative
+// Hops, and on Hops set beside Trust or Leftmost, or without Headers.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C] {
 	if slices.ContainsFunc(cfg.Headers, func(name string) bool {
 		return strings.EqualFold(name, router.HeaderXForwardedProto)
@@ -84,8 +104,18 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 		panic("middleware: RealIPConfig.Headers names X-Forwarded-Proto, which carries no address; " +
 			"a trusted peer's scheme is kept without it, and DropProto deletes it")
 	}
+	switch {
+	case cfg.Hops < 0:
+		panic("middleware: RealIPConfig needs a Hops of zero or more")
+	case cfg.Hops > 0 && cfg.Trust != nil:
+		panic("middleware: RealIPConfig sets both Hops and Trust; count the proxies or name them, not both")
+	case cfg.Hops > 0 && cfg.Leftmost:
+		panic("middleware: RealIPConfig sets both Hops and Leftmost; pick one")
+	case cfg.Hops > 0 && len(cfg.Headers) == 0:
+		panic("middleware: RealIPConfig sets Hops without Headers; name the header the proxies append to")
+	}
 	if cfg.Trust == nil {
-		cfg.Trust = NewTrustSet()
+		cfg.Trust = loopbackOnly
 	}
 	cfg.Headers = canonicalHeaders(cfg.Headers...)
 	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {
@@ -169,12 +199,43 @@ func ClientAddr(c router.Context) (netip.Addr, bool) {
 	return ap.Addr().WithZone("").Unmap(), true
 }
 
+// The NAT64 prefixes of RFC 6052 and RFC 8215. An address in them stands for
+// an IPv4 client, so it is not cut to its /64.
+var (
+	nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
+	nat64LocalUse  = netip.MustParsePrefix("64:ff9b:1::/48")
+)
+
+// clientNetwork reports the address of the client, with an IPv6 address cut
+// to its /64. It is the default client of [RateLimit] and [Idempotency]. An address in the NAT64 prefix 64:ff9b::/96 is reported as the
+// IPv4 address it carries, and one in 64:ff9b:1::/48 whole, since the network
+// picks where in it the IPv4 address sits. A RemoteAddr that holds no IP
+// address is reported as it stands.
+func clientNetwork(c router.Context) string {
+	addr, ok := ClientAddr(c)
+	switch {
+	case !ok:
+		return ClientIP(c)
+	case nat64WellKnown.Contains(addr):
+		b := addr.As16()
+		return netip.AddrFrom4([4]byte(b[12:])).String()
+	case nat64LocalUse.Contains(addr):
+		return addr.String()
+	case addr.Is6():
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return addr.String()
+}
+
 type hop struct {
 	addr  string
 	proto string
 }
 
 func (cfg RealIPConfig[C]) client(req *http.Request) (hop, bool) {
+	if cfg.Hops > 0 {
+		return cfg.countedHop(req)
+	}
 	if !cfg.Leftmost {
 		peer, _, ok := splitHop(req.RemoteAddr)
 		if !ok || !cfg.Trust.Trusted(peer.Addr()) {
@@ -201,6 +262,32 @@ func (cfg RealIPConfig[C]) client(req *http.Request) (hop, bool) {
 		}
 	}
 	return best, true
+}
+
+// countedHop takes the entry Hops places from the right of the first named
+// header whose chain is that long. It vouches for no peer when none is.
+func (cfg RealIPConfig[C]) countedHop(req *http.Request) (hop, bool) {
+	for _, name := range cfg.Headers {
+		values := req.Header.Values(name)
+		if len(values) == 0 {
+			continue
+		}
+		rfc7239 := strings.EqualFold(name, router.HeaderForwarded)
+		n := 0
+		for e := range entriesRight(values) {
+			if n++; n < cfg.Hops {
+				continue
+			}
+			h := parseEntry(e, rfc7239)
+			if _, text, ok := parseHop(h.addr); ok {
+				h.addr = text
+			} else {
+				h.addr = ""
+			}
+			return h, true
+		}
+	}
+	return hop{}, false
 }
 
 func (cfg RealIPConfig[C]) trustedHop(values []string, rfc7239 bool) hop {

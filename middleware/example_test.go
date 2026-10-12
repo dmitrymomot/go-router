@@ -96,7 +96,7 @@ func ExampleRealIPWithConfig() {
 			routertest.Header(router.HeaderXForwardedProto, "https")).String()
 	}
 
-	// The bare middleware names no header and trusts no public peer, so it
+	// The bare middleware names no header and trusts the loopback alone, so it
 	// strips every forwarding header and the connection stands.
 	fmt.Println(report(middleware.RealIP[*Context]))
 
@@ -120,6 +120,23 @@ func ExampleRealIPWithConfig() {
 	// 192.0.2.1 http
 	// 203.0.113.9 https
 	// 203.0.113.9 http
+}
+
+func ExampleRealIPWithConfig_hops() {
+	// Two proxies stand in front: a CDN, then a load balancer that connects
+	// to the server. Each appends the address it saw, so the client is the
+	// second entry from the right, whatever the client wrote before it.
+	r := newAPI()
+	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
+		Headers: []string{router.HeaderXForwardedFor},
+		Hops:    2,
+	}))
+	r.GET("/", func(c *Context) error { return c.String(http.StatusOK, middleware.ClientIP(c)) })
+
+	fmt.Println(routertest.Get(r, "/",
+		routertest.Header(router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9, 198.51.100.20")).String())
+	// Output:
+	// 203.0.113.9
 }
 
 func ExampleClientAddr() {

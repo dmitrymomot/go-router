@@ -59,10 +59,14 @@ var errIdempotencyStoreFull = errors.New("middleware: every idempotency key in t
 // IdempotencyConfig configures [IdempotencyWithConfig].
 //
 // Store is required. Client names whose keys these are, and a nil one takes
-// the address that [ClientIP] reports, so one client cannot claim, replay or
-// push out the keys of another. Report the id of the signed-in user instead to
-// share the keys of a user across addresses. A Client that reports "" makes
-// the key global.
+// the address that [ClientIP] reports, with an IPv6 address cut to its /64 and
+// a NAT64 address taken as the IPv4 client behind it, the same client
+// [RateLimit] counts. So one client cannot claim, replay or push out the keys
+// of another network. Every client behind one NAT or in one /64 shares the
+// keys, though, so one of them that learns the key of another can replay the
+// stored answer. Report the id of the signed-in user instead to scope the keys
+// to a user, which also shares them across addresses. A Client that reports ""
+// makes the key global.
 //
 // Fingerprint says what makes two requests the same, and an error from it is
 // returned as it stands. A nil one hashes the method, the path, the raw query,
@@ -103,9 +107,10 @@ type IdempotencyConfig[C router.Context] struct {
 // [DefaultIdempotencyFormField] field. A request without a key runs as usual.
 // See [IdempotencyWithConfig] for how each repeat is answered.
 //
-// The keys belong to the address of the client, so a client that changes its
-// address loses them; set Client through IdempotencyWithConfig to give each
-// user their own.
+// The keys belong to the network of the client, its IPv6 /64 or its IPv4
+// address, so a client that changes its address loses them, and clients
+// behind one NAT share them; set Client through IdempotencyWithConfig to give
+// each user their own.
 //
 // Put it inside auth and CSRF; see Order in the package doc.
 //
@@ -176,7 +181,7 @@ func IdempotencyWithConfig[C router.Context](cfg IdempotencyConfig[C]) router.Mi
 		cfg.Wait = DefaultIdempotencyWait
 	}
 	if cfg.Client == nil {
-		cfg.Client = func(c C) string { return ClientIP(c) }
+		cfg.Client = func(c C) string { return clientNetwork(c) }
 	}
 	if cfg.Fingerprint == nil {
 		maxBody := cfg.MaxBody
