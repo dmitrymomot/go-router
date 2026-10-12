@@ -30,9 +30,9 @@ type ETagConfig[C router.Context] struct {
 //
 // A response passes through untouched when it is not a 200, when its
 // Cache-Control says no-store, when it holds more than [DefaultETagMaxBytes]
-// bytes, or when the handler flushes it, which commits it and ends the
-// buffering. A handler that sets an ETag itself costs no buffer: the answer is
-// 304 or 200 at once.
+// bytes (or the MaxBytes of [ETagWithConfig]), or when the handler flushes
+// it, which commits it and ends the buffering. A handler that sets an ETag
+// itself costs no buffer: the answer is 304 or 200 at once.
 //
 // ETag wraps the response writer, and keeps Unwrap so that
 // [http.NewResponseController] still reaches the writer underneath.

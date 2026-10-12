@@ -45,11 +45,11 @@ const acceptedEncodings = "gzip, deflate"
 // refused with [router.ErrUnsupportedMediaType] and an Accept-Encoding of
 // "gzip, deflate", since the handler could not read the body anyway.
 //
-// The expansion stops at [router.DefaultMaxBodyBytes], which is what keeps a
-// small body that expands to a huge one from filling the memory. A body that
-// does not decode reports [router.ErrBadRequest], and one over the limit
-// reports [router.ErrPayloadTooLarge] and closes the connection after the
-// answer.
+// The expansion stops at [router.DefaultMaxBodyBytes], or at the MaxBytes of
+// [DecompressWithConfig], which is what keeps a small body that expands to a
+// huge one from filling the memory. A body that does not decode reports
+// [router.ErrBadRequest], and one over the limit reports
+// [router.ErrPayloadTooLarge] and closes the connection after the answer.
 //
 // See Order in the package doc for where it goes.
 func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {

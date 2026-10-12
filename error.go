@@ -74,8 +74,8 @@ func (e *HTTPError) WithMessage(format string, args ...any) *HTTPError {
 
 // WithDetails copies e with details attached. [TextErrorHandler] writes
 // a []FieldError one line per field, and leaves any other type to a handler
-// that knows it. [JSONErrorHandler] writes any details as JSON, so they must
-// hold nothing private.
+// that knows it. [JSONErrorHandler] and [ProblemErrorHandler] write any
+// details as JSON, so they must hold nothing private.
 func (e *HTTPError) WithDetails(details any) *HTTPError {
 	c := *e
 	c.Details = details
@@ -84,7 +84,7 @@ func (e *HTTPError) WithDetails(details any) *HTTPError {
 
 // WithError copies e with err as its cause. The cause reaches the log, and it
 // reaches the client only through an error handler with exposeCause set, such
-// as [TextErrorHandler] and [JSONErrorHandler].
+// as [TextErrorHandler], [JSONErrorHandler] and [ProblemErrorHandler].
 func (e *HTTPError) WithError(err error) *HTTPError {
 	c := *e
 	c.Err = err
@@ -424,7 +424,7 @@ var noSniff = []string{"nosniff"}
 //
 // [TextErrorHandler], [JSONErrorHandler] and [ProblemErrorHandler] call it
 // before they write. Call it first in an error handler of your own, with
-// c.ResponseWriter().Header() or the header you hold, so an error does not go
+// c.Response().Header() or the header you hold, so an error does not go
 // out with the cache lifetime or the file name of the response that failed.
 // It leaves Content-Type to the caller.
 func ResetForError(h http.Header) {

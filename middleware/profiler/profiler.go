@@ -19,7 +19,7 @@ import (
 //	/pprof/cmdline, /pprof/profile, /pprof/symbol, /pprof/trace
 //	/vars      the expvar variables, as JSON
 //
-// Mount it with [router.Router.MountHandler], as in
+// Mount it with router.Router.MountHandler, as in
 // r.MountHandler("/debug", profiler.Handler()), which gives /debug/pprof/
 // and /debug/vars. The index page finds the profiles by that /debug prefix, so
 // mount it there.

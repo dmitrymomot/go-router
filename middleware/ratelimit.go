@@ -58,6 +58,7 @@ type RateLimitError struct {
 	RetryAfter time.Duration
 }
 
+// Error reports the client and its wait.
 func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("middleware: rate limit reached for %q; retry after %s", e.Client, e.RetryAfter)
 }

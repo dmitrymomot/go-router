@@ -532,7 +532,7 @@ type IdempotencyMemoryStoreConfig struct {
 }
 
 // NewIdempotencyMemoryStore builds an [IdempotencyStore] in this process that
-// keeps a key for maxAge after its claim. An maxAge of zero takes
+// keeps a key for maxAge after its claim. A maxAge of zero takes
 // [DefaultIdempotencyMaxAge].
 //
 // The keys live in one process, so several instances each hold their own.

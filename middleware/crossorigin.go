@@ -16,10 +16,10 @@ var errCrossOrigin = router.ErrForbidden.WithMessage("cross-origin request")
 // all, such as a webhook that carries its own signature, goes through Skip.
 //
 // OnReject answers a refused request. It gets the context and the reason that
-// [http.CrossOriginProtection] reports. An error it returns answers the
-// request, and nil says that OnReject wrote the answer itself; either way the
-// request goes no further. A nil OnReject answers with a 403 "cross-origin
-// request".
+// [http.CrossOriginProtection] reports. Return an error to report it in place
+// of the request, or nil to say that OnReject wrote the answer itself; either
+// way the request goes no further. A nil OnReject answers with a 403
+// "cross-origin request".
 type CrossOriginConfig[C router.Context] struct {
 	Skip           func(c C) bool
 	TrustedOrigins []string

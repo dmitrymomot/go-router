@@ -25,6 +25,8 @@ type DeprecationConfig[C router.Context] struct {
 // Sunset header of RFC 8594 (an HTTP date) when Sunset is set, and a Link
 // header with rel="deprecation" when Link is set.
 //
+// See Order in the package doc for where it goes.
+//
 // Deprecation panics on a zero Deprecated, on a Sunset before Deprecated, and
 // on a Link that holds a '<', a '>' or a control character.
 func Deprecation[C router.Context](cfg DeprecationConfig[C]) router.Middleware[C] {

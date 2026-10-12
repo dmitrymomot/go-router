@@ -43,6 +43,8 @@ type ThrottleConfig[C router.Context] struct {
 // protects a resource from too many requests in flight. The count lives in one
 // process.
 //
+// See Order in the package doc for where it goes.
+//
 // Throttle panics on a limit under one.
 func Throttle[C router.Context](limit int) router.Middleware[C] {
 	return ThrottleWithConfig(ThrottleConfig[C]{Limit: limit})

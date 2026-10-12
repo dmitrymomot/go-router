@@ -4,6 +4,8 @@
 // r.Use(middleware.Recover[*Context]) or r.Use(middleware.BodyLimit[*Context](n)).
 // XWithConfig takes the whole config, as in
 // r.Use(middleware.RecoverWithConfig(middleware.RecoverConfig[*Context]{})).
+// Heartbeat, AllowContentType and Deprecation come in one form alone, and
+// StripSlashes and MethodOverride wrap an [http.Handler]; see Order.
 //
 // A field left at its zero value takes its default. Every Config carries a
 // Skip field, and every callback of a Config, Skip included, takes the context
