@@ -207,3 +207,21 @@ func ExampleRequest_SourceID() {
 	// Output:
 	// delete-7
 }
+
+// A URL may hold text outside ASCII. A header cannot, so each such byte goes
+// out percent-encoded.
+func ExampleResponse_PushURL() {
+	r := newRouter()
+	r.GET("/menu", func(c *Context) error {
+		if err := htmx.NewResponse(c).PushURL("/café").Err(); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/menu", nil)
+	req.Header.Set(htmx.HeaderRequest, "true")
+	fmt.Println(serveRequest(r, req).Header().Get(htmx.HeaderPushURL))
+	// Output:
+	// /caf%C3%A9
+}

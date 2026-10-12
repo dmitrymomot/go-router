@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -93,7 +94,6 @@ func TestMatch(t *testing.T) {
 	}{
 		{"/", "/"},
 		{"/users", "/users"},
-		{"/users/", "/users"},
 		{"/users/new", "/users/new"},
 		{"/users/42", "/users/{id} id=42"},
 		{"/users/42/posts/7", "/users/{id}/posts/{postID} id=42 postID=7"},
@@ -247,16 +247,17 @@ func TestRedirectTrailingSlash(t *testing.T) {
 }
 
 // The trie matches a dot segment literally, but a browser resolves one in a
-// Location, so a redirect to /x/.. would land on /, another route.
+// Location, so a redirect to /x/.. would land on /, another route. Without
+// the redirect the path keeps its slash and misses the route.
 func TestRedirectTrailingSlashLeavesADotSegmentAlone(t *testing.T) {
 	r := newTestRouter()
 	r.RedirectTrailingSlash(true)
 	r.GET("/{a}/{b}", echoRoute)
 
 	for _, target := range []string{"/x/../", "/x/./", "/x/%2e%2E/", "/x/%2e/"} {
-		// No redirect: the route answers as it does with the option off.
-		if rec := do(r, http.MethodGet, target); rec.Code != http.StatusOK || rec.Header().Get(HeaderLocation) != "" {
-			t.Errorf("GET %s = %d, Location %q; want 200 and no redirect",
+		// No redirect: the path misses the route as it does with the option off.
+		if rec := do(r, http.MethodGet, target); rec.Code != http.StatusNotFound || rec.Header().Get(HeaderLocation) != "" {
+			t.Errorf("GET %s = %d, Location %q; want 404 and no redirect",
 				target, rec.Code, rec.Header().Get(HeaderLocation))
 		}
 	}
@@ -2504,7 +2505,7 @@ func TestScopeFallbackPrefersTheDeeperScopeOnAnEqualPrefix(t *testing.T) {
 }
 
 // The host comes first, before any of the specificity above: a scope belongs to
-// the host it was declared under, and scopeFallback.hostIdx keeps it there. A
+// the host it was declared under, and the scope index of each host keeps it there. A
 // request that matched a host never reaches an any-host scope, however much
 // more specific that scope's prefix is.
 func TestScopeFallbackNeverCrossesAHost(t *testing.T) {
@@ -3508,5 +3509,135 @@ func TestRedirectTrailingSlashLeavesACatchAllAlone(t *testing.T) {
 	}
 	if rec := do(r, http.MethodGet, "/users/"); rec.Header().Get(HeaderLocation) != "/users" {
 		t.Errorf("GET /users/ Location = %q, want /users", rec.Header().Get(HeaderLocation))
+	}
+}
+
+// With RedirectTrailingSlash off, a path that differs from a route by a
+// trailing slash does not reach it; v0.3.0 matched the trimmed path and
+// answered 200. A catch-all still takes the path, without the slash.
+func TestATrailingSlashMissesTheRoute(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/", echoRoute)
+	r.GET("/users", echoRoute)
+	r.GET("/users/{id}", echoRoute)
+	r.GET("/files/{p...}", echoRoute)
+	r.Any("/any", echoRoute)
+
+	tests := []struct {
+		method, target string
+		code           int
+		body           string
+	}{
+		{http.MethodGet, "/users/", http.StatusNotFound, ""},
+		{http.MethodGet, "/users//", http.StatusNotFound, ""},
+		{http.MethodPost, "/users/", http.StatusNotFound, ""},
+		{http.MethodGet, "/users/42/", http.StatusNotFound, ""},
+		{http.MethodGet, "//", http.StatusNotFound, ""},
+		{http.MethodGet, "/any/", http.StatusNotFound, ""},
+		{http.MethodGet, "/users", http.StatusOK, "/users"},
+		{http.MethodGet, "/", http.StatusOK, "/"},
+		{http.MethodGet, "/files/dir/", http.StatusOK, "/files/{p...} p=dir"},
+		{http.MethodGet, "/files/dir//", http.StatusOK, "/files/{p...} p=dir"},
+		{http.MethodGet, "/files/", http.StatusOK, "/files/{p...} p="},
+		{http.MethodPost, "/files/dir/", http.StatusMethodNotAllowed, ""},
+	}
+	for _, tc := range tests {
+		rec := do(r, tc.method, tc.target)
+		if rec.Code != tc.code || tc.body != "" && rec.Body.String() != tc.body {
+			t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.target, rec.Code, rec.Body.String(), tc.code, tc.body)
+		}
+	}
+}
+
+// A scope still answers the 404 of a path under it that ends in a slash.
+func TestATrailingSlashKeepsTheScopeFallback(t *testing.T) {
+	r := newTestRouter()
+	scopeAnswering(r, "/api")
+	r.Route("/api", func(g *Router[*tctx]) { g.GET("/users", echoRoute) })
+	if rec := do(r, http.MethodGet, "/api/users/"); rec.Code != http.StatusNotFound || rec.Body.String() != "/api" {
+		t.Errorf("GET /api/users/ = %d %q, want the 404 of /api", rec.Code, rec.Body.String())
+	}
+}
+
+// v0.3.0 took any method: "GET " registered a route no request reaches, and
+// put "GET " in the Allow header of its path.
+func TestHandleRefusesAMethodNoRequestCarries(t *testing.T) {
+	for method, want := range map[string]string{
+		"":        "needs a method",
+		"GET ":    "token",
+		"G(ET":    "token",
+		"get":     `use "GET"`,
+		"Options": `use "OPTIONS"`,
+		"query":   `use "QUERY"`,
+	} {
+		t.Run(method, func(t *testing.T) {
+			mustPanicContaining(t, want, func() { newTestRouter().Handle(method, "/x", echoRoute) })
+		})
+	}
+	r := newTestRouter()
+	r.Handle("PROPFIND", "/x", echoRoute)
+	r.Handle("purge", "/x", echoRoute)
+	if rec := do(r, "PROPFIND", "/x"); rec.Code != http.StatusOK {
+		t.Errorf("PROPFIND /x = %d, want 200", rec.Code)
+	}
+}
+
+// A conflict names the route already there and where both were registered.
+func TestAConflictNamesTheRouteAlreadyThere(t *testing.T) {
+	r := newTestRouter()
+	r.GET("/users/{id}", echoRoute)
+	r.GET("/files/{p...}", echoRoute)
+	r.GET("/n/{id:int}", echoRoute)
+	first := lineOf(t, -3)
+	for pattern, want := range map[string]string{
+		"/users/{name}/x":  `"/users/{id}" (registered at ` + first,
+		"/files/{rest...}": `"/files/{p...}" (registered at `,
+		"/n/{num:int}/x":   `"/n/{id:int}" (registered at `,
+	} {
+		msg := panicOf(func() { r.GET(pattern, echoRoute) })
+		if !strings.Contains(msg, want) || !strings.Contains(msg, "router_test.go:") {
+			t.Errorf("GET %s panic = %q, want one that mentions %q", pattern, msg, want)
+		}
+	}
+	msg := panicOf(func() { r.GET("/users/{id}", echoRoute) })
+	second := lineOf(t, -1)
+	if !strings.Contains(msg, "registered at "+first) || !strings.Contains(msg, second) {
+		t.Errorf("duplicate panic = %q, want one that names %s and %s", msg, first, second)
+	}
+}
+
+// lineOf returns the site, as callerSite spells it, of the line delta lines
+// from the call.
+func lineOf(t *testing.T, delta int) string {
+	t.Helper()
+	_, file, line, _ := runtime.Caller(1)
+	return filepath.Join(filepath.Base(filepath.Dir(file)), filepath.Base(file)) + ":" + strconv.Itoa(line+delta)
+}
+
+func panicOf(fn func()) (msg string) {
+	defer func() { msg = fmt.Sprint(recover()) }()
+	fn()
+	return ""
+}
+
+// A preflight and a 405 reuse the cached Allow header and the inline
+// parameter array, so a pooled router answers them without allocating.
+func TestPreflightAndMethodNotAllowedDoNotAllocate(t *testing.T) {
+	r := NewPooled(func() *tctx { return new(tctx) }, func(*tctx) {})
+	r.GET("/users/{id}", echoRoute)
+	w := &nopWriter{h: make(http.Header)}
+	for _, method := range []string{http.MethodOptions, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/users/42", nil)
+		r.ServeHTTP(w, req)
+		if got := w.h.Get(HeaderAllow); got != "GET, HEAD, OPTIONS" {
+			t.Fatalf("%s Allow = %q", method, got)
+		}
+		if method == http.MethodDelete {
+			// The error answer writes a body; only routing is measured here.
+			continue
+		}
+		if allocs := testing.AllocsPerRun(100, func() { r.ServeHTTP(w, req) }); allocs != 0 {
+			t.Errorf("%s allocates %v times per request, want 0", method, allocs)
+		}
 	}
 }

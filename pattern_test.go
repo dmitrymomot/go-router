@@ -24,6 +24,10 @@ func TestValidatePatternMatchesWhatHandleAccepts(t *testing.T) {
 		{"/x/{id:(?:v1)}", true},
 		{"/x/{id:123}", false},
 		{"/x/{id:_a}", false},
+		{"/a//b", false},
+		{"//a", false},
+		{"/a/{id}//b", false},
+		{"/a/", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.pattern, func(t *testing.T) {

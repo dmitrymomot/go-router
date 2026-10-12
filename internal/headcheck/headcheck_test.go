@@ -27,8 +27,7 @@ func TestMatchesGETAcceptsAHandlerThatKeepsTheRule(t *testing.T) {
 		w.Header().Set("X-Key", r.Header.Get("X-Key"))
 		w.WriteHeader(http.StatusTeapot)
 		if r.Method != http.MethodHead {
-			//nolint:errcheck // The recorder never fails.
-			io.WriteString(w, "body")
+			_, _ = io.WriteString(w, "body") // The recorder never fails.
 		}
 	})
 	tb := new(recordingTB)

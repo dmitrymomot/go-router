@@ -1,4 +1,20 @@
 // Package serve runs HTTP servers that stop when their context does.
+//
+// [Run] serves a handler until its context ends, then drains the requests in
+// flight. [RunAll] does the same for several servers, such as a public one
+// beside a private one for probes. The defaults are the safe ones: a header
+// deadline, an idle deadline and a bounded drain.
+//
+//	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+//	defer stop()
+//
+//	r := router.New(func(http.ResponseWriter, *http.Request) *App { return new(App) })
+//	r.GET("/", home)
+//
+//	err := serve.Run(ctx, r, serve.Config{Addr: ":8080", DrainDelay: 5 * time.Second})
+//
+// A long-lived handler, such as a server-sent event stream, learns that the
+// drain started from [Draining].
 package serve
 
 import (
@@ -11,6 +27,8 @@ import (
 	"net/http"
 	"slices"
 	"time"
+
+	"github.com/dmitrymomot/go-router/internal/drain"
 )
 
 // DefaultShutdownTimeout is how long [Run] waits for the requests in flight
@@ -22,14 +40,46 @@ const DefaultShutdownTimeout = 10 * time.Second
 // connection open forever.
 const DefaultReadHeaderTimeout = 10 * time.Second
 
+// DefaultIdleTimeout is how long [Run] keeps an idle keep-alive connection
+// when Config.IdleTimeout is zero.
+const DefaultIdleTimeout = 120 * time.Second
+
+// Draining reports a channel that closes when the drain of the server that
+// serves ctx starts, right after DrainDelay. The request contexts stay live
+// through the drain, so an ordinary request finishes its work; a long-lived
+// handler, which the drain would otherwise wait for until ShutdownTimeout,
+// selects on the channel and returns:
+//
+//	select {
+//	case <-serve.Draining(c):
+//		return nil
+//	case v := <-updates:
+//		...
+//	}
+//
+// sse.Serve does it on its own. The channel is nil for a context that no
+// server of this package serves, so the select never picks it.
+func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
+
 // Config is what [Run] builds the server from. Set Addr, or hand over a
 // Listener of your own; a Listener wins, and Run closes it either way.
 //
 // Every timeout of zero takes the default of net/http, except
-// ReadHeaderTimeout, which takes [DefaultReadHeaderTimeout], and
-// ShutdownTimeout, which takes [DefaultShutdownTimeout]. A negative
-// ReadHeaderTimeout means no deadline, and a negative ShutdownTimeout closes
-// the connections at once rather than draining them.
+// ReadHeaderTimeout, which takes [DefaultReadHeaderTimeout], IdleTimeout,
+// which takes [DefaultIdleTimeout], and ShutdownTimeout, which takes
+// [DefaultShutdownTimeout]. A negative ReadHeaderTimeout or IdleTimeout means
+// no deadline, and a negative ShutdownTimeout closes the connections at once
+// rather than draining them.
+//
+// ReadTimeout has no default, because the right bound depends on the size of
+// the uploads the server takes; set it when no route accepts a large body.
+// WriteTimeout stays zero on purpose, so a server-sent event stream is not cut
+// off; bound a plain handler with a timeout middleware instead.
+//
+// Once the drain starts, Run closes the channel of [Draining], so a long-lived
+// handler such as a server-sent event stream ends on its own and the drain
+// does not run out of time. It cancels no request context. OnServer may set
+// BaseContext; Run wraps it and adds that channel.
 //
 // OnListen runs with the address the server actually listens on, which names
 // the port that ":0" chose. OnServer sees the [http.Server] before it serves,
@@ -113,6 +163,10 @@ func Run(ctx context.Context, h http.Handler, cfg Config) error {
 type instance struct {
 	h   http.Handler
 	srv *http.Server
+
+	// draining closes when the drain starts; see Draining.
+	draining chan struct{}
+
 	ln  net.Listener
 	cfg Config
 }
@@ -143,7 +197,7 @@ func (in *instance) build() error {
 		ReadHeaderTimeout: headerTimeout(in.cfg.ReadHeaderTimeout),
 		ReadTimeout:       in.cfg.ReadTimeout,
 		WriteTimeout:      in.cfg.WriteTimeout,
-		IdleTimeout:       in.cfg.IdleTimeout,
+		IdleTimeout:       idleTimeout(in.cfg.IdleTimeout),
 
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
@@ -179,11 +233,28 @@ func (in *instance) open(ctx context.Context) error {
 // left to whoever owns it.
 func (in *instance) closeOwn() {
 	if in.ln != nil && in.cfg.Listener == nil {
-		in.ln.Close() //nolint:errcheck // The listener is going away either way.
+		_ = in.ln.Close() // The listener is going away either way.
+	}
+}
+
+// withDrainContext wraps BaseContext of the server, the one OnServer may have
+// set, so that the context of every request carries the channel of Draining.
+func (in *instance) withDrainContext(ctx context.Context) {
+	in.draining = make(chan struct{})
+	user := in.srv.BaseContext
+	in.srv.BaseContext = func(l net.Listener) context.Context {
+		base := context.WithoutCancel(ctx)
+		if user != nil {
+			if b := user(l); b != nil {
+				base = b
+			}
+		}
+		return drain.With(base, in.draining)
 	}
 }
 
 func (in *instance) serve(ctx context.Context) error {
+	in.withDrainContext(ctx)
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
 	var drainErr error
@@ -276,6 +347,7 @@ func (in *instance) drain(ctx context.Context, stopped <-chan struct{}) error {
 			return nil
 		}
 	}
+	close(in.draining)
 	return shutdown(ctx, in.srv, in.cfg.ShutdownTimeout)
 }
 
@@ -297,10 +369,21 @@ func shutdown(ctx context.Context, srv *http.Server, timeout time.Duration) erro
 	case err == nil:
 		return nil
 	case errors.Is(err, context.DeadlineExceeded):
-		srv.Close() //nolint:errcheck // The drain already failed; the close reports nothing new.
+		_ = srv.Close() // The drain already failed; the close reports nothing new.
 		return fmt.Errorf("serve: the drain did not finish in %s: %w", timeout, err)
 	default:
 		return fmt.Errorf("serve: shut down: %w", err)
+	}
+}
+
+func idleTimeout(d time.Duration) time.Duration {
+	switch {
+	case d == 0:
+		return DefaultIdleTimeout
+	case d < 0:
+		return 0
+	default:
+		return d
 	}
 }
 

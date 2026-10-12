@@ -138,7 +138,7 @@ func (r *Router[C]) newChild(prefix string, mws []Middleware[C], meta []any) *Ro
 	c := &Router[C]{root: r.root, owner: r, prefix: prefix, mws: mws, meta: meta, inHost: r.inHost || len(r.hosts) > 0}
 	r.children = append(r.children, c)
 	if normalizePattern(prefix) != "/" {
-		c.settingChanged()
+		c.scopeOpened()
 	}
 	return c
 }

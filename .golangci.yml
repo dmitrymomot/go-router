@@ -1,6 +1,13 @@
 version: "2"
 
 linters:
+  enable:
+    - gosec
+    - bodyclose
+    - errorlint
+    - contextcheck
+    - noctx
+    - nilerr
   settings:
     staticcheck:
       checks:
@@ -11,3 +18,81 @@ linters:
         - -ST1020
         - -ST1021
         - -ST1022
+  exclusions:
+    rules:
+      # G101 matches the word "token" in a constant name. These constants name a
+      # context key and an HTTP header, not a secret.
+      - linters: [gosec]
+        path: ^(middleware/csrf\.go|mime\.go)$
+        text: "G101"
+      # G115 flags integer conversions whose range the code already bounds: a
+      # slice length or a shard count that min() caps, a rune below utf8.RuneSelf,
+      # and the length of a cookie name written into a fixed-width MAC header.
+      - linters: [gosec]
+        path: ^(compile\.go|host\.go|cookie/cookie\.go|htmx/htmx\.go|middleware/ratelimit\.go)$
+        text: "G115"
+      # G124 wants Secure, HttpOnly and SameSite on every cookie. NewCookie is the
+      # builder that the caller then tunes, the cookie package and the CSRF middleware
+      # set the attributes from their options, and the routertest cookies replay a
+      # value into a request, where those attributes do not travel.
+      - linters: [gosec]
+        path: ^(cookie\.go|cookie/.*\.go|middleware/csrf\.go|routertest/routertest\.go)$
+        text: "G124"
+      # routertest writes golden files under testdata with the usual 0755 mode.
+      - linters: [gosec]
+        path: ^routertest/routertest\.go$
+        text: "G301"
+      # Tests: they write plain-text bodies to a recorder (G705), build files in
+      # t.TempDir or testdata (G301, G304, G306), call httptest servers by URL
+      # (G107), use a seeded PRNG for reproducible fuzz rounds (G404), pin a TLS
+      # version on purpose (G402), convert small test integers (G115), use cookies
+      # without flags (G124), hold fixture tokens (G101) and index slices after a
+      # length check (G602). Tests also drop the error of a Close, a Write or an
+      # Execute on a recorder or a file they own (G104).
+      - linters: [gosec]
+        path: _test\.go$
+        text: "G(101|104|107|115|124|301|304|306|402|404|602|705)"
+      # postChunked closes the response body in a t.Cleanup, which bodyclose does not
+      # see across the helper boundary.
+      - linters: [bodyclose]
+        path: ^middleware/bodylimit_test\.go$
+      # A recovered panic value is an any, and net/http itself compares it to
+      # http.ErrAbortHandler with ==. Wrapping the sentinel is not a way to abort,
+      # so the identity check is the contract.
+      - linters: [errorlint]
+        path: ^(dispatch\.go|error\.go|middleware/recover\.go)$
+        text: "comparing with == will fail"
+      # FieldErrorsOf and httpErrorOf walk the error tree by hand: the type switch
+      # and the assertion are the walk, and they descend through Unwrap themselves.
+      # error(he) == err asks whether err is that very value, which errors.Is would
+      # also satisfy for a wrapper that is not the sentinel.
+      - linters: [errorlint]
+        path: ^error\.go$
+        text: "(type switch|type assertion) on error|comparing with =="
+      # Tests compare for identity on purpose: a recovered http.ErrAbortHandler, a
+      # sentinel a handler must return unwrapped, and a panic value that must pass
+      # through untouched.
+      - linters: [errorlint]
+        path: _test\.go$
+        text: "comparing with !="
+      # contextcheck follows a call chain into a helper that builds its own request
+      # with httptest, so no caller context exists to pass. Both sites are tests of
+      # that very construction.
+      - linters: [contextcheck]
+        path: ^(render_test\.go|routertest/routertest_test\.go)$
+      # Tests drive handlers with httptest requests and reach loopback servers
+      # with http.Get, net.Listen and net.Dial. A request context adds nothing
+      # there: httptest.NewRequest gives a background context, and the servers
+      # die with the test.
+      - linters: [noctx]
+        path: _test\.go$
+      # TestFlushError records the Open error in a variable the test asserts on
+      # and ends the handler without one, so the status stays what Open sent.
+      - linters: [nilerr]
+        path: ^sse/sse_test\.go$
+      # Request now builds its request with context.Background, so contextcheck
+      # wants the caller's context passed in. The two callers pass it as the
+      # Context option, which replaces that background context.
+      - linters: [contextcheck]
+        path: ^routertest/routertest\.go$
+        text: "Function `Request` should pass"

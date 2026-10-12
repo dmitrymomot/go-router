@@ -43,6 +43,11 @@ func TrustPrefix(p netip.Prefix) TrustOption {
 // private ranges. Turn one off with its option, and add a range of your own
 // with [TrustPrefix].
 //
+// [RealIP] trusts the loopback alone unless its config names a set. Pass
+// NewTrustSet() as RealIPConfig.Trust behind a load balancer in a private
+// range. Every host in those ranges is then trusted, so a client inside the
+// same network can set its own address.
+//
 // NewTrustSet panics on a nil option.
 func NewTrustSet(opts ...TrustOption) *TrustSet {
 	s := &TrustSet{loopback: true, linkLocal: true, private: true}

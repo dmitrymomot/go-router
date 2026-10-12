@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,19 @@ func gzipped(t *testing.T, s string) []byte {
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("close the gzip body: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func deflated(t *testing.T, s string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := w.Write([]byte(s)); err != nil {
+		t.Fatalf("write the deflate body: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close the deflate body: %v", err)
 	}
 	return buf.Bytes()
 }
@@ -126,17 +140,93 @@ func TestDecompressLeavesAPlainBodyAlone(t *testing.T) {
 	}
 }
 
-func TestDecompressPassesAnEncodingItDoesNotKnow(t *testing.T) {
+func TestDecompressExpandsADeflateBody(t *testing.T) {
 	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
 
-	req := httptest.NewRequest(http.MethodPost, "/read", strings.NewReader("0123456789"))
-	req.Header.Set(router.HeaderContentEncoding, "br")
+	req := decompressPost("/bind", deflated(t, `{"name":"ada"}`))
+	req.Header.Set(router.HeaderContentEncoding, "Deflate")
 	rec := do(r, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
 	}
-	if rec.Body.String() != "10" {
-		t.Errorf("the handler read %q bytes, want the body untouched", rec.Body.String())
+	if rec.Body.String() != "ada" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "ada")
+	}
+}
+
+func TestDecompressRefusesAnEncodingItDoesNotKnow(t *testing.T) {
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
+
+	for _, encoding := range []string{"br", "zstd", "gzip, gzip", "deflate, gzip", "compress"} {
+		t.Run(encoding, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/read", strings.NewReader("0123456789"))
+			req.Header.Set(router.HeaderContentEncoding, encoding)
+			rec := do(r, req)
+			if rec.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("status = %d, want 415: %s", rec.Code, rec.Body)
+			}
+			if got := rec.Header().Get(router.HeaderAcceptEncoding); got != "gzip, deflate" {
+				t.Errorf("Accept-Encoding = %q, want %q", got, "gzip, deflate")
+			}
+		})
+	}
+}
+
+func TestDecompressPassesIdentityThrough(t *testing.T) {
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
+
+	for _, encoding := range []string{"identity", "Identity", ""} {
+		t.Run(encoding, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/read", strings.NewReader("0123456789"))
+			req.Header.Set(router.HeaderContentEncoding, encoding)
+			if rec := do(r, req); rec.Code != http.StatusOK || rec.Body.String() != "10" {
+				t.Errorf("status %d, the handler read %q bytes, want 200 and the body untouched",
+					rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestDecompressExpandsGzipAfterIdentity(t *testing.T) {
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
+
+	req := decompressPost("/bind", gzipped(t, `{"name":"ada"}`))
+	req.Header.Set(router.HeaderContentEncoding, "identity, gzip")
+	if rec := do(r, req); rec.Body.String() != "ada" {
+		t.Errorf("status %d, body = %q, want %q", rec.Code, rec.Body.String(), "ada")
+	}
+}
+
+func TestDecompressRejectsABodyThatIsNotDeflate(t *testing.T) {
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
+
+	req := decompressPost("/read", []byte("this is not a zlib stream"))
+	req.Header.Set(router.HeaderContentEncoding, "deflate")
+	if rec := do(r, req); rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDecompressStopsADeflateBomb(t *testing.T) {
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxBytes: 1 << 10})
+
+	req := decompressPost("/read", deflated(t, strings.Repeat("0", 40<<10)))
+	req.Header.Set(router.HeaderContentEncoding, "deflate")
+	if rec := do(r, req); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestDecompressReusesADeflateReader(t *testing.T) {
+	r := decompressRouter(middleware.DecompressConfig[*appContext]{})
+
+	for i := range 3 {
+		want := strings.Repeat("x", i+1)
+		req := decompressPost("/read", deflated(t, want))
+		req.Header.Set(router.HeaderContentEncoding, "deflate")
+		if rec := do(r, req); rec.Body.String() != strconv.Itoa(len(want)) {
+			t.Errorf("request %d: the handler read %q bytes, want %d", i, rec.Body.String(), len(want))
+		}
 	}
 }
 
@@ -175,7 +265,7 @@ func TestDecompressStopsAZipBomb(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: tc.limit})
+			r := decompressRouter(middleware.DecompressConfig[*appContext]{MaxBytes: tc.limit})
 			if rec := do(r, decompressPost("/read", bomb)); rec.Code != tc.want {
 				t.Errorf("status = %d, want %d", rec.Code, tc.want)
 			}
@@ -268,15 +358,15 @@ func TestDecompressDoesNotHandOneReaderToTwoRequests(t *testing.T) {
 func TestDecompressRejectsANegativeCap(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("no panic for a negative MaxDecompressedSize")
+			t.Error("no panic for a negative MaxBytes")
 		}
 	}()
-	middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: -1})
+	middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxBytes: -1})
 }
 
 func TestDecompressTooLargeClosesTheConnection(t *testing.T) {
 	r := newRouter()
-	r.Use(middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxDecompressedSize: 10}))
+	r.Use(middleware.DecompressWithConfig(middleware.DecompressConfig[*appContext]{MaxBytes: 10}))
 	r.POST("/", func(c *appContext) error {
 		_, err := io.ReadAll(c.Request().Body)
 		return err

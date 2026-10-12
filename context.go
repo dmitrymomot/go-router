@@ -1,8 +1,3 @@
-// Package router implements an HTTP router whose handlers take an
-// application-defined request context.
-//
-// A handler is func(C) error, where C embeds [Base]. The router fills the
-// embedded Base before it calls the handler.
 package router
 
 import (
@@ -10,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -35,6 +31,7 @@ type Context interface {
 	RouteMeta() []any
 	Host() string
 	RouteHost() string
+	ClientIP() string
 
 	base() *Base
 }
@@ -91,6 +88,7 @@ type routerOpts struct {
 	answer       func(c Context, err error) // HandleError's way to the router that serves
 	maxBody      int64
 	maxMultipart int64
+	decoders     map[string]*bodyDecoder // Router.Decoder, by media type
 }
 
 var defaultRouterOpts = &routerOpts{maxBody: DefaultMaxBodyBytes}
@@ -169,9 +167,24 @@ type deferredState struct {
 	// forms are the multipart forms whose spilled parts go once the request
 	// is done.
 	forms []*multipart.Form
+	// onDone runs once the handler returns; see routerhook.OnHandlerDone.
+	onDone []func()
 	// bodyLimit is the cap of SetBodyLimit: 0 leaves the router's, and -1
 	// lifts it.
 	bodyLimit int64
+}
+
+// handlerDone runs the functions of routerhook.OnHandlerDone, the last one
+// first, and forgets them, so a second call does nothing.
+func (b *Base) handlerDone() {
+	if b.deferred == nil || b.deferred.onDone == nil {
+		return
+	}
+	fs := b.deferred.onDone
+	b.deferred.onDone = nil
+	for _, f := range slices.Backward(fs) {
+		f()
+	}
 }
 
 func (b *Base) deferrals() *deferredState {
@@ -391,6 +404,19 @@ func (b *Base) Host() string {
 	return b.host
 }
 
+// ClientIP reports the address of the peer, without its port: the host of
+// RemoteAddr, or RemoteAddr whole when it has no port, as under a Unix socket.
+// The RealIP middleware rewrites RemoteAddr with the address of the client, so
+// with RealIP in front this is the client rather than the proxy. It allocates
+// nothing.
+func (b *Base) ClientIP() string {
+	host, _, err := net.SplitHostPort(b.req.RemoteAddr)
+	if err != nil {
+		return b.req.RemoteAddr
+	}
+	return host
+}
+
 // Scheme reports "https" or "http". See [SchemeOf].
 func (b *Base) Scheme() string { return SchemeOf(b.req) }
 
@@ -399,6 +425,9 @@ func (b *Base) Scheme() string { return SchemeOf(b.req) }
 //
 // The header counts whoever sent it. The RealIP middleware in front by default
 // keeps only a trusted proxy's header, reduced to one value.
+// Mount the RealIP middleware wherever the scheme matters: without it a client
+// sets the scheme by sending X-Forwarded-Proto itself, and Secure (HSTS) and
+// CSRF (the Secure flag and the __Host- prefix of its cookie) trust that.
 func SchemeOf(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
@@ -454,6 +483,11 @@ func (b *Base) ParamNames() []string { return slices.Clone(b.paramNames) }
 
 // Method reports the HTTP method of the request.
 func (b *Base) Method() string { return b.req.Method }
+
+// TrailingSlash reports whether the request path ended with a slash that
+// routing trimmed. It is useful on a catch-all route, which sees the same
+// route for "/files/a" and "/files/a/" and may want to tell them apart.
+func (b *Base) TrailingSlash() bool { return b.tailSlash }
 
 // Path reports the path of the request URL.
 func (b *Base) Path() string { return b.req.URL.Path }

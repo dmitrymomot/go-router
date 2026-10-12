@@ -578,7 +578,7 @@ func TestIdempotencyKeepsTheKeyOfAnAnswerTooLargeToKeep(t *testing.T) {
 	var runs atomic.Int32
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-		Store: middleware.NewIdempotencyMemoryStore(0), MaxBody: 4,
+		Store: middleware.NewIdempotencyMemoryStore(0), MaxBytes: 4,
 	}))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
@@ -1126,8 +1126,8 @@ func TestIdempotencyWithConfigPanics(t *testing.T) {
 		{name: "too many sources", want: "token sources", cfg: middleware.IdempotencyConfig[*appContext]{
 			Store: store, Sources: make([]middleware.TokenSource, middleware.MaxTokenSources+1),
 		}},
-		{name: "negative MaxBody", want: "MaxBody", cfg: middleware.IdempotencyConfig[*appContext]{
-			Store: store, MaxBody: -1,
+		{name: "negative MaxBytes", want: "MaxBytes", cfg: middleware.IdempotencyConfig[*appContext]{
+			Store: store, MaxBytes: -1,
 		}},
 	}
 	for _, tt := range tests {
@@ -1226,6 +1226,38 @@ func TestIdempotencyKeysBelongToTheClientAddress(t *testing.T) {
 	}
 }
 
+func TestIdempotencyKeysBelongToTheClientNetworkLikeRateLimit(t *testing.T) {
+	tests := []struct {
+		name  string
+		addrs []string
+		runs  int32
+	}{
+		{"one IPv6 /64", []string{"[2001:db8::1]:1", "[2001:db8::2]:1"}, 1},
+		{"two IPv6 /64s", []string{"[2001:db8::1]:1", "[2001:db8:0:1::1]:1"}, 2},
+		{"an IPv4 client behind NAT64 and the same one direct", []string{"[64:ff9b::c000:201]:1", "192.0.2.1:1"}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var runs atomic.Int32
+			r := newRouter()
+			r.Use(middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
+			r.POST("/pay", func(c *appContext) error {
+				runs.Add(1)
+				return c.NoContent(http.StatusCreated)
+			})
+			for _, addr := range tt.addrs {
+				req := httptest.NewRequest(http.MethodPost, "/pay", nil)
+				req.RemoteAddr = addr
+				req.Header.Set(router.HeaderIdempotencyKey, "k1")
+				do(r, req)
+			}
+			if n := runs.Load(); n != tt.runs {
+				t.Errorf("runs = %d, want %d", n, tt.runs)
+			}
+		})
+	}
+}
+
 func TestIdempotencyMemoryStoreWarnsOfAnEarlyEviction(t *testing.T) {
 	var buf bytes.Buffer
 	r := newRouter()
@@ -1248,8 +1280,8 @@ func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
 	var runs atomic.Int32
 	seen := &seenErrors{}
 	r := idempotencyRouter(seen, middleware.IdempotencyWithConfig(middleware.IdempotencyConfig[*appContext]{
-		Store:   middleware.NewIdempotencyMemoryStore(0),
-		MaxBody: 8,
+		Store:    middleware.NewIdempotencyMemoryStore(0),
+		MaxBytes: 8,
 	}))
 	r.POST("/pay", func(c *appContext) error {
 		runs.Add(1)
@@ -1266,7 +1298,7 @@ func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
 		return do(r, req)
 	}
 
-	// Two bodies that share the first MaxBody bytes must not share an answer.
+	// Two bodies that share the first MaxBytes bytes must not share an answer.
 	for _, body := range []string{"01234567-pay-1", "01234567-pay-999"} {
 		for _, length := range []int64{int64(len(body)), -1} {
 			if rec := send(body, length); rec.Code != http.StatusRequestEntityTooLarge {
@@ -1278,18 +1310,18 @@ func TestIdempotencyRefusesABodyOverMaxBody(t *testing.T) {
 		}
 	}
 	if n := runs.Load(); n != 0 {
-		t.Fatalf("runs = %d, want 0 for a body over MaxBody", n)
+		t.Fatalf("runs = %d, want 0 for a body over MaxBytes", n)
 	}
 
-	// A body of MaxBody bytes reaches the handler whole, and counts whole.
+	// A body of MaxBytes bytes reaches the handler whole, and counts whole.
 	if rec := send("01234567", -1); rec.Code != http.StatusOK || rec.Body.String() != "01234567" {
-		t.Errorf("a body at MaxBody: %d %q, want 200 with the body", rec.Code, rec.Body)
+		t.Errorf("a body at MaxBytes: %d %q, want 200 with the body", rec.Code, rec.Body)
 	}
 	if rec := send("01234567", -1); rec.Code != http.StatusOK || runs.Load() != 1 {
 		t.Errorf("a repeat: %d after %d runs, want a replay", rec.Code, runs.Load())
 	}
 	if rec := send("01234568", -1); rec.Code != http.StatusUnprocessableEntity {
-		t.Errorf("another body of MaxBody bytes: status = %d, want 422", rec.Code)
+		t.Errorf("another body of MaxBytes bytes: status = %d, want 422", rec.Code)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -219,6 +220,33 @@ func TestTimeoutOnTimeoutSeesTheErrorOfTheHandler(t *testing.T) {
 		}
 		if !errors.Is(caught, sentinel) {
 			t.Errorf("OnTimeout received %v, want the error of the handler in it", caught)
+		}
+	})
+}
+
+func TestTimeoutKeepsTheSuccessOfAHandlerThatFinishedLate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var runs atomic.Int32
+		r := newRouter()
+		r.Use(
+			middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)),
+			middleware.TimeoutWithConfig(middleware.TimeoutConfig[*appContext]{Duration: 20 * time.Millisecond}),
+		)
+		r.POST("/charge", func(c *appContext) error {
+			<-c.Done()
+			runs.Add(1)
+			return nil
+		})
+
+		for range 2 {
+			req := httptest.NewRequest(http.MethodPost, "/charge", nil)
+			req.Header.Set(router.HeaderIdempotencyKey, "k1")
+			if rec := do(r, req); rec.Code == http.StatusServiceUnavailable {
+				t.Errorf("status = 503, want the answer of the handler that returned nil")
+			}
+		}
+		if got := runs.Load(); got != 1 {
+			t.Errorf("the handler ran %d times, want once: the retry ran the side effect again", got)
 		}
 	})
 }

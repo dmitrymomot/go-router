@@ -17,6 +17,9 @@ const (
 	segWildcard
 )
 
+// segment is one piece of a pattern between slashes. A catch-all, {name...},
+// takes the rest of the path without its trailing slashes: "/files/{p...}"
+// gives "dir" for both "/files/dir" and "/files/dir/", and "" for "/files/".
 type segment struct {
 	kind  segKind
 	value string
@@ -88,6 +91,12 @@ func ValidatePattern(pattern string) error {
 }
 
 func parsePattern(pattern string, classes classLookup) ([]segment, []string, error) {
+	return parseSegments(pattern, classes, false)
+}
+
+// parseSegments is parsePattern for a pattern that may hold an empty segment,
+// which a URL template of Expand may: it only builds a path.
+func parseSegments(pattern string, classes classLookup, allowEmpty bool) ([]segment, []string, error) {
 	pattern = normalizePattern(pattern)
 	if pattern == "/" {
 		return nil, nil, nil
@@ -100,6 +109,11 @@ func parsePattern(pattern string, classes classLookup) ([]segment, []string, err
 	for raw := range strings.SplitSeq(pattern[1:], "/") {
 		if len(segs) > 0 && segs[len(segs)-1].kind == segWildcard {
 			return nil, nil, fmt.Errorf("router: catch-all must be the last segment in %q", pattern)
+		}
+		// No request reaches it: a path with "//" in it misses every route
+		// but a catch-all.
+		if raw == "" && !allowEmpty {
+			return nil, nil, fmt.Errorf("router: empty segment in %q; remove the doubled '/'", pattern)
 		}
 
 		switch {

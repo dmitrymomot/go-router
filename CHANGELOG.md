@@ -2,6 +2,128 @@
 
 All notable changes to this module are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before v1, a minor release may break the API; each break is listed below with the way to migrate.
 
+## [Unreleased]
+
+This release follows a review of every package against chi, echo and the stdlib. It closes a forged-address hole in RealIP, a dotfile leak in `static` and a text/plain path into `BindJSON`, adds problem details, body decoders, richer binding, conditional GETs and nine middleware, and gives every middleware option one name per concept. Most breaks fail to compile or panic at registration. The first eleven change behavior silently, so read them before you bump the version.
+
+### Breaking changes
+
+Ordered by risk, the silent ones first.
+
+1. **RealIP trusts only the loopback by default.** A nil `RealIPConfig.Trust` used to trust the private and link-local ranges too, so a client on the server's private network could forge its address through `X-Forwarded-For`. Behind a load balancer in a private range, the headers are now ignored and every request looks like it comes from the balancer, which also merges every client into one rate-limit and idempotency key. Migrate: set `Trust: middleware.NewTrustSet()`, or a set that names the balancer, or `Hops` for a chain of known length.
+2. **A trailing slash no longer reaches a route without one.** With `RedirectTrailingSlash` off, `GET /users/` and `/users//` answered 200 from `/users`, and `GET //` from `/`; they now get 404, or 405 when another route takes the path. A catch-all still takes such a path and its value still leaves the slash out (`Base.TrailingSlash` reports it). With the option on, a path with a dot segment such as `/x/../`, which gets no redirect, is a 404 where it was a 200. Migrate: turn on `RedirectTrailingSlash` for the old leniency with a redirect.
+3. **CSRF masks its token and sets its cookie lazily.** `CSRFTokenFrom` returns the token under a fresh random pad on every call, so a page differs on every render and BREACH cannot learn it; the check unmasks it and still takes the bare token the cookie holds. A safe request that never calls `CSRFTokenFrom` gets no `Set-Cookie` and no `Vary: Cookie`. The value under `CSRFTokenKey` is no longer a string. Migrate: read the token only through `CSRFTokenFrom`, and never compare it with the cookie.
+4. **The context keys of RequestID and CSRF carry a `middleware.` prefix.** `RequestIDKey` is `"middleware.request_id"` and `CSRFTokenKey` is `"middleware.csrf_token"`, so an application value under `request_id` no longer clobbers them. Code that looked either up by the literal key now finds nothing. Migrate: call `RequestIDFrom` and `CSRFTokenFrom`.
+5. **Secure sends `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy`, both `same-origin`.** A site that serves images, scripts or fonts to other origins, or whose OAuth or payment popup talks back through `window.opener`, breaks under the defaults. Migrate: set `CrossOriginResourcePolicy: "cross-origin"` or `CrossOriginOpenerPolicy: "same-origin-allow-popups"`, or set either to `middleware.SecureOmit` to drop it.
+6. **`static` refuses dotfiles in every backend and hides precompressed siblings.** `Config.Dotfiles` was ignored for `Config.FS`, so `os.DirFS("site")` served `.env`; a dot segment is now a 404 there too unless `Dotfiles` is set. An FS set serves `name.br` or `name.gz` in place of `name` to a client that accepts the encoding, and a direct request for the sibling of an existing `name` is a 404.
+7. **Gzip leaves compressed media alone.** Images, video, audio, fonts, archives, PDF and `application/octet-stream` go out unencoded by default. Migrate: set `GzipConfig.ExcludeContentTypes` to a list of your own; a non-nil list replaces `DefaultGzipExcludeContentTypes`.
+8. **BindJSON answers 415 for a Content-Type that is not JSON.** A cross-site form can send `text/plain` without a preflight, so a `BindJSON` that decoded any body let it drive a JSON endpoint that trusts a cookie. A request with no Content-Type is still decoded. `Bind` and `BindJSON` also answer 415 for a JSON type whose charset is not UTF-8. Migrate: send `application/json` or a `+json` type.
+9. **Decompress answers 415 for an encoding it cannot expand.** A body in an encoding other than gzip, deflate or identity, or in stacked encodings such as `gzip, gzip`, used to reach the handler still compressed; it is now refused with 415 and `Accept-Encoding: gzip, deflate`. A deflate body is now expanded.
+10. **KeyAuth validates only the first key it finds.** It called the Validator for every key the sources yielded, up to eight a request. A request whose first key is wrong is now refused even when a later header value or source holds a good one.
+11. **A struct that Bind cannot fill fails every Bind.** A tagged field of a type its source cannot fill (a chan, a func, a map with non-string keys, a slice of structs, a struct in a header or the path), a `,split` option on a field that is not a slice, and a `default` that does not parse as its field make every Bind of that type answer 500 with a cause that names the field, where the field used to be skipped or to fail only when a value arrived. Migrate: fix the field the log names.
+12. **`Handle` refuses a method that is not an RFC 9110 token.** `"GET "` used to register a dead route and corrupt `Allow`; it now panics, and so does a standard method in the wrong case such as `"get"`, with a message that suggests the uppercase one.
+13. **A pattern or a scope prefix with an empty segment panics.** `"/a//b"` is refused by the route methods, `Route`, `Mount`, `MountHandler` and `ValidatePattern`.
+14. **RateLimit takes `OnReject func(c C, err error) error` and sets `Retry-After` before it runs.** `RateLimitConfig.OnDeny(c, id, retryAfter)` is `OnReject`, whose error is the 429 wrapping a `*RateLimitError` that carries the client and its wait (read it with `errors.As`). Migrate: return `err`, or an answer of your own, from the hook.
+15. **Every middleware option takes one name per concept.** Byte caps are `MaxBytes`, entry lifetimes are `MaxAge`, rejection hooks are `OnReject func(c C, err error) error`, and switches read as `Disable…`. The table below lists every rename.
+16. **`router.Context` gains `ClientIP() string`.** A context that embeds `Base` gets it; one that declares its own `ClientIP` with another signature no longer satisfies `Context`.
+
+#### Renamed
+
+| Old | New |
+|---|---|
+| `BodyLimitConfig.Limit` | `MaxBytes` |
+| `DecompressConfig.MaxDecompressedSize` | `MaxBytes` |
+| `IdempotencyConfig.MaxBody`, `DefaultIdempotencyMaxBody` | `MaxBytes`, `DefaultIdempotencyMaxBytes` |
+| `IdempotencyMemoryStoreConfig.ExpiresIn`, `DefaultIdempotencyExpiry` | `MaxAge`, `DefaultIdempotencyMaxAge` |
+| `RateLimitMemoryStoreConfig.ExpiresIn`, `DefaultRateLimitExpiry` | `MaxAge`, `DefaultRateLimitMaxAge` |
+| `KeyAuthConfig.OnError` | `OnReject` |
+| `KeyAuthConfig.ContinueOnIgnoredError` | `ContinueOnNilReject` |
+| `RateLimitConfig.OnDeny func(c, id, retryAfter)` | `OnReject func(c C, err error) error` |
+| `RequestIDConfig.IgnoreInbound` | `DisableInbound` |
+| `RealIPConfig.DropProto` | `DisableForwardedProto` |
+| `RequestIDKey` value `"request_id"` | `"middleware.request_id"` |
+| `CSRFTokenKey` value `"csrf_token"` | `"middleware.csrf_token"` |
+
+### Added
+
+Router:
+
+- `ProblemErrorHandler` and `Problem`, an RFC 9457 problem details answer as `application/problem+json`: field errors under `errors`, other Details under `details`, and the cause only when exposed. Also `MIMEApplicationProblemJSON` and `HeaderLastModified`.
+- `ResetForError(h)`, which a custom error handler calls first to drop the cache, length, encoding and file-name headers of the handler that failed.
+- `Router.Decoder(mediaType, d)` and `BodyDecoder`, so `Bind` accepts a body type such as XML; JSON, the form types and multipart stay built in.
+- Binding: `,split` for a comma list and a `default:"…"` tag in the path, the query, the headers and a form, and, in the query and a form, dotted keys for a nested struct and bracket keys for a `map[string]V`.
+- `Base.LocalRedirect` and `IsLocalURL`, a redirect that refuses a target off the site with a 400.
+- `Base.CheckETag`, `ETagOf` and `ETagMatch`, a quote-aware weak `If-None-Match` comparison that answers 304 to a GET or HEAD. The `ETag` middleware uses the same matcher.
+- `Base.TrailingSlash`, which tells a catch-all whether the path ended with a slash.
+- `Base.ClientIP`, the host of `RemoteAddr`, without allocating; `middleware.ClientIP` delegates to it.
+
+middleware:
+
+- `ETag` and `ETagWithConfig`, conditional GET for dynamic answers up to 1 MiB. A HEAD passes through with the handler's own headers.
+- `NoCache` and `NoCacheWithConfig`.
+- `Throttle` and `ThrottleWithConfig`, a concurrency cap with a backlog, 429 or 503, and `Retry-After`.
+- `Heartbeat(path)`, a probe that answers before the log and the limits, on a path with no route.
+- `StripSlashes` and `MethodOverride`, which wrap the router as an `http.Handler`. `MethodOverride` reads `_method` from the first 64 KiB of a URL-encoded body and puts the body back, so the router's body limits still apply.
+- `Deprecation`, the RFC 9745 `Deprecation`, RFC 8594 `Sunset` and `Link rel=deprecation` headers.
+- `AllowContentType`, 415 for a body type outside a list.
+- `CrossOrigin` and `CrossOriginWithConfig`, a token-less guard on `http.CrossOriginProtection`.
+- `RealIPConfig.Hops`, the client a known number of proxies from the right. The peer must still be in `Trust`, which is `NewTrustSet()` when nil, and the first named header that is present decides: a chain shorter than `Hops` is untrusted.
+- `GzipConfig.ExcludeContentTypes` and `DefaultGzipExcludeContentTypes`, and deflate negotiated by q-value. There is no zstd or brotli, since Go 1.27 has no stdlib encoder for either.
+- `SecureConfig.CrossOriginOpenerPolicy`, `CrossOriginEmbedderPolicy`, `CrossOriginResourcePolicy` and `PermissionsPolicy`.
+- `CORSConfig.AllowPrivateNetwork`.
+- `RateLimitError{Client, RetryAfter}`.
+- Package `middleware/profiler`, whose `Handler()` serves pprof and expvar under `MountHandler`.
+
+Other packages:
+
+- `cookie.NewEncryptedCodec(key, previous...)` and `cookie.KeyLen`: AES-256-GCM cookies that bind the name and expiry, rotate keys, and carry flashes.
+- `static` serves the precompressed `.br` or `.gz` sibling of a file in an FS set, br first, with `Vary` and an ETag that names the encoding.
+- `serve.Draining(ctx)`, a channel that closes when the drain starts, for a long-lived handler to end on, and `serve.DefaultIdleTimeout`. `Run` cancels no request context, so an ordinary request in flight finishes with a live context.
+- `sse.WriteTimeout`, `sse.DefaultWriteTimeout` (30 s), `sse.ErrClosed` and `Writer.Close`.
+- routertest: `Expect.JSON` and `Expect.JSONPath`, which compare JSON by value and list every path that differs, `Event.Retry`, and `ReadEvents(tb, srv, target, n)` for the first events of a stream that never ends.
+
+### Changed
+
+- `Blob`, `String`, `HTML`, `JSON`, `Stream`, `NoContent`, `Attachment`, `Inline`, `Render` and `RenderStream` return `ErrInternalServerError` for a status outside 100 to 999, where net/http panicked.
+- The message of a field that does not parse is a fixed phrase such as `is not a valid integer`, in every Bind method and in `QueryAs`, `FormAs` and `QueryAllAs`; the parse error stays in the cause.
+- A conflict or duplicate panic names the existing route and the file and line of both registrations.
+- Idempotency keys a client by its network by default, an IPv6 /64 with NAT64 unwrapped, as RateLimit does.
+- The rate-limit memory store caps each shard at an even share of `MaxEntries`, so a shard can fill before the store does.
+- `serve` defaults `IdleTimeout` to 120 s, and a negative value means none. Request contexts carry the values of the `Run` context.
+- An `sse.Writer` is safe for concurrent use, `sse.Open` honours `Heartbeat` and `Close`, and each write gets its own deadline instead of the stream clearing it.
+- `sse.Serve` ends with its `Close` event when the drain of `serve.Run` starts, and the heartbeat of `sse.Open` stops on it.
+- Accept and Accept-Encoding q values follow one strict RFC 9110 rule in content negotiation, `Gzip` and `static`: a malformed or out-of-range q, or one with more than three decimals, refuses its entry.
+- The `middleware` Order list places the new middleware, and the docs of `SchemeOf`, `RealIP`, `Secure` and `CSRF` say that the scheme is only as trusted as RealIP makes it.
+- The package overview of `router` moved to `doc.go` and covers routing, errors, binding, responses, middleware, testing and serving. The README maps the common calls of chi and echo.
+- `_examples/chat` no longer closes the room from `OnDrain`, since `sse.Serve` now ends its streams when the drain starts.
+
+### Fixed
+
+- A client on the server's private network could forge its address through RealIP's default trust.
+- The heartbeat of `sse.Open` stops when the handler returns without `Writer.Close`, so it no longer writes while the router answers an error or resets a pooled context.
+- `static` served dotfiles such as `.env` from `os.DirFS` through `Config.FS`.
+- An error answer kept the `Cache-Control`, `ETag`, `Last-Modified`, `Content-Disposition`, `Content-Encoding` and `Content-Length` of the handler that failed; every error handler, and the bare 500, now drops them and sets `nosniff`.
+- A field error no longer echoes the raw input, a Go type name or the text of `UnmarshalText`, and a long JSON member name is cut.
+- `"GET "` can no longer register a dead route or corrupt `Allow`.
+- A graceful shutdown with an open SSE stream ran into the shutdown timeout, because net/http never cancels request contexts, and a stalled SSE client could pin its handler forever.
+- Timeout answered 503 to a handler that returned nil just past the deadline, after its side effect had happened, so Idempotency ran it again; the handler's answer now stands.
+- `TrustedOrigins` and `AllowOrigins` match an origin written with its default port or in mixed case.
+- htmx `Redirect`, `Location`, `PushURL` and `ReplaceURL` percent-encode non-ASCII bytes instead of failing with a 500.
+- The decompress coding type no longer clashes with the gzip encoding type.
+- Examples: the tenants session is bound to its workspace and checks membership, the chat user cookie is signed, and the restapi key stays out of the log.
+
+### Performance
+
+Measured on an Apple M3 Max against v0.3.0. [benchmarks/README.md](benchmarks/README.md) has the router comparison and the scope benchmarks of this release.
+
+- A 404 under one of 1000 parameterized scopes: 5172 → 259 ns. A miss with 1000 scopes and none covering the path: 9890 → 181 ns. Registering 1000 scopes: 252 ms and 489 MiB → 5.6 ms and 4.9 MiB, since a new scope compiles its own subtree.
+- A CORS preflight: 3 → 1 allocation; a 405: 5 → 2 allocations. Pooled static match: 42.9 → 38.2 ns; one parameter: 95 → 84 ns.
+- `Bind` of a mixed struct: 1673 → 849 ns and 13 → 8 allocations; `Bind` of JSON: 10 → 7 allocations; `BindQuery` and `BindForm`: 13 to 14% faster.
+- `Base.JSON` and the error handlers encode into a pooled buffer: 200 items take 359 B/op instead of 16.8 KB, and 5 allocations instead of 6.
+- Gzip no longer copies a large write into its sniff buffer: a 1 MiB write takes 1.9 KiB/op instead of 1277 KiB, and a 4 KiB body is 9% faster with 82% fewer bytes.
+- The rate-limit memory store, full: a new client 1047 → 120 ns; a returning client 134 → 54 ns. KeyAuth makes one Validator call where it made up to eight.
+- `static.New` streams each file into the hasher instead of reading it whole.
+
 ## [0.3.0] - 2026-09-22
 
 v0.3.0 is a rework after a full audit: it closes several security holes, moves the add-ons out of the root package, and gives the API one shape per concept. Most breaks fail to compile. The first nine change behavior silently, so read them before you bump the version.

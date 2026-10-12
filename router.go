@@ -2,10 +2,15 @@ package router
 
 import (
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +34,9 @@ type registration[C Context] struct {
 	// rest appends a catch-all under mountParam, a name no pattern can spell,
 	// so MountHandler and RedirectHost take the rest of the path.
 	rest bool
+	// site is the file:line of the call that registered the route, which a
+	// Mount replay keeps.
+	site string
 }
 
 // hostClaim is the hold one RedirectHost call has on its host. It is not zero
@@ -73,13 +81,19 @@ type Router[C Context] struct {
 	hasRoutes    bool
 	closed       bool
 	refreshDepth int
-	meta         []any
-	hosts        []hostSpec
-	inHost       bool
-	errHandler   ErrorHandlerFunc[C]
-	mounted      *Router[C] // the router a Mount shim holds
-	preMws       []Middleware[C]
-	classes      map[string]*matcher
+	// fresh marks a scope opened since the last compile; freshScopes, on the
+	// root, lists them, and fullCompile asks the next refresh for the whole
+	// graph.
+	fresh       bool
+	fullCompile bool
+	freshScopes []*Router[C]
+	meta        []any
+	hosts       []hostSpec
+	inHost      bool
+	errHandler  ErrorHandlerFunc[C]
+	mounted     *Router[C] // the router a Mount shim holds
+	preMws      []Middleware[C]
+	classes     map[string]*matcher
 }
 
 // engine is the route table as the request path sees it: everything routing
@@ -90,8 +104,8 @@ type engine[C Context] struct {
 	tree    *node[C]
 	hostSet *hostSet[C]
 
-	allowCache      map[*node[C]]string
-	scopes          []*scopeFallback[C]
+	// scopeIdx indexes the scopes with a prefix that answer for every host.
+	scopeIdx        *scopeNode[C]
 	notFoundChain   HandlerFunc[C]
 	notAllowedChain HandlerFunc[C]
 	optionsChain    HandlerFunc[C]
@@ -106,6 +120,7 @@ type engine[C Context] struct {
 	// routes read it, and the value compile resolved for it.
 	errSlots    map[errKey[C]]*int32
 	errResolved map[errKey[C]]int32
+	owners      map[*Router[C]]int32
 	mountPaths  map[mountPath[C]]*mountPath[C]
 }
 
@@ -144,7 +159,6 @@ func (e *engine[C]) mountIn(outer *mountPath[C], shim *Router[C]) *mountPath[C] 
 func newEngine[C Context]() *engine[C] {
 	return &engine[C]{
 		tree:        new(node[C]),
-		allowCache:  map[*node[C]]string{},
 		autoOptions: true,
 		// A router that never calls a setter still has to answer.
 		notFoundChain:   defaultNotFound[C],
@@ -211,6 +225,11 @@ func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 // "{name...}" takes the rest of the path. A parameter may sit inside a
 // segment, as in "/reports/rep-{date}.csv".
 //
+// A route takes the path as sent, so "/users/" does not reach "/users"; see
+// [Router.RedirectTrailingSlash]. A catch-all is the exception: it takes a
+// path with a trailing slash too, and its value leaves the slash out, so
+// "/files/{p...}" gives "dir" for "/files/dir/".
+//
 // A constraint after a colon narrows what a parameter admits, and a value
 // outside it does not match the route. A word names a class: "{id:int}" takes
 // ASCII digits, "{t:slug}" lowercase letters, digits and inner hyphens, and
@@ -220,10 +239,13 @@ func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 // else is a regular expression that must match the whole value, as in
 // "{id:[0-9]{6}}".
 //
-// Handle panics on an empty method, a nil handler, a nil middleware, a
-// constraint that names no class or does not compile, a pattern that conflicts
-// with one already registered, or a call that arrives after the router started
-// serving.
+// The method is case-sensitive, as in a request, and must be a token of RFC
+// 9110: "GET" or "PROPFIND", not "get" or "GET ".
+//
+// Handle panics on a method that is not a token or is a standard method in
+// lowercase, a nil handler, a nil middleware, a constraint that names no class
+// or does not compile, a pattern that conflicts with one already registered,
+// or a call that arrives after the router started serving.
 func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.register(registration[C]{method: method, pattern: pattern, handler: h, mws: mws})
 }
@@ -233,8 +255,8 @@ func (r *Router[C]) register(reg registration[C]) {
 	// Ordered against the freeze: without it the check below is a guess, and a
 	// route could go into a trie a request had already started reading.
 	defer r.guard("register " + method + " " + pattern)()
-	if method == "" {
-		panic("router: Handle needs a method")
+	if err := checkMethod(method); err != nil {
+		panic(err.Error() + " for " + pattern)
 	}
 	if reg.handler == nil {
 		panic("router: Handle needs a handler for " + method + " " + pattern)
@@ -244,6 +266,7 @@ func (r *Router[C]) register(reg registration[C]) {
 		s.hasRoutes = true
 	}
 	reg.mws = slices.Clone(reg.mws)
+	reg.site = callerSite()
 	r.regs = append(r.regs, reg)
 	r.install(reg)
 }
@@ -272,13 +295,13 @@ func (r *Router[C]) install(reg registration[C]) {
 	if len(meta) > 0 {
 		handler = withRouteMeta(handler, &routeRecord{pattern: normalizePattern(full), meta: meta})
 	}
-	mh := methodHandler[C]{method: reg.method, handler: handler, meta: meta}
+	mh := methodHandler[C]{method: reg.method, handler: handler, meta: meta, site: reg.site}
 
 	entries := r.hostEntriesIn(eng)
 	if len(entries) == 0 {
 		eng.anyHostRoutes = true
 		mh.errIdx = r.errSlot(eng, nil)
-		if err := eng.tree.insert(full, segs, names, nil, mh, eng.autoOptions, eng.allowCache); err != nil {
+		if err := eng.tree.insert(full, segs, names, nil, mh, eng.autoOptions); err != nil {
 			panic(err.Error())
 		}
 		return
@@ -297,11 +320,62 @@ func (r *Router[C]) install(reg registration[C]) {
 			panic("router: the host " + e.pattern + " already holds routes, so RedirectHost cannot own it")
 		}
 		mh.errIdx = r.errSlot(eng, e)
-		if err := e.tree.insert(full, segs, names, e.names, mh, eng.autoOptions, eng.allowCache); err != nil {
+		if err := e.tree.insert(full, segs, names, e.names, mh, eng.autoOptions); err != nil {
 			panic(err.Error())
 		}
 		if claim {
 			e.redirect = reg.claim
+		}
+	}
+}
+
+// standardMethods are the methods of RFC 9110 and RFC 5789, and QUERY.
+var standardMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+	http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace, MethodQuery,
+}
+
+// checkMethod refuses a method that no request can carry: net/http answers 400
+// to one that is not a token, and a lowercase standard method is another
+// method that no client sends.
+func checkMethod(method string) error {
+	if method == "" {
+		return errors.New("router: Handle needs a method")
+	}
+	for i := range len(method) {
+		if !isTokenByte(method[i]) {
+			return fmt.Errorf("router: method %q holds %q, which an RFC 9110 token cannot", method, method[i])
+		}
+	}
+	if up := strings.ToUpper(method); up != method && slices.Contains(standardMethods, up) {
+		return fmt.Errorf("router: method %q is not %s; methods are case-sensitive, so use %q", method, up, up)
+	}
+	return nil
+}
+
+// isTokenByte reports whether c is a tchar of RFC 9110.
+func isTokenByte(c byte) bool {
+	return isLetter(c) || isDigit(c) || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+}
+
+// routerDir is the directory of this package's source, which callerSite skips.
+var routerDir = func() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Dir(file)
+}()
+
+// callerSite returns the file:line of the nearest caller outside this package,
+// a test of it included, or "" when there is none.
+func callerSite() string {
+	var pcs [32]uintptr
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs[:])])
+	for {
+		f, more := frames.Next()
+		if f.File != "" && (filepath.Dir(f.File) != routerDir || strings.HasSuffix(f.File, "_test.go")) {
+			return filepath.Join(filepath.Base(filepath.Dir(f.File)), filepath.Base(f.File)) + ":" + strconv.Itoa(f.Line)
+		}
+		if !more {
+			return ""
 		}
 	}
 }
@@ -504,10 +578,10 @@ func (r *Router[C]) HandleOPTIONS(on bool) {
 	defer r.guard("change the OPTIONS setting")()
 	root := r.root
 	root.eng.autoOptions = on
-	root.eng.tree.recacheAllow(on, root.eng.allowCache)
+	root.eng.tree.recacheAllow(on)
 	if root.eng.hostSet != nil {
 		for _, e := range root.eng.hostSet.all {
-			e.tree.recacheAllow(on, root.eng.allowCache)
+			e.tree.recacheAllow(on)
 		}
 	}
 }
@@ -551,6 +625,10 @@ func (r *Router[C]) Logger(l *slog.Logger) {
 
 // JSONOptions sets the options that [Base.JSON], [Base.BindJSON] and the
 // SendJSON of package sse apply. The options of a single call win over these.
+//
+// json/v2 matches member names case-sensitively, so a member "Name" does not
+// fill a field tagged `json:"name"`; pass json.MatchCaseInsensitiveNames(true)
+// to match in any case.
 //
 // JSONOptions panics on a scope, on a mounted router, or after the router started
 // serving.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"os"
@@ -40,7 +41,8 @@ func ExampleCSRF() {
 	r.Use(middleware.CSRF[*Context])
 
 	// The token reaches the page through the context, and comes back in the
-	// _csrf form field. It is also the value of the _csrf cookie.
+	// _csrf form field. The page carries the token under a mask that changes
+	// on every render, so it differs from the value of the _csrf cookie.
 	r.GET("/form", func(c *Context) error {
 		return c.String(http.StatusOK, fmt.Sprintf(`<input name="_csrf" value=%q>`,
 			middleware.CSRFTokenFrom(c)))
@@ -49,13 +51,14 @@ func ExampleCSRF() {
 
 	form := routertest.Get(r, "/form")
 	cookie := form.Cookies()[0]
+	token := strings.Split(form.String(), `"`)[3]
 
 	saved := routertest.Do(r, http.MethodPost, "/save",
 		routertest.Cookie(cookie),
-		routertest.FormBody(url.Values{"_csrf": {cookie.Value}}))
+		routertest.FormBody(url.Values{"_csrf": {token}}))
 	forged := routertest.Do(r, http.MethodPost, "/save", routertest.Cookie(cookie))
 
-	fmt.Println(cookie.Name, strings.Contains(form.String(), cookie.Value))
+	fmt.Println(cookie.Name, token != cookie.Value)
 	fmt.Println(saved.StatusCode, saved.String())
 	fmt.Println(forged.StatusCode, forged.String())
 	// Output:
@@ -96,7 +99,7 @@ func ExampleRealIPWithConfig() {
 			routertest.Header(router.HeaderXForwardedProto, "https")).String()
 	}
 
-	// The bare middleware names no header and trusts no public peer, so it
+	// The bare middleware names no header and trusts the loopback alone, so it
 	// strips every forwarding header and the connection stands.
 	fmt.Println(report(middleware.RealIP[*Context]))
 
@@ -110,16 +113,37 @@ func ExampleRealIPWithConfig() {
 		Trust:   proxies,
 	})))
 
-	// DropProto takes the scheme from the connection alone.
+	// DisableForwardedProto takes the scheme from the connection alone.
 	fmt.Println(report(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
-		Headers:   []string{router.HeaderXForwardedFor},
-		Trust:     proxies,
-		DropProto: true,
+		Headers:               []string{router.HeaderXForwardedFor},
+		Trust:                 proxies,
+		DisableForwardedProto: true,
 	})))
 	// Output:
 	// 192.0.2.1 http
 	// 203.0.113.9 https
 	// 203.0.113.9 http
+}
+
+func ExampleRealIPWithConfig_hops() {
+	// Two proxies stand in front: a CDN, then a load balancer that connects
+	// to the server. Each appends the address it saw, so the client is the
+	// second entry from the right, whatever the client wrote before it. The
+	// load balancer must be trusted too: Trust is the private ranges unless it
+	// is set, and the test request arrives from 192.0.2.1.
+	r := newAPI()
+	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
+		Headers: []string{router.HeaderXForwardedFor},
+		Trust: middleware.NewTrustSet(
+			middleware.TrustPrefix(netip.MustParsePrefix("192.0.2.0/24"))),
+		Hops: 2,
+	}))
+	r.GET("/", func(c *Context) error { return c.String(http.StatusOK, middleware.ClientIP(c)) })
+
+	fmt.Println(routertest.Get(r, "/",
+		routertest.Header(router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9, 198.51.100.20")).String())
+	// Output:
+	// 203.0.113.9
 }
 
 func ExampleClientAddr() {
@@ -292,12 +316,12 @@ func ExampleBodyLimit() {
 func ExampleDecompress() {
 	r := newAPI()
 	// BodyLimit bounds the bytes on the wire and what Bind reads of their
-	// expansion; MaxDecompressedSize bounds the expansion for any reader. A
+	// expansion; MaxBytes bounds the expansion for any reader. A
 	// zip bomb needs both.
 	r.Use(
 		middleware.BodyLimit[*Context](1<<20),
 		middleware.DecompressWithConfig(middleware.DecompressConfig[*Context]{
-			MaxDecompressedSize: 1 << 20,
+			MaxBytes: 1 << 20,
 		}),
 	)
 	r.POST("/echo", func(c *Context) error {
@@ -372,8 +396,8 @@ func ExampleRequestIDWithConfig() {
 	r.Use(middleware.RequestIDWithConfig(middleware.RequestIDConfig[*Context]{
 		// A real program leaves Generator nil, for a UUIDv7 per request.
 		Generator: func() string { return "req-1" },
-		// IgnoreInbound refuses the id a client sends, which nothing verifies.
-		IgnoreInbound: true,
+		// DisableInbound refuses the id a client sends, which nothing verifies.
+		DisableInbound: true,
 	}))
 	r.GET("/", func(c *Context) error {
 		return c.String(http.StatusOK, middleware.RequestIDFrom(c))
@@ -499,7 +523,7 @@ func ExampleNewIdempotencyMemoryStoreWithConfig() {
 	// Keep a key for a day, and at most 10000 of them. A full store drops the
 	// oldest key whose answer it holds.
 	store := middleware.NewIdempotencyMemoryStoreWithConfig(middleware.IdempotencyMemoryStoreConfig{
-		ExpiresIn:  24 * time.Hour,
+		MaxAge:     24 * time.Hour,
 		MaxEntries: 10000,
 	})
 
@@ -533,4 +557,159 @@ func ExampleNewIdempotencyMemoryStoreWithConfig() {
 	// Output:
 	// 201 order for alice
 	// 201 order for bob
+}
+
+func ExampleETag() {
+	r := newAPI()
+	r.Use(middleware.ETag[*Context])
+	r.GET("/report", func(c *Context) error { return c.String(http.StatusOK, "totals") })
+
+	first := routertest.Get(r, "/report")
+	again := routertest.Get(r, "/report", routertest.Header("If-None-Match", first.Header.Get("ETag")))
+	fmt.Println(first.StatusCode, again.StatusCode)
+	// Output: 200 304
+}
+
+func ExampleNoCache() {
+	r := newAPI()
+	r.Use(middleware.NoCache[*Context])
+	r.GET("/me", sayOK)
+
+	res := routertest.Get(r, "/me")
+	fmt.Println(res.Header.Get("Cache-Control"))
+	// Output: no-cache, no-store, no-transform, must-revalidate, private, max-age=0
+}
+
+func ExampleThrottle() {
+	r := newAPI()
+	// At most 10 reports run at once; 20 more wait up to 2 seconds for a slot,
+	// and the rest get a 503 with a Retry-After of 5 seconds.
+	r.Use(middleware.ThrottleWithConfig(middleware.ThrottleConfig[*Context]{
+		Limit:          10,
+		Backlog:        20,
+		BacklogTimeout: 2 * time.Second,
+		Status:         http.StatusServiceUnavailable,
+		RetryAfter:     5 * time.Second,
+	}))
+	r.GET("/report", sayOK)
+
+	fmt.Println(routertest.Get(r, "/report").StatusCode)
+	// Output: 200
+}
+
+func ExampleHeartbeat() {
+	r := newAPI()
+	// Mount it at the root, so it also answers a path with no route.
+	r.Use(middleware.Heartbeat[*Context]("/ping"))
+	r.GET("/", sayOK)
+
+	res := routertest.Get(r, "/ping")
+	fmt.Println(res.StatusCode, res.String())
+	// Output: 200 .
+}
+
+func ExampleStripSlashes() {
+	r := newAPI()
+	r.GET("/users", sayOK)
+
+	// StripSlashes goes in front of the router, which picks the route.
+	h := middleware.StripSlashes(r)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/", nil))
+	fmt.Println(rec.Code)
+	// Output: 200
+}
+
+func ExampleDeprecation() {
+	r := newAPI()
+	r.Use(middleware.Deprecation(middleware.DeprecationConfig[*Context]{
+		Deprecated: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Sunset:     time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+		Link:       "https://example.com/migrate",
+	}))
+	r.GET("/v1/users", sayOK)
+
+	h := routertest.Get(r, "/v1/users").Header
+	fmt.Println(h.Get("Deprecation"))
+	fmt.Println(h.Get("Sunset"))
+	fmt.Println(h.Get("Link"))
+	// Output:
+	// @1767225600
+	// Fri, 01 Jan 2027 00:00:00 GMT
+	// <https://example.com/migrate>; rel="deprecation"
+}
+
+func ExampleMethodOverride() {
+	r := newAPI()
+	r.DELETE("/items/1", sayOK)
+
+	// MethodOverride goes in front of the router, which picks the route.
+	h := middleware.MethodOverride(r)
+	form := httptest.NewRequest(http.MethodPost, "/items/1", strings.NewReader("_method=DELETE"))
+	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, form)
+	fmt.Println(rec.Code)
+	// Output: 200
+}
+
+func ExampleAllowContentType() {
+	r := newAPI()
+	r.Use(middleware.AllowContentType[*Context]("application/json"))
+	r.POST("/items", sayOK)
+
+	res := routertest.Do(r, http.MethodPost, "/items", routertest.Body("text/plain", strings.NewReader("hi")))
+	fmt.Println(res.StatusCode)
+	// Output: 415
+}
+
+// CrossOrigin and CSRF guard the same door. CrossOrigin needs no token and no
+// cookie, and trusts the Sec-Fetch-Site header of the browser; CSRF hands out a
+// token that every form must send back, and so it also covers a browser that
+// sends no such header.
+func ExampleCrossOrigin() {
+	r := newAPI()
+	r.Use(middleware.CrossOriginWithConfig(middleware.CrossOriginConfig[*Context]{
+		TrustedOrigins: []string{"https://partner.example"},
+	}))
+	r.POST("/save", sayOK)
+
+	post := func(site, origin string) int {
+		opts := []routertest.RequestOption{routertest.Header(router.HeaderSecFetchSite, site)}
+		if origin != "" {
+			opts = append(opts, routertest.Header(router.HeaderOrigin, origin))
+		}
+		return routertest.Do(r, http.MethodPost, "/save", opts...).StatusCode
+	}
+
+	fmt.Println("same origin:", post("same-origin", ""))
+	fmt.Println("another site:", post("cross-site", "https://evil.example"))
+	fmt.Println("trusted site:", post("cross-site", "https://partner.example"))
+	// Output:
+	// same origin: 200
+	// another site: 403
+	// trusted site: 200
+}
+
+func ExampleGzipWithConfig() {
+	r := newAPI()
+	r.Use(middleware.GzipWithConfig(middleware.GzipConfig[*Context]{
+		// Replace the default list of types that are compressed already.
+		ExcludeContentTypes: []string{"application/pdf", "image/*"},
+	}))
+	body := strings.Repeat("a", 2000)
+	r.GET("/text", func(c *Context) error { return c.String(http.StatusOK, body) })
+	r.GET("/doc", func(c *Context) error {
+		c.SetHeader(router.HeaderContentType, "application/pdf")
+		_, err := c.Response().WriteString(body)
+		return err
+	})
+
+	// A client that takes deflate and not gzip gets deflate.
+	accept := routertest.Header(router.HeaderAcceptEncoding, "deflate, br;q=0.5")
+	fmt.Printf("text: %q\n", routertest.Get(r, "/text", accept).Header.Get(router.HeaderContentEncoding))
+	fmt.Printf("pdf: %q\n", routertest.Get(r, "/doc", accept).Header.Get(router.HeaderContentEncoding))
+	// Output:
+	// text: "deflate"
+	// pdf: ""
 }

@@ -309,3 +309,54 @@ func ExampleExpect_FieldErrors() {
 		Status(http.StatusUnprocessableEntity).
 		FieldErrors("email")
 }
+
+// JSON compares the body as data, so key order and spacing do not matter, and
+// JSONPath checks one value by its path.
+func ExampleExpect_JSON() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
+	r := router.New(newContext)
+	r.GET("/users", func(c *appContext) error {
+		return c.JSON(http.StatusOK, map[string]any{
+			"total": 2,
+			"items": []user{{Name: "ann", Age: 30}, {Name: "bob", Age: 41}},
+		})
+	})
+
+	routertest.Get(r, "/users").Expect(tb).
+		Status(http.StatusOK).
+		JSONPath("items.1.name", "bob").
+		JSONPath("total", 2).
+		JSON(map[string]any{
+			"items": []map[string]any{{"name": "ann", "age": 30}, {"name": "bob", "age": 41}},
+			"total": 2,
+		})
+}
+
+// ReadEvents reads a live stream from a server, and stops at the count of
+// events, so a stream that never ends cannot hang the test.
+func ExampleReadEvents() {
+	// tb is the *testing.T of the test that runs this.
+	var tb testing.TB
+
+	r := router.New(newContext)
+	r.GET("/stream", func(c *appContext) error {
+		s, err := sse.Open(c, http.StatusOK)
+		if err != nil {
+			return err
+		}
+		for _, name := range []string{"ann", "bob"} {
+			if err := s.Send(sse.Event{Name: "user", Data: name, Retry: time.Second}); err != nil {
+				return err
+			}
+		}
+		<-c.Request().Context().Done() // the stream stays open
+		return nil
+	})
+
+	srv := routertest.NewServer(tb, r)
+	for _, e := range routertest.ReadEvents(tb, srv, "/stream", 2) {
+		fmt.Println(e.Name, e.Data, e.Retry)
+	}
+}

@@ -105,3 +105,30 @@ func ExampleOpen() {
 	// data: one
 	// data: two
 }
+
+func ExampleWriter_Close() {
+	r := router.New(newContext)
+
+	r.GET("/jobs/stream", func(c *Context) error {
+		s, err := sse.Open(c, http.StatusOK,
+			sse.Heartbeat(15*time.Second),
+			sse.WriteTimeout(10*time.Second),
+			sse.Close(sse.Event{Name: "done", Data: "bye"}))
+		if err != nil {
+			return err
+		}
+		// Close stops the heartbeat and sends the closing event.
+		defer s.Close() //nolint:errcheck // The client is gone if it fails.
+
+		return s.SendData("working")
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/jobs/stream", nil))
+	fmt.Print(rec.Body.String())
+	// Output:
+	// data: working
+	//
+	// event: done
+	// data: bye
+}

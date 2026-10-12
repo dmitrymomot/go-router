@@ -127,8 +127,7 @@ func (w *holdWriter) ReadFrom(src io.Reader) (int64, error) {
 }
 
 func (w *holdWriter) Flush() {
-	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
-	w.FlushError()
+	_ = w.FlushError() // Flush mirrors http.Flusher, which reports no error.
 }
 
 func (w *holdWriter) FlushError() error {

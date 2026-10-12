@@ -41,17 +41,22 @@ func SecureCompare(a, b string) bool {
 // an empty list reads a Bearer token from Authorization.
 //
 // Challenge is the WWW-Authenticate value of a 401, and an empty one sends
-// "Bearer". OnError answers the failure itself, and ContinueOnIgnoredError
-// lets the request through when OnError reports nil, which suits an optional
-// sign-in. The challenge goes on a 401 that OnError returns as an error, and an
-// OnError that writes a 401 itself sets its own.
+// "Bearer".
+//
+// OnReject answers a refused request. It gets the failure: a 401 for a missing
+// or bad key, or the error of Validator. Return an error to report it in place
+// of the request, or nil to say that OnReject wrote the answer itself. A nil
+// OnReject reports the failure. ContinueOnNilReject lets the request through
+// when OnReject reports nil, which suits an optional sign-in. The challenge
+// goes on a 401 that OnReject returns as an error, and an OnReject that writes
+// a 401 itself sets its own.
 type KeyAuthConfig[C router.Context] struct {
-	Skip                   func(c C) bool
-	Sources                []TokenSource
-	Validator              func(c C, key string) (bool, error)
-	OnError                func(c C, err error) error
-	ContinueOnIgnoredError bool
-	Challenge              string
+	Skip                func(c C) bool
+	Sources             []TokenSource
+	Validator           func(c C, key string) (bool, error)
+	OnReject            func(c C, err error) error
+	ContinueOnNilReject bool
+	Challenge           string
 }
 
 var defaultKeyAuthSources = []TokenSource{FromHeader(router.HeaderAuthorization, "Bearer ")}
@@ -59,10 +64,11 @@ var defaultKeyAuthSources = []TokenSource{FromHeader(router.HeaderAuthorization,
 // KeyAuth refuses a request whose API key v does not accept. It reads a Bearer
 // token from the Authorization header and answers 401 with a challenge.
 //
-// A request that offers several keys has each tried, up to
-// [MaxTokensPerRequest], and the first one v accepts wins. An error from v is
-// reported as it stands, so a database failure reaches the client as a 500 and
-// not as a 401.
+// v checks one key per request: the first that the first source holding one
+// offers. A later key, from a repeated header or another source, is never
+// tried, so a request whose first key is wrong is refused even when a good one
+// follows. An error from v is reported as it stands, so a database failure
+// reaches the client as a 500 and not as a 401.
 //
 // See Order in the package doc for where it goes.
 //
@@ -94,34 +100,32 @@ func KeyAuthWithConfig[C router.Context](cfg KeyAuthConfig[C]) router.Middleware
 				return next(c)
 			}
 
-			var verr error
-			presented := false
-			for key := range readTokens(c, cfg.Sources) {
-				presented = true
-				ok, err := cfg.Validator(c, key)
-				if ok && err == nil {
-					return next(c)
-				}
-				if err != nil && verr == nil {
-					verr = err
-				}
+			var key string
+			for token := range readTokens(c, cfg.Sources) {
+				key = token
+				break
 			}
 
 			failure := error(errMissingKey)
-			switch {
-			case verr != nil:
-				failure = verr
-			case presented:
-				failure = errInvalidKey
+			if key != "" {
+				ok, err := cfg.Validator(c, key)
+				switch {
+				case err != nil:
+					failure = err
+				case ok:
+					return next(c)
+				default:
+					failure = errInvalidKey
+				}
 			}
 
-			if cfg.OnError == nil {
+			if cfg.OnReject == nil {
 				return keyAuthChallenge(c.Response(), cfg.Challenge, failure)
 			}
-			if err := cfg.OnError(c, failure); err != nil {
+			if err := cfg.OnReject(c, failure); err != nil {
 				return keyAuthChallenge(c.Response(), cfg.Challenge, err)
 			}
-			if cfg.ContinueOnIgnoredError {
+			if cfg.ContinueOnNilReject {
 				return next(c)
 			}
 			return nil

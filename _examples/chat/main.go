@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,14 +12,16 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/serve"
 )
 
 type Context struct {
 	router.Base
-	Room *room
-	User string
+	Room    *room
+	Cookies *cookie.Codec
+	User    string
 }
 
 type Ctx = *Context
@@ -34,17 +37,17 @@ func main() {
 
 	rm := newRoom()
 
-	if err := serve.Run(ctx, newRouter(rm), serve.Config{
+	if err := serve.Run(ctx, newRouter(rm, cookie.NewCodec(sessionKey())), serve.Config{
 		Addr:              addr,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       time.Minute,
 		ShutdownTimeout:   5 * time.Second,
-		// No WriteTimeout: it would cut every stream at the deadline.
+		// No WriteTimeout: it would cut every stream at the deadline. The
+		// streams end with the drain instead: sse.Serve watches
+		// serve.Draining and sends its Close event, while the requests that
+		// are not streams finish with a live context.
 		OnListen: func(a net.Addr) { slog.Info("chat is listening", "url", "http://"+a.String()) },
-		// Every open stream is blocked on the room, so the room closes when
-		// the drain begins. A drain that waits for a stream never ends.
-		OnDrain: rm.close,
 		// Config carries what a server usually needs. OnServer reaches the
 		// rest of http.Server.
 		OnServer: func(srv *http.Server) error {
@@ -57,9 +60,9 @@ func main() {
 	}
 }
 
-func newRouter(rm *room) *router.Router[Ctx] {
+func newRouter(rm *room, codec *cookie.Codec) *router.Router[Ctx] {
 	r := router.New(func(http.ResponseWriter, *http.Request) Ctx {
-		return &Context{Room: rm}
+		return &Context{Room: rm, Cookies: codec}
 	})
 
 	// Logger wraps Recover, so the request line carries the recovered panic.
@@ -83,4 +86,18 @@ func newRouter(rm *room) *router.Router[Ctx] {
 	r.Mount("/room", roomRouter())
 
 	return r
+}
+
+// sessionKey signs the user cookie. A key that lives only for this run ends
+// every session with the process, which is right for an example and wrong for
+// a service.
+func sessionKey() []byte {
+	if key := []byte(os.Getenv("SESSION_KEY")); len(key) >= cookie.MinKeyLen {
+		return key
+	}
+	key := make([]byte, cookie.MinKeyLen)
+	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program.
+	rand.Read(key)
+	slog.Info("no SESSION_KEY of 32 bytes or more, so this run signs with a new one")
+	return key
 }

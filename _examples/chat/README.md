@@ -44,11 +44,7 @@ r.Mount("/room", roomRouter())
 
 The prefix appears at that line and nowhere else. `roomRouter` registers `/`, `/messages` and `/events`, and `Use(requireUser)` covers all three.
 
-**A server that stops when its context does.** `serve.Run` owns the listener, the signal and the drain, so `main` says what the timeouts are and nothing about how to shut down. The room closes when the drain begins, because a drain that waits for an open stream never ends:
-
-```go
-OnDrain: rm.close,
-```
+**A server that stops when its context does.** `serve.Run` owns the listener, the signal and the drain, so `main` says what the timeouts are and nothing about how to shut down. An open stream needs no hook either: when the drain begins, `sse.Serve` sees `serve.Draining` close, sends its Close event and returns, so the drain does not wait on the room, while ordinary requests keep a live context until they finish.
 
 ## The htmx pieces
 

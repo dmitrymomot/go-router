@@ -166,22 +166,32 @@ func TestRateLimitStoreErrorIsAServerFault(t *testing.T) {
 	}
 }
 
-func TestRateLimitOnDenyAnswersTheRequest(t *testing.T) {
+func TestRateLimitOnRejectAnswersTheRequest(t *testing.T) {
 	var (
 		gotID   string
 		gotWait time.Duration
+		got429  bool
 	)
 	r := rateLimitRouter(middleware.RateLimitConfig[*appContext]{
 		Store: fakeRateStore{wait: 3 * time.Second},
-		OnDeny: func(c *appContext, id string, retryAfter time.Duration) error {
-			gotID, gotWait = id, retryAfter
+		OnReject: func(c *appContext, err error) error {
+			got429 = router.StatusOf(err) == http.StatusTooManyRequests
+			if limited, ok := errors.AsType[*middleware.RateLimitError](err); ok {
+				gotID, gotWait = limited.Client, limited.RetryAfter
+			}
 			return c.String(http.StatusOK, "slow down")
 		},
 	})
 
 	rec := get(r, "/")
 	if rec.Code != http.StatusOK || rec.Body.String() != "slow down" {
-		t.Fatalf("status = %d, body = %q, want the answer of OnDeny", rec.Code, rec.Body)
+		t.Fatalf("status = %d, body = %q, want the answer of OnReject", rec.Code, rec.Body)
+	}
+	if !got429 {
+		t.Error("OnReject did not get the 429")
+	}
+	if got := rec.Header().Get(router.HeaderRetryAfter); got != "3" {
+		t.Errorf("Retry-After = %q, want 3 before OnReject runs", got)
 	}
 	if gotID != "192.0.2.1" {
 		t.Errorf("id = %q, want the client address", gotID)
@@ -269,7 +279,7 @@ func TestMemoryStoreKeepsTheLimitPastTheExpiryWindow(t *testing.T) {
 					allowed++
 				}
 			}
-			time.Sleep(middleware.DefaultRateLimitExpiry + time.Second)
+			time.Sleep(middleware.DefaultRateLimitMaxAge + time.Second)
 		}
 
 		if want := 1000 + rounds*51; allowed > want {
@@ -339,7 +349,7 @@ func TestRateLimitIPv4AndOtherNetworksCountApart(t *testing.T) {
 func TestNewRateLimitMemoryStoreRejectsNegatives(t *testing.T) {
 	for field, cfg := range map[string]middleware.RateLimitMemoryStoreConfig{
 		"Burst":      {Rate: 1, Burst: -1},
-		"ExpiresIn":  {Rate: 1, ExpiresIn: -time.Second},
+		"MaxAge":     {Rate: 1, MaxAge: -time.Second},
 		"MaxEntries": {Rate: 1, MaxEntries: -1},
 	} {
 		mustPanicContaining(t, field+" of zero or more", func() {

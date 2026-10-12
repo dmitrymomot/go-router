@@ -295,7 +295,7 @@ func TestReadmeContracts(t *testing.T) {
 	store := middleware.NewRateLimitMemoryStoreWithConfig(middleware.RateLimitMemoryStoreConfig{
 		Rate:       10,
 		Burst:      30,
-		ExpiresIn:  time.Minute,
+		MaxAge:     time.Minute,
 		MaxEntries: 1024,
 	})
 	if middleware.RateLimit[*Context](store) == nil {
@@ -528,6 +528,22 @@ func ExampleBase_Render() {
 	// <h1>hello</h1><p>/posts/hello</p>
 }
 
+func ExampleBase_ClientIP() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	// Behind a proxy, mount middleware.RealIP first: it rewrites RemoteAddr
+	// with the address of the client, and ClientIP reports that.
+	r.GET("/", func(c *Context) error {
+		return c.String(http.StatusOK, c.ClientIP())
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[2001:db8::1]:51234"
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	fmt.Println(rec.Body.String())
+	// Output: 2001:db8::1
+}
+
 func ExampleBase_NewCookie() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.POST("/theme", func(c *Context) error {
@@ -749,7 +765,7 @@ func ExampleFieldErrorsOf() {
 	rec := serveRequest(r, req)
 	fmt.Println(rec.Code, rec.Body.String())
 	// Output:
-	// 400 email=ann@example.com age: cannot parse "old" as int
+	// 400 email=ann@example.com age: is not a valid integer
 }
 
 type Batch struct {
@@ -950,4 +966,69 @@ func ExampleBase_RouteMeta() {
 	// Output:
 	// 200 users
 	// 403 needs billing
+}
+
+func ExampleProblemErrorHandler() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.ErrorHandler(router.ProblemErrorHandler[*Context](false))
+	r.POST("/users", func(*Context) error {
+		return router.ErrUnprocessableEntity.
+			WithMessage("the form has errors").
+			WithDetails([]router.FieldError{{Field: "email", Message: "is required"}})
+	})
+
+	fmt.Println(serve(r, http.MethodPost, "/users"))
+	// Output:
+	// 422 {"type":"about:blank","title":"Unprocessable Entity","status":422,"detail":"the form has errors","instance":"/users","errors":[{"field":"email","message":"is required"}]}
+}
+
+func ExampleBase_LocalRedirect() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.GET("/login", func(c *Context) error {
+		// next comes from the client, so only a path on this host is followed.
+		return c.LocalRedirect(http.StatusSeeOther, c.Query("next"))
+	})
+
+	fmt.Println(serveLocation(r, "", "/login?next=/account"))
+	fmt.Println(serve(r, http.MethodGet, "/login?next=//evil.example"))
+	// Output:
+	// 303 /account
+	// 400 redirect target is not a local path
+}
+
+func ExampleBase_CheckETag() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.GET("/report", func(c *Context) error {
+		data := []byte(`{"total":42}`)
+		if c.CheckETag(router.ETagOf(data)) {
+			return nil
+		}
+		return c.Blob(http.StatusOK, router.MIMEApplicationJSON, data)
+	})
+
+	first := httptest.NewRecorder()
+	r.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/report", nil))
+	fmt.Println(first.Code, first.Body.String())
+
+	req := httptest.NewRequest(http.MethodGet, "/report", nil)
+	req.Header.Set(router.HeaderIfNoneMatch, first.Header().Get(router.HeaderETag))
+	again := httptest.NewRecorder()
+	r.ServeHTTP(again, req)
+	fmt.Println(again.Code, again.Body.Len())
+	// Output:
+	// 200 {"total":42}
+	// 304 0
+}
+
+func ExampleETagMatch() {
+	fmt.Println(router.ETagMatch([]string{`"a", W/"b"`}, `"b"`))
+	fmt.Println(router.ETagMatch([]string{"*"}, `"b"`))
+	fmt.Println(router.ETagMatch([]string{`"a"`}, `"b"`))
+	// Output:
+	// true
+	// true
+	// false
 }

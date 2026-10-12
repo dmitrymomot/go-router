@@ -39,4 +39,11 @@ var (
 	// that b, a *router.Base, parsed. The router does it when a request is
 	// done; routertest does it for a context built outside a router.
 	RemoveSpilledParts func(b any)
+
+	// OnHandlerDone has the router call f once the handler of b, a
+	// *router.Base, returns, before the error handler answers. Functions run
+	// in the reverse order of their registration. Package sse stops the
+	// heartbeat of a stream with it. A Base that no router serves never calls
+	// f.
+	OnHandlerDone func(b any, f func())
 )

@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.2"
           cache-dependency-path: |
             go.mod
             benchmarks/go.sum
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.2"
           cache-dependency-path: |
             go.mod
             benchmarks/go.sum
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.2"
           cache-dependency-path: |
             go.mod
             benchmarks/go.sum
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.2"
           cache-dependency-path: |
             go.mod
             benchmarks/go.sum
@@ -88,7 +88,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.2"
           cache-dependency-path: |
             go.mod
             benchmarks/go.sum
@@ -105,7 +105,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.2"
           cache-dependency-path: |
             go.mod
             benchmarks/go.sum

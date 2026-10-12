@@ -6,12 +6,12 @@ import (
 	"github.com/dmitrymomot/go-router"
 )
 
-// BodyLimitConfig configures [BodyLimitWithConfig]. A Limit of zero takes
+// BodyLimitConfig configures [BodyLimitWithConfig]. A MaxBytes of zero takes
 // [router.DefaultMaxBodyBytes], which then replaces the cap of the router as
-// any other Limit does.
+// any other MaxBytes does.
 type BodyLimitConfig[C router.Context] struct {
-	Skip  func(c C) bool
-	Limit int64
+	Skip     func(c C) bool
+	MaxBytes int64
 }
 
 // BodyLimit caps the request body at limit bytes for the routes it covers. It
@@ -35,17 +35,17 @@ type BodyLimitConfig[C router.Context] struct {
 // BodyLimit panics on a negative limit, and a limit of zero takes
 // [router.DefaultMaxBodyBytes].
 func BodyLimit[C router.Context](limit int64) router.Middleware[C] {
-	return BodyLimitWithConfig(BodyLimitConfig[C]{Limit: limit})
+	return BodyLimitWithConfig(BodyLimitConfig[C]{MaxBytes: limit})
 }
 
 // BodyLimitWithConfig is [BodyLimit] with a configuration.
 //
-// BodyLimitWithConfig panics on a negative Limit.
+// BodyLimitWithConfig panics on a negative MaxBytes.
 func BodyLimitWithConfig[C router.Context](cfg BodyLimitConfig[C]) router.Middleware[C] {
-	if cfg.Limit < 0 {
-		panic("middleware: BodyLimitWithConfig needs a Limit of zero or more")
+	if cfg.MaxBytes < 0 {
+		panic("middleware: BodyLimitWithConfig needs a MaxBytes of zero or more")
 	}
-	limit := cmp.Or(cfg.Limit, router.DefaultMaxBodyBytes)
+	limit := cmp.Or(cfg.MaxBytes, router.DefaultMaxBodyBytes)
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {

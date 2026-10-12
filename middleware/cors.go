@@ -3,6 +3,7 @@ package middleware
 import (
 	"cmp"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,16 +24,32 @@ import (
 // AllowCredentials lets the browser send cookies, and it cannot go with "*".
 // MaxAge is how long the browser caches the preflight, and a negative one
 // caches nothing.
+//
+// AllowPrivateNetwork answers a preflight that carries
+// Access-Control-Request-Private-Network: true with
+// Access-Control-Allow-Private-Network: true, which lets a page on a public
+// site reach a server on a private network. Turn it on only for an origin you
+// trust, since it opens the internal network to that origin.
+//
+// An origin compares in canonical form: the scheme and the host in lower case,
+// and no port when it is the default one of the scheme, so "https://app.example:443"
+// allows the Origin "https://app.example".
 type CORSConfig[C router.Context] struct {
-	Skip             func(c C) bool
-	AllowOrigins     []string
-	AllowOriginFunc  func(c C, origin string) (bool, error)
-	AllowMethods     []string
-	AllowHeaders     []string
-	ExposeHeaders    []string
-	AllowCredentials bool
-	MaxAge           time.Duration
+	Skip                func(c C) bool
+	AllowOrigins        []string
+	AllowOriginFunc     func(c C, origin string) (bool, error)
+	AllowMethods        []string
+	AllowHeaders        []string
+	ExposeHeaders       []string
+	AllowCredentials    bool
+	AllowPrivateNetwork bool
+	MaxAge              time.Duration
 }
+
+const (
+	headerAccessControlRequestPrivateNetwork = "Access-Control-Request-Private-Network"
+	headerAccessControlAllowPrivateNetwork   = "Access-Control-Allow-Private-Network"
+)
 
 // CORS allows every origin, without credentials. It suits a public read-only
 // API; anything that carries a session needs [CORSWithConfig] with the origins
@@ -132,6 +149,12 @@ func CORSWithConfig[C router.Context](cfg CORSConfig[C]) router.Middleware[C] {
 			} else if asked := req.Header.Get(router.HeaderAccessControlRequestHeaders); asked != "" {
 				res.Header().Set(router.HeaderAccessControlAllowHeaders, asked)
 			}
+			if cfg.AllowPrivateNetwork {
+				router.AddVary(res.Header(), headerAccessControlRequestPrivateNetwork)
+				if req.Header.Get(headerAccessControlRequestPrivateNetwork) == "true" {
+					res.Header().Set(headerAccessControlAllowPrivateNetwork, "true")
+				}
+			}
 			if maxAge != "" {
 				res.Header().Set(router.HeaderAccessControlMaxAge, maxAge)
 			}
@@ -146,10 +169,8 @@ func (cfg CORSConfig[C]) allows(c C, origin string) (bool, error) {
 	if cfg.AllowOriginFunc != nil {
 		return cfg.AllowOriginFunc(c, origin)
 	}
-	for _, o := range cfg.AllowOrigins {
-		if o == "*" || strings.EqualFold(o, origin) {
-			return true, nil
-		}
+	if slices.Contains(cfg.AllowOrigins, "*") {
+		return true, nil
 	}
-	return false, nil
+	return sameOrigin(cfg.AllowOrigins, origin), nil
 }

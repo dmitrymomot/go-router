@@ -131,6 +131,15 @@ func (s *Store) Authenticate(slug, email, password string) error {
 	return nil
 }
 
+// HasAccount reports whether email holds an account in the workspace slug.
+func (s *Store) HasAccount(slug, email string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	_, ok := s.accounts[accountKey(slug, email)]
+	return ok
+}
+
 func (s *Store) NewTicket(slug, email string) string {
 	id := rand.Text()
 

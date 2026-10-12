@@ -1,4 +1,25 @@
 // Package static serves static assets and builds their fingerprinted URLs.
+//
+// [New] reads a [Config] into an [Assets] set, either an embedded [io/fs.FS]
+// that it fingerprints once, or a live directory that it reads on every
+// request. [Mount] puts the set on a router, [Handler] serves it from a route
+// of your own, and [Assets.ServeHTTP] makes it an [net/http.Handler] for any
+// other mux. [Assets.URL] gives the fingerprinted path of a file, and
+// [Assets.FuncMap] hands it to a template.
+//
+//	//go:embed dist
+//	var dist embed.FS
+//
+//	assets := static.Must(static.Config{FS: dist, Root: "dist", Prefix: "/static"})
+//	static.Mount(r, assets)
+//	err := serve.Run(ctx, r, serve.Config{Addr: ":8080"})
+//
+// A file next to a precompressed copy, "app.js" beside "app.js.br" or
+// "app.js.gz", is sent compressed to a client that accepts it. See
+// [Config.FS].
+//
+// The set refuses a path with a dot segment, such as .git or .env, unless
+// Config.Dotfiles is set, for every backend.
 package static
 
 import (
@@ -6,6 +27,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -27,6 +49,16 @@ const immutableCacheControl = "public, max-age=31536000, immutable"
 // or Dir for a directory it reads on every request; the two exclude each
 // other, and only FS is fingerprinted.
 //
+// FS is read once, in [New]: every file is hashed for its ETag and for the
+// build tag. That suits [embed.FS]. A live directory passed as os.DirFS keeps
+// the ETags it had at New, so an edit made afterwards is served with a stale
+// ETag; use Dir for a directory that changes. An FS set also serves a
+// precompressed sibling: when the set holds name+".br" or name+".gz" and the
+// client accepts br or gzip (a q of 0 refuses it), the sibling goes out with
+// Content-Encoding, Vary: Accept-Encoding, the Content-Type of name and an
+// ETag with the encoding as a suffix; br wins over gzip. A sibling is not an
+// asset of its own: Has reports false for it, and a request for it is a 404.
+//
 // Root is a subdirectory of FS or Dir to serve from. Prefix is where the
 // assets live in the URL space. Build is the tag that goes into every URL; an
 // embedded set that leaves it empty gets one from the contents, so a release
@@ -36,9 +68,12 @@ const immutableCacheControl = "public, max-age=31536000, immutable"
 // and Fallback narrows that to the requests it recognizes as navigation.
 // RedirectDir sends a directory without a trailing slash to the path with one.
 // MaxAge is the cache lifetime of an embedded set without a build tag.
-// NotFound answers a path the set does not hold. A live set refuses a path
-// with a segment that starts with a dot, such as .git or .env, unless Dotfiles
-// is set; an embedded set holds none unless embed was told to keep them.
+// NotFound answers a path the set does not hold, for [Assets.ServeHTTP] and
+// for [Handler] alike. Without it, ServeHTTP writes a plain-text 404, and
+// Handler reports [router.ErrNotFound] to the error handler of the router.
+// Both backends refuse a path with a segment that starts with a dot, such as
+// .git or .env, unless Dotfiles is set; an FS set does not even index such an
+// entry, so it adds nothing to the ETags or the build tag.
 type Config struct {
 	FS          fs.FS
 	Dir         string
@@ -69,6 +104,7 @@ type Assets struct {
 	cache        string
 	spa          bool
 	redirectDir  bool
+	dotfiles     bool
 
 	// notFound always holds a handler so ServeHTTP can call it; this says
 	// whether the caller chose it. Handler answers with router.ErrNotFound
@@ -108,6 +144,7 @@ func New(cfg Config) (*Assets, error) {
 		cache:        "no-cache",
 		spa:          cfg.SPA,
 		redirectDir:  cfg.RedirectDir,
+		dotfiles:     cfg.Dotfiles,
 	}
 	if a.notFound == nil {
 		a.notFound = http.NotFoundHandler()
@@ -160,7 +197,7 @@ func New(cfg Config) (*Assets, error) {
 	if err := validateIndex(a.fsys, a.index); err != nil {
 		return nil, err
 	}
-	etags, sum, err := index(a.fsys)
+	etags, sum, err := index(a.fsys, cfg.Dotfiles)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +259,7 @@ func (a *Assets) Has(name string) bool {
 	name = cleanName(name)
 	if a.etags != nil {
 		_, ok := a.etags[name]
-		return ok
+		return ok && !a.isSibling(name)
 	}
 	f, info, err := a.openFile(name)
 	if err != nil {
@@ -269,18 +306,26 @@ func cleanName(p string) string {
 	return strings.TrimPrefix(path.Clean("/"+p), "/")
 }
 
-func index(fsys fs.FS) (map[string]string, string, error) {
+func index(fsys fs.FS, dotfiles bool) (map[string]string, string, error) {
 	etags := make(map[string]string)
 	sum := sha256.New()
 	err := fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		data, err := fs.ReadFile(fsys, name)
 		if err != nil {
 			return err
 		}
-		h := sha256.Sum256(data)
+		if !dotfiles && name != "." && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		h, err := hashFile(fsys, name)
+		if err != nil {
+			return err
+		}
 		etags[name] = `"` + hex.EncodeToString(h[:16]) + `"`
 		_, _ = sum.Write([]byte(name))
 		_, _ = sum.Write(h[:])
@@ -290,6 +335,24 @@ func index(fsys fs.FS) (map[string]string, string, error) {
 		return nil, "", fmt.Errorf("static: read the asset set: %w", err)
 	}
 	return etags, hex.EncodeToString(sum.Sum(nil)[:6]), nil
+}
+
+// hashFile streams the file into the hash, so a large asset is never held
+// whole in memory.
+func hashFile(fsys fs.FS, name string) ([sha256.Size]byte, error) {
+	var out [sha256.Size]byte
+	f, err := fsys.Open(name)
+	if err != nil {
+		return out, err
+	}
+	//nolint:errcheck // The file is read only.
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return out, err
+	}
+	h.Sum(out[:0])
+	return out, nil
 }
 
 type liveFS struct {
