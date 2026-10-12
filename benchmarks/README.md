@@ -102,15 +102,15 @@ The overflow costs 128 bytes and one allocation, which is the documented price o
 | Parameter | chi 5.3.2 | 377.2 | 366.1–392.1 | 704 | 4 |
 | Parameter | echo 5.3.1 | 101.3 | 100.2–102.5 | 0 | 0 |
 | Parameter | `http.ServeMux` | 238.2 | 237.2–242.7 | 112 | 3 |
-| Not found | go-router | 197.4 | 195.9–206.5 | 304 | 2 |
-| Not found | go-router pooled | 160.9 | 158.9–169.1 | 16 | 1 |
+| Not found | go-router | 167.1 | 165.9–171.1 | 304 | 2 |
+| Not found | go-router pooled | 129.8 | 129.7–131.5 | 16 | 1 |
 | Not found | chi 5.3.2 | 222.9 | 221.7–225.1 | 416 | 5 |
 | Not found | echo 5.3.1 | 532.9 | 528.1–540.0 | 424 | 8 |
 | Not found | `http.ServeMux` | 617.1 | 610.0–620.9 | 320 | 18 |
 
 Twenty times the route table moves the pooled router by about 4 ns on a static match and by nothing measurable on a three-parameter match. The targets are not the same paths as in the tables above, so read this as a magnitude rather than a controlled delta: the trie walks the request, not the table, and a table this much larger does not change the shape of any column.
 
-A miss reverses the ranking. Echo is 3.3x slower than the pooled router there, and `http.ServeMux` 3.8x at 18 allocations. Both build a response the routers ahead of them do not: a router that answers 404 quickly is worth more under a scanner than under a load test. The pooled miss now costs one allocation where it cost two, but its median is about 50 ns above the 111 ns of the previous recording, which is more than session noise explains and has not been profiled yet.
+A miss reverses the ranking. Echo is 4.1x slower than the pooled router there, and `http.ServeMux` 4.8x at 18 allocations. Both build a response the routers ahead of them do not: a router that answers 404 quickly is worth more under a scanner than under a load test. The pooled miss now costs one allocation where it cost two. Its median sits about 19 ns above the 111 ns of the previous recording, and that gap is the price of `ResetForError`, which the text error handler now runs before it writes: it drops six headers a failed handler may have left. The harness reuses one header map across iterations, so each 404 deletes six keys from a map that still holds the previous answer's Content-Type and nosniff, and a delete hashes its key even when the key is missing. net/http hands every request a fresh map, where the reset skips the deletes: with the map cleared before each request, the pooled miss takes 104.5 ns against 112.5 ns for `d81bbd9`. The two go-router rows were rerun in a later session, after the reset stopped canonicalizing "ETag" on every call and learned to skip an empty header; on `8b50596` the pooled miss measured 160.9 ns and the unpooled one 197.4 ns.
 
 ## Reading the tables
 
@@ -155,11 +155,11 @@ The host measurements include complete authority validation. The pooled measurem
 
 | Case | Median | Range | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| 404 under a scope, `/r500/7/missing` | 296.6 ns | 293.9–301.9 ns | 304 | 2 |
-| 404 under no scope, `/nothing/here` | 221.1 ns | 218.6–228.7 ns | 304 | 2 |
+| 404 under a scope, `/r500/7/missing` | 261.2 ns | 259.2–262.1 ns | 304 | 2 |
+| 404 under no scope, `/nothing/here` | 193.7 ns | 191.6–195.2 ns | 304 | 2 |
 | Registering the 1000 scopes | 5.52 ms | 5.43–5.57 ms | 4.9 MiB | 66397 |
 
-Before the index, the fallback tested every prefixed scope in turn and registration compiled the whole graph on every `Route`: in the session that measured the change, the first 404 took 5172 ns, the second 9890 ns, and registering took 252 ms and 489 MiB. Those older numbers come from that session, not this one.
+Before the index, the fallback tested every prefixed scope in turn and registration compiled the whole graph on every `Route`: in the session that measured the change, the first 404 took 5172 ns, the second 9890 ns, and registering took 252 ms and 489 MiB. Those older numbers come from that session, not this one. The two 404 rows were rerun with the not-found rows above, after the `ResetForError` fix; on `8b50596` they measured 296.6 ns and 221.1 ns.
 
 ## Dependencies
 
