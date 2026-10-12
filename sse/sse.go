@@ -71,8 +71,8 @@ const nilOptionError = "sse: an option cannot be nil"
 
 // Heartbeat sends a comment every d, which holds a connection open through a
 // proxy that drops an idle one. [Serve] does the sending, and so does [Open],
-// from a goroutine that ends with [Writer.Close], with the request or with the
-// drain of serve.Run.
+// from a goroutine that ends with [Writer.Close], with the request, with the
+// handler or with the drain of serve.Run.
 func Heartbeat(d time.Duration) Option {
 	return func(c *config) { c.heartbeat = d }
 }
@@ -146,9 +146,10 @@ type Writer struct {
 // that is already closed.
 //
 // The [Heartbeat] and [Close] options work here: a goroutine sends the
-// heartbeat until [Writer.Close] runs, the request ends or
+// heartbeat until [Writer.Close] runs, the request ends, the handler returns or
 // the drain of serve.Run starts, and Close sends the closing event. Call Close,
-// usually with defer, before the handler returns.
+// usually with defer, before the handler returns. A router stops the heartbeat
+// of a handler that returns without Close, and closes the writer.
 //
 // serve.Run does not cancel the request when it drains, so a handler that
 // streams from a loop selects on serve.Draining to end in time:
@@ -182,8 +183,21 @@ func Open(c router.Context, status int, opts ...Option) (*Writer, error) {
 		s.stop = make(chan struct{})
 		s.beat = make(chan struct{})
 		go s.heartbeat(c.Done(), drain.Done(s.b.Request().Context()))
+		// The heartbeat must not write once the handler has returned: the
+		// router answers an error and hands the Base on from there.
+		routerhook.OnHandlerDone(s.b, s.release)
 	}
 	return s, nil
+}
+
+// release closes the writer without the Close event and waits for the
+// heartbeat to stop. The router calls it when the handler returns.
+func (s *Writer) release() {
+	s.mu.Lock()
+	s.shut = true
+	s.stopHeartbeat()
+	s.mu.Unlock()
+	<-s.beat
 }
 
 // stopHeartbeat tells the heartbeat goroutine to stop. The caller holds the
