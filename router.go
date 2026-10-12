@@ -87,13 +87,13 @@ type Router[C Context] struct {
 	fresh       bool
 	fullCompile bool
 	freshScopes []*Router[C]
-	meta         []any
-	hosts        []hostSpec
-	inHost       bool
-	errHandler   ErrorHandlerFunc[C]
-	mounted      *Router[C] // the router a Mount shim holds
-	preMws       []Middleware[C]
-	classes      map[string]*matcher
+	meta        []any
+	hosts       []hostSpec
+	inHost      bool
+	errHandler  ErrorHandlerFunc[C]
+	mounted     *Router[C] // the router a Mount shim holds
+	preMws      []Middleware[C]
+	classes     map[string]*matcher
 }
 
 // engine is the route table as the request path sees it: everything routing
