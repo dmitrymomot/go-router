@@ -119,7 +119,7 @@ Other packages:
 Measured on an Apple M3 Max against v0.3.0. [benchmarks/README.md](benchmarks/README.md) has the router comparison and the scope benchmarks of this release.
 
 - A 404 under one of 1000 parameterized scopes: 5172 → 259 ns. A miss with 1000 scopes and none covering the path: 9890 → 181 ns. Registering 1000 scopes: 252 ms and 489 MiB → 5.6 ms and 4.9 MiB, since a new scope compiles its own subtree.
-- A CORS preflight: 3 → 1 allocation; a 405: 5 → 3 allocations. Pooled static match: 42.9 → 38.2 ns; one parameter: 95 → 84 ns.
+- A CORS preflight: 3 → 1 allocation; a 405: 5 → 2 allocations. Pooled static match: 42.9 → 38.2 ns; one parameter: 95 → 84 ns.
 - `Bind` of a mixed struct: 1673 → 849 ns and 13 → 8 allocations; `Bind` of JSON: 10 → 7 allocations; `BindQuery` and `BindForm`: 13 to 14% faster.
 - `Base.JSON` and the error handlers encode into a pooled buffer: 200 items take 359 B/op instead of 16.8 KB, and 5 allocations instead of 6.
 - Gzip no longer copies a large write into its sniff buffer: a 1 MiB write takes 1.9 KiB/op instead of 1277 KiB, and a 4 KiB body is 9% faster with 82% fewer bytes.
