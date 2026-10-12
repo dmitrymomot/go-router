@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func FuzzAcceptsGzip(f *testing.F) {
+func FuzzNegotiateEncoding(f *testing.F) {
 	for _, seed := range []string{
 		"gzip",
 		"gzip;q=0",
@@ -15,7 +15,7 @@ func FuzzAcceptsGzip(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(_ *testing.T, accept string) {
-		_ = acceptsGzip(accept)
+		_ = negotiateEncoding(accept)
 	})
 }
 

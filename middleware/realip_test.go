@@ -562,7 +562,10 @@ func TestRealIPSecuresTheCookiesBehindATLSProxy(t *testing.T) {
 		middleware.SecureWithConfig(middleware.SecureConfig[*appContext]{HSTSMaxAge: 365 * 24 * time.Hour}),
 		middleware.CSRF[*appContext],
 	)
-	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, "ok") })
+	r.GET("/", func(c *appContext) error {
+		middleware.CSRFTokenFrom(c)
+		return c.String(http.StatusOK, "ok")
+	})
 
 	tests := []struct {
 		name   string

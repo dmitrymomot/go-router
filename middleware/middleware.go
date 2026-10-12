@@ -30,7 +30,7 @@
 //  7. [HTMXRedirect]
 //  8. [BodyLimit], then [Decompress]
 //  9. [RateLimit] and auth: [KeyAuth] or [BasicAuth]
-//  10. [CSRF]
+//  10. [CSRF] or [CrossOrigin]
 //  11. [ParseForm]
 //  12. [MinDuration]
 //  13. [Idempotency]
@@ -75,6 +75,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -95,6 +96,10 @@ func isSafeMethod(method string) bool {
 	return false
 }
 
+// originOf reports the canonical form of an origin: the scheme and the host in
+// lower case, and no port when it is the default one of the scheme, so that
+// "HTTPS://App.Example:443" and "https://app.example" compare equal. It reports
+// false for anything that is not an origin.
 func originOf(s string) (string, bool) {
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme == "" || u.Opaque != "" || u.Host == "" || u.User != nil ||
@@ -102,7 +107,24 @@ func originOf(s string) (string, bool) {
 		strings.Contains(u.Host, "*") {
 		return "", false
 	}
-	return strings.ToLower(u.Scheme + "://" + u.Host), true
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if port == "" || scheme == "https" && port == "443" || scheme == "http" && port == "80" {
+		return scheme + "://" + host, true
+	}
+	return scheme + "://" + host + ":" + port, true
+}
+
+// sameOrigin reports whether the Origin header value sent equals one of the
+// canonical origins in list. A value that is not an origin, such as "null",
+// matches none.
+func sameOrigin(list []string, sent string) bool {
+	origin, ok := originOf(sent)
+	return ok && slices.Contains(list, origin)
 }
 
 // checkOrigins reports origins in canonical form, and whether one of them is
