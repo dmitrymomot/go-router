@@ -432,7 +432,7 @@ func ResetForError(h http.Header) {
 	delete(h, HeaderContentDisposition)
 	delete(h, HeaderContentEncoding)
 	h.Del(HeaderETag) // "ETag" is not the canonical key.
-	delete(h, "Last-Modified")
+	delete(h, HeaderLastModified)
 	delete(h, HeaderCacheControl)
 	h[HeaderXContentTypeOptions] = noSniff
 }
@@ -473,9 +473,6 @@ func writeText(b *Base, err error, exposeCause bool) error {
 	}
 	return nil
 }
-
-// mimeProblemJSON is the media type of RFC 9457 problem details.
-const mimeProblemJSON = "application/problem+json"
 
 // Problem is the object [ProblemErrorHandler] writes, an RFC 9457 problem
 // details document. Errors holds the []FieldError of the Details, and Details
@@ -526,7 +523,7 @@ func ProblemErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
 		if exposeCause && he.Err != nil {
 			p.Cause = he.Err.Error()
 		}
-		return writeErrorBody(b, he.Status, mimeProblemJSON, p)
+		return writeErrorBody(b, he.Status, MIMEApplicationProblemJSON, p)
 	}
 }
 

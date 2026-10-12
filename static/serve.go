@@ -177,14 +177,14 @@ func (a *Assets) send(w http.ResponseWriter, r *http.Request, name string, f fs.
 	if sib := a.precompressed(w, r, name); sib != nil {
 		//nolint:errcheck // The file is read only.
 		defer sib.Close()
-		h.Set("Etag", sib.etag)
+		h.Set(router.HeaderETag, sib.etag)
 		h.Set("Content-Encoding", sib.encoding)
 		h.Set("Content-Type", contentType(name))
 		http.ServeContent(w, r, path.Base(name), sib.modTime, sib.f)
 		return nil
 	}
 	if tag := a.etag(name, info); tag != "" {
-		h.Set("Etag", tag)
+		h.Set(router.HeaderETag, tag)
 	}
 	http.ServeContent(w, r, path.Base(name), info.ModTime(), rs)
 	return nil

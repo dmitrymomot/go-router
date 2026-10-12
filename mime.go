@@ -6,8 +6,12 @@ import (
 	"github.com/dmitrymomot/go-router/internal/accept"
 )
 
-// The header names that this package and its middleware read or write. They
+// The header names that this package and its middleware read or write. Most
 // are in the canonical form of net/http, so they suit a direct map read.
+// HeaderETag, HeaderWWWAuthenticate, HeaderXCSRFToken and HeaderXRealIP keep
+// the spelling of their RFCs instead, which net/http stores as "Etag",
+// "Www-Authenticate", "X-Csrf-Token" and "X-Real-Ip": reach those through the
+// Get, Set, Values and Del methods of [http.Header], which canonicalize.
 const (
 	HeaderAccept                          = "Accept"
 	HeaderAcceptEncoding                  = "Accept-Encoding"
@@ -26,6 +30,7 @@ const (
 	HeaderForwarded                       = "Forwarded"
 	HeaderIdempotencyKey                  = "Idempotency-Key"
 	HeaderIfNoneMatch                     = "If-None-Match"
+	HeaderLastModified                    = "Last-Modified"
 	HeaderLocation                        = "Location"
 	HeaderReferer                         = "Referer"
 	HeaderReferrerPolicy                  = "Referrer-Policy"
@@ -59,6 +64,7 @@ const (
 const (
 	MIMEApplicationJSON            = "application/json"
 	MIMEApplicationJSONCharsetUTF8 = "application/json; charset=utf-8"
+	MIMEApplicationProblemJSON     = "application/problem+json"
 	MIMEApplicationForm            = "application/x-www-form-urlencoded"
 	MIMEMultipartForm              = "multipart/form-data"
 	MIMEOctetStream                = "application/octet-stream"
