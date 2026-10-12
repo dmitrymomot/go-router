@@ -10,6 +10,7 @@ import (
 	"encoding/json/v2"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -35,6 +36,7 @@ type Context interface {
 	RouteMeta() []any
 	Host() string
 	RouteHost() string
+	ClientIP() string
 
 	base() *Base
 }
@@ -390,6 +392,19 @@ func (b *Base) Host() string {
 		b.needsCleanup = b.needsCleanup || b.host != ""
 	}
 	return b.host
+}
+
+// ClientIP reports the address of the peer, without its port: the host of
+// RemoteAddr, or RemoteAddr whole when it has no port, as under a Unix socket.
+// The RealIP middleware rewrites RemoteAddr with the address of the client, so
+// with RealIP in front this is the client rather than the proxy. It allocates
+// nothing.
+func (b *Base) ClientIP() string {
+	host, _, err := net.SplitHostPort(b.req.RemoteAddr)
+	if err != nil {
+		return b.req.RemoteAddr
+	}
+	return host
 }
 
 // Scheme reports "https" or "http". See [SchemeOf].

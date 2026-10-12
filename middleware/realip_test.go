@@ -931,3 +931,35 @@ func BenchmarkClientAddr(b *testing.B) {
 		}
 	}
 }
+
+func TestBaseClientIPAgreesWithClientIPOnAPooledRouter(t *testing.T) {
+	r := router.NewPooled(func() *appContext { return new(appContext) }, func(*appContext) {})
+	r.Use(middleware.RealIPWithConfig(behindLB(middleware.RealIPConfig[*appContext]{
+		Headers: []string{router.HeaderXForwardedFor},
+	})))
+	r.GET("/", func(c *appContext) error {
+		if base, mw := c.ClientIP(), middleware.ClientIP(c); base != mw {
+			return c.String(http.StatusOK, "Base.ClientIP "+base+" != ClientIP "+mw)
+		}
+		return c.String(http.StatusOK, c.ClientIP())
+	})
+
+	tests := []struct {
+		name, remote, forwarded, want string
+	}{
+		{"the client behind the balancer", "10.0.0.1:1", "203.0.113.9", "203.0.113.9"},
+		{"the peer without a header", "10.0.0.1:2", "", "10.0.0.1"},
+		{"an untrusted peer that names a client", "198.51.100.4:3", "203.0.113.9", "198.51.100.4"},
+		{"another client on the same context", "10.0.0.1:4", "2001:db8::7", "2001:db8::7"},
+	}
+	for _, tc := range tests {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = tc.remote
+		if tc.forwarded != "" {
+			req.Header.Set(router.HeaderXForwardedFor, tc.forwarded)
+		}
+		if got := do(r, req).Body.String(); got != tc.want {
+			t.Errorf("%s: client = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

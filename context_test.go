@@ -573,3 +573,48 @@ func TestAddVarySkipsWhatTheHeaderAlreadyNames(t *testing.T) {
 		t.Errorf("Vary = %v, want the wildcard alone", got)
 	}
 }
+
+func TestClientIPIsTheHostOfRemoteAddr(t *testing.T) {
+	tests := []struct {
+		remote, want string
+	}{
+		{"192.0.2.1:1234", "192.0.2.1"},
+		{"[2001:db8::1]:443", "2001:db8::1"},
+		{"@", "@"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		b := newBase("/")
+		b.req.RemoteAddr = tc.remote
+		if got := b.ClientIP(); got != tc.want {
+			t.Errorf("ClientIP() of %q = %q, want %q", tc.remote, got, tc.want)
+		}
+	}
+}
+
+func TestClientIPOnAPooledRouterFollowsEachRequest(t *testing.T) {
+	r := newPooledRouter()
+	r.GET("/", func(c *pctx) error { return c.String(http.StatusOK, c.ClientIP()) })
+
+	for remote, want := range map[string]string{
+		"192.0.2.1:1":     "192.0.2.1",
+		"198.51.100.7:2":  "198.51.100.7",
+		"[2001:db8::2]:3": "2001:db8::2",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = remote
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != want {
+			t.Errorf("ClientIP() for %q = %q, want %q", remote, got, want)
+		}
+	}
+}
+
+func TestClientIPAllocatesNothing(t *testing.T) {
+	b := newBase("/")
+	b.req.RemoteAddr = "[2001:db8::1]:443"
+	if n := testing.AllocsPerRun(100, func() { _ = b.ClientIP() }); n != 0 {
+		t.Errorf("ClientIP() allocates %v times, want 0", n)
+	}
+}

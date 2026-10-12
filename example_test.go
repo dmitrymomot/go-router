@@ -528,6 +528,22 @@ func ExampleBase_Render() {
 	// <h1>hello</h1><p>/posts/hello</p>
 }
 
+func ExampleBase_ClientIP() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
+	// Behind a proxy, mount middleware.RealIP first: it rewrites RemoteAddr
+	// with the address of the client, and ClientIP reports that.
+	r.GET("/", func(c *Context) error {
+		return c.String(http.StatusOK, c.ClientIP())
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[2001:db8::1]:51234"
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	fmt.Println(rec.Body.String())
+	// Output: 2001:db8::1
+}
+
 func ExampleBase_NewCookie() {
 	r := router.New(func(http.ResponseWriter, *http.Request) *Context { return new(Context) })
 	r.POST("/theme", func(c *Context) error {

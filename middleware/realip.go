@@ -3,7 +3,6 @@ package middleware
 import (
 	"cmp"
 	"iter"
-	"net"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -177,14 +176,9 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 
 // ClientIP reports the address of the peer, without its port. Put [RealIP] in
 // front for this to be the address of the client rather than of the proxy.
-// [ClientAddr] reports the same address as a [netip.Addr].
-func ClientIP(c router.Context) string {
-	host, _, err := net.SplitHostPort(c.Request().RemoteAddr)
-	if err != nil {
-		return c.Request().RemoteAddr
-	}
-	return host
-}
+// It is [router.Base.ClientIP], and [ClientAddr] reports the same address as a
+// [netip.Addr].
+func ClientIP(c router.Context) string { return c.ClientIP() }
 
 // ClientAddr reports the address of the peer, the client when [RealIP] runs in
 // front, without its port or zone and with an IPv4-mapped address unmapped. ok
