@@ -52,7 +52,7 @@ func TestGzipWriterPoolDetachesTheResponseWriter(t *testing.T) {
 	token := &retentionToken{}
 	pointer := weak.Make(token)
 	underlying := &retainingResponseWriter{header: make(http.Header), token: token}
-	w := &gzipWriter{ResponseWriter: underlying, pool: pool, min: 1}
+	w := &gzipWriter{ResponseWriter: underlying, enc: &encoding{suffix: "-gzip", pool: pool}, min: 1}
 	if _, err := w.Write([]byte("compress me")); err != nil {
 		t.Fatalf("write compressed response: %v", err)
 	}
