@@ -255,6 +255,39 @@ func (r *Response) set(name, value string) *Response {
 	return r
 }
 
+// setURL is [Response.set] for a header that holds a URL. A URL may carry
+// non-ASCII text, such as /café, which a header cannot, so each byte outside
+// ASCII goes out as a percent escape. A control byte still fails.
+func (r *Response) setURL(name, url string) *Response {
+	return r.set(name, escapeURLBytes(url))
+}
+
+// escapeURLBytes percent-encodes every byte of u outside ASCII and leaves the
+// rest as it stands, including a control byte, which validHeaderValue refuses.
+func escapeURLBytes(u string) string {
+	i := 0
+	for i < len(u) && u[i] < utf8.RuneSelf {
+		i++
+	}
+	if i == len(u) {
+		return u
+	}
+	const hex = "0123456789ABCDEF"
+	var sb strings.Builder
+	sb.Grow(len(u) + 6)
+	sb.WriteString(u[:i])
+	for ; i < len(u); i++ {
+		if c := u[i]; c < utf8.RuneSelf {
+			sb.WriteByte(c)
+		} else {
+			sb.WriteByte('%')
+			sb.WriteByte(hex[c>>4])
+			sb.WriteByte(hex[c&0xF])
+		}
+	}
+	return sb.String()
+}
+
 var errHeaderByte = errors.New("a header value holds only printable ASCII")
 
 // validHeaderValue refuses a control byte, which could split the header, and
@@ -268,15 +301,16 @@ func validHeaderValue(v string) error {
 	return nil
 }
 
-// PushURL puts url in the history of the browser.
+// PushURL puts url in the history of the browser. A byte of url outside ASCII
+// goes out percent-encoded.
 func (r *Response) PushURL(url string) *Response {
-	return r.set(HeaderPushURL, url)
+	return r.setURL(HeaderPushURL, url)
 }
 
 // ReplaceURL replaces the current entry in the history of the browser with
-// url.
+// url. A byte of url outside ASCII goes out percent-encoded.
 func (r *Response) ReplaceURL(url string) *Response {
-	return r.set(HeaderReplaceURL, url)
+	return r.setURL(HeaderReplaceURL, url)
 }
 
 // Retarget swaps the answer into the element that selector names, in place of
@@ -452,22 +486,23 @@ func (r *Response) navigate(header, target string) error {
 	if !isHTMX(r.b.Request()) {
 		return r.b.Redirect(http.StatusSeeOther, target)
 	}
-	if r.set(header, target).err != nil {
+	if r.setURL(header, target).err != nil {
 		return r.err
 	}
 	return r.b.NoContent(http.StatusOK)
 }
 
 // Redirect sends the browser to url as a whole-page load. A request that htmx
-// did not make gets an ordinary 303 instead. It reports a failure when url is
-// empty.
+// did not make gets an ordinary 303 instead. A byte of url outside ASCII goes
+// out percent-encoded. It reports a failure when url is empty.
 func (r *Response) Redirect(url string) error {
 	return r.navigate(HeaderRedirect, url)
 }
 
 // Location sends the client to path as a swap, which keeps the page loaded. A
-// request that htmx did not make gets an ordinary 303 instead. It reports a
-// failure when path is empty.
+// request that htmx did not make gets an ordinary 303 instead. A byte of path
+// outside ASCII goes out percent-encoded. It reports a failure when path is
+// empty.
 func (r *Response) Location(path string) error {
 	return r.navigate(HeaderLocation, path)
 }
