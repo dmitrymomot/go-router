@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -393,13 +392,49 @@ func writeJSON(b *Base, err error, exposeCause bool) error {
 	if exposeCause && he.Err != nil {
 		body.Error.Cause = he.Err.Error()
 	}
-	data, err := json.Marshal(body, b.jsonOptions(nil)...)
+	return writeErrorBody(b, he.Status, MIMEApplicationJSONCharsetUTF8, body)
+}
+
+// writeErrorBody encodes body and writes it as the error response with
+// contentType, forcing the type and dropping the headers of the failed
+// handler. A body that does not encode writes nothing.
+func writeErrorBody(b *Base, status int, contentType string, body any) error {
+	if !validStatus(status) {
+		return errInvalidStatus(status)
+	}
+	buf, err := marshalPooled(body, b.jsonOptions(nil))
 	if err != nil {
 		return ErrInternalServerError.WithError(fmt.Errorf("router: encode the error body: %w", err))
 	}
+	defer putBuf(buf)
+	h := b.res.Header()
+	ResetForError(h)
 	// The failed handler may have set a Content-Type of its own.
-	b.res.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
-	return b.Blob(he.Status, MIMEApplicationJSONCharsetUTF8, data)
+	h[HeaderContentType] = typeValue(contentType)
+	return b.Blob(status, contentType, buf.Bytes())
+}
+
+var noSniff = []string{"nosniff"}
+
+// ResetForError removes from h the headers that describe the body of a failed
+// handler and would lie about an error body: Content-Length,
+// Content-Disposition, Content-Encoding, ETag, Last-Modified and
+// Cache-Control. It also sets X-Content-Type-Options to nosniff, as
+// [http.Error] does.
+//
+// [TextErrorHandler], [JSONErrorHandler] and [ProblemErrorHandler] call it
+// before they write. Call it first in an error handler of your own, with
+// c.ResponseWriter().Header() or the header you hold, so an error does not go
+// out with the cache lifetime or the file name of the response that failed.
+// It leaves Content-Type to the caller.
+func ResetForError(h http.Header) {
+	delete(h, HeaderContentLength)
+	delete(h, HeaderContentDisposition)
+	delete(h, HeaderContentEncoding)
+	h.Del(HeaderETag) // "ETag" is not the canonical key.
+	delete(h, "Last-Modified")
+	delete(h, HeaderCacheControl)
+	h[HeaderXContentTypeOptions] = noSniff
 }
 
 func writeText(b *Base, err error, exposeCause bool) error {
@@ -407,10 +442,15 @@ func writeText(b *Base, err error, exposeCause bool) error {
 	if he == nil {
 		return nil
 	}
+	if !validStatus(he.Status) {
+		return errInvalidStatus(he.Status)
+	}
 
 	// Plain text, always. A handler that wants JSON or HTML for its errors
 	// says so in its own ErrorHandler, which knows what its clients read.
-	b.res.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
+	h := b.res.Header()
+	ResetForError(h)
+	h[HeaderContentType] = typeText
 	b.res.WriteHeader(he.Status)
 	if b.req.Method == http.MethodHead {
 		return nil
@@ -432,6 +472,62 @@ func writeText(b *Base, err error, exposeCause bool) error {
 		return err
 	}
 	return nil
+}
+
+// mimeProblemJSON is the media type of RFC 9457 problem details.
+const mimeProblemJSON = "application/problem+json"
+
+// Problem is the object [ProblemErrorHandler] writes, an RFC 9457 problem
+// details document. Errors holds the []FieldError of the Details, and Details
+// any other Details; Cause is the text of the wrapped cause, set only by
+// ProblemErrorHandler(true). Each is left out when empty.
+type Problem struct {
+	Type     string       `json:"type"`
+	Title    string       `json:"title,omitzero"`
+	Status   int          `json:"status"`
+	Detail   string       `json:"detail,omitzero"`
+	Instance string       `json:"instance,omitzero"`
+	Errors   []FieldError `json:"errors,omitzero"`
+	Details  any          `json:"details,omitzero"`
+	Cause    string       `json:"cause,omitzero"`
+}
+
+// ProblemErrorHandler writes err as an RFC 9457 problem details document with
+// the media type application/problem+json. The type is "about:blank", the
+// title is the standard text of the status, the detail is the message of
+// [HTTPErrorOf], and the instance is the path of the request. A []FieldError in
+// the Details goes in the "errors" member; any other Details goes in "details",
+// so it must hold nothing private. With exposeCause set, the text of the
+// wrapped cause goes in "cause", which suits a development server and leaks
+// internals anywhere else.
+//
+// Like [JSONErrorHandler], it removes the headers of the failed handler first
+// (see [ResetForError]), sends no body to a HEAD request, and neither logs nor
+// checks for a committed response when called directly.
+func ProblemErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
+	return func(c C, err error) error {
+		b := c.base()
+		he := HTTPErrorOf(err)
+		if he == nil {
+			return nil
+		}
+		p := Problem{
+			Type:     "about:blank",
+			Title:    http.StatusText(he.Status),
+			Status:   he.Status,
+			Detail:   he.Message,
+			Instance: b.req.URL.EscapedPath(),
+		}
+		if fields, ok := he.Details.([]FieldError); ok {
+			p.Errors = fields
+		} else {
+			p.Details = he.Details
+		}
+		if exposeCause && he.Err != nil {
+			p.Cause = he.Err.Error()
+		}
+		return writeErrorBody(b, he.Status, mimeProblemJSON, p)
+	}
 }
 
 // HandleError answers err now with the error handler that owns the request,
@@ -493,6 +589,7 @@ func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 		b.Logger().ErrorContext(b.req.Context(), "router: the error handler panicked",
 			slog.Any("panic", rec), slog.Any("error", err))
 		if !b.res.Committed {
+			ResetForError(b.res.Header())
 			b.res.WriteHeader(http.StatusInternalServerError)
 		}
 	}()
@@ -505,6 +602,7 @@ func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	default:
 		b.Logger().ErrorContext(b.req.Context(), "router: the error handler failed",
 			slog.Any("handler_error", herr), slog.Any("error", err))
+		ResetForError(b.res.Header())
 		b.res.WriteHeader(http.StatusInternalServerError)
 	}
 }

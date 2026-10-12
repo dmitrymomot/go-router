@@ -455,6 +455,11 @@ func (b *Base) ParamNames() []string { return slices.Clone(b.paramNames) }
 // Method reports the HTTP method of the request.
 func (b *Base) Method() string { return b.req.Method }
 
+// TrailingSlash reports whether the request path ended with a slash that
+// routing trimmed. It is useful on a catch-all route, which sees the same
+// route for "/files/a" and "/files/a/" and may want to tell them apart.
+func (b *Base) TrailingSlash() bool { return b.tailSlash }
+
 // Path reports the path of the request URL.
 func (b *Base) Path() string { return b.req.URL.Path }
 
