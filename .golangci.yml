@@ -4,6 +4,7 @@ linters:
   enable:
     - gosec
     - bodyclose
+    - errorlint
   settings:
     staticcheck:
       checks:
@@ -52,3 +53,22 @@ linters:
       # see across the helper boundary.
       - linters: [bodyclose]
         path: ^middleware/bodylimit_test\.go$
+      # A recovered panic value is an any, and net/http itself compares it to
+      # http.ErrAbortHandler with ==. Wrapping the sentinel is not a way to abort,
+      # so the identity check is the contract.
+      - linters: [errorlint]
+        path: ^(dispatch\.go|error\.go|middleware/recover\.go)$
+        text: "comparing with == will fail"
+      # FieldErrorsOf and httpErrorOf walk the error tree by hand: the type switch
+      # and the assertion are the walk, and they descend through Unwrap themselves.
+      # error(he) == err asks whether err is that very value, which errors.Is would
+      # also satisfy for a wrapper that is not the sentinel.
+      - linters: [errorlint]
+        path: ^error\.go$
+        text: "(type switch|type assertion) on error|comparing with =="
+      # Tests compare for identity on purpose: a recovered http.ErrAbortHandler, a
+      # sentinel a handler must return unwrapped, and a panic value that must pass
+      # through untouched.
+      - linters: [errorlint]
+        path: _test\.go$
+        text: "comparing with !="

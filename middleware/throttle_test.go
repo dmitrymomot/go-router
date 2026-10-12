@@ -127,7 +127,7 @@ func TestThrottleOnRejectAndSkip(t *testing.T) {
 		Limit: 1,
 		OnReject: func(_ *appContext, err error) error {
 			if !errors.Is(err, router.ErrTooManyRequests) {
-				return fmt.Errorf("OnReject got %v, want the 429", err)
+				return fmt.Errorf("OnReject got %w, want the 429", err)
 			}
 			return router.ErrBadGateway
 		},
