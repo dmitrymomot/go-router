@@ -91,6 +91,7 @@ type routerOpts struct {
 	answer       func(c Context, err error) // HandleError's way to the router that serves
 	maxBody      int64
 	maxMultipart int64
+	decoders     map[string]*bodyDecoder // Router.Decoder, by media type
 }
 
 var defaultRouterOpts = &routerOpts{maxBody: DefaultMaxBodyBytes}

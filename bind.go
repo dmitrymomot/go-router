@@ -31,8 +31,9 @@ const defaultMaxMultipartMemory int64 = 32 << 20
 // Bind reads the body whenever the request carries one, that is when it has
 // a Content-Length above zero, or a body of unknown length, whatever the
 // method. A Content-Type without a body reads nothing. The Content-Type picks
-// the decoder: JSON for application/json and any "+json" type, and a form for
-// the two form types. JSON follows the rules of [Base.BindJSON]: a field with no
+// the decoder: JSON for application/json and any "+json" type, a form for the
+// two form types, and the [BodyDecoder] that [Router.Decoder] registered for
+// any other type. JSON follows the rules of [Base.BindJSON]: a field with no
 // tag at all takes the member of its Go name, a field tagged for another
 // source and not for `json` takes no member, and member names match
 // case-sensitively, so a member "Name" does not fill a field tagged
@@ -152,6 +153,9 @@ func (b *Base) decodeBody(dst any, sv reflect.Value) error {
 	case mt == "":
 		return ErrUnsupportedMediaType.WithMessage("a %s body needs a Content-Type", b.req.Method)
 	default:
+		if d := b.opts().decoders[mt]; d != nil {
+			return b.decodeWith(d, dst, mt)
+		}
 		return ErrUnsupportedMediaType.WithMessage("cannot decode a %s body", clip(mt))
 	}
 }
