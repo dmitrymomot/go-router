@@ -515,5 +515,10 @@ type hiddenPage struct {
 }
 
 func decode(vals url.Values, dst any, tag string) []FieldError {
-	return decodeValues(vals, reflect.ValueOf(dst).Elem(), tag)
+	fails := decodeValues(vals, reflect.ValueOf(dst).Elem(), tag)
+	if fails == nil {
+		return nil
+	}
+	fields, _ := failed(fails)
+	return fields
 }

@@ -206,7 +206,7 @@ func TestBindQueryReportsAParseError(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "page: ") {
 		t.Errorf("body does not name the field: %q", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "cannot parse") {
+	if !strings.Contains(rec.Body.String(), "is not a valid integer") {
 		t.Errorf("body does not say what went wrong: %q", rec.Body.String())
 	}
 }
@@ -1272,7 +1272,7 @@ func TestBindFormReturnsWhatDecoded(t *testing.T) {
 		if in.Email != "bo@x.io" {
 			t.Errorf("Email = %q, want the value that decoded", in.Email)
 		}
-		want := []FieldError{{Field: "age", Message: `cannot parse "abc" as int`}}
+		want := []FieldError{{Field: "age", Message: "is not a valid integer"}}
 		if got := FieldErrorsOf(bindErr); !reflect.DeepEqual(got, want) {
 			t.Errorf("FieldErrorsOf = %+v, want %+v", got, want)
 		}
@@ -1399,7 +1399,7 @@ func TestQueryAs(t *testing.T) {
 		{target: "/search?page=2", want: "2", code: http.StatusOK},
 		{target: "/search?page=", want: `missing query parameter "page"`, code: http.StatusBadRequest},
 		{target: "/search", want: `missing query parameter "page"`, code: http.StatusBadRequest},
-		{target: "/search?page=abc", want: "query parameter page: ", code: http.StatusBadRequest},
+		{target: "/search?page=abc", want: `query parameter "page" is not a valid integer`, code: http.StatusBadRequest},
 	} {
 		t.Run(tt.target, func(t *testing.T) {
 			rec := do(r, http.MethodGet, tt.target)

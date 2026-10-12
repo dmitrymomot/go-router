@@ -70,10 +70,10 @@ func (b *Base) Bind[T any]() (T, error) {
 	if err := b.decodePath(sv); err != nil {
 		return *p, err
 	}
-	fields := decodeValues(b.queryValues(), sv, "query")
-	fields = append(fields, decodeValues(url.Values(b.req.Header), sv, "header")...)
-	if fields != nil {
-		return *p, badFields(fields, joinFields(fields))
+	fails := decodeValues(b.queryValues(), sv, "query")
+	fails = append(fails, decodeValues(url.Values(b.req.Header), sv, "header")...)
+	if fails != nil {
+		return *p, badFields(fails)
 	}
 	return *p, validate(p)
 }
@@ -209,7 +209,7 @@ func jsonError(err error, empty bool) *HTTPError {
 		return ErrBadRequest.WithMessage("malformed JSON body").WithError(err)
 	}
 	if field := jsonField(se.JSONPointer); field != "" {
-		return badFields([]FieldError{{Field: field, Message: jsonProblem(se)}}, err)
+		return invalidRequest([]FieldError{{Field: field, Message: jsonProblem(se)}}, err)
 	}
 	return ErrBadRequest.WithMessage("the request body %s", jsonProblem(se)).WithError(err)
 }
@@ -241,7 +241,8 @@ func jsonField(p jsontext.Pointer) string {
 		}
 		sb.WriteString(tok)
 	}
-	return sb.String()
+	// A member name comes from the client, so a long one is cut.
+	return clip(sb.String())
 }
 
 // BindForm fills a T from the form of the body and validates it, through the
@@ -304,8 +305,9 @@ func (b *Base) decodePath(sv reflect.Value) error {
 			vals[n] = b.paramVals[i : i+1 : i+1]
 		}
 	}
-	if fields := decodeValues(vals, sv, "param"); fields != nil {
-		return ErrNotFound.WithError(joinFields(fields))
+	if fails := decodeValues(vals, sv, "param"); fails != nil {
+		_, cause := failed(fails)
+		return ErrNotFound.WithError(cause)
 	}
 	return nil
 }
@@ -392,23 +394,20 @@ func validate[T any](v *T) error {
 // decodeInto fills sv from vals through tag, and reports the fields that
 // failed as one [ErrBadRequest].
 func decodeInto(vals url.Values, sv reflect.Value, tag string) error {
-	if fields := decodeValues(vals, sv, tag); fields != nil {
-		return badFields(fields, joinFields(fields))
+	if fails := decodeValues(vals, sv, tag); fails != nil {
+		return badFields(fails)
 	}
 	return nil
 }
 
-func joinFields(fields []FieldError) error {
-	errs := make([]error, len(fields))
-	for i, f := range fields {
-		errs[i] = f
-	}
-	return errors.Join(errs...)
-}
-
 // badFields is the 400 of a value that did not decode, one [FieldError] per
 // field that failed.
-func badFields(fields []FieldError, cause error) *HTTPError {
+func badFields(fails []fieldFailure) *HTTPError {
+	fields, cause := failed(fails)
+	return invalidRequest(fields, cause)
+}
+
+func invalidRequest(fields []FieldError, cause error) *HTTPError {
 	return ErrBadRequest.WithMessage("invalid request").WithDetails(fields).WithError(cause)
 }
 
@@ -758,7 +757,7 @@ func (b *Base) QueryAllAs[T any](name string) ([]T, error) {
 		return nil, nil
 	}
 	if err := setField(reflect.ValueOf(&out).Elem(), raw, ""); err != nil {
-		return nil, ErrBadRequest.WithMessage("query parameter %s: %s", name, err).WithError(err)
+		return nil, malformed("query parameter", name, err)
 	}
 	return out, nil
 }
@@ -793,9 +792,21 @@ func parseAs[T any](raw, kind, name string) (T, error) {
 	}
 	v, err := ParseValue[T](raw)
 	if err != nil {
-		return v, ErrBadRequest.WithMessage("%s %s: %s", kind, name, err).WithError(err)
+		return v, malformed(kind, name, err)
 	}
 	return v, nil
+}
+
+// malformed is the error of a named value that does not parse: an
+// [ErrBadRequest] whose message names the field and not the value, or an
+// [ErrInternalServerError] for a type that ParseValue does not take.
+func malformed(kind, name string, err error) *HTTPError {
+	if _, ok := errors.AsType[*parseError](err); !ok {
+		return ErrInternalServerError.WithError(err)
+	}
+	fe := FieldError{Field: name, Message: clientMessage(err)}
+	return ErrBadRequest.WithMessage("%s %q %s", kind, name, fe.Message).
+		WithDetails([]FieldError{fe}).WithError(err)
 }
 
 func valueOr[T any](s string, def T) T {

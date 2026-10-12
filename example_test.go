@@ -749,7 +749,7 @@ func ExampleFieldErrorsOf() {
 	rec := serveRequest(r, req)
 	fmt.Println(rec.Code, rec.Body.String())
 	// Output:
-	// 400 email=ann@example.com age: cannot parse "old" as int
+	// 400 email=ann@example.com age: is not a valid integer
 }
 
 type Batch struct {
