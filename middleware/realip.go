@@ -75,11 +75,11 @@ func canonicalHeaders(names ...string) []string {
 // Name the headers your proxy actually sets, through [RealIPWithConfig], to
 // have the address of the client replace RemoteAddr.
 //
-// RealIP is the step that vouches for the scheme. [router.Base.Scheme] reads
-// X-Forwarded-Proto as it stands, and [Secure], which sends HSTS over https
-// alone, and [CSRF], which checks the Referer of an https request, both read
-// the scheme through it. Without RealIP in front, a client sets the scheme
-// they see by sending the header itself.
+// RealIP is the step that vouches for the scheme. [router.SchemeOf] reads
+// X-Forwarded-Proto as it stands, and both [Secure], which sends HSTS over
+// https alone, and [CSRF], which marks its cookie Secure and gives it the
+// __Host- prefix over https, take the scheme from it. Without RealIP in front,
+// a client sets the scheme the server sees by sending the header itself.
 //
 // See Order in the package doc for where it goes.
 func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
