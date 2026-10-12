@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -46,20 +47,30 @@ type Event struct {
 	Retry time.Duration
 }
 
+// DefaultWriteTimeout is how long a single write to the client may take when no
+// [WriteTimeout] option says otherwise. A client that stops reading holds the
+// handler for this long at most.
+const DefaultWriteTimeout = 30 * time.Second
+
+// ErrClosed is what a [Writer] reports once [Writer.Close] has run.
+var ErrClosed = errors.New("sse: the stream is closed")
+
 type config struct {
-	closeEvent *Event
-	heartbeat  time.Duration
-	retry      time.Duration
+	closeEvent   *Event
+	heartbeat    time.Duration
+	retry        time.Duration
+	writeTimeout time.Duration
 }
 
-// Option configures a stream. See [Heartbeat], [Retry] and [Close].
+// Option configures a stream. See [Heartbeat], [Retry], [Close] and
+// [WriteTimeout].
 type Option func(*config)
 
 const nilOptionError = "sse: an option cannot be nil"
 
 // Heartbeat sends a comment every d, which holds a connection open through a
-// proxy that drops an idle one. [Serve] does the sending; a stream driven by
-// hand calls [Writer.Comment] itself.
+// proxy that drops an idle one. [Serve] does the sending, and so does [Open],
+// from a goroutine that ends with [Writer.Close] or with the request.
 func Heartbeat(d time.Duration) Option {
 	return func(c *config) { c.heartbeat = d }
 }
@@ -70,11 +81,19 @@ func Retry(d time.Duration) Option {
 	return func(c *config) { c.retry = d }
 }
 
-// Close sends e as the last event, once the channel of [Serve] closes. It
-// suits a "done" the client watches for, because the browser reconnects on
-// its own when a stream simply ends.
+// Close sends e as the last event, once the channel of [Serve] closes or
+// [Writer.Close] runs. It suits a "done" the client watches for, because the
+// browser reconnects on its own when a stream simply ends.
 func Close(e Event) Option {
 	return func(c *config) { c.closeEvent = &e }
+}
+
+// WriteTimeout bounds each write to the client, an event or a heartbeat, so a
+// client that stops reading cannot hold the handler forever. The stream clears
+// the write deadline of the server and sets this one before every write. Zero
+// takes [DefaultWriteTimeout], and a negative d sets no deadline at all.
+func WriteTimeout(d time.Duration) Option {
+	return func(c *config) { c.writeTimeout = d }
 }
 
 const heartbeatText = "ping"
@@ -85,6 +104,12 @@ const maxFrameBuf = 512 << 10
 
 // Writer writes a server-sent event stream. [Open] opens one.
 //
+// A Writer is safe for concurrent use: every send holds a lock, so a handler
+// may send from several goroutines and the heartbeat of [Open] shares the
+// stream with them. Events from one goroutine keep their order. A Writer must
+// not be used after the handler returns, so call [Writer.Close], usually with
+// defer, before it does.
+//
 // A send that fails on its value returns the error, writes nothing and leaves
 // the stream open: an ID or a name with a line break, an ID with a null, a
 // value SendJSON cannot encode, a component that fails to render. A failed
@@ -92,6 +117,7 @@ const maxFrameBuf = 512 << 10
 // so a loop needs one error check per send and no more. [Writer.Closed]
 // reports whether the stream still takes events.
 type Writer struct {
+	mu    sync.Mutex
 	b     *router.Base
 	res   *router.Response
 	rc    *http.ResponseController
@@ -100,18 +126,100 @@ type Writer struct {
 	lines lines
 	cfg   config
 	head  bool
+
+	// shut is set by Close. stop ends the heartbeat goroutine and beat is
+	// closed when that goroutine has returned; both are nil without one.
+	shut bool
+	stop chan struct{}
+	beat chan struct{}
 }
 
 // Open opens a server-sent event stream on c and writes status with the
-// headers of the format. It clears the write deadline, so the stream outlives
-// the ordinary timeout of the server.
+// headers of the format. It clears the write deadline of the server, so the
+// stream outlives the ordinary timeout, and bounds each write by
+// [WriteTimeout] instead.
 //
 // It reports a [router.ErrInternalServerError] when an option is nil or the
 // response writer cannot flush. A HEAD request gets the headers and a writer
 // that is already closed.
 //
+// The [Heartbeat] and [Close] options work here: a goroutine sends the
+// heartbeat until [Writer.Close] runs or the request ends, and Close sends the
+// closing event. Call Close, usually with defer, before the handler returns.
+//
+// middleware.Timeout cancels the context of a stream when its deadline passes,
+// which ends the stream with the first write after it. Skip the middleware for
+// stream routes:
+//
+//	middleware.TimeoutWithConfig(middleware.TimeoutConfig[*Context]{
+//		Skip: func(c *Context) bool { return strings.HasPrefix(c.Request().URL.Path, "/events") },
+//	})
+//
 // See [Serve] to drive a stream from a channel.
 func Open(c router.Context, status int, opts ...Option) (*Writer, error) {
+	s, err := openStream(c, status, opts)
+	if err != nil {
+		return nil, err
+	}
+	if s.cfg.heartbeat > 0 && !s.head {
+		s.stop = make(chan struct{})
+		s.beat = make(chan struct{})
+		go s.heartbeat(c.Done())
+	}
+	return s, nil
+}
+
+func (s *Writer) heartbeat(done <-chan struct{}) {
+	defer close(s.beat)
+	t := time.NewTicker(s.cfg.heartbeat)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-done:
+			return
+		case <-t.C:
+			if s.Comment(heartbeatText) != nil {
+				return
+			}
+		}
+	}
+}
+
+// Close stops the heartbeat and sends the [Close] event, when one is
+// configured. It leaves the stream closed: every later send reports
+// [ErrClosed]. A second call does nothing and reports nil, and so does a call
+// on a stream that already failed or answered a HEAD.
+func (s *Writer) Close() error {
+	s.mu.Lock()
+	if s.shut {
+		s.mu.Unlock()
+		return nil
+	}
+	s.shut = true
+	if s.stop != nil {
+		close(s.stop)
+	}
+	s.mu.Unlock()
+	// The heartbeat may be waiting for the lock, so wait for it without
+	// holding the lock.
+	if s.beat != nil {
+		<-s.beat
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.head || s.err != nil || s.cfg.closeEvent == nil {
+		return nil
+	}
+	s.shut = false
+	err := s.sendLocked(*s.cfg.closeEvent)
+	s.shut = true
+	return err
+}
+
+func openStream(c router.Context, status int, opts []Option) (*Writer, error) {
 	if err := validateOptions(opts); err != nil {
 		return nil, router.ErrInternalServerError.WithError(err)
 	}
@@ -144,6 +252,9 @@ func Open(c router.Context, status int, opts ...Option) (*Writer, error) {
 
 	res.WriteHeader(status)
 	s.head = req.Method == http.MethodHead
+	if err := s.arm(); err != nil {
+		return nil, err
+	}
 	if err := s.flush(); err != nil {
 		return nil, err
 	}
@@ -184,11 +295,32 @@ func (s *Writer) Request() *http.Request { return s.b.Request() }
 func (s *Writer) LastEventID() string { return s.b.Request().Header.Get(HeaderLastEventID) }
 
 // Closed reports whether the stream stopped taking events, because a write
-// failed or because the request is a HEAD.
-func (s *Writer) Closed() bool { return s.head || s.err != nil }
+// failed, because [Writer.Close] ran or because the request is a HEAD.
+func (s *Writer) Closed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed()
+}
+
+// closed is [Writer.Closed] for a caller that holds the lock.
+func (s *Writer) closed() bool { return s.head || s.err != nil || s.shut }
+
+// reason is what a send reports for a stream that is closed.
+func (s *Writer) reason() error {
+	if s.err == nil && s.shut {
+		return ErrClosed
+	}
+	return s.err
+}
 
 // Send writes e and flushes it to the client.
 func (s *Writer) Send(e Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sendLocked(e)
+}
+
+func (s *Writer) sendLocked(e Event) error {
 	ok, err := s.begin(e)
 	if !ok {
 		return err
@@ -203,6 +335,8 @@ func (s *Writer) SendData(data string) error { return s.Send(Event{Data: data}) 
 // SendJSON writes an event called name whose data is v as JSON. opts win over
 // the options of [router.Router.JSONOptions].
 func (s *Writer) SendJSON(name string, v any, opts ...json.Options) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ok, err := s.begin(Event{Name: name})
 	if !ok {
 		return err
@@ -221,6 +355,8 @@ func (s *Writer) SendJSON(name string, v any, opts ...json.Options) error {
 // A render failure that is already a [router.HTTPError] passes through; any
 // other becomes a [router.ErrInternalServerError].
 func (s *Writer) SendComponent(name string, c router.Component) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ok, err := s.begin(Event{Name: name})
 	if !ok {
 		return err
@@ -234,8 +370,10 @@ func (s *Writer) SendComponent(name string, c router.Component) error {
 // Comment writes a comment, which the client ignores. It keeps a connection
 // alive through a proxy that drops an idle one.
 func (s *Writer) Comment(text string) error {
-	if s.Closed() {
-		return s.err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed() {
+		return s.reason()
 	}
 	s.resetBuf()
 	s.lines = lines{buf: &s.buf, prefix: ": "}
@@ -253,8 +391,8 @@ func renderError(err error) error {
 // The bool is not the error: a HEAD request closes the stream with no failure
 // to report, and a caller must not then write into a frame that never started.
 func (s *Writer) begin(e Event) (bool, error) {
-	if s.Closed() {
-		return false, s.err
+	if s.closed() {
+		return false, s.reason()
 	}
 	s.resetBuf()
 	if err := s.field("id", e.ID); err != nil {
@@ -311,8 +449,27 @@ func (s *Writer) end() error {
 	return s.commit()
 }
 
+// arm sets the write deadline that bounds the next write.
+func (s *Writer) arm() error {
+	d := s.cfg.writeTimeout
+	if d < 0 {
+		return nil
+	}
+	if d == 0 {
+		d = DefaultWriteTimeout
+	}
+	if err := s.rc.SetWriteDeadline(time.Now().Add(d)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		s.err = err
+		return err
+	}
+	return nil
+}
+
 func (s *Writer) commit() error {
 	s.buf.WriteByte('\n')
+	if err := s.arm(); err != nil {
+		return err
+	}
 	if _, err := s.res.Write(s.buf.Bytes()); err != nil {
 		s.err = err
 		return err
@@ -464,13 +621,17 @@ func Events() Sender[Event] {
 // one is configured, and ends the handler.
 //
 // The heartbeat of [Heartbeat] runs here, so a stream driven this way keeps
-// itself alive.
+// itself alive. The stream ends with the context of the request, so
+// middleware.Timeout cuts it short; see [Open] for the Skip that avoids it.
 func Serve[T any](c router.Context, ch <-chan T, send Sender[T], opts ...Option) error {
 	if send == nil {
 		return router.ErrInternalServerError.WithError(errors.New("sse: Serve needs a sender"))
 	}
 
-	s, err := Open(c, http.StatusOK, opts...)
+	if err := validateOptions(opts); err != nil {
+		return router.ErrInternalServerError.WithError(err)
+	}
+	s, err := openStream(c, http.StatusOK, opts)
 	if err != nil {
 		return err
 	}
