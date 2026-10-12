@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"testing"
+
+	"github.com/dmitrymomot/go-router/internal/accept"
 )
 
 func FuzzNegotiateEncoding(f *testing.F) {
@@ -14,8 +16,16 @@ func FuzzNegotiateEncoding(f *testing.F) {
 	} {
 		f.Add(seed)
 	}
-	f.Fuzz(func(_ *testing.T, accept string) {
-		_ = negotiateEncoding(accept)
+	f.Fuzz(func(t *testing.T, header string) {
+		switch got := negotiateEncoding(header); got {
+		case "":
+		case "gzip", "deflate":
+			if accept.EncodingQuality(header, got) <= 0 {
+				t.Errorf("negotiateEncoding(%q) = %q, which the header refuses", header, got)
+			}
+		default:
+			t.Errorf("negotiateEncoding(%q) = %q; want gzip, deflate or empty", header, got)
+		}
 	})
 }
 

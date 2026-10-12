@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/accept"
 )
 
 // DefaultGzipMinLength is the body below which [Gzip] compresses nothing,
@@ -553,57 +554,9 @@ func isEventStream(contentType string) bool {
 
 // negotiateEncoding picks the coding for an Accept-Encoding value: "gzip",
 // "deflate", or "" when the client takes neither. The higher quality wins and
-// gzip wins a tie. A coding the header names takes its own quality, and "*"
-// stands for the ones it does not name.
-func negotiateEncoding(accept string) string {
-	gz, df, star := -1.0, -1.0, -1.0
-	for part := range strings.SplitSeq(accept, ",") {
-		token, params, _ := strings.Cut(part, ";")
-		switch token = strings.TrimSpace(token); {
-		case strings.EqualFold(token, "gzip"), strings.EqualFold(token, "x-gzip"):
-			if gz < 0 {
-				gz = encodingQuality(params)
-			}
-		case strings.EqualFold(token, "deflate"):
-			if df < 0 {
-				df = encodingQuality(params)
-			}
-		case token == "*":
-			if star < 0 {
-				star = encodingQuality(params)
-			}
-		}
-	}
-	if gz < 0 {
-		gz = star
-	}
-	if df < 0 {
-		df = star
-	}
-	switch {
-	case gz > 0 && gz >= df:
-		return "gzip"
-	case df > 0:
-		return "deflate"
-	}
-	return ""
-}
-
-// encodingQuality reads the q parameter, and reports 1 when there is none and 0
-// when it does not parse.
-func encodingQuality(params string) float64 {
-	for p := range strings.SplitSeq(params, ";") {
-		k, v, ok := strings.Cut(p, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
-			continue
-		}
-		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil {
-			return 0
-		}
-		return q
-	}
-	return 1
+// gzip wins a tie.
+func negotiateEncoding(header string) string {
+	return accept.NegotiateEncoding(header, "gzip", "deflate")
 }
 
 // contentTypeSet matches the media type of a Content-Type value against exact
