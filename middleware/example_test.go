@@ -128,11 +128,15 @@ func ExampleRealIPWithConfig() {
 func ExampleRealIPWithConfig_hops() {
 	// Two proxies stand in front: a CDN, then a load balancer that connects
 	// to the server. Each appends the address it saw, so the client is the
-	// second entry from the right, whatever the client wrote before it.
+	// second entry from the right, whatever the client wrote before it. The
+	// load balancer must be trusted too: Trust is the private ranges unless it
+	// is set, and the test request arrives from 192.0.2.1.
 	r := newAPI()
 	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
 		Headers: []string{router.HeaderXForwardedFor},
-		Hops:    2,
+		Trust: middleware.NewTrustSet(
+			middleware.TrustPrefix(netip.MustParsePrefix("192.0.2.0/24"))),
+		Hops: 2,
 	}))
 	r.GET("/", func(c *Context) error { return c.String(http.StatusOK, middleware.ClientIP(c)) })
 

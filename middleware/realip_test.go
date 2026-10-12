@@ -874,7 +874,7 @@ func TestRealIPHops(t *testing.T) {
 	}{
 		{"one proxy takes the last entry", router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9", "10.0.0.1:9000", 1, "203.0.113.9", "https"},
 		{"two proxies take the second from the right", router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9, 10.0.5.7", "10.0.0.1:9000", 2, "203.0.113.9", "https"},
-		{"a public peer counts like any other", router.HeaderXForwardedFor, "203.0.113.9", "198.51.100.1:9000", 1, "203.0.113.9", "https"},
+		{"an untrusted peer is ignored", router.HeaderXForwardedFor, "203.0.113.9", "198.51.100.1:9000", 1, "198.51.100.1", "http"},
 		{"a chain that is too short is ignored", router.HeaderXForwardedFor, "203.0.113.9", "10.0.0.1:9000", 2, "10.0.0.1", "http"},
 		{"an entry with no address keeps the peer", router.HeaderXForwardedFor, "unknown", "10.0.0.1:9000", 1, "10.0.0.1", "https"},
 		{"Forwarded counts its elements", router.HeaderForwarded, "for=1.2.3.4, for=203.0.113.9;proto=https, for=10.0.5.7", "10.0.0.1:9000", 2, "203.0.113.9", "https"},
@@ -896,6 +896,50 @@ func TestRealIPHops(t *testing.T) {
 	}
 }
 
+func TestRealIPHopsTrustsTheNamedPeer(t *testing.T) {
+	r := headerEchoRouter(middleware.RealIPConfig[*appContext]{
+		Headers: []string{router.HeaderXForwardedFor},
+		Hops:    1,
+		Trust:   middleware.NewTrustSet(middleware.TrustPrefix(netip.MustParsePrefix("198.51.100.0/24"))),
+	}, "none")
+
+	req := forwarded(router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9", "198.51.100.1:9000")
+	if got := do(r, req).Body.String(); got != "203.0.113.9 http " {
+		t.Errorf("trusted public peer = %q, want 203.0.113.9", got)
+	}
+	req = forwarded(router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9", "192.0.2.1:9000")
+	if got := do(r, req).Body.String(); got != "192.0.2.1 http " {
+		t.Errorf("untrusted peer = %q, want 192.0.2.1", got)
+	}
+}
+
+func TestRealIPHopsFromAnUntrustedPeerKeepsRemoteAddr(t *testing.T) {
+	r := headerEchoRouter(middleware.RealIPConfig[*appContext]{
+		Headers: []string{router.HeaderXForwardedFor},
+		Hops:    1,
+	}, router.HeaderXForwardedProto)
+
+	req := forwarded(router.HeaderXForwardedFor, "6.6.6.6", "203.0.113.50:9000")
+	req.Header.Set(router.HeaderXForwardedProto, "https")
+	if got := do(r, req).Body.String(); got != "203.0.113.50 http " {
+		t.Errorf("direct client = %q, want its own address, http, and no vouched scheme", got)
+	}
+}
+
+func TestRealIPHopsDecidesOnTheFirstHeaderPresent(t *testing.T) {
+	r := headerEchoRouter(middleware.RealIPConfig[*appContext]{
+		Headers: []string{router.HeaderXForwardedFor, router.HeaderForwarded},
+		Hops:    2,
+	}, router.HeaderForwarded)
+
+	req := forwarded(router.HeaderXForwardedFor, "6.6.6.6", "10.0.0.1:9000")
+	req.Header.Set(router.HeaderForwarded, "for=1.2.3.4, for=203.0.113.9")
+	req.Header.Set(router.HeaderXForwardedProto, "https")
+	if got := do(r, req).Body.String(); got != "10.0.0.1 http " {
+		t.Errorf("short first chain = %q, want an untrusted request that never reads Forwarded", got)
+	}
+}
+
 func TestRealIPWithConfigPanicsOnABadHops(t *testing.T) {
 	xff := []string{router.HeaderXForwardedFor}
 	tests := []struct {
@@ -903,7 +947,6 @@ func TestRealIPWithConfigPanicsOnABadHops(t *testing.T) {
 		cfg  middleware.RealIPConfig[*appContext]
 	}{
 		{"negative", middleware.RealIPConfig[*appContext]{Headers: xff, Hops: -1}},
-		{"beside Trust", middleware.RealIPConfig[*appContext]{Headers: xff, Hops: 1, Trust: lanProxies}},
 		{"beside Leftmost", middleware.RealIPConfig[*appContext]{Headers: xff, Hops: 1, Leftmost: true}},
 		{"without Headers", middleware.RealIPConfig[*appContext]{Hops: 1}},
 	}
