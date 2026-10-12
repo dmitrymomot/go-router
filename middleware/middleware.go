@@ -30,7 +30,7 @@
 //  7. [HTMXRedirect]
 //  8. [BodyLimit], then [Decompress]
 //  9. [RateLimit] and auth: [KeyAuth] or [BasicAuth]
-//  10. [CSRF]
+//  10. [CSRF] or [CrossOrigin]
 //  11. [ParseForm]
 //  12. [MinDuration]
 //  13. [Idempotency]
