@@ -1226,6 +1226,38 @@ func TestIdempotencyKeysBelongToTheClientAddress(t *testing.T) {
 	}
 }
 
+func TestIdempotencyKeysBelongToTheClientNetworkLikeRateLimit(t *testing.T) {
+	tests := []struct {
+		name  string
+		addrs []string
+		runs  int32
+	}{
+		{"one IPv6 /64", []string{"[2001:db8::1]:1", "[2001:db8::2]:1"}, 1},
+		{"two IPv6 /64s", []string{"[2001:db8::1]:1", "[2001:db8:0:1::1]:1"}, 2},
+		{"an IPv4 client behind NAT64 and the same one direct", []string{"[64:ff9b::c000:201]:1", "192.0.2.1:1"}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var runs atomic.Int32
+			r := newRouter()
+			r.Use(middleware.Idempotency[*appContext](middleware.NewIdempotencyMemoryStore(0)))
+			r.POST("/pay", func(c *appContext) error {
+				runs.Add(1)
+				return c.NoContent(http.StatusCreated)
+			})
+			for _, addr := range tt.addrs {
+				req := httptest.NewRequest(http.MethodPost, "/pay", nil)
+				req.RemoteAddr = addr
+				req.Header.Set(router.HeaderIdempotencyKey, "k1")
+				do(r, req)
+			}
+			if n := runs.Load(); n != tt.runs {
+				t.Errorf("runs = %d, want %d", n, tt.runs)
+			}
+		})
+	}
+}
+
 func TestIdempotencyMemoryStoreWarnsOfAnEarlyEviction(t *testing.T) {
 	var buf bytes.Buffer
 	r := newRouter()

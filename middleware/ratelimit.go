@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash/maphash"
 	"math"
-	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -112,34 +111,6 @@ func RateLimitWithConfig[C router.Context](cfg RateLimitConfig[C]) router.Middle
 			return next(c)
 		}
 	}
-}
-
-// The NAT64 prefixes of RFC 6052 and RFC 8215. An address in them stands for
-// an IPv4 client, so it is not cut to its /64.
-var (
-	nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
-	nat64LocalUse  = netip.MustParsePrefix("64:ff9b:1::/48")
-)
-
-// clientNetwork reports the address of the client, with an IPv6 address cut
-// to its /64. An address in the NAT64 prefix 64:ff9b::/96 is reported as the
-// IPv4 address it carries, and one in 64:ff9b:1::/48 whole, since the network
-// picks where in it the IPv4 address sits. A RemoteAddr that holds no IP
-// address is reported as it stands.
-func clientNetwork(c router.Context) string {
-	addr, ok := ClientAddr(c)
-	switch {
-	case !ok:
-		return ClientIP(c)
-	case nat64WellKnown.Contains(addr):
-		b := addr.As16()
-		return netip.AddrFrom4([4]byte(b[12:])).String()
-	case nat64LocalUse.Contains(addr):
-		return addr.String()
-	case addr.Is6():
-		return netip.PrefixFrom(addr, 64).Masked().String()
-	}
-	return addr.String()
 }
 
 func denyTooManyRequests[C router.Context](c C, _ string, retryAfter time.Duration) error {
