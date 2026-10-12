@@ -10,7 +10,7 @@ import (
 func TestContentEncoding(t *testing.T) {
 	tests := []struct {
 		values []string
-		want   encoding
+		want   bodyCoding
 	}{
 		{nil, encodingNone},
 		{[]string{""}, encodingNone},

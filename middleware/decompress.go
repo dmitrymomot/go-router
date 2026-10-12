@@ -121,16 +121,16 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig[C]) router.Midd
 	}
 }
 
-type encoding uint8
+type bodyCoding uint8
 
 const (
-	encodingNone encoding = iota
+	encodingNone bodyCoding = iota
 	encodingGzip
 	encodingDeflate
 	encodingUnknown
 )
 
-func (e encoding) String() string {
+func (e bodyCoding) String() string {
 	if e == encodingDeflate {
 		return "deflate"
 	}
@@ -139,11 +139,11 @@ func (e encoding) String() string {
 
 // contentEncoding reads the Content-Encoding of a request. identity counts as
 // no encoding, and a second coding makes the whole unknown.
-func contentEncoding(values []string) encoding {
+func contentEncoding(values []string) bodyCoding {
 	enc := encodingNone
 	for _, v := range values {
 		for e := range strings.SplitSeq(v, ",") {
-			var found encoding
+			var found bodyCoding
 			switch e = strings.TrimSpace(e); {
 			case e == "" || strings.EqualFold(e, "identity"):
 				continue
@@ -165,7 +165,7 @@ func contentEncoding(values []string) encoding {
 
 // openDecoder takes a pooled reader of enc and points it at src. A reader
 // that fails is back in its pool when it returns.
-func openDecoder(enc encoding, src *bufio.Reader) (io.Reader, error) {
+func openDecoder(enc bodyCoding, src *bufio.Reader) (io.Reader, error) {
 	if enc == encodingGzip {
 		zr := gzipReaders.Get().(*gzip.Reader)
 		if err := zr.Reset(src); err != nil {
