@@ -3558,6 +3558,29 @@ func TestATrailingSlashKeepsTheScopeFallback(t *testing.T) {
 	}
 }
 
+// v0.3.0 took any method: "GET " registered a route no request reaches, and
+// put "GET " in the Allow header of its path.
+func TestHandleRefusesAMethodNoRequestCarries(t *testing.T) {
+	for method, want := range map[string]string{
+		"":        "needs a method",
+		"GET ":    "token",
+		"G(ET":    "token",
+		"get":     `use "GET"`,
+		"Options": `use "OPTIONS"`,
+		"query":   `use "QUERY"`,
+	} {
+		t.Run(method, func(t *testing.T) {
+			mustPanicContaining(t, want, func() { newTestRouter().Handle(method, "/x", echoRoute) })
+		})
+	}
+	r := newTestRouter()
+	r.Handle("PROPFIND", "/x", echoRoute)
+	r.Handle("purge", "/x", echoRoute)
+	if rec := do(r, "PROPFIND", "/x"); rec.Code != http.StatusOK {
+		t.Errorf("PROPFIND /x = %d, want 200", rec.Code)
+	}
+}
+
 // A preflight and a 405 reuse the cached Allow header and the inline
 // parameter array, so a pooled router answers them without allocating.
 func TestPreflightAndMethodNotAllowedDoNotAllocate(t *testing.T) {

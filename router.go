@@ -2,10 +2,12 @@ package router
 
 import (
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -231,10 +233,13 @@ func defaultMethodNotAllowed[C Context](C) error { return ErrMethodNotAllowed }
 // else is a regular expression that must match the whole value, as in
 // "{id:[0-9]{6}}".
 //
-// Handle panics on an empty method, a nil handler, a nil middleware, a
-// constraint that names no class or does not compile, a pattern that conflicts
-// with one already registered, or a call that arrives after the router started
-// serving.
+// The method is case-sensitive, as in a request, and must be a token of RFC
+// 9110: "GET" or "PROPFIND", not "get" or "GET ".
+//
+// Handle panics on a method that is not a token or is a standard method in
+// lowercase, a nil handler, a nil middleware, a constraint that names no class
+// or does not compile, a pattern that conflicts with one already registered,
+// or a call that arrives after the router started serving.
 func (r *Router[C]) Handle(method, pattern string, h HandlerFunc[C], mws ...Middleware[C]) {
 	r.register(registration[C]{method: method, pattern: pattern, handler: h, mws: mws})
 }
@@ -244,8 +249,8 @@ func (r *Router[C]) register(reg registration[C]) {
 	// Ordered against the freeze: without it the check below is a guess, and a
 	// route could go into a trie a request had already started reading.
 	defer r.guard("register " + method + " " + pattern)()
-	if method == "" {
-		panic("router: Handle needs a method")
+	if err := checkMethod(method); err != nil {
+		panic(err.Error() + " for " + pattern)
 	}
 	if reg.handler == nil {
 		panic("router: Handle needs a handler for " + method + " " + pattern)
@@ -315,6 +320,35 @@ func (r *Router[C]) install(reg registration[C]) {
 			e.redirect = reg.claim
 		}
 	}
+}
+
+// standardMethods are the methods of RFC 9110 and RFC 5789, and QUERY.
+var standardMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+	http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace, MethodQuery,
+}
+
+// checkMethod refuses a method that no request can carry: net/http answers 400
+// to one that is not a token, and a lowercase standard method is another
+// method that no client sends.
+func checkMethod(method string) error {
+	if method == "" {
+		return errors.New("router: Handle needs a method")
+	}
+	for i := range len(method) {
+		if !isTokenByte(method[i]) {
+			return fmt.Errorf("router: method %q holds %q, which an RFC 9110 token cannot", method, method[i])
+		}
+	}
+	if up := strings.ToUpper(method); up != method && slices.Contains(standardMethods, up) {
+		return fmt.Errorf("router: method %q is not %s; methods are case-sensitive, so use %q", method, up, up)
+	}
+	return nil
+}
+
+// isTokenByte reports whether c is a tchar of RFC 9110.
+func isTokenByte(c byte) bool {
+	return isLetter(c) || isDigit(c) || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
 }
 
 // GET registers h for GET. See [Router.Handle].
