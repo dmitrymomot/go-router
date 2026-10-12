@@ -27,20 +27,34 @@ const sessionCookie = "tenants_session"
 
 const sessionMaxAge = 12 * time.Hour
 
-// writeSession signs the email into a cookie with no Domain attribute, so it
-// belongs to the host that set it and to no other: signing in at acme.lvh.me
-// leaves beta.lvh.me signed out.
+// writeSession signs the workspace slug and the email into a cookie with no
+// Domain attribute, so it belongs to the host that set it: signing in at
+// acme.lvh.me leaves beta.lvh.me signed out. The slug is signed in as well, so
+// a cookie replayed on another workspace host is told apart even when the
+// attacker controls a host of their own.
 func writeSession(c Ctx, email string) error {
-	return c.Cookies.Set(c, c.NewCookie(sessionCookie, email, sessionMaxAge))
+	return c.Cookies.Set(c, c.NewCookie(sessionCookie, sessionValue(c.Workspace.Slug, email), sessionMaxAge))
 }
 
+func sessionValue(slug, email string) string { return slug + "\x00" + email }
+
+// readSession reports the account the session cookie names, and only when the
+// cookie was signed for the workspace of c and the email still holds an
+// account there.
 func readSession(c Ctx) (string, bool) {
 	v, err := c.Cookies.Get(c, sessionCookie)
 	if err != nil {
 		return "", false
 	}
-	email := cleanEmail(v)
-	return email, email != ""
+	slug, email, ok := strings.Cut(v, "\x00")
+	if !ok || slug != c.Workspace.Slug {
+		return "", false
+	}
+	email = cleanEmail(email)
+	if email == "" || !c.Store.HasAccount(slug, email) {
+		return "", false
+	}
+	return email, true
 }
 
 func clearSession(c Ctx) { c.ClearCookie(sessionCookie) }

@@ -86,7 +86,6 @@ func newRouter(store *Store, codec *cookie.Codec) *router.Router[Ctx] {
 			CookieHTTPOnly: true,
 			CookieSameSite: http.SameSiteLaxMode,
 		}),
-		readSessionInto,
 	)
 
 	// The apex. www sends every request to it, keeping the path and query. An
@@ -102,17 +101,6 @@ func newRouter(store *Store, codec *cookie.Codec) *router.Router[Ctx] {
 	r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })
 
 	return r
-}
-
-// readSessionInto puts the signed-in email on the context, and lets an
-// anonymous request through: only the workspace pages care.
-func readSessionInto(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
-	return func(c Ctx) error {
-		if email, ok := readSession(c); ok {
-			c.Email = email
-		}
-		return next(c)
-	}
 }
 
 // renderError answers a failure with a page, because a browser reads pages.

@@ -20,7 +20,10 @@ func workspaceRoutes(h *router.Router[Ctx]) {
 }
 
 // loadWorkspace turns the {tenant} label of the host into the workspace, or
-// answers 404. Every handler below it can read c.Workspace.
+// answers 404. Every handler below it can read c.Workspace. It then puts the
+// signed-in email on the context, and lets an anonymous request through: only
+// the dashboard cares. The session is read here, and not in a global
+// middleware, because it is valid only for the workspace of the host.
 func loadWorkspace(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
 	return func(c Ctx) error {
 		slug := c.Param("tenant")
@@ -29,6 +32,9 @@ func loadWorkspace(next router.HandlerFunc[Ctx]) router.HandlerFunc[Ctx] {
 			return router.ErrNotFound.WithMessage("no workspace at %s", c.Host())
 		}
 		c.Workspace = w
+		if email, ok := readSession(c); ok {
+			c.Email = email
+		}
 		return next(c)
 	}
 }
