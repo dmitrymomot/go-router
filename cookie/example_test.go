@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -61,6 +62,26 @@ func ExampleCodec() {
 	// Output:
 	// 204
 	// ann
+}
+
+// An encrypted codec keeps the value from the client as well: the cookie holds
+// no readable text, and a cookie moved to another name fails to open.
+func ExampleNewEncryptedCodec() {
+	// The key is exactly 32 bytes. Read it from the environment.
+	codec := cookie.NewEncryptedCodec([]byte("32-bytes-of-key-material-for-aes"))
+
+	sealed := codec.Encode("session", []byte("ann"), time.Now().Add(time.Hour))
+	fmt.Println(strings.Contains(sealed, "ann"))
+
+	value, err := codec.Decode("session", sealed)
+	fmt.Println(string(value), err)
+
+	_, err = codec.Decode("other", sealed)
+	fmt.Println(err)
+	// Output:
+	// false
+	// ann <nil>
+	// cookie: the signed cookie does not verify
 }
 
 func ExampleNewCodec_rotation() {

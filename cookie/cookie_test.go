@@ -189,7 +189,7 @@ func TestNewCodecCopiesEveryKey(t *testing.T) {
 }
 
 func TestZeroCodecPanics(t *testing.T) {
-	const want = "cookie: use NewCodec to build a Codec"
+	const want = "cookie: use NewCodec or NewEncryptedCodec to build a Codec"
 	var nilCodec *Codec
 	for name, cc := range map[string]*Codec{"the zero Codec": new(Codec), "a nil Codec": nilCodec} {
 		t.Run(name, func(t *testing.T) {
