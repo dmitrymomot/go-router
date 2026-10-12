@@ -474,15 +474,17 @@ func BenchmarkMemoryStoreAtCapacityUniqueIDs(b *testing.B) {
 		}
 	}
 	b.ReportAllocs()
-	// A full store evicts the entry that expires first, so each new client is
-	// admitted and the store stays at its bound.
+	// A full shard evicts the entry that expires first, so each new client is
+	// admitted and the store never passes its bound. Each shard caps at its own
+	// share, and the keys spread unevenly, so the store can hold fewer than
+	// maxEntries until every shard has filled.
 	for i := 0; b.Loop(); i++ {
 		allowed, _, err := s.Allow(nil, strconv.Itoa(i+maxEntries))
 		if err != nil || !allowed {
 			b.Fatalf("request %d: allowed = %t, err = %v", i, allowed, err)
 		}
 	}
-	if got := memoryStoreSize(s); got != maxEntries {
-		b.Fatalf("the store holds %d buckets, want %d", got, maxEntries)
+	if got := memoryStoreSize(s); got > maxEntries {
+		b.Fatalf("the store holds %d buckets, want at most %d", got, maxEntries)
 	}
 }
