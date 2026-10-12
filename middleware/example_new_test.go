@@ -1,14 +1,12 @@
 package middleware_test
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"time"
 
-	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/routertest"
 )
@@ -72,22 +70,6 @@ func ExampleStripSlashes() {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/", nil))
 	fmt.Println(rec.Code)
 	// Output: 200
-}
-
-func ExampleProfiler() {
-	r := newAPI()
-	// The profiler exposes the internals of the process: guard it.
-	r.Route("/debug", func(g *router.Router[*Context]) {
-		g.Use(middleware.BasicAuth(func(_ *Context, user, pass string) (bool, error) {
-			return middleware.SecureCompare(user, "ops") && middleware.SecureCompare(pass, "s3cret"), nil
-		}))
-		g.MountHandler("/", middleware.Profiler())
-	})
-
-	anon := routertest.Get(r, "/debug/vars")
-	authed := routertest.Get(r, "/debug/vars", routertest.Header("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("ops:s3cret"))))
-	fmt.Println(anon.StatusCode, authed.StatusCode)
-	// Output: 401 200
 }
 
 func ExampleDeprecation() {

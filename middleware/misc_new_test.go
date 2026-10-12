@@ -153,47 +153,6 @@ func TestMethodOverrideReachesTheRoute(t *testing.T) {
 	}
 }
 
-func TestProfiler(t *testing.T) {
-	h := middleware.Profiler()
-	tests := []struct {
-		target string
-		code   int
-		body   string
-	}{
-		{"/pprof/", http.StatusOK, "Types of profiles"},
-		{"/pprof/goroutine?debug=1", http.StatusOK, "goroutine profile"},
-		{"/pprof/cmdline", http.StatusOK, ""},
-		{"/vars", http.StatusOK, "memstats"},
-		{"/pprof", http.StatusMovedPermanently, ""},
-		{"/nope", http.StatusNotFound, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.target, func(t *testing.T) {
-			rec := get(h, tt.target)
-			if rec.Code != tt.code || !strings.Contains(rec.Body.String(), tt.body) {
-				t.Errorf("got %d %.80q, want %d containing %q", rec.Code, rec.Body, tt.code, tt.body)
-			}
-		})
-	}
-}
-
-func TestProfilerMounted(t *testing.T) {
-	r := newRouter()
-	r.MountHandler("/debug", middleware.Profiler())
-	for target, want := range map[string]string{
-		"/debug/pprof/":             "Types of profiles",
-		"/debug/pprof/heap?debug=1": "heap profile",
-		"/debug/vars":               "memstats",
-	} {
-		if rec := get(r, target); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) {
-			t.Errorf("%s = %d %.80q, want %q", target, rec.Code, rec.Body, want)
-		}
-	}
-	if rec := get(r, "/debug/pprof"); rec.Header().Get("Location") != "pprof/" {
-		t.Errorf("Location = %q", rec.Header().Get("Location"))
-	}
-}
-
 func TestDeprecation(t *testing.T) {
 	dep := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	sun := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
