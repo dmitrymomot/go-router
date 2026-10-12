@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
@@ -145,5 +146,63 @@ func TestClipCutsAtARuneBoundary(t *testing.T) {
 	}
 	if got := clip("short"); got != "short" {
 		t.Errorf("clip(short) = %q", got)
+	}
+}
+
+// BindJSON refuses a body whose Content-Type names another type, so a
+// text/plain form posted from another site cannot reach a JSON endpoint.
+func TestBindJSONChecksTheContentType(t *testing.T) {
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/in", func(c *tctx) error {
+		in, err := c.BindJSON[createUser]()
+		if err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, in.Name)
+	})
+	for _, tt := range []struct {
+		contentType string
+		code        int
+	}{
+		{"", http.StatusOK},
+		{MIMEApplicationJSON, http.StatusOK},
+		{"application/json; charset=utf-8", http.StatusOK},
+		{"application/json; charset=UTF-8", http.StatusOK},
+		{"Application/JSON", http.StatusOK},
+		{"application/vnd.api+json", http.StatusOK},
+		{"text/plain", http.StatusUnsupportedMediaType},
+		{"text/plain; charset=utf-8", http.StatusUnsupportedMediaType},
+		{MIMEApplicationForm, http.StatusUnsupportedMediaType},
+		{"application/json; charset=latin1", http.StatusUnsupportedMediaType},
+		{"application/json; charset=utf-16", http.StatusUnsupportedMediaType},
+		{"application/json; charset", http.StatusUnsupportedMediaType},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/in", strings.NewReader(`{"name":"ann"}`))
+		if tt.contentType != "" {
+			req.Header.Set(HeaderContentType, tt.contentType)
+		}
+		if rec := doReq(r, req); rec.Code != tt.code {
+			t.Errorf("Content-Type %q: status = %d, want %d", tt.contentType, rec.Code, tt.code)
+		}
+	}
+}
+
+func TestBindRefusesAJSONBodyInAnotherCharset(t *testing.T) {
+	r := newTestRouter()
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.POST("/in", func(c *tctx) error {
+		_, err := c.Bind[createUser]()
+		return err
+	})
+	for ct, code := range map[string]int{
+		"application/json; charset=utf-8":      http.StatusOK,
+		"application/json; charset=Utf-8":      http.StatusOK,
+		"application/json; charset=iso-8859-1": http.StatusUnsupportedMediaType,
+		"application/problem+json; charset=x":  http.StatusUnsupportedMediaType,
+	} {
+		if got := post(r, "/in", ct, `{"name":"ann"}`).Code; got != code {
+			t.Errorf("Content-Type %q: status = %d, want %d", ct, got, code)
+		}
 	}
 }

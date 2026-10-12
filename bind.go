@@ -35,7 +35,10 @@ const defaultMaxMultipartMemory int64 = 32 << 20
 // type, and a form for the two form types. JSON follows the rules of
 // [Base.BindJSON]: a field with no tag at all takes the member of its Go
 // name, and a field tagged for another source and not for `json` takes no
-// member. The route parameters, the query and the headers come next, so a field
+// member, and member names match case-sensitively; see BindJSON. A JSON
+// Content-Type with a charset other than UTF-8 reports an
+// [ErrUnsupportedMediaType]. The route parameters, the query and the headers
+// come next, so a field
 // tagged for both the body and one of them takes the value of the latter. A
 // T that implements [Validator] is validated last.
 //
@@ -98,7 +101,10 @@ func (b *Base) decodeBody(dst any, sv reflect.Value) error {
 		return ErrUnsupportedMediaType.WithMessage("malformed Content-Type").WithError(err)
 	}
 	switch {
-	case mt == MIMEApplicationJSON || strings.HasSuffix(mt, "+json"):
+	case isJSON(mt):
+		if err := jsonCharset(params); err != nil {
+			return err
+		}
 		return b.decodeJSON(dst, nil)
 	case mt == MIMEApplicationForm, mt == MIMEMultipartForm:
 		if err := b.readForm(mt, params); err != nil {
@@ -108,7 +114,7 @@ func (b *Base) decodeBody(dst any, sv reflect.Value) error {
 	case mt == "":
 		return ErrUnsupportedMediaType.WithMessage("a %s body needs a Content-Type", b.req.Method)
 	default:
-		return ErrUnsupportedMediaType.WithMessage("cannot decode a %s body", mt)
+		return ErrUnsupportedMediaType.WithMessage("cannot decode a %s body", clip(mt))
 	}
 }
 
@@ -116,10 +122,43 @@ func (b *Base) decodeBody(dst any, sv reflect.Value) error {
 // reports "" and no error.
 func (b *Base) mediaType() (string, map[string]string, error) {
 	ct := b.req.Header.Get(HeaderContentType)
-	if ct == "" {
+	switch ct {
+	case "":
 		return "", nil, nil
+	case MIMEApplicationJSON:
+		// The common case needs no parse.
+		return ct, nil, nil
 	}
 	return mime.ParseMediaType(ct)
+}
+
+// isJSON reports whether mt names JSON: application/json or any "+json" type.
+func isJSON(mt string) bool {
+	return mt == MIMEApplicationJSON || strings.HasSuffix(mt, "+json")
+}
+
+// jsonCharset refuses a JSON body in a charset other than UTF-8, the only one
+// that JSON allows, rather than decode it wrong.
+func jsonCharset(params map[string]string) error {
+	if cs, ok := params["charset"]; ok && !strings.EqualFold(cs, "utf-8") {
+		return ErrUnsupportedMediaType.WithMessage("a JSON body must be UTF-8")
+	}
+	return nil
+}
+
+// acceptJSON checks the Content-Type of a body that BindJSON decodes: none at
+// all, or a JSON type in UTF-8.
+func (b *Base) acceptJSON() error {
+	mt, params, err := b.mediaType()
+	switch {
+	case err != nil:
+		return ErrUnsupportedMediaType.WithMessage("malformed Content-Type").WithError(err)
+	case mt == "":
+		return nil
+	case !isJSON(mt):
+		return ErrUnsupportedMediaType.WithMessage("cannot decode a %s body as JSON", clip(mt))
+	}
+	return jsonCharset(params)
 }
 
 // newTarget allocates the value a Bind method fills, and reports the struct
@@ -152,6 +191,17 @@ func targetStruct[T any](p *T) reflect.Value {
 // BindJSON decodes the body as JSON into a T and validates it. opts win over
 // the options of [Router.JSONOptions]. It reports errors as [Base.Bind] does.
 //
+// A request without a Content-Type is decoded as JSON. A Content-Type other
+// than application/json or a "+json" type, or a charset other than UTF-8,
+// reports an [ErrUnsupportedMediaType]. So a cross-site form, which can send
+// text/plain but not application/json, cannot drive a JSON endpoint that
+// trusts a cookie.
+//
+// Member names match case-sensitively, as json/v2 matches them and unlike
+// encoding/json: a member "Name" does not fill a field tagged `json:"name"`.
+// Pass json.MatchCaseInsensitiveNames(true), here or to [Router.JSONOptions],
+// to match in any case.
+//
 // A field with no tag takes the member of its Go name, as json/v2 does. A
 // field that carries a `query`, `param`, `header` or `form` tag and no `json`
 // tag takes no member, at any depth, so a client cannot set through the body
@@ -170,6 +220,9 @@ func targetStruct[T any](p *T) reflect.Value {
 // another type, so such a member reports "malformed JSON body" and no field.
 func (b *Base) BindJSON[T any](opts ...json.Options) (T, error) {
 	var v T
+	if err := b.acceptJSON(); err != nil {
+		return v, err
+	}
 	if err := b.decodeJSON(&v, opts); err != nil {
 		return v, err
 	}
