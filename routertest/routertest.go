@@ -6,6 +6,7 @@
 package routertest
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json/jsontext"
@@ -25,8 +26,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
@@ -188,7 +191,8 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 // Request builds a request for a handler under test. target is a path, and it
 // may carry a query. It may also be an absolute URL: its host becomes the Host
 // of the request, and https marks the request as one over TLS. The request
-// carries context.Background unless an option gives it another.
+// carries context.Background unless an option gives it another, so give a
+// route that may never end, such as a live stream, a [Context] with a deadline.
 func Request(method, target string, opts ...RequestOption) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	for _, opt := range opts {
@@ -494,57 +498,175 @@ func NewServer(tb testing.TB, h http.Handler) *httptest.Server {
 	return httptest.NewTestServer(tb, h)
 }
 
-// Event is one event parsed out of a server-sent event body.
+// Event is one event parsed out of a server-sent event body. Retry is the
+// reconnection time the event carried, as [sse.Event] sets it, and is zero for
+// an event without one.
 type Event struct {
-	ID   string
-	Name string
-	Data string
+	ID    string
+	Name  string
+	Data  string
+	Retry time.Duration
 }
 
 // Events parses the body as a server-sent event stream. Comments are dropped,
 // the data fields of one event are joined with a line break, and an id carries
-// over to the events that follow, as the format says.
+// over to the events that follow, as the format says. A retry field belongs to
+// the event of its block, and a block without data is no event.
+//
+// Events reads the body of a response that has ended. A route that never ends,
+// such as a live stream, makes [Serve] and [Get] wait for ever, because their
+// request carries context.Background and the recorder returns only when the
+// handler does. Give such a request a context with a deadline, which the
+// handler sees as the end of the stream:
+//
+//	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+//	defer cancel()
+//	res := routertest.Get(h, "/stream", routertest.Context(ctx))
+//
+// or start a server with [NewServer] and read it with [ReadEvents], which
+// stops at the count of events you ask for.
 func Events(r *Response) []Event {
 	var (
-		events  []Event
-		data    []byte
-		name    string
-		id      string
-		hasData bool
+		events []Event
+		p      eventParser
 	)
 	body := bytes.TrimPrefix(r.Body, []byte("\ufeff"))
 
 	for line := range eventLines(body) {
-		switch {
-		case line == "":
-			if !hasData {
-				name = ""
-				continue
+		if e, ok := p.feed(line); ok {
+			events = append(events, e)
+		}
+	}
+	return events
+}
+
+// eventParser turns the lines of a server-sent event stream into events, one
+// line at a time.
+type eventParser struct {
+	data    []byte
+	name    string
+	id      string
+	retry   time.Duration
+	hasData bool
+}
+
+// feed takes one line, without its line break, and reports the event that the
+// line completes, if any.
+func (p *eventParser) feed(line string) (Event, bool) {
+	switch {
+	case line == "":
+		if !p.hasData {
+			p.name, p.retry = "", 0
+			return Event{}, false
+		}
+		e := Event{
+			ID:    p.id,
+			Name:  p.name,
+			Data:  string(bytes.TrimSuffix(p.data, []byte("\n"))),
+			Retry: p.retry,
+		}
+		p.data, p.hasData, p.name, p.retry = p.data[:0], false, "", 0
+		return e, true
+
+	case strings.HasPrefix(line, ":"):
+
+	default:
+		field, value, _ := strings.Cut(line, ":")
+		value = strings.TrimPrefix(value, " ")
+		switch field {
+		case "event":
+			p.name = value
+		case "data":
+			p.data = append(append(p.data, value...), '\n')
+			p.hasData = true
+		case "id":
+			if !strings.ContainsRune(value, 0) {
+				p.id = value
 			}
-			events = append(events, Event{
-				ID:   id,
-				Name: name,
-				Data: string(bytes.TrimSuffix(data, []byte("\n"))),
-			})
-			data, hasData, name = data[:0], false, ""
-
-		case strings.HasPrefix(line, ":"):
-
-		default:
-			field, value, _ := strings.Cut(line, ":")
-			value = strings.TrimPrefix(value, " ")
-			switch field {
-			case "event":
-				name = value
-			case "data":
-				data = append(append(data, value...), '\n')
-				hasData = true
-			case "id":
-				if !strings.ContainsRune(value, 0) {
-					id = value
-				}
+		case "retry":
+			if ms, err := strconv.ParseUint(value, 10, 31); err == nil {
+				p.retry = time.Duration(ms) * time.Millisecond
 			}
 		}
+	}
+	return Event{}, false
+}
+
+// readEventsTimeout bounds [ReadEvents] when the test has no deadline sooner.
+const readEventsTimeout = 30 * time.Second
+
+// ReadEvents connects to the event stream at target on srv, a server from
+// [NewServer], reads until it holds n events, and reports them. It closes the
+// connection when it returns. target is a path, and it may carry a query.
+//
+// srv is a parameter, and not an address, because a server of [NewServer] has
+// no network address a plain http.Client could dial: only srv.Client reaches it.
+//
+// opts change the request, such as [Header] for a Last-Event-ID or a cookie.
+// The request asks for text/event-stream and carries tb.Context(), and it is
+// given up after 30 seconds, so a stream that stalls fails the test instead of
+// hanging it. It fails the test when the server answers other than 200, when
+// the stream ends or stalls before n events arrive, and when n is negative.
+func ReadEvents(tb testing.TB, srv *httptest.Server, target string, n int, opts ...RequestOption) []Event {
+	tb.Helper()
+	if srv == nil {
+		tb.Fatalf("routertest: ReadEvents needs a server from NewServer")
+		return nil
+	}
+	client := srv.Client()
+	url := srv.URL + target
+	if n < 0 {
+		tb.Fatalf("routertest: ReadEvents needs a count of events of 0 or more, and got %d", n)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(tb.Context(), readEventsTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		tb.Fatalf("routertest: ReadEvents: build the request for %s: %v", url, err)
+		return nil
+	}
+	req.Header.Set(router.HeaderAccept, router.MIMETextEventStream)
+	for _, opt := range opts {
+		opt(req)
+	}
+
+	res, err := client.Do(req)
+	if err != nil {
+		tb.Fatalf("routertest: ReadEvents: GET %s: %v", url, err)
+		return nil
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			tb.Errorf("routertest: ReadEvents: close the stream of %s: %v", url, err)
+		}
+	}()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<10))
+		tb.Fatalf("routertest: ReadEvents: GET %s: status = %d, want 200; body: %s", url, res.StatusCode, body)
+		return nil
+	}
+
+	events := make([]Event, 0, n)
+	var p eventParser
+	sc := bufio.NewScanner(res.Body)
+	sc.Buffer(make([]byte, 0, 4<<10), 1<<20)
+	for len(events) < n && sc.Scan() {
+		line := sc.Text()
+		if len(events) == 0 && !p.hasData && p.id == "" {
+			line = strings.TrimPrefix(line, "\ufeff")
+		}
+		if e, ok := p.feed(line); ok {
+			events = append(events, e)
+		}
+	}
+	if len(events) < n {
+		cause := sc.Err()
+		if cause == nil {
+			cause = io.EOF
+		}
+		tb.Fatalf("routertest: ReadEvents: GET %s: read %d of %d events: %v; got %+v", url, len(events), n, cause, events)
 	}
 	return events
 }

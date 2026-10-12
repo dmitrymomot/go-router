@@ -24,7 +24,7 @@ type Flash struct {
 	Message string `json:"message"`
 }
 
-// AddFlash appends f to the flash cookie, which cc signs. The cookie is the
+// AddFlash appends f to the flash cookie, which cc signs or encrypts. The cookie is the
 // one [router.Base.NewCookie] builds: HttpOnly, SameSite=Lax, and Secure over
 // HTTPS.
 //

@@ -499,14 +499,12 @@ func TestResponseRejectsAByteAHeaderCannotCarry(t *testing.T) {
 	} {
 		t.Run(value, func(t *testing.T) {
 			b := router.NewBase(httptest.NewRecorder(), requestWith(nil))
-			hx := NewResponse(b).Retarget(value).PushURL(value)
+			hx := NewResponse(b).Retarget(value)
 			if !errors.Is(hx.Err(), errHeaderByte) {
 				t.Errorf("Err() = %v, want one that wraps %v", hx.Err(), errHeaderByte)
 			}
-			for _, name := range []string{HeaderRetarget, HeaderPushURL} {
-				if got := b.Response().Header().Get(name); got != "" {
-					t.Errorf("%s = %q, want no header", name, got)
-				}
+			if got := b.Response().Header().Get(HeaderRetarget); got != "" {
+				t.Errorf("%s = %q, want no header", HeaderRetarget, got)
 			}
 		})
 	}
@@ -946,6 +944,57 @@ func BenchmarkRequestOf(b *testing.B) {
 	for b.Loop() {
 		if RequestOf(req).TargetID() != "log" {
 			b.Fatal("TargetID() != log")
+		}
+	}
+}
+
+func TestURLHeadersPercentEncodeNonASCII(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"/café", "/caf%C3%A9"},
+		{"/über?q=ü", "/%C3%BCber?q=%C3%BC"},
+		{"/日本", "/%E6%97%A5%E6%9C%AC"},
+		{"/a%20b", "/a%20b"},
+		{"/bad\xffbyte", "/bad%FFbyte"},
+		{"/plain", "/plain"},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			r := newRouter()
+			r.GET("/redirect", func(c *tctx) error { return NewResponse(c).Redirect(tc.in) })
+			r.GET("/location", func(c *tctx) error { return NewResponse(c).Location(tc.in) })
+			r.GET("/chain", func(c *tctx) error {
+				if err := NewResponse(c).PushURL(tc.in).ReplaceURL(tc.in).Err(); err != nil {
+					return err
+				}
+				return c.NoContent(http.StatusOK)
+			})
+			hx := map[string]string{HeaderRequest: "true"}
+
+			for path, header := range map[string]string{
+				"/redirect": HeaderRedirect,
+				"/location": HeaderLocation,
+			} {
+				rec := do(r, http.MethodGet, path, hx)
+				if rec.Code != http.StatusOK || rec.Header().Get(header) != tc.want {
+					t.Errorf("%s = %d, %s = %q, want 200 and %q", path, rec.Code, header, rec.Header().Get(header), tc.want)
+				}
+			}
+			rec := do(r, http.MethodGet, "/chain", hx)
+			for _, header := range []string{HeaderPushURL, HeaderReplaceURL} {
+				if rec.Code != http.StatusOK || rec.Header().Get(header) != tc.want {
+					t.Errorf("/chain = %d, %s = %q, want 200 and %q", rec.Code, header, rec.Header().Get(header), tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestURLHeadersStillRefuseAControlByte(t *testing.T) {
+	for _, u := range []string{"/a\nb", "/caf\u00e9\r\nSet-Cookie: x=1", "/a\x7fb"} {
+		r := newRouter()
+		r.GET("/", func(c *tctx) error { return NewResponse(c).Redirect(u) })
+		rec := do(r, http.MethodGet, "/", map[string]string{HeaderRequest: "true"})
+		if rec.Code != http.StatusInternalServerError || rec.Header().Get(HeaderRedirect) != "" {
+			t.Errorf("Redirect(%q) = %d with %q, want 500 and no header", u, rec.Code, rec.Header().Get(HeaderRedirect))
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
@@ -200,8 +201,8 @@ func TestLoginBelongsToTheWorkspace(t *testing.T) {
 	if got := sessionOf(t, res); got.Domain != "" {
 		t.Errorf("session cookie domain = %q, want none", got.Domain)
 	}
-	if email, ok := routertest.SignedCookie(t, res, testCodec, sessionCookie); !ok || email != "ann@example.com" {
-		t.Errorf("the session carries %q, %v, want ann@example.com", email, ok)
+	if email, ok := routertest.SignedCookie(t, res, testCodec, sessionCookie); !ok || email != sessionValue("acme", "ann@example.com") {
+		t.Errorf("the session carries %q, %v, want the acme slug and ann@example.com", email, ok)
 	}
 }
 
@@ -335,4 +336,45 @@ func TestSignupNeedsTheCSRFToken(t *testing.T) {
 			"name": {"Acme"}, "email": {"ann@example.com"}, "password": {testPassword},
 		}))
 	res.Expect(t).Status(http.StatusForbidden)
+}
+
+// A session signed for one workspace must open no other. An attacker signs up
+// a workspace of their own, claims the address of a member of another, and
+// replays the cookie there.
+func TestASessionOfOneWorkspaceOpensNoOther(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, browser(t, h, apex), "Acme", "ann@acme.com", testPassword)
+	signUp(t, browser(t, h, apex), "Evil", "ann@acme.com", "evil password")
+
+	evil := browser(t, h, host("evil"))
+	res := logIn(t, evil, "ann@acme.com", "evil password")
+	res.Expect(t).Redirect(http.StatusSeeOther, "/")
+	stolen := sessionOf(t, res)
+
+	// The cookie works where it was issued.
+	own := routertest.Get(h, "http://"+host("evil")+"/", routertest.Host(host("evil")), routertest.Cookie(stolen))
+	own.Expect(t).Status(http.StatusOK)
+	if !strings.Contains(own.String(), "ann@acme.com") {
+		t.Fatalf("the session does not sign in on its own workspace: %s", own)
+	}
+
+	replay := routertest.Get(h, "http://"+host("acme")+"/", routertest.Host(host("acme")), routertest.Cookie(stolen))
+	replay.Expect(t).Status(http.StatusOK)
+	if strings.Contains(replay.String(), "ann@acme.com") || !strings.Contains(replay.String(), "as a guest") {
+		t.Errorf("a cookie of workspace evil signed in on acme: %s", replay)
+	}
+}
+
+// A cookie signed for the right workspace still needs an account behind it.
+func TestASessionNeedsAMemberOfTheWorkspace(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, browser(t, h, apex), "Acme", "ann@acme.com", testPassword)
+
+	forged := testCodec.Encode(sessionCookie, []byte(sessionValue("acme", "mallory@example.com")), time.Now().Add(time.Hour))
+	res := routertest.Get(h, "http://"+host("acme")+"/", routertest.Host(host("acme")),
+		routertest.Cookie(&http.Cookie{Name: sessionCookie, Value: forged}))
+	res.Expect(t).Status(http.StatusOK)
+	if strings.Contains(res.String(), "mallory@example.com") {
+		t.Errorf("a non-member signed in: %s", res)
+	}
 }

@@ -1,8 +1,9 @@
 // Package cookie holds signed cookies and flash messages for go-router.
 //
 // A [Codec] signs a cookie value with HMAC-SHA256 and verifies it on the way
-// back. The router holds no codec: the app builds one with [NewCodec] and
-// keeps the *Codec in its own context struct, set by the context factory, as
+// back, or, when built with [NewEncryptedCodec], encrypts it with AES-256-GCM
+// so the client cannot read it either. The router holds no codec: the app
+// builds one with [NewCodec] or [NewEncryptedCodec] and keeps the *Codec in its own context struct, set by the context factory, as
 // in
 //
 //	type Context struct {
@@ -16,7 +17,10 @@ package cookie
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -62,19 +66,22 @@ const sep = '.'
 
 var enc = base64.RawURLEncoding
 
-// Codec signs a cookie value with HMAC-SHA256, so a client can hold it and
-// cannot change it. The value is signed and not encrypted: the client reads
-// it.
+// Codec protects a cookie value, so a client can hold it and cannot change
+// it. [NewCodec] builds one that signs with HMAC-SHA256: the client reads the
+// value. [NewEncryptedCodec] builds one that encrypts with AES-256-GCM: the
+// client reads nothing, and cannot change it either.
 //
-// It signs with its current key and verifies with it and then with each
+// It protects with its current key and opens with it and then with each
 // previous key, so a key rotates without signing anyone out.
 //
-// [NewCodec] builds the only usable Codec: every method of the zero Codec
-// panics. A Codec is safe for concurrent use.
+// [NewCodec] and [NewEncryptedCodec] build the only usable Codec: every method
+// of the zero Codec panics. A Codec is safe for concurrent use.
 type Codec struct {
-	// keys[0] signs, and every key verifies, in order. Pointers, because a
+	// keys[0] protects, and every key opens, in order. Pointers, because a
 	// sync.Pool must not be copied.
 	keys []*codecKey
+	// encrypted selects AES-256-GCM over HMAC-SHA256 for every key.
+	encrypted bool
 }
 
 type codecKey struct {
@@ -82,7 +89,12 @@ type codecKey struct {
 	// hmac.New builds and keys two hashes per call, and a flash is signed or
 	// verified at least twice per request.
 	macs sync.Pool
+	// aead is set on an encrypted codec only.
+	aead cipher.AEAD
 }
+
+// KeyLen is the length of a key that [NewEncryptedCodec] takes.
+const KeyLen = 32
 
 func newCodecKey(key []byte) *codecKey {
 	k := &codecKey{key: bytes.Clone(key)}
@@ -119,20 +131,69 @@ func NewCodec(key []byte, previous ...[]byte) *Codec {
 	return &Codec{keys: keys}
 }
 
+// NewEncryptedCodec builds a codec that encrypts with AES-256-GCM under key,
+// and also opens a value encrypted under any of previous, tried in order. It
+// copies every key. Keep the keys out of the source and out of the repository.
+//
+// The name and the expiry of the cookie are authenticated along with the
+// value, so a value cannot be moved to another cookie or kept past its
+// expiry. Encryption hides the value from the client and from anything that
+// logs the cookie. It adds 28 bytes and a third to the size of the value, so
+// [ErrTooLarge] comes sooner than with [NewCodec].
+//
+// To rotate, build NewEncryptedCodec(newKey, oldKey), as with [NewCodec].
+//
+// NewEncryptedCodec panics on any key that is not exactly [KeyLen] bytes.
+func NewEncryptedCodec(key []byte, previous ...[]byte) *Codec {
+	if len(key) != KeyLen {
+		panic("cookie: NewEncryptedCodec needs a key of exactly " +
+			strconv.Itoa(KeyLen) + " bytes, and got " + strconv.Itoa(len(key)))
+	}
+	for i, k := range previous {
+		if len(k) != KeyLen {
+			panic("cookie: NewEncryptedCodec needs every previous key to be exactly " +
+				strconv.Itoa(KeyLen) + " bytes, and previous[" + strconv.Itoa(i) +
+				"] has " + strconv.Itoa(len(k)))
+		}
+	}
+	keys := make([]*codecKey, 0, 1+len(previous))
+	keys = append(keys, newAEADKey(key))
+	for _, k := range previous {
+		keys = append(keys, newAEADKey(k))
+	}
+	return &Codec{keys: keys, encrypted: true}
+}
+
+func newAEADKey(key []byte) *codecKey {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic("cookie: " + err.Error()) // unreachable: the length is checked.
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		panic("cookie: " + err.Error()) // unreachable: AES has a 16-byte block.
+	}
+	return &codecKey{key: bytes.Clone(key), aead: gcm}
+}
+
 // mustBeBuilt panics on a Codec that NewCodec did not build, which has no key
 // to sign with.
 func (cc *Codec) mustBeBuilt() {
 	if cc == nil || len(cc.keys) == 0 {
-		panic("cookie: use NewCodec to build a Codec")
+		panic("cookie: use NewCodec or NewEncryptedCodec to build a Codec")
 	}
 }
 
-// Encode signs value for a cookie called name and reports the string to store.
-// The signature runs out at expires. The name is signed too, so a value cannot
-// be moved to another cookie.
+// Encode protects value for a cookie called name and reports the string to
+// store: signed, or encrypted on a codec from [NewEncryptedCodec]. The result
+// runs out at expires. The name is covered too, so a value cannot be moved to
+// another cookie.
 func (cc *Codec) Encode(name string, value []byte, expires time.Time) string {
 	cc.mustBeBuilt()
 	expiry := expires.Unix()
+	if cc.encrypted {
+		return cc.keys[0].seal(name, expiry, value)
+	}
 	sig := cc.keys[0].sign(name, expiry, value)
 	buf := make([]byte, 0, enc.EncodedLen(len(value))+enc.EncodedLen(len(sig))+22)
 	buf = enc.AppendEncode(buf, value)
@@ -143,11 +204,14 @@ func (cc *Codec) Encode(name string, value []byte, expires time.Time) string {
 	return string(buf)
 }
 
-// Decode verifies signed for a cookie called name and reports the value. It
-// reports [ErrInvalid] when the string is malformed or no key verifies it, and
-// [ErrExpired] when it has run out.
+// Decode verifies signed for a cookie called name and reports the value, which
+// an encrypted codec decrypts. It reports [ErrInvalid] when the string is
+// malformed or no key verifies it, and [ErrExpired] when it has run out.
 func (cc *Codec) Decode(name, signed string) ([]byte, error) {
 	cc.mustBeBuilt()
+	if cc.encrypted {
+		return cc.open(name, signed)
+	}
 	encValue, rest, ok := strings.Cut(signed, string(sep))
 	if !ok {
 		return nil, ErrInvalid
@@ -178,6 +242,61 @@ func (cc *Codec) Decode(name, signed string) ([]byte, error) {
 		return value, nil
 	}
 	return nil, ErrInvalid
+}
+
+// seal reports the cookie string of an encrypted value: the expiry, then the
+// nonce and the sealed value in one segment. The expiry is in the clear so
+// Decode can bind it, and the AEAD rejects a changed one.
+func (k *codecKey) seal(name string, expiry int64, value []byte) string {
+	nonce := make([]byte, k.aead.NonceSize(), k.aead.NonceSize()+len(value)+k.aead.Overhead())
+	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program.
+	rand.Read(nonce)
+	sealed := k.aead.Seal(nonce, nonce, value, aad(name, expiry))
+
+	buf := make([]byte, 0, 20+1+enc.EncodedLen(len(sealed)))
+	buf = strconv.AppendInt(buf, expiry, 10)
+	buf = append(buf, sep)
+	buf = enc.AppendEncode(buf, sealed)
+	return string(buf)
+}
+
+func (cc *Codec) open(name, s string) ([]byte, error) {
+	encExpiry, encSealed, ok := strings.Cut(s, string(sep))
+	if !ok {
+		return nil, ErrInvalid
+	}
+	expiry, err := strconv.ParseInt(encExpiry, 10, 64)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	sealed, err := enc.DecodeString(encSealed)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	for _, k := range cc.keys {
+		n := k.aead.NonceSize()
+		if len(sealed) < n+k.aead.Overhead() {
+			return nil, ErrInvalid
+		}
+		value, err := k.aead.Open(nil, sealed[:n], sealed[n:], aad(name, expiry))
+		if err != nil {
+			continue
+		}
+		if !time.Now().Before(time.Unix(expiry, 0)) {
+			return nil, ErrExpired
+		}
+		return value, nil
+	}
+	return nil, ErrInvalid
+}
+
+// aad is the additional data of a sealed value: the same header the signer
+// binds into the MAC, so a name or an expiry that changed fails to open.
+func aad(name string, expiry int64) []byte {
+	b := make([]byte, 16, 16+len(name))
+	binary.BigEndian.PutUint64(b[:8], uint64(len(name)))
+	binary.BigEndian.PutUint64(b[8:], uint64(expiry))
+	return append(b, name...)
 }
 
 // The name length comes first, so a shorter name with a longer value cannot
@@ -213,7 +332,8 @@ func expiryOf(ck *http.Cookie, now time.Time) time.Time {
 	}
 }
 
-// Set writes ck to the response of c with its value signed. Every other field
+// Set writes ck to the response of c with its value signed, or encrypted on a
+// codec from [NewEncryptedCodec]. Every other field
 // of ck goes out as it stands, so the caller owns Path, Secure, HttpOnly and
 // SameSite. Build ck with [router.Base.NewCookie] for the router's defaults.
 // ck itself is left unchanged.

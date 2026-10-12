@@ -46,7 +46,9 @@ func join(c Ctx) error {
 		return htmx.RenderPartial(c, http.StatusOK, tmpl("join", form), tmpl("index", form))
 	}
 
-	writeUser(c, name)
+	if err := writeUser(c, name); err != nil {
+		return err
+	}
 
 	return htmx.NewResponse(c).Redirect("/room")
 }
