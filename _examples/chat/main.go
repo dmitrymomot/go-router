@@ -44,8 +44,9 @@ func main() {
 		IdleTimeout:       time.Minute,
 		ShutdownTimeout:   5 * time.Second,
 		// No WriteTimeout: it would cut every stream at the deadline. The
-		// streams end with the drain instead, which cancels every request
-		// context with the cause serve.ErrDraining.
+		// streams end with the drain instead: sse.Serve watches
+		// serve.Draining and sends its Close event, while the requests that
+		// are not streams finish with a live context.
 		OnListen: func(a net.Addr) { slog.Info("chat is listening", "url", "http://"+a.String()) },
 		// Config carries what a server usually needs. OnServer reaches the
 		// rest of http.Server.

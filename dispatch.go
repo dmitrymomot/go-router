@@ -41,6 +41,7 @@ func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {
 			panic(rec)
 		}
 		if rec != nil {
+			b.handlerDone()
 			err = PanicError(rec, 0)
 			r.handleError(c, err)
 		}
@@ -79,6 +80,7 @@ func (r *Router[C]) release(c C) {
 			c.base().removeSpilledParts()
 			panic(rec)
 		}
+		c.base().handlerDone()
 		r.handleError(c, PanicError(rec, 0))
 		c.base().removeSpilledParts()
 		return
@@ -314,6 +316,9 @@ func canonicalEscapedPath(path string) string {
 
 func (r *Router[C]) dispatch(c C, h HandlerFunc[C]) error {
 	err := h(c)
+	if c.base().deferred != nil {
+		c.base().handlerDone()
+	}
 	if err != nil && !c.base().errorHandled {
 		r.handleError(c, err)
 	}

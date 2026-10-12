@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/drain"
 	"github.com/dmitrymomot/go-router/internal/routerhook"
 )
 
@@ -70,7 +71,8 @@ const nilOptionError = "sse: an option cannot be nil"
 
 // Heartbeat sends a comment every d, which holds a connection open through a
 // proxy that drops an idle one. [Serve] does the sending, and so does [Open],
-// from a goroutine that ends with [Writer.Close] or with the request.
+// from a goroutine that ends with [Writer.Close], with the request, with the
+// handler or with the drain of serve.Run.
 func Heartbeat(d time.Duration) Option {
 	return func(c *config) { c.heartbeat = d }
 }
@@ -144,8 +146,24 @@ type Writer struct {
 // that is already closed.
 //
 // The [Heartbeat] and [Close] options work here: a goroutine sends the
-// heartbeat until [Writer.Close] runs or the request ends, and Close sends the
-// closing event. Call Close, usually with defer, before the handler returns.
+// heartbeat until [Writer.Close] runs, the request ends, the handler returns or
+// the drain of serve.Run starts, and Close sends the closing event. Call Close,
+// usually with defer, before the handler returns. A router stops the heartbeat
+// of a handler that returns without Close, and closes the writer.
+//
+// serve.Run does not cancel the request when it drains, so a handler that
+// streams from a loop selects on serve.Draining to end in time:
+//
+//	for {
+//		select {
+//		case <-serve.Draining(c):
+//			return s.Close()
+//		case <-c.Done():
+//			return nil
+//		case v := <-updates:
+//			...
+//		}
+//	}
 //
 // middleware.Timeout cancels the context of a stream when its deadline passes,
 // which ends the stream with the first write after it. Skip the middleware for
@@ -164,12 +182,35 @@ func Open(c router.Context, status int, opts ...Option) (*Writer, error) {
 	if s.cfg.heartbeat > 0 && !s.head {
 		s.stop = make(chan struct{})
 		s.beat = make(chan struct{})
-		go s.heartbeat(c.Done())
+		go s.heartbeat(c.Done(), drain.Done(s.b.Request().Context()))
+		// The heartbeat must not write once the handler has returned: the
+		// router answers an error and hands the Base on from there.
+		routerhook.OnHandlerDone(s.b, s.release)
 	}
 	return s, nil
 }
 
-func (s *Writer) heartbeat(done <-chan struct{}) {
+// release closes the writer without the Close event and waits for the
+// heartbeat to stop. The router calls it when the handler returns.
+func (s *Writer) release() {
+	s.mu.Lock()
+	s.shut = true
+	s.stopHeartbeat()
+	s.mu.Unlock()
+	<-s.beat
+}
+
+// stopHeartbeat tells the heartbeat goroutine to stop. The caller holds the
+// lock and then waits on beat without it.
+func (s *Writer) stopHeartbeat() {
+	select {
+	case <-s.stop:
+	default:
+		close(s.stop)
+	}
+}
+
+func (s *Writer) heartbeat(done, draining <-chan struct{}) {
 	defer close(s.beat)
 	t := time.NewTicker(s.cfg.heartbeat)
 	defer t.Stop()
@@ -178,6 +219,8 @@ func (s *Writer) heartbeat(done <-chan struct{}) {
 		case <-s.stop:
 			return
 		case <-done:
+			return
+		case <-draining:
 			return
 		case <-t.C:
 			if s.Comment(heartbeatText) != nil {
@@ -199,7 +242,7 @@ func (s *Writer) Close() error {
 	}
 	s.shut = true
 	if s.stop != nil {
-		close(s.stop)
+		s.stopHeartbeat()
 	}
 	s.mu.Unlock()
 	// The heartbeat may be waiting for the lock, so wait for it without
@@ -616,8 +659,9 @@ func Events() Sender[Event] {
 }
 
 // Serve opens a stream on c and sends every value of ch through send, until ch
-// closes or the client goes away. A closed ch sends the [Close] event, when
-// one is configured, and ends the handler.
+// closes, the client goes away or the drain of serve.Run starts. A closed ch
+// or the drain sends the [Close] event, when one is configured, and ends the
+// handler.
 //
 // The heartbeat of [Heartbeat] runs here, so a stream driven this way keeps
 // itself alive. The stream ends with the context of the request, so
@@ -645,11 +689,13 @@ func Serve[T any](c router.Context, ch <-chan T, send Sender[T], opts ...Option)
 		beat = t.C
 	}
 
-	done := c.Done()
+	done, draining := c.Done(), drain.Done(c.Request().Context())
 	for {
 		select {
 		case <-done:
 			return nil
+		case <-draining:
+			return s.finish()
 		case v, ok := <-ch:
 			if !ok {
 				return s.finish()

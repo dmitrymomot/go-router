@@ -167,9 +167,24 @@ type deferredState struct {
 	// forms are the multipart forms whose spilled parts go once the request
 	// is done.
 	forms []*multipart.Form
+	// onDone runs once the handler returns; see routerhook.OnHandlerDone.
+	onDone []func()
 	// bodyLimit is the cap of SetBodyLimit: 0 leaves the router's, and -1
 	// lifts it.
 	bodyLimit int64
+}
+
+// handlerDone runs the functions of routerhook.OnHandlerDone, the last one
+// first, and forgets them, so a second call does nothing.
+func (b *Base) handlerDone() {
+	if b.deferred == nil || b.deferred.onDone == nil {
+		return
+	}
+	fs := b.deferred.onDone
+	b.deferred.onDone = nil
+	for _, f := range slices.Backward(fs) {
+		f()
+	}
 }
 
 func (b *Base) deferrals() *deferredState {
