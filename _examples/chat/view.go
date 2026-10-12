@@ -5,7 +5,6 @@ import (
 	"embed"
 	"html/template"
 	"io"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -52,17 +51,24 @@ func clean(s string, limit int) string {
 
 const cookieName = "chat_user"
 
+const userMaxAge = 12 * time.Hour
+
+// readUser reports the name the signed cookie carries. A cookie the codec does
+// not verify counts as no cookie, so no client can post under a name it was
+// not given.
 func readUser(c Ctx) (string, bool) {
-	name, err := url.QueryUnescape(c.Cookie(cookieName))
+	v, err := c.Cookies.Get(c, cookieName)
 	if err != nil {
 		return "", false
 	}
-	name = cleanName(name)
+	name := cleanName(v)
 	return name, name != ""
 }
 
-func writeUser(c Ctx, name string) {
-	c.SetCookie(c.NewCookie(cookieName, url.QueryEscape(name), 12*time.Hour))
+// writeUser signs name into the cookie. A name is at most 24 runes, far below
+// the size of a cookie, so ErrTooLarge cannot happen.
+func writeUser(c Ctx, name string) error {
+	return c.Cookies.Set(c, c.NewCookie(cookieName, name, userMaxAge))
 }
 
 func clearUser(c Ctx) {

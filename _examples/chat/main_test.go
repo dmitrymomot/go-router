@@ -15,9 +15,13 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/htmx"
 	"github.com/dmitrymomot/go-router/middleware"
 )
+
+// testCodec signs the user cookie of every test router.
+var testCodec = cookie.NewCodec([]byte(strings.Repeat("k", cookie.MinKeyLen)))
 
 type session struct {
 	csrfToken  string
@@ -27,7 +31,7 @@ type session struct {
 
 func TestIndexIssuesCSRFAndPinsAssets(t *testing.T) {
 	rm := newRoom()
-	rec := send(t, newRouter(rm), http.MethodGet, "/", nil, false)
+	rec := send(t, newRouter(rm, testCodec), http.MethodGet, "/", nil, false)
 	wantStatus(t, rec, http.StatusOK)
 
 	token := hiddenToken(t, rec.Body.String())
@@ -76,7 +80,7 @@ func TestIndexIssuesCSRFAndPinsAssets(t *testing.T) {
 
 func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 	rm := newRoom()
-	h := newRouter(rm)
+	h := newRouter(rm, testCodec)
 
 	missing := send(t, h, http.MethodPost, "/join", url.Values{"name": {"Alice"}}, true)
 	wantStatus(t, missing, http.StatusForbidden)
@@ -105,7 +109,10 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 		t.Errorf("HX-Redirect = %q, want /room", got)
 	}
 	s.userCookie = responseCookie(t, joined, cookieName)
-	if s.userCookie.Value != "Alice" || !s.userCookie.HttpOnly || s.userCookie.SameSite != http.SameSiteLaxMode {
+	if name, err := testCodec.Decode(cookieName, s.userCookie.Value); err != nil || string(name) != "Alice" {
+		t.Errorf("user cookie carries %q, %v, want a signed Alice", name, err)
+	}
+	if !s.userCookie.HttpOnly || s.userCookie.SameSite != http.SameSiteLaxMode {
 		t.Errorf("user cookie = %#v", s.userCookie)
 	}
 
@@ -131,7 +138,7 @@ func TestJoinRequiresCSRFAndAuthenticates(t *testing.T) {
 }
 
 func TestJoinRefusalWorksWithoutJavaScript(t *testing.T) {
-	h := newRouter(newRoom())
+	h := newRouter(newRoom(), testCodec)
 	s := startSession(t, h)
 	refuse := func(hx bool) *httptest.ResponseRecorder {
 		rec := send(t, h, http.MethodPost, "/join", url.Values{
@@ -159,7 +166,7 @@ func TestJoinRefusalWorksWithoutJavaScript(t *testing.T) {
 }
 
 func TestAuthenticationRedirectsPagesAndRejectsAnonymousSSE(t *testing.T) {
-	h := newRouter(newRoom())
+	h := newRouter(newRoom(), testCodec)
 
 	page := send(t, h, http.MethodGet, "/room", nil, false)
 	wantStatus(t, page, http.StatusSeeOther)
@@ -181,7 +188,7 @@ func TestAuthenticationRedirectsPagesAndRejectsAnonymousSSE(t *testing.T) {
 }
 
 func TestLogoutIsPOSTAndCSRFProtected(t *testing.T) {
-	h := newRouter(newRoom())
+	h := newRouter(newRoom(), testCodec)
 	s := joinedSession(t, h, "Alice")
 
 	get := send(t, h, http.MethodGet, "/leave", nil, false, s.csrfCookie, s.userCookie)
@@ -214,7 +221,7 @@ func TestLogoutIsPOSTAndCSRFProtected(t *testing.T) {
 
 func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 	rm := newRoom()
-	h := newRouter(rm)
+	h := newRouter(rm, testCodec)
 	s := joinedSession(t, h, "Alice")
 	messages, unsubscribe := rm.join()
 	defer unsubscribe()
@@ -261,7 +268,7 @@ func TestMessageRequiresCSRFAndBroadcasts(t *testing.T) {
 
 func TestSSEFlowAndRoomShutdown(t *testing.T) {
 	rm := newRoom()
-	srv := httptest.NewServer(newRouter(rm))
+	srv := httptest.NewServer(newRouter(rm, testCodec))
 	t.Cleanup(srv.Close)
 
 	jar, err := cookiejar.New(nil)
@@ -495,4 +502,23 @@ func roomReaders(rm *room) int {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	return len(rm.readers)
+}
+
+// The name is the whole identity, so a cookie the codec did not sign must not
+// open the room.
+func TestAnUnsignedUserCookieIsNoIdentity(t *testing.T) {
+	h := newRouter(newRoom(), testCodec)
+
+	forged := &http.Cookie{Name: cookieName, Value: "Alice"}
+	res := send(t, h, http.MethodGet, "/room", nil, false, forged)
+	if res.Code == http.StatusOK {
+		t.Fatalf("an unsigned cookie opened the room: %d", res.Code)
+	}
+
+	// A value signed under another key fails too.
+	other := cookie.NewCodec([]byte(strings.Repeat("x", cookie.MinKeyLen)))
+	signed := &http.Cookie{Name: cookieName, Value: other.Encode(cookieName, []byte("Alice"), time.Now().Add(time.Hour))}
+	if res := send(t, h, http.MethodGet, "/room", nil, false, signed); res.Code == http.StatusOK {
+		t.Fatalf("a cookie signed with another key opened the room: %d", res.Code)
+	}
 }
