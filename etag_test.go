@@ -63,3 +63,31 @@ func TestCheckETag(t *testing.T) {
 		})
 	}
 }
+
+func TestETagMatch(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		etag   string
+		want   bool
+	}{
+		{"exact", []string{`"a"`}, `"a"`, true},
+		{"weak request", []string{`W/"a"`}, `"a"`, true},
+		{"weak etag", []string{`"a"`}, `W/"a"`, true},
+		{"star", []string{"*"}, `"a"`, true},
+		{"list", []string{`"x", "a"`}, `"a"`, true},
+		{"second value", []string{`"x"`, `"a"`}, `"a"`, true},
+		{"comma inside a tag", []string{`"x", "a,b"`}, `"a,b"`, true},
+		{"halves of a tag", []string{`"a", "b"`}, `"a,b"`, false},
+		{"different", []string{`"x"`}, `"a"`, false},
+		{"none", nil, `"a"`, false},
+		{"unquoted", []string{`a`}, `"a"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ETagMatch(tt.values, tt.etag); got != tt.want {
+				t.Errorf("ETagMatch(%q, %q) = %v, want %v", tt.values, tt.etag, got, tt.want)
+			}
+		})
+	}
+}

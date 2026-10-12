@@ -21,11 +21,16 @@ import (
 // address from, in order of preference; an empty list reads none, so a server
 // behind a proxy has to name them.
 //
-// Hops counts the proxies in front instead, for a chain of known length: the
-// client is the entry Hops places from the right of the chain, the peer being
-// the first proxy, and Trust does not count. Hops of 1 takes the last entry,
-// the one the peer wrote. A request whose chain is shorter than Hops did not
-// pass every proxy, so it is treated as an untrusted peer's.
+// Hops counts the proxies in front instead of walking back to the nearest
+// untrusted hop, for a chain of known length: the client is the entry Hops
+// places from the right of the chain, the peer being the first proxy. Hops of
+// 1 takes the last entry, the one the peer wrote. The peer must still be in
+// Trust, and a nil Trust takes [NewTrustSet], since a counted chain sits on a
+// private network; a peer outside it is untrusted, and a client that reaches
+// the server directly cannot choose its address. The first named header that
+// is present decides: when its chain is shorter than Hops the request did not
+// pass every proxy, so it is treated as an untrusted peer's, and no other
+// header is tried.
 //
 // X-Forwarded-Proto carries no address and does not go in Headers. A trusted
 // peer's scheme is kept, reduced to "http" or "https": the entry that peer
@@ -94,8 +99,11 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // https behind a proxy that ends TLS. Every forwarding header of an untrusted
 // peer is deleted, unless Leftmost is set.
 //
+// With Hops the peer must be in Trust, which is [NewTrustSet] when nil, and the
+// first named header that is present decides, as RealIPConfig describes.
+//
 // RealIPWithConfig panics when Headers names X-Forwarded-Proto, on a negative
-// Hops, and on Hops set beside Trust or Leftmost, or without Headers.
+// Hops, and on Hops set beside Leftmost or without Headers.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C] {
 	if slices.ContainsFunc(cfg.Headers, func(name string) bool {
 		return strings.EqualFold(name, router.HeaderXForwardedProto)
@@ -106,8 +114,6 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 	switch {
 	case cfg.Hops < 0:
 		panic("middleware: RealIPConfig needs a Hops of zero or more")
-	case cfg.Hops > 0 && cfg.Trust != nil:
-		panic("middleware: RealIPConfig sets both Hops and Trust; count the proxies or name them, not both")
 	case cfg.Hops > 0 && cfg.Leftmost:
 		panic("middleware: RealIPConfig sets both Hops and Leftmost; pick one")
 	case cfg.Hops > 0 && len(cfg.Headers) == 0:
@@ -115,6 +121,9 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 	}
 	if cfg.Trust == nil {
 		cfg.Trust = loopbackOnly
+		if cfg.Hops > 0 {
+			cfg.Trust = NewTrustSet()
+		}
 	}
 	cfg.Headers = canonicalHeaders(cfg.Headers...)
 	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {
@@ -259,8 +268,13 @@ func (cfg RealIPConfig[C]) client(req *http.Request) (hop, bool) {
 }
 
 // countedHop takes the entry Hops places from the right of the first named
-// header whose chain is that long. It vouches for no peer when none is.
+// header that is present, when the peer is trusted. It vouches for no peer when
+// that chain is shorter than Hops, and it tries no other header then.
 func (cfg RealIPConfig[C]) countedHop(req *http.Request) (hop, bool) {
+	peer, _, ok := splitHop(req.RemoteAddr)
+	if !ok || !cfg.Trust.Trusted(peer.Addr()) {
+		return hop{}, false
+	}
 	for _, name := range cfg.Headers {
 		values := req.Header.Values(name)
 		if len(values) == 0 {
@@ -280,6 +294,7 @@ func (cfg RealIPConfig[C]) countedHop(req *http.Request) (hop, bool) {
 			}
 			return h, true
 		}
+		return hop{}, false
 	}
 	return hop{}, false
 }

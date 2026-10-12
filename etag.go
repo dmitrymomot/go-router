@@ -35,7 +35,7 @@ func (b *Base) CheckETag(etag string) bool {
 	if b.req.Method != http.MethodGet && b.req.Method != http.MethodHead {
 		return false
 	}
-	if !etagMatches(b.req.Header[HeaderIfNoneMatch], etag) {
+	if !ETagMatch(b.req.Header[HeaderIfNoneMatch], etag) {
 		return false
 	}
 	// A 304 carries no body, so the headers that describe one go.
@@ -45,9 +45,12 @@ func (b *Base) CheckETag(etag string) bool {
 	return true
 }
 
-// etagMatches reports whether any entity tag in the If-None-Match values
-// weakly matches etag.
-func etagMatches(values []string, etag string) bool {
+// ETagMatch reports whether any entity tag in the If-None-Match header values
+// weakly matches etag, as RFC 9110 asks for If-None-Match: a "W/" prefix on
+// either side is ignored, "*" matches anything, and a comma-separated list
+// matches when any member does. Members are quoted, so a comma inside one does
+// not split it. [Base.CheckETag] and the ETag middleware both use it.
+func ETagMatch(values []string, etag string) bool {
 	want := strings.TrimPrefix(etag, "W/")
 	for _, v := range values {
 		for {
