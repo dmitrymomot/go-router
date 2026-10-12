@@ -203,3 +203,34 @@ func (r *Router[C]) RedirectHost(pattern string, status int, target string) {
 }
 
 const errRedirectHostPrefix = "router: RedirectHost answers every path of a host, so it cannot sit in a scope with a prefix"
+
+// IsLocalURL reports whether s is a path on this host and nothing else: it
+// starts with a single "/", not "//" or "/\" (which a browser reads as another
+// host), and holds no control byte. A value that names a scheme or a host
+// fails, as does the empty string. Use it on a "next" or "return_to" value
+// before you redirect to it; [Base.LocalRedirect] does.
+func IsLocalURL(s string) bool {
+	if s == "" || s[0] != '/' {
+		return false
+	}
+	if len(s) > 1 && (s[1] == '/' || s[1] == '\\') {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// LocalRedirect redirects to target with status, as [Base.Redirect] does, but
+// only to a local path. A target that fails [IsLocalURL] gives an
+// [ErrBadRequest] with the message "redirect target is not a local path" and
+// writes nothing, which closes the open redirect of a "next" parameter.
+func (b *Base) LocalRedirect(status int, target string) error {
+	if !IsLocalURL(target) {
+		return ErrBadRequest.WithMessage("redirect target is not a local path")
+	}
+	return b.Redirect(status, target)
+}

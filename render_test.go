@@ -395,6 +395,23 @@ func BenchmarkRender(b *testing.B) {
 	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/")
 }
 
+type benchItem struct {
+	ID    int      `json:"id"`
+	Name  string   `json:"name"`
+	Email string   `json:"email"`
+	Tags  []string `json:"tags"`
+}
+
+func BenchmarkJSON(b *testing.B) {
+	items := make([]benchItem, 200)
+	for i := range items {
+		items[i] = benchItem{ID: i, Name: "user name", Email: "user@example.com", Tags: []string{"a", "b"}}
+	}
+	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
+	r.GET("/", func(c *tctx) error { return c.JSON(http.StatusOK, items) })
+	benchServe(b, r, &nopWriter{h: make(http.Header)}, "/")
+}
+
 func BenchmarkRenderStream(b *testing.B) {
 	page := comp("<html><body><h1>hello</h1></body></html>")
 	r := New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
