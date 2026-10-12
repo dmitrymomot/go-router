@@ -1,9 +1,16 @@
 package middleware
 
 import (
+	"bytes"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
+
+// methodOverrideScan is how much of a urlencoded body [MethodOverride] reads
+// to look for the _method field.
+const methodOverrideScan = 64 << 10
 
 // HeaderMethodOverride is the header [MethodOverride] reads.
 const HeaderMethodOverride = "X-HTTP-Method-Override"
@@ -18,9 +25,10 @@ const MethodOverrideField = "_method"
 // other value is ignored and the request stays a POST. A request that is not
 // a POST is never changed.
 //
-// Reading the field parses the form, which reads the body of a urlencoded POST
-// under the limit of [http.Request.ParseForm]. The form stays available to the
-// handler.
+// Reading the field looks at the first 64 KiB of a urlencoded body and never
+// parses the form, so the router reads the whole body under its own body limit,
+// or the one of the route. Put the _method field before the large ones: a field
+// past that prefix is not seen. The handler still reads the full body.
 //
 // Middleware of the router runs after the route is chosen, so MethodOverride
 // is a plain [http.Handler] wrapper that goes in front of the router:
@@ -35,9 +43,13 @@ func MethodOverride(next http.Handler) http.Handler {
 			return
 		}
 		method := req.Header.Get(HeaderMethodOverride)
-		if method == "" && strings.HasPrefix(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
-			_ = req.ParseForm() // A form that does not parse has no field; the handler meets the same error.
-			method = req.PostForm.Get(MethodOverrideField)
+		if method == "" && strings.HasPrefix(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
+			req.Body != nil && req.Body != http.NoBody {
+			var prefix []byte
+			method, prefix = scanMethodField(req.Body)
+			out := req.WithContext(req.Context())
+			out.Body = &prefixedBody{Reader: io.MultiReader(bytes.NewReader(prefix), req.Body), Closer: req.Body}
+			req = out
 		}
 		switch method = strings.ToUpper(method); method {
 		case http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -47,4 +59,23 @@ func MethodOverride(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, req)
 	})
+}
+
+// scanMethodField reads at most [methodOverrideScan] bytes of body and returns
+// the _method field among the complete pairs in them, with the bytes it read.
+func scanMethodField(body io.Reader) (method string, prefix []byte) {
+	prefix, _ = io.ReadAll(io.LimitReader(body, methodOverrideScan)) // An error shows again when the router reads on.
+	complete := prefix
+	if len(prefix) == methodOverrideScan {
+		// The last pair may be cut short.
+		complete = prefix[:max(bytes.LastIndexByte(prefix, '&'), 0)]
+	}
+	values, _ := url.ParseQuery(string(complete)) // Pairs that parse still count.
+	return values.Get(MethodOverrideField), prefix
+}
+
+// prefixedBody is a request body whose first bytes were read ahead.
+type prefixedBody struct {
+	io.Reader
+	io.Closer
 }
