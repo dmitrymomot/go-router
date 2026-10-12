@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,9 +30,13 @@ func main() {
 
 	apiKey := os.Getenv("API_KEY")
 	if apiKey == "" {
-		// Better a key the operator can read from the log than one compiled in.
+		// Demo only: a generated key is printed once to stderr so the person
+		// running the example can use it. A service must never write a secret
+		// to its log, where it outlives the process and reaches every reader
+		// of the log pipeline. Set API_KEY there instead.
 		apiKey = rand.Text()
-		slog.Info("no API_KEY in the environment, so this run made one", "key", apiKey)
+		slog.Info("no API_KEY in the environment, so this run made one and printed it to stderr")
+		fmt.Fprintln(os.Stderr, "API_KEY="+apiKey)
 	}
 
 	r := newRouter(NewStore(), apiKey)
