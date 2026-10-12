@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"compress/gzip"
+	"compress/zlib"
 	"errors"
 	"io"
 	"net/http"
@@ -24,16 +25,31 @@ type DecompressConfig[C router.Context] struct {
 
 var gzipReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
 
-const emptyGzipStream = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+// zlibReaders holds the readers of deflate bodies. It has no New, since
+// zlib.NewReader needs a stream to read the header of.
+var zlibReaders sync.Pool
 
-// Decompress expands a request body that Content-Encoding marks as gzip, so
-// the handler and the binders read plain bytes. A body in any other encoding,
-// and one in none, passes through.
+const (
+	emptyGzipStream = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+	emptyZlibStream = "\x78\x9c\x03\x00\x00\x00\x00\x01"
+)
+
+// acceptedEncodings is the Accept-Encoding of a 415 that [Decompress] answers.
+const acceptedEncodings = "gzip, deflate"
+
+// Decompress expands a request body that Content-Encoding marks as gzip or
+// deflate, so the handler and the binders read plain bytes. A body in no
+// encoding, or in identity, passes through.
+//
+// Any other encoding, and more than one stacked, as in "gzip, gzip", is
+// refused with [router.ErrUnsupportedMediaType] and an Accept-Encoding of
+// "gzip, deflate", since the handler could not read the body anyway.
 //
 // The expansion stops at [router.DefaultMaxBodyBytes], which is what keeps a
 // small body that expands to a huge one from filling the memory. A body that
-// is not gzip reports [router.ErrBadRequest], and one over the limit reports
-// [router.ErrPayloadTooLarge] and closes the connection after the answer.
+// does not decode reports [router.ErrBadRequest], and one over the limit
+// reports [router.ErrPayloadTooLarge] and closes the connection after the
+// answer.
 //
 // See Order in the package doc for where it goes.
 func Decompress[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -52,24 +68,32 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig[C]) router.Midd
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
 			req := c.Request()
-			if skipped(cfg.Skip, c) || req.Body == nil || req.Body == http.NoBody ||
-				!isGzipEncoding(req.Header.Get(router.HeaderContentEncoding)) {
+			if skipped(cfg.Skip, c) || req.Body == nil || req.Body == http.NoBody {
 				return next(c)
 			}
+			enc := contentEncoding(req.Header.Values(router.HeaderContentEncoding))
+			switch enc {
+			case encodingNone:
+				return next(c)
+			case encodingUnknown:
+				c.Response().Header().Set(router.HeaderAcceptEncoding, acceptedEncodings)
+				return router.ErrUnsupportedMediaType.WithMessage("the Content-Encoding %q is not supported",
+					strings.Join(req.Header.Values(router.HeaderContentEncoding), ", "))
+			}
 
-			// gzip.Reader.Reset wraps a source without ReadByte in a fresh 4 KiB
+			// Both readers wrap a source without ReadByte in a fresh 4 KiB
 			// bufio.Reader, and *http.body has none.
 			src := byteReaders.Get().(*bufio.Reader)
 			src.Reset(req.Body)
-
-			zr := gzipReaders.Get().(*gzip.Reader)
-			if err := zr.Reset(src); err != nil {
+			if _, err := src.Peek(1); errors.Is(err, io.EOF) {
 				putByteReader(src)
-				putGzipReader(zr)
-				if errors.Is(err, io.EOF) {
-					return next(c)
-				}
-				return router.ErrBadRequest.WithMessage("malformed gzip body").WithError(err)
+				return next(c)
+			}
+
+			zr, err := openDecoder(enc, src)
+			if err != nil {
+				putByteReader(src)
+				return router.ErrBadRequest.WithMessage("malformed %s body", enc).WithError(err)
 			}
 
 			done := false
@@ -77,7 +101,7 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig[C]) router.Midd
 			defer func() {
 				body.zr = nil
 				if done {
-					putGzipReader(zr)
+					putDecoder(zr)
 					putByteReader(src)
 				}
 			}()
@@ -90,11 +114,86 @@ func DecompressWithConfig[C router.Context](cfg DecompressConfig[C]) router.Midd
 			expanded.Header.Del(router.HeaderContentLength)
 			c.SetRequest(&expanded)
 
-			err := next(c)
+			err = next(c)
 			done = true
 			return tooLarge(err, "the expanded request body is limited to %d bytes", limit)
 		}
 	}
+}
+
+type encoding uint8
+
+const (
+	encodingNone encoding = iota
+	encodingGzip
+	encodingDeflate
+	encodingUnknown
+)
+
+func (e encoding) String() string {
+	if e == encodingDeflate {
+		return "deflate"
+	}
+	return "gzip"
+}
+
+// contentEncoding reads the Content-Encoding of a request. identity counts as
+// no encoding, and a second coding makes the whole unknown.
+func contentEncoding(values []string) encoding {
+	enc := encodingNone
+	for _, v := range values {
+		for e := range strings.SplitSeq(v, ",") {
+			var found encoding
+			switch e = strings.TrimSpace(e); {
+			case e == "" || strings.EqualFold(e, "identity"):
+				continue
+			case strings.EqualFold(e, "gzip") || strings.EqualFold(e, "x-gzip"):
+				found = encodingGzip
+			case strings.EqualFold(e, "deflate"):
+				found = encodingDeflate
+			default:
+				return encodingUnknown
+			}
+			if enc != encodingNone {
+				return encodingUnknown
+			}
+			enc = found
+		}
+	}
+	return enc
+}
+
+// openDecoder takes a pooled reader of enc and points it at src. A reader
+// that fails is back in its pool when it returns.
+func openDecoder(enc encoding, src *bufio.Reader) (io.Reader, error) {
+	if enc == encodingGzip {
+		zr := gzipReaders.Get().(*gzip.Reader)
+		if err := zr.Reset(src); err != nil {
+			putDecoder(zr)
+			return nil, err
+		}
+		return zr, nil
+	}
+	if zr, ok := zlibReaders.Get().(io.Reader); ok {
+		if err := zr.(zlib.Resetter).Reset(src, nil); err != nil {
+			putDecoder(zr)
+			return nil, err
+		}
+		return zr, nil
+	}
+	return zlib.NewReader(src)
+}
+
+// putDecoder detaches zr from its source, so the pool does not keep the body
+// alive, and puts it back.
+func putDecoder(zr io.Reader) {
+	if gz, ok := zr.(*gzip.Reader); ok {
+		detachGzipReader(gz)
+		gzipReaders.Put(gz)
+		return
+	}
+	detachZlibReader(zr)
+	zlibReaders.Put(zr)
 }
 
 var byteReaders = sync.Pool{New: func() any { return bufio.NewReader(nil) }}
@@ -104,17 +203,16 @@ func putByteReader(r *bufio.Reader) {
 	byteReaders.Put(r)
 }
 
-func putGzipReader(zr *gzip.Reader) {
-	detachGzipReader(zr)
-	gzipReaders.Put(zr)
-}
-
 func detachGzipReader(zr *gzip.Reader) {
 	_ = zr.Reset(strings.NewReader(emptyGzipStream))
 }
 
+func detachZlibReader(zr io.Reader) {
+	_ = zr.(zlib.Resetter).Reset(strings.NewReader(emptyZlibStream), nil)
+}
+
 type decompressedBody struct {
-	zr  *gzip.Reader
+	zr  io.Reader
 	src io.ReadCloser
 }
 
@@ -126,8 +224,3 @@ func (b *decompressedBody) Read(p []byte) (int, error) {
 }
 
 func (b *decompressedBody) Close() error { return b.src.Close() }
-
-func isGzipEncoding(encoding string) bool {
-	e := strings.TrimSpace(encoding)
-	return strings.EqualFold(e, "gzip") || strings.EqualFold(e, "x-gzip")
-}
