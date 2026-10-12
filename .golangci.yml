@@ -5,6 +5,7 @@ linters:
     - gosec
     - bodyclose
     - errorlint
+    - contextcheck
   settings:
     staticcheck:
       checks:
@@ -72,3 +73,8 @@ linters:
       - linters: [errorlint]
         path: _test\.go$
         text: "comparing with !="
+      # contextcheck follows a call chain into a helper that builds its own request
+      # with httptest, so no caller context exists to pass. Both sites are tests of
+      # that very construction.
+      - linters: [contextcheck]
+        path: ^(render_test\.go|routertest/routertest_test\.go)$
