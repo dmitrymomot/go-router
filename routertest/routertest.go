@@ -194,7 +194,7 @@ func setBody(req *http.Request, contentType string, r io.Reader) {
 // carries context.Background unless an option gives it another, so give a
 // route that may never end, such as a live stream, a [Context] with a deadline.
 func Request(method, target string, opts ...RequestOption) *http.Request {
-	req := httptest.NewRequest(method, target, nil)
+	req := httptest.NewRequestWithContext(context.Background(), method, target, nil)
 	for _, opt := range opts {
 		opt(req)
 	}
@@ -444,7 +444,7 @@ func carry(tb testing.TB, r *Response, cc *cookie.Codec, caller, name string) *r
 	if last == nil || last.MaxAge < 0 || last.Value == "" {
 		return nil
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: name, Value: last.Value})
 	return router.NewBase(httptest.NewRecorder(), req)
 }
@@ -462,7 +462,7 @@ func FlashCookie(tb testing.TB, cc *cookie.Codec, flashes ...cookie.Flash) Reque
 		return func(*http.Request) {}
 	}
 	rec := httptest.NewRecorder()
-	b := router.NewBase(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	b := router.NewBase(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	for _, f := range flashes {
 		if err := cc.AddFlash(b, f); err != nil {
 			tb.Fatalf("routertest: FlashCookie: %v", err)

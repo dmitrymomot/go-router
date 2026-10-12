@@ -8,6 +8,7 @@
 package headcheck
 
 import (
+	"context"
 	"io"
 	"maps"
 	"net/http"
@@ -24,7 +25,7 @@ import (
 func MatchesGET(tb testing.TB, h http.Handler, target string, opts ...func(*http.Request)) {
 	tb.Helper()
 	answer := func(method string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, target, nil)
+		req := httptest.NewRequestWithContext(context.Background(), method, target, nil)
 		for _, opt := range opts {
 			opt(req)
 		}

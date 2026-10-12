@@ -6,6 +6,8 @@ linters:
     - bodyclose
     - errorlint
     - contextcheck
+    - noctx
+    - nilerr
   settings:
     staticcheck:
       checks:
@@ -78,3 +80,19 @@ linters:
       # that very construction.
       - linters: [contextcheck]
         path: ^(render_test\.go|routertest/routertest_test\.go)$
+      # Tests drive handlers with httptest requests and reach loopback servers
+      # with http.Get, net.Listen and net.Dial. A request context adds nothing
+      # there: httptest.NewRequest gives a background context, and the servers
+      # die with the test.
+      - linters: [noctx]
+        path: _test\.go$
+      # TestFlushError records the Open error in a variable the test asserts on
+      # and ends the handler without one, so the status stays what Open sent.
+      - linters: [nilerr]
+        path: ^sse/sse_test\.go$
+      # Request now builds its request with context.Background, so contextcheck
+      # wants the caller's context passed in. The two callers pass it as the
+      # Context option, which replaces that background context.
+      - linters: [contextcheck]
+        path: ^routertest/routertest\.go$
+        text: "Function `Request` should pass"
