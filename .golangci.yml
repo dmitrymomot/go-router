@@ -3,6 +3,7 @@ version: "2"
 linters:
   enable:
     - gosec
+    - bodyclose
   settings:
     staticcheck:
       checks:
@@ -47,3 +48,7 @@ linters:
       - linters: [gosec]
         path: _test\.go$
         text: "G(101|104|107|115|124|301|304|306|402|404|602|705)"
+      # postChunked closes the response body in a t.Cleanup, which bodyclose does not
+      # see across the helper boundary.
+      - linters: [bodyclose]
+        path: ^middleware/bodylimit_test\.go$
