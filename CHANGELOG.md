@@ -53,21 +53,21 @@ Router:
 - `Router.Decoder(mediaType, d)` and `BodyDecoder`, so `Bind` accepts a body type such as XML; JSON, the form types and multipart stay built in.
 - Binding: `,split` for a comma list and a `default:"…"` tag in the path, the query, the headers and a form, and, in the query and a form, dotted keys for a nested struct and bracket keys for a `map[string]V`.
 - `Base.LocalRedirect` and `IsLocalURL`, a redirect that refuses a target off the site with a 400.
-- `Base.CheckETag` and `ETagOf`, a weak `If-None-Match` comparison that answers 304 to a GET or HEAD.
+- `Base.CheckETag`, `ETagOf` and `ETagMatch`, a quote-aware weak `If-None-Match` comparison that answers 304 to a GET or HEAD. The `ETag` middleware uses the same matcher.
 - `Base.TrailingSlash`, which tells a catch-all whether the path ended with a slash.
 - `Base.ClientIP`, the host of `RemoteAddr`, without allocating; `middleware.ClientIP` delegates to it.
 
 middleware:
 
-- `ETag` and `ETagWithConfig`, conditional GET and HEAD for dynamic answers up to 1 MiB.
+- `ETag` and `ETagWithConfig`, conditional GET for dynamic answers up to 1 MiB. A HEAD passes through with the handler's own headers.
 - `NoCache` and `NoCacheWithConfig`.
 - `Throttle` and `ThrottleWithConfig`, a concurrency cap with a backlog, 429 or 503, and `Retry-After`.
 - `Heartbeat(path)`, a probe that answers before the log and the limits, on a path with no route.
-- `StripSlashes` and `MethodOverride`, which wrap the router as an `http.Handler`.
+- `StripSlashes` and `MethodOverride`, which wrap the router as an `http.Handler`. `MethodOverride` reads `_method` from the first 64 KiB of a URL-encoded body and puts the body back, so the router's body limits still apply.
 - `Deprecation`, the RFC 9745 `Deprecation`, RFC 8594 `Sunset` and `Link rel=deprecation` headers.
 - `AllowContentType`, 415 for a body type outside a list.
 - `CrossOrigin` and `CrossOriginWithConfig`, a token-less guard on `http.CrossOriginProtection`.
-- `RealIPConfig.Hops`, the client a known number of proxies from the right.
+- `RealIPConfig.Hops`, the client a known number of proxies from the right. The peer must still be in `Trust`, which is `NewTrustSet()` when nil, and the first named header that is present decides: a chain shorter than `Hops` is untrusted.
 - `GzipConfig.ExcludeContentTypes` and `DefaultGzipExcludeContentTypes`, and deflate negotiated by q-value. There is no zstd or brotli, since Go 1.27 has no stdlib encoder for either.
 - `SecureConfig.CrossOriginOpenerPolicy`, `CrossOriginEmbedderPolicy`, `CrossOriginResourcePolicy` and `PermissionsPolicy`.
 - `CORSConfig.AllowPrivateNetwork`.
@@ -78,7 +78,7 @@ Other packages:
 
 - `cookie.NewEncryptedCodec(key, previous...)` and `cookie.KeyLen`: AES-256-GCM cookies that bind the name and expiry, rotate keys, and carry flashes.
 - `static` serves the precompressed `.br` or `.gz` sibling of a file in an FS set, br first, with `Vary` and an ETag that names the encoding.
-- `serve.ErrDraining`, the cause of the request contexts that `Run` cancels when the drain starts, and `serve.DefaultIdleTimeout`.
+- `serve.Draining(ctx)`, a channel that closes when the drain starts, for a long-lived handler to end on, and `serve.DefaultIdleTimeout`. `Run` cancels no request context, so an ordinary request in flight finishes with a live context.
 - `sse.WriteTimeout`, `sse.DefaultWriteTimeout` (30 s), `sse.ErrClosed` and `Writer.Close`.
 - routertest: `Expect.JSON` and `Expect.JSONPath`, which compare JSON by value and list every path that differs, `Event.Retry`, and `ReadEvents(tb, srv, target, n)` for the first events of a stream that never ends.
 
@@ -91,13 +91,16 @@ Other packages:
 - The rate-limit memory store caps each shard at an even share of `MaxEntries`, so a shard can fill before the store does.
 - `serve` defaults `IdleTimeout` to 120 s, and a negative value means none. Request contexts carry the values of the `Run` context.
 - An `sse.Writer` is safe for concurrent use, `sse.Open` honours `Heartbeat` and `Close`, and each write gets its own deadline instead of the stream clearing it.
+- `sse.Serve` ends with its `Close` event when the drain of `serve.Run` starts, and the heartbeat of `sse.Open` stops on it.
+- Accept and Accept-Encoding q values follow one strict RFC 9110 rule in content negotiation, `Gzip` and `static`: a malformed or out-of-range q, or one with more than three decimals, refuses its entry.
 - The `middleware` Order list places the new middleware, and the docs of `SchemeOf`, `RealIP`, `Secure` and `CSRF` say that the scheme is only as trusted as RealIP makes it.
 - The package overview of `router` moved to `doc.go` and covers routing, errors, binding, responses, middleware, testing and serving. The README maps the common calls of chi and echo.
-- `_examples/chat` no longer closes the room from `OnDrain`, since the drain now ends its streams.
+- `_examples/chat` no longer closes the room from `OnDrain`, since `sse.Serve` now ends its streams when the drain starts.
 
 ### Fixed
 
 - A client on the server's private network could forge its address through RealIP's default trust.
+- The heartbeat of `sse.Open` stops when the handler returns without `Writer.Close`, so it no longer writes while the router answers an error or resets a pooled context.
 - `static` served dotfiles such as `.env` from `os.DirFS` through `Config.FS`.
 - An error answer kept the `Cache-Control`, `ETag`, `Last-Modified`, `Content-Disposition`, `Content-Encoding` and `Content-Length` of the handler that failed; every error handler, and the bare 500, now drops them and sets `nosniff`.
 - A field error no longer echoes the raw input, a Go type name or the text of `UnmarshalText`, and a long JSON member name is cut.
