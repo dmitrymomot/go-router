@@ -19,8 +19,11 @@ func TestSecureCrossOriginPolicies(t *testing.T) {
 		cfg  middleware.SecureConfig[*appContext]
 		want map[string]string
 	}{
-		{"defaults", middleware.SecureConfig[*appContext]{},
-			map[string]string{coop: "same-origin", coep: "", corp: "same-origin", perm: ""}},
+		{
+			"defaults",
+			middleware.SecureConfig[*appContext]{},
+			map[string]string{coop: "same-origin", coep: "", corp: "same-origin", perm: ""},
+		},
 		{"set", middleware.SecureConfig[*appContext]{
 			CrossOriginOpenerPolicy:   "same-origin-allow-popups",
 			CrossOriginEmbedderPolicy: "require-corp",

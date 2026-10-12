@@ -77,10 +77,16 @@ func TestDecodeValuesFillsADefault(t *testing.T) {
 		want in
 	}{
 		{"no values", nil, in{Page: 1, Sort: "name", Tags: []string{"a", "b"}, Limit: ptr(20)}},
-		{"every value", url.Values{"page": {"3"}, "sort": {"id"}, "tag": {"x"}, "limit": {"5"}},
-			in{Page: 3, Sort: "id", Tags: []string{"x"}, Limit: ptr(5)}},
-		{"an empty value is not absent", url.Values{"page": {""}, "sort": {""}},
-			in{Page: 0, Sort: "", Tags: []string{"a", "b"}, Limit: ptr(20)}},
+		{
+			"every value",
+			url.Values{"page": {"3"}, "sort": {"id"}, "tag": {"x"}, "limit": {"5"}},
+			in{Page: 3, Sort: "id", Tags: []string{"x"}, Limit: ptr(5)},
+		},
+		{
+			"an empty value is not absent",
+			url.Values{"page": {""}, "sort": {""}},
+			in{Page: 0, Sort: "", Tags: []string{"a", "b"}, Limit: ptr(20)},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
