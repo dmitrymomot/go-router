@@ -65,13 +65,44 @@ func TestETagSetsATagAndAnswers304(t *testing.T) {
 	}
 }
 
-func TestETagHEAD(t *testing.T) {
+func TestETagHEADPassesThrough(t *testing.T) {
 	r := newRouter()
 	r.Use(middleware.ETag[*appContext])
+	r.GET("/", hello)
 	r.HEAD("/", hello)
-	rec := do(r, httptest.NewRequest(http.MethodHead, "/", nil))
-	if rec.Code != http.StatusOK || rec.Header().Get(router.HeaderETag) == "" {
-		t.Fatalf("HEAD = %d, ETag %q", rec.Code, rec.Header().Get(router.HeaderETag))
+
+	got := get(r, "/")
+	head := do(r, httptest.NewRequest(http.MethodHead, "/", nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("HEAD = %d %q, want an empty 200", head.Code, head.Body)
+	}
+	if got := head.Header().Get(router.HeaderContentLength); got != "5" {
+		t.Errorf("HEAD Content-Length = %q, want the handler's 5", got)
+	}
+	if got := head.Header().Get(router.HeaderETag); got != "" {
+		t.Errorf("HEAD ETag = %q, want none", got)
+	}
+	if cl := got.Header().Get(router.HeaderContentLength); cl != "5" || got.Header().Get(router.HeaderETag) == "" {
+		t.Errorf("GET Content-Length = %q, ETag %q", cl, got.Header().Get(router.HeaderETag))
+	}
+}
+
+func TestETagMatchesATagWithACommaInIt(t *testing.T) {
+	r := etagRouter(middleware.ETagConfig[*appContext]{}, func(c *appContext) error {
+		c.Response().Header().Set(router.HeaderETag, `"a,b"`)
+		return c.String(http.StatusOK, "hello")
+	})
+	for _, inm := range []string{`"a,b"`, `"x", W/"a,b"`} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set(router.HeaderIfNoneMatch, inm)
+		if rec := do(r, req); rec.Code != http.StatusNotModified {
+			t.Errorf("If-None-Match %s: status = %d, want 304", inm, rec.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(router.HeaderIfNoneMatch, `"a", "b"`)
+	if rec := do(r, req); rec.Code != http.StatusOK {
+		t.Errorf("split halves matched: status = %d, want 200", rec.Code)
 	}
 }
 

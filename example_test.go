@@ -1022,3 +1022,13 @@ func ExampleBase_CheckETag() {
 	// 200 {"total":42}
 	// 304 0
 }
+
+func ExampleETagMatch() {
+	fmt.Println(router.ETagMatch([]string{`"a", W/"b"`}, `"b"`))
+	fmt.Println(router.ETagMatch([]string{"*"}, `"b"`))
+	fmt.Println(router.ETagMatch([]string{`"a"`}, `"b"`))
+	// Output:
+	// true
+	// true
+	// false
+}
