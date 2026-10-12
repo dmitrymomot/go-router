@@ -390,7 +390,7 @@ func TestDecodeValuesFlattensEmbeddedStructs(t *testing.T) {
 	}
 
 	var got query
-	if fields := decodeValues(url.Values{"offset": {"40"}, "q": {"go"}}, reflect.ValueOf(&got).Elem(), "query"); len(fields) != 0 {
+	if fields := decode(url.Values{"offset": {"40"}, "q": {"go"}}, &got, "query"); len(fields) != 0 {
 		t.Fatalf("fields = %v, want none", fields)
 	}
 	if got.Offset != 40 || got.Term != "go" {

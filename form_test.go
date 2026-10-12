@@ -344,22 +344,22 @@ func TestStructFieldsKeepsAPlanPerTag(t *testing.T) {
 	}
 }
 
-func TestStructFieldsCachesThePlan(t *testing.T) {
+func TestPlanOfCachesThePlan(t *testing.T) {
 	type cached struct {
 		Page int `query:"page"`
 	}
 	rt := reflect.TypeFor[cached]()
-	first := structFields(rt, "query")
-	second := structFields(rt, "query")
-	if len(first) != 1 || first[0].key != "page" {
+	first := planOf(rt, "query")
+	second := planOf(rt, "query")
+	if len(first.fields) != 1 || first.fields[0].key != "page" {
 		t.Fatalf("plan = %+v", first)
 	}
-	if &first[0] != &second[0] {
-		t.Error("structFields built the plan twice for the same type and tag")
+	if first != second {
+		t.Error("planOf built the plan twice for the same type and tag")
 	}
 }
 
-func TestBuildFieldsReadsOnlyItsOwnTag(t *testing.T) {
+func TestPlanOfReadsOnlyItsOwnTag(t *testing.T) {
 	type Embedded struct {
 		Inner string `query:"inner"`
 	}
@@ -375,31 +375,31 @@ func TestBuildFieldsReadsOnlyItsOwnTag(t *testing.T) {
 	}
 
 	want := []fieldInfo{
-		{index: 0, embedded: true},
+		{index: 0, kind: kindEmbedded},
 		{key: "q", index: 1},
 		{key: "d", layout: "2006-01-02", index: 7},
 	}
-	if got := buildFields(reflect.TypeFor[sample](), "query"); !reflect.DeepEqual(got, want) {
+	if got := planOf(reflect.TypeFor[sample](), "query").fields; !reflect.DeepEqual(got, want) {
 		t.Errorf("plan = %+v, want %+v", got, want)
 	}
 }
 
-func TestBuildFieldsCanonicalizesAHeaderName(t *testing.T) {
+func TestPlanOfCanonicalizesAHeaderName(t *testing.T) {
 	type sample struct {
 		RequestID string `header:"x-request-id"`
 	}
-	plan := buildFields(reflect.TypeFor[sample](), "header")
+	plan := planOf(reflect.TypeFor[sample](), "header").fields
 	if len(plan) != 1 || plan[0].key != "X-Request-Id" {
 		t.Errorf("plan = %+v, want the canonical header name", plan)
 	}
 }
 
-func TestBuildFieldsSkipsUnexportedFields(t *testing.T) {
+func TestPlanOfSkipsUnexportedFields(t *testing.T) {
 	type sample struct {
 		Kept   string `query:"kept"`
 		hidden string `query:"hidden"` //nolint:unused // The decoder must leave it alone.
 	}
-	plan := buildFields(reflect.TypeFor[sample](), "query")
+	plan := planOf(reflect.TypeFor[sample](), "query").fields
 	if len(plan) != 1 || plan[0].key != "kept" {
 		t.Errorf("plan = %+v, want the exported field alone", plan)
 	}
@@ -515,7 +515,10 @@ type hiddenPage struct {
 }
 
 func decode(vals url.Values, dst any, tag string) []FieldError {
-	fails := decodeValues(vals, reflect.ValueOf(dst).Elem(), tag)
+	fails, err := decodeValues(mapSource(vals), reflect.ValueOf(dst).Elem(), tag)
+	if err != nil {
+		panic(err)
+	}
 	if fails == nil {
 		return nil
 	}

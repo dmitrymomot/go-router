@@ -30,26 +30,53 @@ const defaultMaxMultipartMemory int64 = 32 << 20
 //
 // Bind reads the body whenever the request carries one, that is when it has
 // a Content-Length above zero, or a body of unknown length, whatever the
-// method. A Content-Type without a body reads nothing. The
-// Content-Type picks the decoder: JSON for application/json and any "+json"
-// type, and a form for the two form types. JSON follows the rules of
-// [Base.BindJSON]: a field with no tag at all takes the member of its Go
-// name, and a field tagged for another source and not for `json` takes no
-// member, and member names match case-sensitively; see BindJSON. A JSON
+// method. A Content-Type without a body reads nothing. The Content-Type picks
+// the decoder: JSON for application/json and any "+json" type, and a form for
+// the two form types. JSON follows the rules of [Base.BindJSON]: a field with no
+// tag at all takes the member of its Go name, a field tagged for another
+// source and not for `json` takes no member, and member names match
+// case-sensitively, so a member "Name" does not fill a field tagged
+// `json:"name"` unless json.MatchCaseInsensitiveNames(true) is set. A JSON
 // Content-Type with a charset other than UTF-8 reports an
 // [ErrUnsupportedMediaType]. The route parameters, the query and the headers
-// come next, so a field
-// tagged for both the body and one of them takes the value of the latter. A
-// T that implements [Validator] is validated last.
+// come next, so a field tagged for both the body and one of them takes the
+// value of the latter. A T that implements [Validator] is validated last.
+//
+// The tags of the route parameters, the query, the headers and a form take
+// these forms:
+//
+//   - `query:"ids,split"` on a slice splits each value at its commas, so
+//     ids=1,2,3 fills []int{1, 2, 3}. Each part is trimmed of spaces, and an
+//     empty part is dropped.
+//   - `default:"20"` beside the tag fills a field whose key the request does
+//     not carry at all, and that no other source filled. A key with an empty
+//     value is not absent. A slice takes a default split at its commas.
+//   - A struct field, or a pointer to one, in the query or a form reads the
+//     keys under its own: `form:"addr"` on a struct whose City is tagged
+//     `form:"city"` reads addr.city. A pointer is allocated only for a key
+//     under it.
+//   - A map[string]V field, where V is a value or a slice of them, in the
+//     query or a form reads the keys in brackets: `query:"price"` reads
+//     price[low]=1 into the key low.
+//
+// A field of a type that its source cannot fill, such as a chan, a func, a
+// map with keys that are not strings, or a struct in a header, is a bug in T.
+// So is a split option on a field that is not a slice, and a default that
+// does not parse as its field. The plan of each type is built and checked
+// once, at its first Bind, and every Bind of such a T reports an
+// [ErrInternalServerError] whose cause names the field, whatever the request
+// carries.
 //
 // A value that does not fit its field is an [ErrBadRequest] "invalid
 // request", and a value that Validate refuses is an [ErrUnprocessableEntity],
 // unless the Validator names a status of its own. Both list the fields in
-// Details, which [FieldErrorsOf] reads. The T comes back with the error and
-// holds what decoded: every field of a form, the query, the path or the
-// headers, and the JSON members before the one that failed.
-// errors.AsType[*HTTPError] finds one in every error, and [StatusOf] reports
-// its status, so a handler can return it as it stands.
+// Details, which [FieldErrorsOf] reads. The message of a field that does not
+// parse is a fixed phrase, such as "is not a valid integer", which repeats
+// neither the value nor a Go type; the detail stays in the cause, for the
+// log. The T comes back with the error and holds what decoded: every field of
+// a form, the query, the path or the headers, and the JSON members before the
+// one that failed. errors.AsType[*HTTPError] finds one in every error, and
+// [StatusOf] reports its status, so a handler can return it as it stands.
 //
 // A path is the exception: [Base.BindPath] and [Base.ParamAs] report an
 // [ErrNotFound] for a value that does not decode, because such a path names no
@@ -73,9 +100,20 @@ func (b *Base) Bind[T any]() (T, error) {
 	if err := b.decodePath(sv); err != nil {
 		return *p, err
 	}
-	fails := decodeValues(b.queryValues(), sv, "query")
-	fails = append(fails, decodeValues(url.Values(b.req.Header), sv, "header")...)
-	if fails != nil {
+	var query url.Values
+	if planOf(sv.Type(), "query").has() {
+		// A T without a query field leaves the query unparsed.
+		query = b.queryValues()
+	}
+	fails, err := decodeValues(mapSource(query), sv, "query")
+	if err != nil {
+		return *p, ErrInternalServerError.WithError(err)
+	}
+	more, err := decodeValues(mapSource(b.req.Header), sv, "header")
+	if err != nil {
+		return *p, ErrInternalServerError.WithError(err)
+	}
+	if fails = append(fails, more...); fails != nil {
 		return *p, badFields(fails)
 	}
 	return *p, validate(p)
@@ -234,7 +272,7 @@ func (b *Base) decodeJSON(dst any, opts []json.Options) error {
 	err := json.UnmarshalRead(&body, dst, b.jsonOptions(opts)...)
 	// Even a failed decode hands back what it filled, so the fields of the
 	// other sources are cleared either way.
-	clearOtherSources(reflect.ValueOf(dst))
+	jsonClearer.clear(reflect.ValueOf(dst))
 	if err != nil {
 		// json/v2 reports an empty body with the same syntax error as a
 		// truncated one, so the byte count tells them apart.
@@ -299,7 +337,7 @@ func jsonField(p jsontext.Pointer) string {
 }
 
 // BindForm fills a T from the form of the body and validates it, through the
-// `form` tag. It reads a URL-encoded form and a multipart one alike, for any
+// `form` tag in the forms that [Base.Bind] lists. It reads a URL-encoded form and a multipart one alike, for any
 // method. Parsing happens once per request, so a later form read costs
 // nothing. A bool field reads a checkbox: "on" when it is checked, and false
 // when it is absent.
@@ -321,13 +359,18 @@ func (b *Base) BindForm[T any]() (T, error) {
 }
 
 // BindQuery fills a T from the query string and validates it, through the
-// `query` tag. It reports errors as [Base.Bind] does.
+// `query` tag in the forms that [Base.Bind] lists. It reports errors as Bind
+// does.
 func (b *Base) BindQuery[T any]() (T, error) {
 	p, sv, err := newTarget[T]()
 	if err != nil {
 		return *p, err
 	}
-	if err := decodeInto(b.queryValues(), sv, "query"); err != nil {
+	var query url.Values
+	if planOf(sv.Type(), "query").has() {
+		query = b.queryValues()
+	}
+	if err := decodeInto(query, sv, "query"); err != nil {
 		return *p, err
 	}
 	return *p, validate(p)
@@ -349,16 +392,14 @@ func (b *Base) BindPath[T any]() (T, error) {
 }
 
 func (b *Base) decodePath(sv reflect.Value) error {
-	if len(b.paramNames) == 0 || len(structFields(sv.Type(), "param")) == 0 {
+	if !planOf(sv.Type(), "param").has() {
 		return nil
 	}
-	vals := make(url.Values, len(b.paramNames))
-	for i, n := range b.paramNames {
-		if i < len(b.paramVals) {
-			vals[n] = b.paramVals[i : i+1 : i+1]
-		}
+	fails, err := decodeValues((*pathSource)(b), sv, "param")
+	if err != nil {
+		return ErrInternalServerError.WithError(err)
 	}
-	if fails := decodeValues(vals, sv, "param"); fails != nil {
+	if fails != nil {
 		_, cause := failed(fails)
 		return ErrNotFound.WithError(cause)
 	}
@@ -366,8 +407,8 @@ func (b *Base) decodePath(sv reflect.Value) error {
 }
 
 // BindHeader fills a T from the request headers and validates it, through the
-// `header` tag, whose value is the header name in any case. It reports errors
-// as [Base.Bind] does.
+// `header` tag, whose value is the header name in any case. The split option
+// and the default tag of [Base.Bind] apply. It reports errors as Bind does.
 func (b *Base) BindHeader[T any]() (T, error) {
 	p, sv, err := newTarget[T]()
 	if err != nil {
@@ -408,11 +449,15 @@ func validate[T any](v *T) error {
 	// A body of "null" bound into a pointer leaves nothing to hand the handler,
 	// and the client chose that, not the caller. Refusing it here keeps a nil
 	// out of every handler that binds a pointer.
-	if rv := reflect.ValueOf(*v); rv.Kind() == reflect.Pointer && rv.IsNil() {
+	// reflect.ValueOf(v) and any(v) box a pointer, which allocates nothing,
+	// where any(*v) would copy a struct T to the heap. So *v is tried only
+	// for a T that boxes for free.
+	rv := reflect.ValueOf(v).Elem()
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return ErrBadRequest.WithMessage("the request body is null")
 	}
 	sv, ok := any(v).(Validator)
-	if !ok {
+	if !ok && (rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface) {
 		sv, ok = any(*v).(Validator)
 	}
 	if !ok {
@@ -445,9 +490,14 @@ func validate[T any](v *T) error {
 }
 
 // decodeInto fills sv from vals through tag, and reports the fields that
-// failed as one [ErrBadRequest].
+// failed as one [ErrBadRequest], or a struct that the source cannot fill as an
+// [ErrInternalServerError].
 func decodeInto(vals url.Values, sv reflect.Value, tag string) error {
-	if fails := decodeValues(vals, sv, tag); fails != nil {
+	fails, err := decodeValues(mapSource(vals), sv, tag)
+	if err != nil {
+		return ErrInternalServerError.WithError(err)
+	}
+	if fails != nil {
 		return badFields(fails)
 	}
 	return nil
@@ -647,15 +697,16 @@ func (b *Base) removeSpilledParts() {
 	b.deferred.forms = nil
 }
 
-// otherSources are the tags that name a source other than a JSON body.
+// otherSources are the tags that name a source other than the body.
 var otherSources = [...]string{"query", "param", "header", "form"}
 
-// ofOtherSource reports a field that another source fills and a JSON body must
-// not: it carries a query, param, header or form tag, and no json tag. json/v2
-// fills such a field from the member of its Go name, which would let a client
-// set what the struct meant to take from a header or the path.
-func ofOtherSource(f reflect.StructField) bool {
-	if _, ok := f.Tag.Lookup("json"); ok {
+// ofOtherSource reports a field that another source fills and a body must
+// not: it carries a query, param, header or form tag, and not the tag own of
+// the body, such as json. json/v2 fills such a field from the member of its
+// Go name, which would let a client set what the struct meant to take from a
+// header or the path.
+func ofOtherSource(f reflect.StructField, own string) bool {
+	if _, ok := f.Tag.Lookup(own); ok {
 		return false
 	}
 	for _, tag := range otherSources {
@@ -666,33 +717,73 @@ func ofOtherSource(f reflect.StructField) bool {
 	return false
 }
 
-// clearOtherSources zeroes, in the value v decoded from JSON, every field of
+// clearer zeroes the fields of another source in a value that a body decoded
+// into, for a body whose fields carry the tag own.
+type clearer struct {
+	own   string
+	plans sync.Map // reflect.Type -> *clearPlan
+}
+
+// jsonClearer is the clearer of a JSON body.
+var jsonClearer = &clearer{own: "json"}
+
+// clearPlan is what a clearer does to a type, built once per type.
+type clearPlan struct {
+	reach bool  // a value of the type can hold a field of another source
+	zero  []int // the fields of another source, of a struct
+	walk  []int // the fields of a struct that can hold one
+}
+
+func (c *clearer) plan(t reflect.Type) *clearPlan {
+	if v, ok := c.plans.Load(t); ok {
+		return v.(*clearPlan)
+	}
+	own := c.own
+	p := &clearPlan{reach: typeReaches(t, own, make(map[reflect.Type]bool))}
+	if p.reach && t.Kind() == reflect.Struct {
+		for i := range t.NumField() {
+			f := t.Field(i)
+			switch {
+			case ofOtherSource(f, own):
+				p.zero = append(p.zero, i)
+			// The exported fields of an unexported embedded struct are
+			// still set through it, by json/v2 and by reflect alike.
+			case (f.IsExported() || f.Anonymous) && c.plan(f.Type).reach:
+				p.walk = append(p.walk, i)
+			}
+		}
+	}
+	v, _ := c.plans.LoadOrStore(t, p)
+	return v.(*clearPlan)
+}
+
+// clear zeroes, in the value v that a body decoded into, every field of
 // another source, at any depth. A type that decodes itself is left alone.
-func clearOtherSources(v reflect.Value) {
-	if !v.IsValid() || !reachesOtherSource(v.Type()) {
+func (c *clearer) clear(v reflect.Value) {
+	if !v.IsValid() {
+		return
+	}
+	p := c.plan(v.Type())
+	if !p.reach {
 		return
 	}
 	switch v.Kind() {
 	case reflect.Pointer:
 		if !v.IsNil() {
-			clearOtherSources(v.Elem())
+			c.clear(v.Elem())
 		}
 	case reflect.Struct:
-		for f, fv := range v.Fields() {
-			switch {
-			case ofOtherSource(f):
-				if fv.CanSet() {
-					fv.SetZero()
-				}
-			// The exported fields of an unexported embedded struct are
-			// still set through it, by json/v2 and by reflect alike.
-			case f.IsExported() || f.Anonymous:
-				clearOtherSources(fv)
+		for _, i := range p.zero {
+			if fv := v.Field(i); fv.CanSet() {
+				fv.SetZero()
 			}
+		}
+		for _, i := range p.walk {
+			c.clear(v.Field(i))
 		}
 	case reflect.Slice, reflect.Array:
 		for i := range v.Len() {
-			clearOtherSources(v.Index(i))
+			c.clear(v.Index(i))
 		}
 	case reflect.Map:
 		if !v.CanInterface() {
@@ -701,34 +792,22 @@ func clearOtherSources(v reflect.Value) {
 		for iter := v.MapRange(); iter.Next(); {
 			elem := reflect.New(v.Type().Elem()).Elem()
 			elem.Set(iter.Value())
-			clearOtherSources(elem)
+			c.clear(elem)
 			v.SetMapIndex(iter.Key(), elem)
 		}
 	}
 }
 
-var reachCache sync.Map // reflect.Type -> bool
-
-// reachesOtherSource reports whether a value of type t can hold a field of
-// another source, so a value that cannot is not walked.
-func reachesOtherSource(t reflect.Type) bool {
-	if v, ok := reachCache.Load(t); ok {
-		return v.(bool)
-	}
-	// Only the answer for the root is cached: the answer for a type met
-	// inside a cycle is partial.
-	reach := typeReaches(t, make(map[reflect.Type]bool))
-	reachCache.Store(t, reach)
-	return reach
-}
-
-func typeReaches(t reflect.Type, seen map[reflect.Type]bool) bool {
+// typeReaches reports whether a value of type t can hold a field of another
+// source, so a value that cannot is not walked. The answer for a type met
+// inside a cycle is partial, so clearer.plan asks it of every type as a root.
+func typeReaches(t reflect.Type, own string, seen map[reflect.Type]bool) bool {
 	if decodesItself(t) {
 		return false
 	}
 	switch t.Kind() {
 	case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
-		return typeReaches(t.Elem(), seen)
+		return typeReaches(t.Elem(), own, seen)
 	case reflect.Struct:
 		if seen[t] {
 			return false
@@ -738,7 +817,7 @@ func typeReaches(t reflect.Type, seen map[reflect.Type]bool) bool {
 			if !f.IsExported() && !f.Anonymous {
 				continue
 			}
-			if ofOtherSource(f) || typeReaches(f.Type, seen) {
+			if ofOtherSource(f, own) || typeReaches(f.Type, own, seen) {
 				return true
 			}
 		}
