@@ -1,8 +1,3 @@
-// Package router implements an HTTP router whose handlers take an
-// application-defined request context.
-//
-// A handler is func(C) error, where C embeds [Base]. The router fills the
-// embedded Base before it calls the handler.
 package router
 
 import (
