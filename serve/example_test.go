@@ -168,3 +168,55 @@ func ExampleRunAll() {
 	// private: 503 draining
 	// RunAll returned: <nil>
 }
+
+func ExampleDraining() {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	ticks := time.NewTicker(time.Hour)
+	defer ticks.Stop()
+
+	// A long-lived handler would hold the drain until ShutdownTimeout; this one
+	// ends its answer as soon as the drain starts.
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		for {
+			select {
+			case <-serve.Draining(r.Context()):
+				//nolint:errcheck // The example has no better place to report it.
+				fmt.Fprint(w, "bye")
+				return
+			case <-r.Context().Done():
+				return
+			case <-ticks.C:
+				//nolint:errcheck // The example has no better place to report it.
+				fmt.Fprint(w, "tick")
+			}
+		}
+	})
+
+	read := make(chan struct{})
+	err := serve.Run(ctx, h, serve.Config{
+		Addr:   "127.0.0.1:0",
+		Logger: slog.New(slog.DiscardHandler),
+		OnListen: func(addr net.Addr) {
+			go func() {
+				defer close(read)
+				res, err := http.Get("http://" + addr.String())
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				defer res.Body.Close() //nolint:errcheck // Nothing left to report it to.
+				stop()
+				body, _ := io.ReadAll(res.Body)
+				fmt.Println(string(body))
+			}()
+		},
+	})
+	<-read
+	fmt.Println("Run returned:", err)
+	// Output:
+	// bye
+	// Run returned: <nil>
+}

@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -1149,14 +1150,18 @@ func TestRunChecksTheServerForAContextAlreadyDone(t *testing.T) {
 }
 
 func TestDrainEndsLongLivedRequests(t *testing.T) {
-	var cause atomic.Value
+	var ctxErr atomic.Value
 	entered := make(chan struct{})
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
 		close(entered)
-		<-r.Context().Done()
-		cause.Store(context.Cause(r.Context()))
+		select {
+		case <-serve.Draining(r.Context()):
+			ctxErr.Store(fmt.Sprint(r.Context().Err()))
+		case <-r.Context().Done():
+			ctxErr.Store("client gone")
+		}
 	})
 	s := start(t, h, serve.Config{ShutdownTimeout: 2 * time.Second})
 
@@ -1177,8 +1182,52 @@ func TestDrainEndsLongLivedRequests(t *testing.T) {
 	case <-time.After(wait):
 		t.Fatal("Run did not return while a request stayed open")
 	}
-	if got, _ := cause.Load().(error); !errors.Is(got, serve.ErrDraining) {
-		t.Errorf("cause = %v, want ErrDraining", got)
+	if got := ctxErr.Load(); got != "<nil>" {
+		t.Errorf("request context at the drain = %v, want it live", got)
+	}
+}
+
+func TestDrainLetsAnOrdinaryRequestFinish(t *testing.T) {
+	entered := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-serve.Draining(r.Context())
+		// The work of a request that was in flight when the drain started,
+		// such as a database transaction, still has a live context.
+		time.Sleep(50 * time.Millisecond)
+		if err := r.Context().Err(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = io.WriteString(w, "done")
+	})
+	s := start(t, h, serve.Config{ShutdownTimeout: 2 * time.Second})
+
+	type result struct {
+		body string
+		err  error
+	}
+	got := make(chan result, 1)
+	go func() {
+		res, err := http.Get("http://" + s.addr)
+		if err != nil {
+			got <- result{err: err}
+			return
+		}
+		defer res.Body.Close() //nolint:errcheck // A test body.
+		body, err := io.ReadAll(res.Body)
+		got <- result{string(body), err}
+	}()
+	<-entered
+
+	s.cancel()
+	if err := <-s.errc; err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	s.stopped = true
+	r := <-got
+	if r.err != nil || r.body != "done" {
+		t.Errorf("response = %q, %v; want \"done\"", r.body, r.err)
 	}
 }
 

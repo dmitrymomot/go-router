@@ -13,8 +13,8 @@
 //
 //	err := serve.Run(ctx, r, serve.Config{Addr: ":8080", DrainDelay: 5 * time.Second})
 //
-// A long-lived handler, such as a server-sent event stream, sees its request
-// context end when the drain starts. See [ErrDraining].
+// A long-lived handler, such as a server-sent event stream, learns that the
+// drain started from [Draining].
 package serve
 
 import (
@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"slices"
 	"time"
+
+	"github.com/dmitrymomot/go-router/internal/drain"
 )
 
 // DefaultShutdownTimeout is how long [Run] waits for the requests in flight
@@ -42,12 +44,22 @@ const DefaultReadHeaderTimeout = 10 * time.Second
 // when Config.IdleTimeout is zero.
 const DefaultIdleTimeout = 120 * time.Second
 
-// ErrDraining is the cause of the request contexts that [Run] cancels when the
-// drain starts, right after DrainDelay. A long-lived handler tells a drain
-// from a client that went away with [context.Cause]:
+// Draining reports a channel that closes when the drain of the server that
+// serves ctx starts, right after DrainDelay. The request contexts stay live
+// through the drain, so an ordinary request finishes its work; a long-lived
+// handler, which the drain would otherwise wait for until ShutdownTimeout,
+// selects on the channel and returns:
 //
-//	if errors.Is(context.Cause(c), serve.ErrDraining) { ... }
-var ErrDraining = errors.New("serve: the server is draining")
+//	select {
+//	case <-serve.Draining(c):
+//		return nil
+//	case v := <-updates:
+//		...
+//	}
+//
+// sse.Serve does it on its own. The channel is nil for a context that no
+// server of this package serves, so the select never picks it.
+func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
 
 // Config is what [Run] builds the server from. Set Addr, or hand over a
 // Listener of your own; a Listener wins, and Run closes it either way.
@@ -64,10 +76,10 @@ var ErrDraining = errors.New("serve: the server is draining")
 // WriteTimeout stays zero on purpose, so a server-sent event stream is not cut
 // off; bound a plain handler with a timeout middleware instead.
 //
-// Once the drain starts, Run cancels the context of every request in flight
-// with [ErrDraining] as the cause, so a long-lived handler such as a
-// server-sent event stream ends on its own and the drain does not run out of
-// time. OnServer may set BaseContext; Run wraps it and adds that cancellation.
+// Once the drain starts, Run closes the channel of [Draining], so a long-lived
+// handler such as a server-sent event stream ends on its own and the drain
+// does not run out of time. It cancels no request context. OnServer may set
+// BaseContext; Run wraps it and adds that channel.
 //
 // OnListen runs with the address the server actually listens on, which names
 // the port that ":0" chose. OnServer sees the [http.Server] before it serves,
@@ -152,9 +164,8 @@ type instance struct {
 	h   http.Handler
 	srv *http.Server
 
-	// draining ends the contexts of the requests in flight, with ErrDraining.
-	draining       context.Context
-	cancelDraining context.CancelCauseFunc
+	// draining closes when the drain starts; see Draining.
+	draining chan struct{}
 
 	ln  net.Listener
 	cfg Config
@@ -227,9 +238,9 @@ func (in *instance) closeOwn() {
 }
 
 // withDrainContext wraps BaseContext of the server, the one OnServer may have
-// set, so that the context of every request ends when the drain starts.
+// set, so that the context of every request carries the channel of Draining.
 func (in *instance) withDrainContext(ctx context.Context) {
-	in.draining, in.cancelDraining = context.WithCancelCause(context.Background())
+	in.draining = make(chan struct{})
 	user := in.srv.BaseContext
 	in.srv.BaseContext = func(l net.Listener) context.Context {
 		base := context.WithoutCancel(ctx)
@@ -238,11 +249,7 @@ func (in *instance) withDrainContext(ctx context.Context) {
 				base = b
 			}
 		}
-		bctx, cancel := context.WithCancelCause(base)
-		// The stop function is dropped: the callback runs once, and Serve calls
-		// BaseContext once.
-		context.AfterFunc(in.draining, func() { cancel(ErrDraining) })
-		return bctx
+		return drain.With(base, in.draining)
 	}
 }
 
@@ -340,7 +347,7 @@ func (in *instance) drain(ctx context.Context, stopped <-chan struct{}) error {
 			return nil
 		}
 	}
-	in.cancelDraining(ErrDraining)
+	close(in.draining)
 	return shutdown(ctx, in.srv, in.cfg.ShutdownTimeout)
 }
 
