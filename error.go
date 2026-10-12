@@ -428,14 +428,21 @@ var noSniff = []string{"nosniff"}
 // out with the cache lifetime or the file name of the response that failed.
 // It leaves Content-Type to the caller.
 func ResetForError(h http.Header) {
-	delete(h, HeaderContentLength)
-	delete(h, HeaderContentDisposition)
-	delete(h, HeaderContentEncoding)
-	h.Del(HeaderETag) // "ETag" is not the canonical key.
-	delete(h, HeaderLastModified)
-	delete(h, HeaderCacheControl)
+	// A fresh header has nothing to drop, and each delete of a missing key
+	// still hashes it: skipping them keeps a bare 404 cheap.
+	if len(h) > 0 {
+		delete(h, HeaderContentLength)
+		delete(h, HeaderContentDisposition)
+		delete(h, HeaderContentEncoding)
+		delete(h, canonicalETag) // h.Del would canonicalize on every call.
+		delete(h, HeaderLastModified)
+		delete(h, HeaderCacheControl)
+	}
 	h[HeaderXContentTypeOptions] = noSniff
 }
+
+// canonicalETag is the key net/http stores [HeaderETag] under.
+const canonicalETag = "Etag"
 
 func writeText(b *Base, err error, exposeCause bool) error {
 	he := HTTPErrorOf(err)

@@ -993,16 +993,30 @@ func TestBareErrorResponseDropsTheHeadersToo(t *testing.T) {
 }
 
 func TestResetForError(t *testing.T) {
+	dropped := []string{HeaderContentLength, HeaderContentDisposition, HeaderContentEncoding, HeaderETag, HeaderLastModified, HeaderCacheControl}
 	h := http.Header{}
-	h.Set(HeaderCacheControl, "x")
+	for _, k := range dropped {
+		h.Set(k, "x")
+	}
 	h.Set(HeaderContentType, "image/png")
 	h.Set("X-Other", "kept")
 	ResetForError(h)
-	if h.Get(HeaderCacheControl) != "" || h.Get("X-Other") != "kept" || h.Get(HeaderContentType) != "image/png" {
+	for _, k := range dropped {
+		if h.Get(k) != "" {
+			t.Errorf("%s kept: %v", k, h)
+		}
+	}
+	if h.Get("X-Other") != "kept" || h.Get(HeaderContentType) != "image/png" {
 		t.Errorf("header = %v", h)
 	}
 	if h.Get(HeaderXContentTypeOptions) != "nosniff" {
 		t.Errorf("no nosniff: %v", h)
+	}
+
+	empty := http.Header{}
+	ResetForError(empty)
+	if len(empty) != 1 || empty.Get(HeaderXContentTypeOptions) != "nosniff" {
+		t.Errorf("empty header = %v", empty)
 	}
 }
 
