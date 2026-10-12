@@ -75,8 +75,7 @@ func (a *Assets) precompressed(w http.ResponseWriter, r *http.Request, name stri
 		}
 		rs, ok := f.(io.ReadSeeker)
 		if !ok || info.IsDir() {
-			//nolint:errcheck // The file is read only.
-			f.Close()
+			_ = f.Close() // The file is read only.
 			continue
 		}
 		tag, _ := strings.CutSuffix(a.etags[name], `"`)

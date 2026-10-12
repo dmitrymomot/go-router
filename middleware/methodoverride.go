@@ -36,8 +36,7 @@ func MethodOverride(next http.Handler) http.Handler {
 		}
 		method := req.Header.Get(HeaderMethodOverride)
 		if method == "" && strings.HasPrefix(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
-			//nolint:errcheck // A form that does not parse has no field; the handler meets the same error.
-			req.ParseForm()
+			_ = req.ParseForm() // A form that does not parse has no field; the handler meets the same error.
 			method = req.PostForm.Get(MethodOverrideField)
 		}
 		switch method = strings.ToUpper(method); method {

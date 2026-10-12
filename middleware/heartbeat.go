@@ -30,8 +30,7 @@ func Heartbeat[C router.Context](path string) router.Middleware[C] {
 				res.Header().Set(router.HeaderContentType, "text/plain")
 				res.WriteHeader(http.StatusOK)
 				if req.Method == http.MethodGet {
-					//nolint:errcheck // A probe that hung up has no one to tell.
-					res.Write([]byte("."))
+					_, _ = res.Write([]byte(".")) // A probe that hung up has no one to tell.
 				}
 				return nil
 			}

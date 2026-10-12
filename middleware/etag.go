@@ -161,8 +161,7 @@ func (w *etagWriter) Flush() {
 		w.WriteHeader(http.StatusOK)
 	}
 	w.passthrough()
-	//nolint:errcheck // Flush reports nothing, as [http.Flusher] does.
-	http.NewResponseController(w.ResponseWriter).Flush()
+	_ = http.NewResponseController(w.ResponseWriter).Flush() // Flush reports nothing, as [http.Flusher] does.
 }
 
 // passthrough commits the response as the handler wrote it, buffered body
@@ -179,8 +178,7 @@ func (w *etagWriter) passthrough() {
 	}
 	w.ResponseWriter.WriteHeader(w.code)
 	if buffered && len(w.buf) > 0 {
-		//nolint:errcheck // The client is gone if this fails, and the next write says so.
-		w.ResponseWriter.Write(w.buf)
+		_, _ = w.ResponseWriter.Write(w.buf) // The client is gone if this fails, and the next write says so.
 	}
 	w.buf = nil
 }

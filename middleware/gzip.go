@@ -223,8 +223,7 @@ func (w *gzipWriter) WriteHeader(code int) {
 		h.Get(router.HeaderContentEncoding) != "" ||
 		isEventStream(h.Get(router.HeaderContentType)) ||
 		noTransform(h.Values(router.HeaderCacheControl)) {
-		//nolint:errcheck // Nothing writes a status line and reads an error.
-		w.commit(false, nil)
+		_ = w.commit(false, nil) // Nothing writes a status line and reads an error.
 		return
 	}
 	if n, err := strconv.ParseInt(h.Get(router.HeaderContentLength), 10, 64); err == nil {
@@ -234,8 +233,7 @@ func (w *gzipWriter) WriteHeader(code int) {
 			// the first Write.
 			return
 		}
-		//nolint:errcheck // Same as above: the body follows, and reports it.
-		w.commit(n >= int64(w.min), nil)
+		_ = w.commit(n >= int64(w.min), nil) // Same as above: the body follows, and reports it.
 	}
 }
 
@@ -354,16 +352,13 @@ func (w *gzipWriter) Flush() {
 	}
 	switch w.state {
 	case gzipUndecided:
-		//nolint:errcheck // Flush reports nothing, as [http.Flusher] does.
-		w.commit(true, nil)
+		_ = w.commit(true, nil) // Flush reports nothing, as [http.Flusher] does.
 	case gzipOn:
 		if w.gz != nil {
-			//nolint:errcheck // Same as above.
-			w.gz.Flush()
+			_ = w.gz.Flush() // Same as above.
 		}
 	}
-	//nolint:errcheck // A writer that cannot flush says so and changes nothing.
-	http.NewResponseController(w.ResponseWriter).Flush()
+	_ = http.NewResponseController(w.ResponseWriter).Flush() // A writer that cannot flush says so and changes nothing.
 }
 
 // commit sends the status and decides the answer. sniff is the start of the
@@ -433,14 +428,12 @@ func (w *gzipWriter) finish(ok bool) {
 		if w.code == 0 && len(w.buf) == 0 {
 			return
 		}
-		//nolint:errcheck // The response ends here; nothing reads the error.
-		w.commit(false, nil)
+		_ = w.commit(false, nil) // The response ends here; nothing reads the error.
 	case gzipOn:
 		if !ok || w.head {
 			return
 		}
-		//nolint:errcheck // The response is committed; nothing reads the error.
-		w.gz.Close()
+		_ = w.gz.Close() // The response is committed; nothing reads the error.
 		w.gz.Reset(io.Discard)
 		w.enc.pool.Put(w.gz)
 		w.gz = nil

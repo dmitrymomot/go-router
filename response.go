@@ -77,8 +77,7 @@ func (r *Response) WriteString(s string) (int, error) {
 
 // Flush is [Response.FlushError] without the error, for [http.Flusher].
 func (r *Response) Flush() {
-	//nolint:errcheck // Flush mirrors http.Flusher, which reports no error.
-	r.FlushError()
+	_ = r.FlushError() // Flush mirrors http.Flusher, which reports no error.
 }
 
 // FlushError sends what is buffered to the client, committing the response

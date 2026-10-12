@@ -222,7 +222,7 @@ func (in *instance) open(ctx context.Context) error {
 // left to whoever owns it.
 func (in *instance) closeOwn() {
 	if in.ln != nil && in.cfg.Listener == nil {
-		in.ln.Close() //nolint:errcheck // The listener is going away either way.
+		_ = in.ln.Close() // The listener is going away either way.
 	}
 }
 
@@ -362,7 +362,7 @@ func shutdown(ctx context.Context, srv *http.Server, timeout time.Duration) erro
 	case err == nil:
 		return nil
 	case errors.Is(err, context.DeadlineExceeded):
-		srv.Close() //nolint:errcheck // The drain already failed; the close reports nothing new.
+		_ = srv.Close() // The drain already failed; the close reports nothing new.
 		return fmt.Errorf("serve: the drain did not finish in %s: %w", timeout, err)
 	default:
 		return fmt.Errorf("serve: shut down: %w", err)

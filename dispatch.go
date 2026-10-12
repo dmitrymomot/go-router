@@ -23,12 +23,10 @@ func (r *Router[C]) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	c := root.acquire(w, req)
 	defer root.release(c)
 	if root.preChain != nil {
-		//nolint:errcheck // The error handler already ran inside dispatch.
-		root.dispatch(c, root.preChain)
+		_ = root.dispatch(c, root.preChain) // The error handler already ran inside dispatch.
 		return
 	}
-	//nolint:errcheck // Same as above.
-	root.eng.route(c, req, true)
+	_ = root.eng.route(c, req, true) // Same as above.
 }
 
 func (r *Router[C]) serveObserved(w http.ResponseWriter, req *http.Request) {

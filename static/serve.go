@@ -211,8 +211,7 @@ func (a *Assets) openFile(name string) (fs.File, fs.FileInfo, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		//nolint:errcheck // The open already failed to be useful.
-		f.Close()
+		_ = f.Close() // The open already failed to be useful.
 		return nil, nil, err
 	}
 	return f, info, nil

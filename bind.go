@@ -695,8 +695,7 @@ func (b *Base) removeSpilledParts() {
 		return
 	}
 	for _, form := range b.deferred.forms {
-		//nolint:errcheck // A file that is gone already is the wanted outcome.
-		form.RemoveAll()
+		_ = form.RemoveAll() // A file that is gone already is the wanted outcome.
 	}
 	b.deferred.forms = nil
 }
@@ -961,8 +960,7 @@ func valueOr[T any](s string, def T) T {
 // error, and [Base.FormAs] for a field that must be there. The ParseForm
 // middleware refuses a body that does not parse before the handler runs.
 func (b *Base) FormValue(name string) string {
-	//nolint:errcheck // The caller asked for a value, not for the parse error.
-	b.parseForm()
+	_ = b.parseForm() // The caller asked for a value, not for the parse error.
 	return b.req.PostForm.Get(name)
 }
 

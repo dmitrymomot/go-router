@@ -535,8 +535,7 @@ func writeLines[T string | []byte](w *lines, v T, write func(*bytes.Buffer, T) (
 		j := nextBreak(v, i)
 		if j > i {
 			w.start()
-			//nolint:errcheck // bytes.Buffer never fails.
-			write(w.buf, v[i:j])
+			_, _ = write(w.buf, v[i:j]) // bytes.Buffer never fails.
 			w.cr = false
 		}
 		if j < len(v) {
