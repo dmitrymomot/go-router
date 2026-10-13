@@ -2,7 +2,7 @@
 
 All notable changes to this module are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before v1, a minor release may break the API; each break is listed below with the way to migrate.
 
-## [Unreleased]
+## [0.4.0] - 2026-10-14
 
 This release follows a review of every package against chi, echo and the stdlib. It closes a forged-address hole in RealIP, a dotfile leak in `static` and a text/plain path into `BindJSON`, adds problem details, body decoders, richer binding, conditional GETs and nine middleware, and gives every middleware option one name per concept. Most breaks fail to compile or panic at registration. The first eleven change behavior silently, so read them before you bump the version.
 
@@ -618,6 +618,7 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
+[0.4.0]: https://github.com/dmitrymomot/go-router/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/dmitrymomot/go-router/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dmitrymomot/go-router/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0
