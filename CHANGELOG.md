@@ -2,6 +2,15 @@
 
 All notable changes to this module are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before v1, a minor release may break the API; each break is listed below with the way to migrate.
 
+## [Unreleased]
+
+### Added
+
+- **Package `i18n`**, ported from the i18n engine of `dmitrymomot/forge`. It ships no messages, no locale list and no plural or format rules: the application loads its catalogs with `i18n.New(defaultLocale, i18n.WithMessages(fsys))`, laid out as `{tag}/{namespace}.json`. It covers lookup with a fallback from tag to base language to the default locale, plurals by CLDR category, declared keys checked at startup, a hook for missing keys, and locale formats for numbers, percents, `i18n.Money` and dates.
+- **`i18n.Middleware` and `i18n.MiddlewareWithConfig`** resolve the locale of a request from the sources you list, in order: a route parameter, the context of the application through `FromFunc`, a cookie, the query, a header and `Accept-Language`. They set `Content-Language` and `Vary`, and `i18n.T(c, ...)` then works in a handler and in a component that renders with the handler context. `Bundle.WithLocale` does the same for a job outside a request.
+- **`Bundle.Has` and `i18n.RedirectToLocale`** put the locale in the path: `r.ParamClass("locale", bundle.Has)` makes `/{lang:locale}` match only the locales the catalogs define, and a request for `/` goes to the locale of the visitor.
+- **Package `i18n/cldr`** holds CLDR plural rules and format specs, which an application wires with `WithPlural` and `WithFormat`. Nothing applies them by default.
+
 ## [0.4.0] - 2026-10-14
 
 This release follows a review of every package against chi, echo and the stdlib. It closes a forged-address hole in RealIP, a dotfile leak in `static` and a text/plain path into `BindJSON`, adds problem details, body decoders, richer binding, conditional GETs and nine middleware, and gives every middleware option one name per concept. Most breaks fail to compile or panic at registration. The first eleven change behavior silently, so read them before you bump the version.
