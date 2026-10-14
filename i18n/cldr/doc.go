@@ -18,15 +18,17 @@
 //
 // # Keys
 //
-// Plural rules are keyed by base language (Uk, Pl, Ar) — plural grammar
-// does not vary by region. Format specs are keyed by locale tag (FormatEsMX,
-// FormatEsES) — es-MX and es-ES pluralize identically and format nothing
-// alike.
+// Plural rules are keyed by base language (Uk, Pl, Ar), since plural grammar
+// rarely varies by region. Among the languages here, CLDR splits one:
+// European Portuguese. PtPT reads 0 as other, and Pt reads it as one. Wire
+// both, and package i18n picks the rule by tag, then base language:
 //
-// This means a format spec's tag must match your catalog's locale tag: wiring
-// FormatUkUA only takes effect for a uk-UA locale/catalog (WithFormat resolves
-// tag → base language → Invariant) — a bare uk locale falls through to
-// Invariant formatting even though WithPlural("uk", cldr.Uk) still applies.
+//	i18n.WithPlural("pt", cldr.Pt), i18n.WithPlural("pt-PT", cldr.PtPT)
+//
+// Format specs are keyed by locale tag (FormatEsMX, FormatEsES) — es-MX and
+// es-ES pluralize identically and format nothing alike. A format spec's tag
+// must match your catalog's locale tag: FormatUkUA takes effect for a uk-UA
+// locale and not for a bare uk locale, which falls through to Invariant.
 //
 // # No family buckets
 //

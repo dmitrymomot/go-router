@@ -64,6 +64,9 @@ func TestKnownCases(t *testing.T) {
 		{"pl", 2, i18n.Few},
 		// The Romance family-bucket bug: pt 0 is one, it 0 is other.
 		{"pt", 0, i18n.One},
+		{"pt-PT", 0, i18n.Other},
+		{"pt-PT", 1, i18n.One},
+		{"pt-BR", 0, i18n.One},
 		{"it", 0, i18n.Other},
 		{"fr", 0, i18n.One},
 		{"es", 0, i18n.Other},
@@ -111,11 +114,18 @@ func TestPluralFor(t *testing.T) {
 		t.Errorf("uk(21) = %v, want One", got)
 	}
 
-	// Regional tags reduce to their language.
-	for _, tag := range []string{"pt-BR", "pt_BR", "PT-br"} {
+	// A regional tag reduces to its language, unless CLDR gives the region a
+	// rule of its own.
+	for _, tag := range []string{"pt-BR", "pt_BR", "PT-br", "pt-AO"} {
 		r, ok = cldr.PluralFor(tag)
 		if !ok || r(0) != i18n.One {
 			t.Errorf("PluralFor(%q) ok=%v, want the pt rule (0 is one)", tag, ok)
+		}
+	}
+	for _, tag := range []string{"pt-PT", "pt_pt", "PT-pt"} {
+		r, ok = cldr.PluralFor(tag)
+		if !ok || r(0) != i18n.Other {
+			t.Errorf("PluralFor(%q) ok=%v, want the pt-PT rule (0 is other)", tag, ok)
 		}
 	}
 
@@ -135,7 +145,7 @@ func TestPluralFor(t *testing.T) {
 func TestAllIsComplete(t *testing.T) {
 	want := []string{
 		"en", "de", "nl", "sv", "da", "nb", "is",
-		"fr", "es", "it", "pt", "ro", "ca", "gl",
+		"fr", "es", "it", "pt", "pt-PT", "ro", "ca", "gl",
 		"ru", "uk", "be", "pl", "cs", "sk", "sl", "hr", "sr", "bg", "mk",
 		"lv", "lt", "fi", "et", "hu", "el", "sq", "tr", "eu",
 		"ja", "zh", "ko", "th", "vi", "id", "ms", "hi", "ar", "he",

@@ -38,11 +38,12 @@ func xForm(f xplural.Form) (i18n.PluralCategory, bool) {
 // CLDR 38 (2020) added the whole-millions "many" category to the Romance
 // languages; x/text predates it and still reports "other".
 var staleExceptions = map[string]map[int]string{
-	"fr": {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
-	"es": {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
-	"it": {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
-	"pt": {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
-	"ca": {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
+	"fr":    {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
+	"es":    {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
+	"it":    {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
+	"pt":    {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
+	"pt-PT": {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
+	"ca":    {1000000: "CLDR 38 Romance whole-millions many", 2000000: "ditto", 3000000: "ditto", 10000000: "ditto"},
 	// x/text omits CLDR's i%100!=11 exception for Macedonian, so it
 	// wrongly says "one" at every n%10==1 && n%100==11 probe value.
 	"mk": {

@@ -262,6 +262,12 @@ var (
 	// Pt is the CLDR cardinal rule for Portuguese: one covers 0..1, which is
 	// where it diverges from Italian and Spanish.
 	Pt i18n.PluralRule = romanceZeroOne
+	// PtPT is the CLDR cardinal rule for European Portuguese: one is exactly
+	// 1, as in Spanish, so 0 reads as other where Pt reads it as one. Wire it
+	// beside Pt, and the pt-PT locale takes it while pt-BR keeps Pt:
+	//
+	//	i18n.WithPlural("pt", cldr.Pt), i18n.WithPlural("pt-PT", cldr.PtPT)
+	PtPT i18n.PluralRule = romanceOne
 	// Ro is the CLDR cardinal rule for Romanian: one, few (0 and n%100 in
 	// 1..19), other.
 	Ro i18n.PluralRule = romanian
@@ -344,11 +350,12 @@ var (
 	He i18n.PluralRule = hebrew
 )
 
-// all maps base language to rule. Keep it in sync with the vars above; the
+// all maps base language to rule, and a regional tag to the rule of a region
+// that CLDR splits from its language. Keep it in sync with the vars above; the
 // TestAllIsComplete test pins the full set.
 var all = map[string]i18n.PluralRule{
 	"en": En, "de": De, "nl": Nl, "sv": Sv, "da": Da, "nb": Nb, "is": Is,
-	"fr": Fr, "es": Es, "it": It, "pt": Pt, "ro": Ro, "ca": Ca, "gl": Gl,
+	"fr": Fr, "es": Es, "it": It, "pt": Pt, "pt-PT": PtPT, "ro": Ro, "ca": Ca, "gl": Gl,
 	"ru": Ru, "uk": Uk, "be": Be, "pl": Pl, "cs": Cs, "sk": Sk, "sl": Sl,
 	"hr": Hr, "sr": Sr, "bg": Bg, "mk": Mk,
 	"lv": Lv, "lt": Lt, "fi": Fi, "et": Et, "hu": Hu, "el": El, "sq": Sq,
@@ -357,25 +364,30 @@ var all = map[string]i18n.PluralRule{
 	"hi": Hi, "ar": Ar, "he": He,
 }
 
-// All returns every rule keyed by base language. The returned map is a copy;
-// mutating it affects nothing.
+// All returns every rule keyed by base language, plus "pt-PT", the one region
+// CLDR gives a rule of its own. The keys suit WithPlural as they stand. The
+// returned map is a copy; mutating it affects nothing.
 func All() map[string]i18n.PluralRule {
 	out := make(map[string]i18n.PluralRule, len(all))
 	maps.Copy(out, all)
 	return out
 }
 
-// PluralFor looks up a rule by language tag, reducing a regional tag to its
-// base language ("pt-BR" → "pt"). ok is false for a language this package does
-// not carry — the caller then leaves it unwired, and package i18n's DefaultRule
-// applies, which is honest about knowing nothing rather than guessing.
+// PluralFor looks up a rule by language tag: the tag itself ("pt-PT"), then
+// its base language ("pt-BR" → "pt"). ok is false for a language this package
+// does not carry — the caller then leaves it unwired, and package i18n's
+// DefaultRule applies, which is honest about knowing nothing rather than
+// guessing.
 //
 // This is a convenience for callers. package i18n never calls it.
-func PluralFor(lang string) (i18n.PluralRule, bool) {
-	if lang == "" {
-		return nil, false
+func PluralFor(tag string) (i18n.PluralRule, bool) {
+	base, region, _ := strings.Cut(strings.ReplaceAll(tag, "_", "-"), "-")
+	base = strings.ToLower(base)
+	if region != "" {
+		if r, ok := all[base+"-"+strings.ToUpper(region)]; ok {
+			return r, true
+		}
 	}
-	base, _, _ := strings.Cut(strings.ToLower(strings.ReplaceAll(lang, "_", "-")), "-")
 	r, ok := all[base]
 	return r, ok
 }
