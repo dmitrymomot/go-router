@@ -106,9 +106,12 @@ func TestRulesMatchCLDRGolden(t *testing.T) {
 }
 
 // testdata/formats.json holds, for every spec of the package, the strings that
-// the CLDR patterns of its locale render for one moment, one amount and a few
-// numbers. They are rendered from the patterns directly, not from the Go
-// layouts, so the test also proves each layout says what its pattern says.
+// the CLDR data of its locale renders for one moment, one amount and a few
+// numbers. They come from the CLDR symbols, minimum grouping and number,
+// currency, percent and date patterns alone, never from the spec fields or
+// the Go layouts, so the test proves each spec says what CLDR says. The one
+// shared approximation is FormatSpec's: a space beside a sign or symbol is
+// U+0020.
 type formatGolden struct {
 	CLDR    string                       `json:"cldr"`
 	Time    time.Time                    `json:"time"`
