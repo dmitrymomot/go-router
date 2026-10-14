@@ -40,8 +40,10 @@
 //
 // # Verification
 //
-// Every rule is differential-tested against golang.org/x/text's
-// CLDR-generated tables, with a documented exception list where x/text's
-// vintage is stale (notably the Romance whole-millions "many" added in
-// CLDR 38). x/text is a test-only dependency and appears in no shipped code.
+// Every rule is checked against testdata/plurals.json, a table generated from
+// the cardinal rules of CLDR 48 (unicode-org/cldr-json) for 1,211 whole
+// numbers. The benchmarks module also checks every rule against
+// golang.org/x/text, with a documented exception list where x/text's older
+// CLDR is stale: the Romance whole-millions "many" of CLDR 38, Maltese "two"
+// of CLDR 42, and Hebrew and Marathi. x/text stays out of this module.
 package cldr

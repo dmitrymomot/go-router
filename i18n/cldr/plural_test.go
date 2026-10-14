@@ -133,8 +133,8 @@ func TestPluralFor(t *testing.T) {
 	// gets i18n's DefaultRule, which is honest about knowing nothing.
 	for _, lang := range []string{
 		"xx", "",
-		// Deliberately excluded from scope.
-		"ga", "cy", "mt",
+		// Not carried: Welsh.
+		"cy",
 	} {
 		if _, ok := cldr.PluralFor(lang); ok {
 			t.Errorf("PluralFor(%q) ok, want not ok", lang)
@@ -149,6 +149,9 @@ func TestAllIsComplete(t *testing.T) {
 		"ru", "uk", "be", "pl", "cs", "sk", "sl", "hr", "sr", "bg", "mk",
 		"lv", "lt", "fi", "et", "hu", "el", "sq", "tr", "eu",
 		"ja", "zh", "ko", "th", "vi", "id", "ms", "hi", "ar", "he",
+		"ga", "mt",
+		"bn", "ur", "fa", "sw", "ta", "te", "mr", "gu", "kn", "ml", "pa",
+		"fil", "am", "ha", "my", "az", "kk", "uz", "ka", "hy", "af", "ne",
 	}
 	all := cldr.All()
 	for _, lang := range want {

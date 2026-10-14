@@ -52,6 +52,18 @@ var staleExceptions = map[string]map[int]string{
 		211:  "x/text Macedonian bug: omits CLDR i%100!=11 exception",
 		1011: "x/text Macedonian bug: omits CLDR i%100!=11 exception",
 	},
+	// CLDR 42 gave Maltese a "two" category and moved n%100 == 2 out of
+	// "few"; x/text still reads 2, 102, ... as few. i18n/cldr/testdata, from
+	// CLDR 48, confirms our rule.
+	"mt": {
+		2:    "x/text stale: CLDR 42 added Maltese two",
+		102:  "x/text stale: CLDR 42 narrowed Maltese few to n%100 in 3..10",
+		202:  "x/text stale: CLDR 42 narrowed Maltese few to n%100 in 3..10",
+		1002: "x/text stale: CLDR 42 narrowed Maltese few to n%100 in 3..10",
+	},
+	// Current CLDR has Marathi one at n = 1 alone; x/text still has "i = 0 or
+	// n = 1". i18n/cldr/testdata, from CLDR 48, confirms our rule.
+	"mr": {0: "x/text stale: current CLDR reads Marathi 0 as other"},
 	// x/text predates CLDR v42, which removed Hebrew's round-tens
 	// "many" category; x/text still reports "many" for those values.
 	"he": {

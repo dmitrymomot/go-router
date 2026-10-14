@@ -188,13 +188,61 @@ func lithuanian(n int) i18n.PluralCategory {
 }
 
 // hindi: one covers 0 and 1, with no whole-millions "many" (unlike the
-// Romance languages that share the same low-end shape).
+// Romance languages that share the same low-end shape). Bengali, Persian,
+// Gujarati, Kannada, Amharic, Punjabi and Armenian share it for whole numbers.
 func hindi(n int) i18n.PluralCategory {
 	a := magnitude(n)
 	if a == 0 || a == 1 {
 		return i18n.One
 	}
 	return i18n.Other
+}
+
+// irish: one 1, two 2, few 3..6, many 7..10, other beyond. No modulo: 21 is
+// other, not one.
+func irish(n int) i18n.PluralCategory {
+	switch a := magnitude(n); {
+	case a == 1:
+		return i18n.One
+	case a == 2:
+		return i18n.Two
+	case a >= 3 && a <= 6:
+		return i18n.Few
+	case a >= 7 && a <= 10:
+		return i18n.Many
+	default:
+		return i18n.Other
+	}
+}
+
+// maltese: one 1, two 2, few 0 and n%100 in 3..10, many n%100 in 11..19. The
+// two category arrived in CLDR 42; before it, 2 read as few.
+func maltese(n int) i18n.PluralCategory {
+	a := magnitude(n)
+	switch m := a % 100; {
+	case a == 1:
+		return i18n.One
+	case a == 2:
+		return i18n.Two
+	case a == 0 || m >= 3 && m <= 10:
+		return i18n.Few
+	case m >= 11 && m <= 19:
+		return i18n.Many
+	default:
+		return i18n.Other
+	}
+}
+
+// filipino: one unless the last digit is 4, 6 or 9. CLDR's "i = 1,2,3" clause
+// adds nothing for whole numbers, since 1, 2 and 3 already end in another
+// digit.
+func filipino(n int) i18n.PluralCategory {
+	switch magnitude(n) % 10 {
+	case 4, 6, 9:
+		return i18n.Other
+	default:
+		return i18n.One
+	}
 }
 
 // arabic: the full six-category rule.
@@ -348,6 +396,58 @@ var (
 	// translator must not author a dead "many" form (x/text v0.38 still reports
 	// it — see the staleExceptions note in plural_test.go).
 	He i18n.PluralRule = hebrew
+
+	// Ga is the CLDR cardinal rule for Irish: one, two, few (3..6), many
+	// (7..10), other.
+	Ga i18n.PluralRule = irish
+	// Mt is the CLDR cardinal rule for Maltese: one, two, few (0 and n%100 in
+	// 3..10), many (n%100 in 11..19), other.
+	Mt i18n.PluralRule = maltese
+	// Bn is the CLDR cardinal rule for Bengali: one covers 0 and 1.
+	Bn i18n.PluralRule = hindi
+	// Ur is the CLDR cardinal rule for Urdu: one is exactly 1.
+	Ur i18n.PluralRule = oneOther
+	// Fa is the CLDR cardinal rule for Persian: one covers 0 and 1.
+	Fa i18n.PluralRule = hindi
+	// Sw is the CLDR cardinal rule for Swahili: one is exactly 1.
+	Sw i18n.PluralRule = oneOther
+	// Ta is the CLDR cardinal rule for Tamil: one is exactly 1.
+	Ta i18n.PluralRule = oneOther
+	// Te is the CLDR cardinal rule for Telugu: one is exactly 1.
+	Te i18n.PluralRule = oneOther
+	// Mr is the CLDR cardinal rule for Marathi: one is exactly 1.
+	Mr i18n.PluralRule = oneOther
+	// Gu is the CLDR cardinal rule for Gujarati: one covers 0 and 1.
+	Gu i18n.PluralRule = hindi
+	// Kn is the CLDR cardinal rule for Kannada: one covers 0 and 1.
+	Kn i18n.PluralRule = hindi
+	// Ml is the CLDR cardinal rule for Malayalam: one is exactly 1.
+	Ml i18n.PluralRule = oneOther
+	// Pa is the CLDR cardinal rule for Punjabi: one covers 0 and 1.
+	Pa i18n.PluralRule = hindi
+	// Fil is the CLDR cardinal rule for Filipino: one unless the last digit is
+	// 4, 6 or 9.
+	Fil i18n.PluralRule = filipino
+	// Am is the CLDR cardinal rule for Amharic: one covers 0 and 1.
+	Am i18n.PluralRule = hindi
+	// Ha is the CLDR cardinal rule for Hausa: one is exactly 1.
+	Ha i18n.PluralRule = oneOther
+	// My is the CLDR cardinal rule for Burmese: no plural distinction.
+	My i18n.PluralRule = otherOnly
+	// Az is the CLDR cardinal rule for Azerbaijani: one is exactly 1.
+	Az i18n.PluralRule = oneOther
+	// Kk is the CLDR cardinal rule for Kazakh: one is exactly 1.
+	Kk i18n.PluralRule = oneOther
+	// Uz is the CLDR cardinal rule for Uzbek: one is exactly 1.
+	Uz i18n.PluralRule = oneOther
+	// Ka is the CLDR cardinal rule for Georgian: one is exactly 1.
+	Ka i18n.PluralRule = oneOther
+	// Hy is the CLDR cardinal rule for Armenian: one covers 0 and 1.
+	Hy i18n.PluralRule = hindi
+	// Af is the CLDR cardinal rule for Afrikaans: one is exactly 1.
+	Af i18n.PluralRule = oneOther
+	// Ne is the CLDR cardinal rule for Nepali: one is exactly 1.
+	Ne i18n.PluralRule = oneOther
 )
 
 // all maps base language to rule, and a regional tag to the rule of a region
@@ -362,6 +462,11 @@ var all = map[string]i18n.PluralRule{
 	"tr": Tr, "eu": Eu,
 	"ja": Ja, "zh": Zh, "ko": Ko, "th": Th, "vi": Vi, "id": Id, "ms": Ms,
 	"hi": Hi, "ar": Ar, "he": He,
+	"ga": Ga, "mt": Mt,
+	"bn": Bn, "ur": Ur, "fa": Fa, "sw": Sw, "ta": Ta, "te": Te, "mr": Mr,
+	"gu": Gu, "kn": Kn, "ml": Ml, "pa": Pa, "fil": Fil, "am": Am, "ha": Ha,
+	"my": My, "az": Az, "kk": Kk, "uz": Uz, "ka": Ka, "hy": Hy, "af": Af,
+	"ne": Ne,
 }
 
 // All returns every rule keyed by base language, plus "pt-PT", the one region
