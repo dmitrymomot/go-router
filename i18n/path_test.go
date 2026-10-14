@@ -79,18 +79,14 @@ func TestRedirectToLocaleRefusesPattern(t *testing.T) {
 		t.Errorf("code = %d, want 500", rec.Code)
 	}
 
-	for name, fn := range map[string]func(){
-		"nil bundle":  func() { i18n.RedirectToLocale[*tctx](nil, "/{lang}", "lang") },
-		"wrong name":  func() { i18n.RedirectToLocale[*tctx](b, "/{lang}", "locale") },
-		"bad pattern": func() { i18n.RedirectToLocale[*tctx](b, "lang/{lang}", "lang") },
+	for name, tc := range map[string]struct {
+		want string
+		fn   func()
+	}{
+		"nil bundle":  {"i18n: ", func() { i18n.RedirectToLocale[*tctx](nil, "/{lang}", "lang") }},
+		"wrong name":  {"router: ", func() { i18n.RedirectToLocale[*tctx](b, "/{lang}", "locale") }},
+		"bad pattern": {"router: ", func() { i18n.RedirectToLocale[*tctx](b, "lang/{lang}", "lang") }},
 	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("%s: no panic", name)
-				}
-			}()
-			fn()
-		}()
+		t.Run(name, func(t *testing.T) { mustPanic(t, tc.want, tc.fn) })
 	}
 }

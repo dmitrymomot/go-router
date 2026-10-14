@@ -255,14 +255,6 @@ func TestMiddlewarePanics(t *testing.T) {
 			}})
 		},
 	} {
-		func() {
-			defer func() {
-				msg, _ := recover().(string)
-				if !strings.HasPrefix(msg, "i18n: ") {
-					t.Errorf("%s: panic = %q, want an i18n panic", name, msg)
-				}
-			}()
-			fn()
-		}()
+		t.Run(name, func(t *testing.T) { mustPanic(t, "i18n: ", fn) })
 	}
 }
