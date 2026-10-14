@@ -368,6 +368,8 @@ func TestPercentBefore(t *testing.T) {
 	for _, tc := range []struct{ name, got, want string }{
 		{"tr", b.Percent(de, 0.5), "%50"},
 		{"tr negative", b.Percent(de, -0.125), "-%12,5"},
+		{"tr negative zero", b.Percent(de, -1e-10), "-%0"},
+		{"trailing negative zero", b.Percent(b.ParseOrDefault("en"), -1e-10), "-0%"},
 		{"tr grouped", b.Percent(de, 12.5), "%1.250"},
 		{"eu", b.Percent(vi, 0.5), "% 50"},
 		{"NaN", b.Percent(de, math.NaN()), "%NaN"},

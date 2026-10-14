@@ -260,8 +260,10 @@ const percentFractionScale = 1e6
 func appendPercentSpec(dst []byte, ratio float64, s *FormatSpec) []byte {
 	p := math.Round(ratio*100*percentFractionScale) / percentFractionScale
 	if s.PercentBefore {
-		// The minus leads the sign, as in CLDR's "-%50".
-		if p < 0 {
+		// The minus leads the sign, as in CLDR's "-%50". Signbit catches the -0
+		// that a tiny negative ratio rounds to, which the trailing form also
+		// renders with its minus ("-0%").
+		if math.Signbit(p) && !math.IsNaN(p) {
 			dst = append(dst, '-')
 			p = -p
 		}
