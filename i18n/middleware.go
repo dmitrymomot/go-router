@@ -130,8 +130,10 @@ type Config[C router.Context] struct {
 }
 
 // Middleware resolves the locale of each request from Accept-Language, then the
-// default locale of b, and puts a [Localizer] on the context, where [From] and
-// the context functions such as [T] read it. It sets Content-Language and adds
+// default locale of b, and puts a [Localizer] on the request context, where
+// [From] and the context functions such as [T] read it: through the handler
+// context, through c.Request().Context(), and through the ctx a templ
+// component renders with, as in { i18n.T(ctx, "app.title") }. It sets Content-Language and adds
 // Accept-Language to Vary.
 //
 // Middleware panics if b is nil.
@@ -183,7 +185,7 @@ func MiddlewareWithConfig[C router.Context](cfg Config[C]) router.Middleware[C] 
 				h.Add("Vary", v)
 			}
 			h.Set("Content-Language", loc.Tag())
-			c.Set(localizerKey, b.For(loc))
+			c.SetContext(b.WithLocale(c.Request().Context(), loc))
 			return next(c)
 		}
 	}

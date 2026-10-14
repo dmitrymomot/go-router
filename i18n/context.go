@@ -5,18 +5,14 @@ import (
 	"time"
 )
 
-// localizerKey is the key of the Localizer that [MiddlewareWithConfig] puts
-// on a request with router.Context.Set. A string, since the store of Set takes
-// one; a context that a handler passes on still answers it, because
-// router.Base.Value reads that store.
-const localizerKey = "i18n.localizer"
-
-// ctxKey carries the Localizer of [Bundle.WithLocale], in a context that no
-// router built.
+// ctxKey carries the Localizer of [Bundle.WithLocale]. The middleware puts it
+// on the request context, so the handler context answers it too:
+// router.Base.Value falls back to the request context.
 type ctxKey struct{}
 
-// WithLocale returns a copy of ctx that carries a [Localizer] for loc, for
-// code that runs outside a request, such as a background job:
+// WithLocale returns a copy of ctx that carries a [Localizer] for loc. The
+// middleware calls it on each request; code that runs outside a request, such
+// as a background job, calls it itself:
 //
 //	ctx = bundle.WithLocale(ctx, bundle.ParseOrDefault(user.Locale))
 //	subject := i18n.T(ctx, "mail.welcome.subject")
@@ -34,19 +30,17 @@ func (b *Bundle) Ctx(ctx context.Context) Localizer {
 }
 
 // From returns the [Localizer] that ctx carries: the one the middleware put
-// on the request, or the one of [Bundle.WithLocale]. A handler context is a
-// context, so From(c) works, and so does the context a component renders
-// with. Without one, From returns the zero Localizer, which fails closed:
-// messages echo their keys and values take the Invariant format.
+// on the request, or the one of [Bundle.WithLocale]. Any context of the
+// request works: the handler context c, c.Request().Context(), the ctx of a
+// templ component, and a context derived from any of them. Without one, From
+// returns the zero Localizer, which fails closed: messages echo their keys and
+// values take the Invariant format.
 func From(ctx context.Context) Localizer {
 	l, _ := lookup(ctx)
 	return l
 }
 
 func lookup(ctx context.Context) (Localizer, bool) {
-	if l, ok := ctx.Value(localizerKey).(Localizer); ok {
-		return l, true
-	}
 	l, ok := ctx.Value(ctxKey{}).(Localizer)
 	return l, ok
 }

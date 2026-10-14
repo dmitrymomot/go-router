@@ -171,19 +171,46 @@ func TestMiddlewareKeepsVary(t *testing.T) {
 	}
 }
 
-func TestMiddlewareReachesComponents(t *testing.T) {
+// TestMiddlewareReachesEveryContext renders a component the way templ does,
+// with whatever ctx it is handed, through each context a request offers.
+func TestMiddlewareReachesEveryContext(t *testing.T) {
+	items := router.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, err := io.WriteString(w, i18n.TN(ctx, "app.items", 3)+" "+i18n.T(ctx, "app.hi"))
+		return err
+	})
 	r := newRouter()
 	r.Use(i18n.Middleware[*tctx](webBundle(t)))
-	r.GET("/", func(c *tctx) error {
-		return c.Render(http.StatusOK, router.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-			_, err := io.WriteString(w, i18n.TN(ctx, "app.items", 3))
+	r.GET("/render", func(c *tctx) error { return c.Render(http.StatusOK, items) })
+	r.GET("/stream", func(c *tctx) error { return c.RenderStream(http.StatusOK, items) })
+	r.GET("/request", func(c *tctx) error {
+		// A service handed the request context, as SetContext advises.
+		var buf strings.Builder
+		if err := items.Render(c.Request().Context(), &buf); err != nil {
 			return err
-		}))
+		}
+		return c.String(http.StatusOK, buf.String())
 	})
+	r.GET("/derived", func(c *tctx) error {
+		ctx, cancel := context.WithCancel(c.Request().Context())
+		defer cancel()
+		var buf strings.Builder
+		if err := items.Render(ctx, &buf); err != nil {
+			return err
+		}
+		return c.String(http.StatusOK, buf.String())
+	})
+	// A plain http.Handler, as templ.Handler is, sees only r.Context().
+	r.GET("/handler", router.WrapHandler[*tctx](http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_ = items.Render(req.Context(), w)
+	})))
 
-	rec := serve(r, "/", nil)
-	if got := rec.Body.String(); got != "3 items" {
-		t.Errorf("body = %q, want %q", got, "3 items")
+	// uk has no app.items, so that key falls back to en.
+	const want = "3 items Привіт"
+	for _, path := range []string{"/render", "/stream", "/request", "/derived", "/handler"} {
+		rec := serve(r, path, map[string]string{"Accept-Language": "uk"})
+		if got := rec.Body.String(); got != want {
+			t.Errorf("GET %s = %q, want %q", path, got, want)
+		}
 	}
 }
 

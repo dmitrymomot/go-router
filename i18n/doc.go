@@ -90,14 +90,19 @@
 //	    },
 //	}))
 //
-// A handler context is a context.Context, so the context functions take it as
-// it stands, and so does the context a component renders with:
+// The middleware puts the Localizer on the request context, so the context
+// functions work with any context of the request: the handler context c,
+// c.Request().Context(), a context derived from either, and the ctx of a
+// templ component, whether c.Render renders it or templ.Handler serves it:
 //
 //	func show(c *Context) error {
 //	    title := i18n.T(c, "app.title")
 //	    price := i18n.Currency(c, i18n.Money{Minor: 1999, Digits: 2, Symbol: "$"})
 //	    ...
 //	}
+//
+//	// in a .templ file
+//	<h1>{ i18n.T(ctx, "app.title") }</h1>
 //
 // [FromFunc] reads the context type of the application, so a locale that a
 // signed-in user saved needs no lookup.
