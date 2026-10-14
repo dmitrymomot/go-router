@@ -49,12 +49,20 @@ func FromCookie(name string) Source {
 }
 
 // FromQuery reads the locale from the query parameter name. It reads the URL
-// alone and never parses a form body.
+// alone, through the query that router.Base.Query caches, and never parses a
+// form body.
 func FromQuery(name string) Source {
 	mustName("FromQuery", name)
 	return Source{read: func(b *Bundle, c router.Context) (Locale, bool) {
-		return b.parse(c.Request().URL.Query().Get(name))
+		return b.parse(baseOf(c).Query(name))
 	}}
+}
+
+// baseOf returns the router.Base of c. Every router.Context embeds one, so the
+// lookup cannot miss.
+func baseOf(c router.Context) *router.Base {
+	base, _ := router.FromContext(c)
+	return base
 }
 
 // FromHeader reads the locale from a request header that holds one tag, such
