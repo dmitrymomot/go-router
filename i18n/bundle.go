@@ -49,7 +49,10 @@ type localeData struct {
 	plurals  map[string]*pluralMsg
 	rule     PluralRule
 	tag      string
-	lang     string
+	// contentLanguage is tag as a header value, built once so the middleware
+	// sets Content-Language with no allocation.
+	contentLanguage []string
+	lang            string
 	// chain is the lookup order: this locale, its base language (if distinct
 	// and present), then the default locale. Deduplicated, precomputed at New.
 	chain  []int
@@ -126,6 +129,7 @@ func New(defaultLocale string, opts ...Option) (*Bundle, error) {
 	for tag, rc := range raw {
 		ld := &b.locales[b.byTag[tag]]
 		ld.tag = tag
+		ld.contentLanguage = []string{tag}
 		ld.lang = Locale{tag: tag}.Lang()
 		ld.rule, ld.ruleWired = resolvePlural(cf.plurals, tag, ld.lang)
 		ld.format = resolveFormat(cf.formats, tag, ld.lang)

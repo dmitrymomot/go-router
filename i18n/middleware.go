@@ -41,7 +41,7 @@ func FromParam(name string) Source {
 // choice of the user is up to the application.
 func FromCookie(name string) Source {
 	mustName("FromCookie", name)
-	return Source{vary: "Cookie", read: func(b *Bundle, c router.Context) (int, bool) {
+	return Source{vary: router.HeaderCookie, read: func(b *Bundle, c router.Context) (int, bool) {
 		ck, err := c.Request().Cookie(name)
 		if err != nil {
 			return 0, false
@@ -80,8 +80,8 @@ func FromHeader(name string) Source {
 // FromAcceptLanguage negotiates the locale from the Accept-Language header,
 // with its q values.
 func FromAcceptLanguage() Source {
-	return Source{vary: "Accept-Language", read: func(b *Bundle, c router.Context) (int, bool) {
-		return b.negotiate(c.Request().Header.Get("Accept-Language"))
+	return Source{vary: router.HeaderAcceptLanguage, read: func(b *Bundle, c router.Context) (int, bool) {
+		return b.negotiate(c.Request().Header.Get(router.HeaderAcceptLanguage))
 	}}
 }
 
@@ -151,7 +151,8 @@ func Middleware[C router.Context](b *Bundle) router.Middleware[C] {
 // Vary names the header of every source in the list, not the header of the
 // source that won: a request without the cookie would negotiate from
 // Accept-Language, so a cache keyed on the URL alone would serve the wrong
-// language. Vary values already present are kept.
+// language. router.AddVary adds them, so a name already listed, or a Vary of
+// "*", is left as it is.
 //
 // MiddlewareWithConfig panics if Bundle is nil, a source is the zero Source,
 // or a [FromFunc] source reads a context type other than C.
@@ -190,10 +191,10 @@ func MiddlewareWithConfig[C router.Context](cfg Config[C]) router.Middleware[C] 
 				}
 			}
 			h := c.Response().Header()
-			for _, v := range vary {
-				h.Add("Vary", v)
-			}
-			h.Set("Content-Language", b.locales[idx].tag)
+			router.AddVary(h, vary...)
+			// A shared slice of capacity one: a later Add copies it rather
+			// than writing into another response's header.
+			h[router.HeaderContentLanguage] = b.locales[idx].contentLanguage
 			c.SetContext(context.WithValue(c.Request().Context(), ctxKey{}, Localizer{b: b, idx: idx}))
 			return next(c)
 		}

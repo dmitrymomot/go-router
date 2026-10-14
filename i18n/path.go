@@ -38,13 +38,14 @@ func RedirectToLocale[C router.Context](b *Bundle, pattern, name string) router.
 	return func(c C) error {
 		l, ok := lookup(c)
 		if !ok {
-			l = b.For(b.Negotiate(c.Request().Header.Get("Accept-Language")))
+			l = b.For(b.Negotiate(c.Request().Header.Get(router.HeaderAcceptLanguage)))
 		}
 		target, err := router.Expand(pattern, name, l.Locale().Tag())
 		if err != nil {
 			return err
 		}
-		c.Response().Header().Add("Vary", "Accept-Language")
-		return baseOf(c).Redirect(http.StatusFound, target)
+		base := baseOf(c)
+		base.Vary(router.HeaderAcceptLanguage)
+		return base.Redirect(http.StatusFound, target)
 	}
 }

@@ -157,19 +157,42 @@ func TestMiddlewareSkip(t *testing.T) {
 }
 
 func TestMiddlewareKeepsVary(t *testing.T) {
-	r := newRouter()
-	r.Use(func(next router.HandlerFunc[*tctx]) router.HandlerFunc[*tctx] {
-		return func(c *tctx) error {
-			c.Response().Header().Add("Vary", "Origin")
-			return next(c)
-		}
-	})
-	r.Use(i18n.Middleware[*tctx](webBundle(t)))
-	r.GET("/", hiHandler)
+	for outer, want := range map[string][]string{
+		"Origin":          {"Origin", "Accept-Language"},
+		"Accept-Language": {"Accept-Language"}, // listed once
+		"*":               {"*"},               // varies on everything already
+	} {
+		r := newRouter()
+		r.Use(func(next router.HandlerFunc[*tctx]) router.HandlerFunc[*tctx] {
+			return func(c *tctx) error {
+				c.Response().Header().Add("Vary", outer)
+				return next(c)
+			}
+		})
+		r.Use(i18n.Middleware[*tctx](webBundle(t)))
+		r.GET("/", hiHandler)
 
-	rec := serve(r, "/", nil)
-	if got := rec.Header().Values("Vary"); !slices.Equal(got, []string{"Origin", "Accept-Language"}) {
-		t.Errorf("Vary = %q", got)
+		rec := serve(r, "/", nil)
+		if got := rec.Header().Values("Vary"); !slices.Equal(got, want) {
+			t.Errorf("outer Vary %q: Vary = %q, want %q", outer, got, want)
+		}
+	}
+}
+
+// TestContentLanguageIsNotShared proves that a handler adding to
+// Content-Language never writes into the value another response holds.
+func TestContentLanguageIsNotShared(t *testing.T) {
+	r := newRouter()
+	r.Use(i18n.Middleware[*tctx](webBundle(t)))
+	r.GET("/", func(c *tctx) error {
+		c.Response().Header().Add("Content-Language", "x-extra")
+		return c.NoContent(http.StatusNoContent)
+	})
+	for range 2 {
+		rec := serve(r, "/", nil)
+		if got := rec.Header().Values("Content-Language"); !slices.Equal(got, []string{"en", "x-extra"}) {
+			t.Errorf("Content-Language = %q", got)
+		}
 	}
 }
 
