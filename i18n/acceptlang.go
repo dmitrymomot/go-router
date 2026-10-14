@@ -76,18 +76,18 @@ func parseAcceptLanguage(header string) []langQ {
 // negotiate picks the best supported locale for header. ok is false when
 // nothing matches, which lets a caller (e.g. the middleware's resolver chain)
 // fall through to another source before defaulting.
-func (b *Bundle) negotiate(header string) (Locale, bool) {
+func (b *Bundle) negotiate(header string) (int, bool) {
 	for _, lq := range parseAcceptLanguage(header) {
 		if lq.tag == "*" {
-			return b.Default(), true
+			return b.defaultIdx, true
 		}
-		// Parse applies exact-then-base matching, so negotiation and lookup
-		// agree by construction.
-		if loc, err := b.Parse(lq.tag); err == nil {
-			return loc, true
+		// The tag is normalized already. resolveIdx applies the exact-then-base
+		// matching of Parse, so negotiation and lookup agree by construction.
+		if i, ok := b.resolveIdx(Locale{tag: lq.tag}); ok {
+			return i, true
 		}
 	}
-	return Locale{}, false
+	return 0, false
 }
 
 // Negotiate picks the best supported locale for an Accept-Language header,
@@ -95,8 +95,9 @@ func (b *Bundle) negotiate(header string) (Locale, bool) {
 // names nothing the bundle supports. Matching runs against the locales the
 // application's catalogs declare — there is no framework list to miss.
 func (b *Bundle) Negotiate(header string) Locale {
-	if loc, ok := b.negotiate(header); ok {
-		return loc
+	i, ok := b.negotiate(header)
+	if !ok {
+		i = b.defaultIdx
 	}
-	return b.Default()
+	return Locale{tag: b.locales[i].tag}
 }

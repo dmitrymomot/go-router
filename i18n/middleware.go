@@ -1,6 +1,7 @@
 package i18n
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -14,7 +15,8 @@ import (
 // with [FromParam], [FromCookie], [FromQuery], [FromHeader],
 // [FromAcceptLanguage] or [FromFunc]; the zero Source is invalid.
 type Source struct {
-	read func(b *Bundle, c router.Context) (Locale, bool)
+	// read reports the index of the locale it found in b.
+	read func(b *Bundle, c router.Context) (int, bool)
 	// ctx is the context type a FromFunc source reads, or nil for a source
 	// that reads any.
 	ctx  reflect.Type
@@ -29,8 +31,8 @@ type Source struct {
 //	r.Route("/{lang:locale}", func(g *router.Router[*Context]) { ... })
 func FromParam(name string) Source {
 	mustName("FromParam", name)
-	return Source{read: func(b *Bundle, c router.Context) (Locale, bool) {
-		return b.parse(c.Param(name))
+	return Source{read: func(b *Bundle, c router.Context) (int, bool) {
+		return b.match(c.Param(name))
 	}}
 }
 
@@ -39,12 +41,12 @@ func FromParam(name string) Source {
 // choice of the user is up to the application.
 func FromCookie(name string) Source {
 	mustName("FromCookie", name)
-	return Source{vary: "Cookie", read: func(b *Bundle, c router.Context) (Locale, bool) {
+	return Source{vary: "Cookie", read: func(b *Bundle, c router.Context) (int, bool) {
 		ck, err := c.Request().Cookie(name)
 		if err != nil {
-			return Locale{}, false
+			return 0, false
 		}
-		return b.parse(ck.Value)
+		return b.match(ck.Value)
 	}}
 }
 
@@ -53,8 +55,8 @@ func FromCookie(name string) Source {
 // form body.
 func FromQuery(name string) Source {
 	mustName("FromQuery", name)
-	return Source{read: func(b *Bundle, c router.Context) (Locale, bool) {
-		return b.parse(baseOf(c).Query(name))
+	return Source{read: func(b *Bundle, c router.Context) (int, bool) {
+		return b.match(baseOf(c).Query(name))
 	}}
 }
 
@@ -70,15 +72,15 @@ func baseOf(c router.Context) *router.Base {
 func FromHeader(name string) Source {
 	mustName("FromHeader", name)
 	name = http.CanonicalHeaderKey(name)
-	return Source{vary: name, read: func(b *Bundle, c router.Context) (Locale, bool) {
-		return b.parse(c.Request().Header.Get(name))
+	return Source{vary: name, read: func(b *Bundle, c router.Context) (int, bool) {
+		return b.match(c.Request().Header.Get(name))
 	}}
 }
 
 // FromAcceptLanguage negotiates the locale from the Accept-Language header,
 // with its q values.
 func FromAcceptLanguage() Source {
-	return Source{vary: "Accept-Language", read: func(b *Bundle, c router.Context) (Locale, bool) {
+	return Source{vary: "Accept-Language", read: func(b *Bundle, c router.Context) (int, bool) {
 		return b.negotiate(c.Request().Header.Get("Accept-Language"))
 	}}
 }
@@ -106,12 +108,12 @@ func FromFunc[C router.Context](varyHeader string, fn func(c C) (string, bool)) 
 	if varyHeader != "" {
 		varyHeader = http.CanonicalHeaderKey(varyHeader)
 	}
-	return Source{vary: varyHeader, ctx: reflect.TypeFor[C](), read: func(b *Bundle, c router.Context) (Locale, bool) {
+	return Source{vary: varyHeader, ctx: reflect.TypeFor[C](), read: func(b *Bundle, c router.Context) (int, bool) {
 		tag, ok := fn(c.(C))
 		if !ok {
-			return Locale{}, false
+			return 0, false
 		}
-		return b.parse(tag)
+		return b.match(tag)
 	}}
 }
 
@@ -119,15 +121,6 @@ func mustName(fn, name string) {
 	if name == "" {
 		panic("i18n: " + fn + " needs a name")
 	}
-}
-
-// parse is Parse that reports a miss as false, for a source that passes on it.
-func (b *Bundle) parse(tag string) (Locale, bool) {
-	if tag == "" {
-		return Locale{}, false
-	}
-	loc, err := b.Parse(tag)
-	return loc, err == nil
 }
 
 // Config configures [MiddlewareWithConfig]. Bundle is required. Sources are
@@ -145,8 +138,8 @@ type Config[C router.Context] struct {
 // default locale of b, and puts a [Localizer] on the request context, where
 // [From] and the context functions such as [T] read it: through the handler
 // context, through c.Request().Context(), and through the ctx a templ
-// component renders with, as in { i18n.T(ctx, "app.title") }. It sets Content-Language and adds
-// Accept-Language to Vary.
+// component renders with, as in { i18n.T(ctx, "app.title") }. It sets
+// Content-Language and adds Accept-Language to Vary.
 //
 // Middleware panics if b is nil.
 func Middleware[C router.Context](b *Bundle) router.Middleware[C] {
@@ -189,10 +182,10 @@ func MiddlewareWithConfig[C router.Context](cfg Config[C]) router.Middleware[C] 
 			if cfg.Skip != nil && cfg.Skip(c) {
 				return next(c)
 			}
-			loc := b.Default()
+			idx := b.defaultIdx
 			for _, s := range sources {
-				if l, ok := s.read(b, c); ok {
-					loc = l
+				if i, ok := s.read(b, c); ok {
+					idx = i
 					break
 				}
 			}
@@ -200,8 +193,8 @@ func MiddlewareWithConfig[C router.Context](cfg Config[C]) router.Middleware[C] 
 			for _, v := range vary {
 				h.Add("Vary", v)
 			}
-			h.Set("Content-Language", loc.Tag())
-			c.SetContext(b.WithLocale(c.Request().Context(), loc))
+			h.Set("Content-Language", b.locales[idx].tag)
+			c.SetContext(context.WithValue(c.Request().Context(), ctxKey{}, Localizer{b: b, idx: idx}))
 			return next(c)
 		}
 	}

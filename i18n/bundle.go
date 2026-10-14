@@ -503,23 +503,26 @@ func (b *Bundle) AppendTN(dst []byte, loc Locale, key string, n int, args ...any
 // will actually be used: exact tag, else base language. It reports
 // ErrUnknownLocale rather than silently defaulting, for callers that care.
 func (b *Bundle) Parse(tag string) (Locale, error) {
-	l := newLocale(tag)
-	if l.IsZero() {
-		return Locale{}, fmt.Errorf("%w: %q", ErrUnknownLocale, tag)
-	}
-	if i, ok := b.resolveIdx(l); ok {
+	if i, ok := b.match(tag); ok {
 		return Locale{tag: b.locales[i].tag}, nil
 	}
 	return Locale{}, fmt.Errorf("%w: %q", ErrUnknownLocale, tag)
 }
 
+// match is Parse as an index, with no error to build: the request path takes
+// a miss as the normal case and passes to the next source.
+func (b *Bundle) match(tag string) (int, bool) {
+	return b.resolveIdx(newLocale(tag))
+}
+
 // ParseOrDefault is Parse with the default locale instead of an error. Empty,
 // unknown, and malformed input are all first-class paths.
 func (b *Bundle) ParseOrDefault(tag string) Locale {
-	if l, err := b.Parse(tag); err == nil {
-		return l
+	i, ok := b.match(tag)
+	if !ok {
+		i = b.defaultIdx
 	}
-	return b.Default()
+	return Locale{tag: b.locales[i].tag}
 }
 
 // Default returns the bundle's default locale.
