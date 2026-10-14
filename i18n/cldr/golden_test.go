@@ -5,6 +5,8 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,17 +16,62 @@ import (
 
 // testdata/plurals.json holds the category of every probe number for every
 // rule of the package, evaluated from the cardinal rules of unicode-org/cldr-json
-// (cldr-core/supplemental/plurals.json) for whole numbers: one letter per
-// probe, z zero, o one, t two, f few, m many, x other. It is generated, so a
-// change to a rule must come with a change to CLDR, not to the file.
+// (cldr-core/supplemental/plurals.json) for whole numbers. The probes are 0 to
+// 1200 and a few larger numbers. Each rule is a list of runs such as "3-10 few":
+// every probe from 3 to 10 takes few. The runs cover the probes in order, each
+// once. The file is generated, so a change to a rule must come with a change
+// to CLDR, not to the file.
 type golden struct {
-	CLDR   string            `json:"cldr"`
-	Probes []int             `json:"probes"`
-	Rules  map[string]string `json:"rules"`
+	CLDR   string `json:"cldr"`
+	Probes struct {
+		From  int   `json:"from"`
+		To    int   `json:"to"`
+		Extra []int `json:"extra"`
+	} `json:"probes"`
+	Rules map[string][]string `json:"rules"`
 }
 
-var letters = map[byte]i18n.PluralCategory{
-	'z': i18n.Zero, 'o': i18n.One, 't': i18n.Two, 'f': i18n.Few, 'm': i18n.Many, 'x': i18n.Other,
+var categories = func() map[string]i18n.PluralCategory {
+	m := make(map[string]i18n.PluralCategory)
+	for _, c := range []i18n.PluralCategory{i18n.Zero, i18n.One, i18n.Two, i18n.Few, i18n.Many, i18n.Other} {
+		m[c.String()] = c
+	}
+	return m
+}()
+
+// expand turns runs into the category of each probe, in probe order.
+func expand(t *testing.T, lang string, probes []int, runs []string) []i18n.PluralCategory {
+	t.Helper()
+	out := make([]i18n.PluralCategory, 0, len(probes))
+	for _, run := range runs {
+		span, name, ok := strings.Cut(run, " ")
+		cat, known := categories[name]
+		if !ok || !known {
+			t.Fatalf("%s: run %q is not \"<from>[-<to>] <category>\"", lang, run)
+		}
+		loS, hiS, isRange := strings.Cut(span, "-")
+		if !isRange {
+			hiS = loS
+		}
+		lo, errLo := strconv.Atoi(loS)
+		hi, errHi := strconv.Atoi(hiS)
+		if errLo != nil || errHi != nil || lo > hi {
+			t.Fatalf("%s: run %q has a bad span", lang, run)
+		}
+		if len(out) == len(probes) || probes[len(out)] != lo {
+			t.Fatalf("%s: run %q does not start at the next probe", lang, run)
+		}
+		for len(out) < len(probes) && probes[len(out)] <= hi {
+			out = append(out, cat)
+		}
+		if probes[len(out)-1] != hi {
+			t.Fatalf("%s: run %q does not end at a probe", lang, run)
+		}
+	}
+	if len(out) != len(probes) {
+		t.Fatalf("%s: runs cover %d of %d probes", lang, len(out), len(probes))
+	}
+	return out
 }
 
 func TestRulesMatchCLDRGolden(t *testing.T) {
@@ -36,18 +83,23 @@ func TestRulesMatchCLDRGolden(t *testing.T) {
 	if err := json.Unmarshal(data, &g); err != nil {
 		t.Fatal(err)
 	}
+	var probes []int
+	for n := g.Probes.From; n <= g.Probes.To; n++ {
+		probes = append(probes, n)
+	}
+	probes = append(probes, g.Probes.Extra...)
+
 	all := cldr.All()
 	if got, want := slices.Sorted(maps.Keys(all)), slices.Sorted(maps.Keys(g.Rules)); !slices.Equal(got, want) {
 		t.Fatalf("All() keys = %v, golden (CLDR %s) keys = %v", got, g.CLDR, want)
 	}
-	for lang, forms := range g.Rules {
+	for lang, runs := range g.Rules {
 		rule := all[lang]
 		bad := 0
-		for i, n := range g.Probes {
-			want := letters[forms[i]]
-			if got := rule(n); got != want && bad < 5 {
+		for i, want := range expand(t, lang, probes, runs) {
+			if got := rule(probes[i]); got != want && bad < 5 {
 				bad++
-				t.Errorf("%s(%d) = %v, CLDR %s says %v", lang, n, got, g.CLDR, want)
+				t.Errorf("%s(%d) = %v, CLDR %s says %v", lang, probes[i], got, g.CLDR, want)
 			}
 		}
 	}
