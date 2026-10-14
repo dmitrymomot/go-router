@@ -19,6 +19,8 @@ type tctx struct {
 	userLocale string
 }
 
+type otherCtx struct{ router.Base }
+
 func newRouter() *router.Router[*tctx] {
 	return router.New(func(http.ResponseWriter, *http.Request) *tctx { return new(tctx) })
 }
@@ -224,6 +226,11 @@ func TestMiddlewarePanics(t *testing.T) {
 		"FromQuery":   func() { i18n.FromQuery("") },
 		"FromHeader":  func() { i18n.FromHeader("") },
 		"FromFunc":    func() { i18n.FromFunc[*tctx]("", nil) },
+		"FromFunc of another context": func() {
+			i18n.MiddlewareWithConfig(i18n.Config[*tctx]{Bundle: b, Sources: []i18n.Source{
+				i18n.FromFunc("", func(*otherCtx) (string, bool) { return "", false }),
+			}})
+		},
 	} {
 		func() {
 			defer func() {

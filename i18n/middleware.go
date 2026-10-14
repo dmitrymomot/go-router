@@ -3,6 +3,7 @@ package i18n
 import (
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 
 	"github.com/dmitrymomot/go-router"
@@ -14,6 +15,9 @@ import (
 // [FromAcceptLanguage] or [FromFunc]; the zero Source is invalid.
 type Source struct {
 	read func(b *Bundle, c router.Context) (Locale, bool)
+	// ctx is the context type a FromFunc source reads, or nil for a source
+	// that reads any.
+	ctx  reflect.Type
 	vary string
 }
 
@@ -83,8 +87,8 @@ func FromAcceptLanguage() Source {
 //
 // fn reports false, or a tag the bundle lacks, to pass to the next source.
 // varyHeader names the request header fn reads, or is "" when it reads none.
-// The middleware passes the context it serves, so C must be the context type
-// of the router; another type panics on the first request.
+// C must be the context type of the router: [MiddlewareWithConfig] panics on a
+// FromFunc of another type.
 //
 // FromFunc panics if fn is nil.
 func FromFunc[C router.Context](varyHeader string, fn func(c C) (string, bool)) Source {
@@ -94,7 +98,7 @@ func FromFunc[C router.Context](varyHeader string, fn func(c C) (string, bool)) 
 	if varyHeader != "" {
 		varyHeader = http.CanonicalHeaderKey(varyHeader)
 	}
-	return Source{vary: varyHeader, read: func(b *Bundle, c router.Context) (Locale, bool) {
+	return Source{vary: varyHeader, ctx: reflect.TypeFor[C](), read: func(b *Bundle, c router.Context) (Locale, bool) {
 		tag, ok := fn(c.(C))
 		if !ok {
 			return Locale{}, false
@@ -148,7 +152,8 @@ func Middleware[C router.Context](b *Bundle) router.Middleware[C] {
 // Accept-Language, so a cache keyed on the URL alone would serve the wrong
 // language. Vary values already present are kept.
 //
-// MiddlewareWithConfig panics if Bundle is nil or a source is the zero Source.
+// MiddlewareWithConfig panics if Bundle is nil, a source is the zero Source,
+// or a [FromFunc] source reads a context type other than C.
 func MiddlewareWithConfig[C router.Context](cfg Config[C]) router.Middleware[C] {
 	b := cfg.Bundle
 	if b == nil {
@@ -162,6 +167,9 @@ func MiddlewareWithConfig[C router.Context](cfg Config[C]) router.Middleware[C] 
 	for i, s := range sources {
 		if s.read == nil {
 			panic(fmt.Sprintf("i18n: MiddlewareWithConfig got the zero Source at index %d", i))
+		}
+		if s.ctx != nil && !reflect.TypeFor[C]().AssignableTo(s.ctx) {
+			panic(fmt.Sprintf("i18n: MiddlewareWithConfig[%v] got a FromFunc for %v at index %d", reflect.TypeFor[C](), s.ctx, i))
 		}
 		if s.vary != "" && !slices.Contains(vary, s.vary) {
 			vary = append(vary, s.vary)
