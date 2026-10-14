@@ -6,10 +6,10 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ### Added
 
-- **Package `i18n`**, ported from the i18n engine of `dmitrymomot/forge`. It ships no messages, no locale list and no plural or format rules: the application loads its catalogs with `i18n.New(defaultLocale, i18n.WithMessages(fsys))`, laid out as `{tag}/{namespace}.json`. It covers lookup with a fallback from tag to base language to the default locale, plurals by CLDR category, declared keys checked at startup, a hook for missing keys, and locale formats for numbers, percents, `i18n.Money` and dates.
+- **Package `i18n`**, ported from the i18n engine of `dmitrymomot/forge`. It ships no messages, no locale list and no plural or format rules: the application loads its catalogs with `i18n.New(defaultLocale, i18n.WithMessages(fsys))`, laid out as `{tag}/{namespace}.json`. It covers lookup with a fallback from tag to base language to the default locale, plurals by CLDR category, declared keys checked at startup, a hook for missing keys, and locale formats for numbers, percents, `i18n.Money` and dates. A plural rule and a format resolve by tag, then base language, so `pt-PT` can override `pt`.
 - **`i18n.Middleware` and `i18n.MiddlewareWithConfig`** resolve the locale of a request from the sources you list, in order: a route parameter, the context of the application through `FromFunc`, a cookie, the query, a header and `Accept-Language`. They set `Content-Language` and `Vary`, and `i18n.T(c, ...)` then works in a handler and in a component that renders with the handler context. `Bundle.WithLocale` does the same for a job outside a request.
 - **`Bundle.Has` and `i18n.RedirectToLocale`** put the locale in the path: `r.ParamClass("locale", bundle.Has)` makes `/{lang:locale}` match only the locales the catalogs define, and a request for `/` goes to the locale of the visitor.
-- **Package `i18n/cldr`** holds CLDR plural rules and format specs, which an application wires with `WithPlural` and `WithFormat`. Nothing applies them by default.
+- **Package `i18n/cldr`** holds CLDR 48 plural rules for 69 languages, every official EU language among them, and format specs for 65 locales, one for each language of every EU member state among them. An application wires them with `WithPlural` and `WithFormat`, and nothing applies them by default. Tests check every rule and spec against tables generated from CLDR 48.
 
 ## [0.4.0] - 2026-10-14
 
