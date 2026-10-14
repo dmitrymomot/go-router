@@ -131,6 +131,9 @@ func New(defaultLocale string, opts ...Option) (*Bundle, error) {
 		ld.format = resolveFormat(cf.formats, tag, ld.lang)
 		compileInto(ld, rc)
 	}
+	if err := b.checkRegionalPlurals(cf.plurals); err != nil {
+		return nil, err
+	}
 	// Chains reference every locale's index, so they are built only once the
 	// loop above has populated all of them.
 	for i := range b.locales {
@@ -205,6 +208,28 @@ func resolvePlural(rules map[string]PluralRule, tag, lang string) (rule PluralRu
 		return r, true
 	}
 	return DefaultRule, false
+}
+
+// checkRegionalPlurals refuses a rule wired for a region that has no catalog
+// when the catalog of its base language got no rule: WithPlural("uk-UA", r)
+// beside a "uk" catalog alone. Resolution never reduces a region, so that rule
+// reaches no locale and uk falls to DefaultRule in silence. A rule for a
+// region without a catalog is fine otherwise, so an application may wire all
+// of cldr.All up front.
+func (b *Bundle) checkRegionalPlurals(rules map[string]PluralRule) error {
+	for _, tag := range slices.Sorted(maps.Keys(rules)) {
+		lang := Locale{tag: tag}.Lang()
+		if lang == tag {
+			continue
+		}
+		if _, ok := b.byTag[tag]; ok {
+			continue
+		}
+		if i, ok := b.byTag[lang]; ok && !b.locales[i].ruleWired {
+			return fmt.Errorf("%w: the plural rule for %q reaches no locale, and locale %q has none; wire it for %q", ErrUnusedRule, tag, lang, lang)
+		}
+	}
+	return nil
 }
 
 // resolveFormat picks a locale's spec: exact tag, then base language, then

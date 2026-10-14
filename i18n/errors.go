@@ -11,6 +11,9 @@ var (
 	ErrDuplicateKey = errors.New("i18n: duplicate key")
 	// ErrUnknownLocale reports a tag the bundle's catalogs do not support.
 	ErrUnknownLocale = errors.New("i18n: unknown locale")
+	// ErrUnusedRule reports a plural rule wired for a region that has no
+	// catalog while its base language has a catalog and no rule.
+	ErrUnusedRule = errors.New("i18n: unused plural rule")
 	// ErrUnknownKey reports a Key absent from the default locale's catalog.
 	ErrUnknownKey = errors.New("i18n: unknown key")
 )

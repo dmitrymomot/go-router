@@ -58,7 +58,9 @@ func WithTranslations(tag, ns string, data map[string]any) Option {
 // WithPlural wires a plural rule for a language ("uk") or for one region of it
 // ("pt-PT"). Resolution is tag, then base language, then DefaultRule, so a
 // rule for "pt" covers pt-BR while a rule for "pt-PT" overrides it there:
-// CLDR gives European Portuguese a rule of its own.
+// CLDR gives European Portuguese a rule of its own. A region never reduces to
+// its language, so New refuses a rule for "uk-UA" beside a "uk" catalog that
+// has no rule of its own.
 //
 // This package ships no per-language rules. Correct CLDR rules live in
 // package cldr: i18n.WithPlural("uk", cldr.Uk).
