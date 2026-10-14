@@ -78,7 +78,8 @@ func WithPlural(tag string, rule PluralRule) Option {
 }
 
 // WithFormat wires a FormatSpec for one locale tag. Resolution is tag, then
-// base language, then Invariant.
+// base language, then Invariant. As with WithPlural, New refuses a spec for
+// "uk-UA" beside a "uk" catalog that has no spec of its own.
 //
 // This package ships no per-locale specs. Correct CLDR specs live in package
 // cldr: i18n.WithFormat("es-MX", cldr.FormatEsMX).

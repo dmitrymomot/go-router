@@ -715,14 +715,19 @@ func TestBundleConcurrentReads(t *testing.T) {
 	wg.Wait()
 }
 
-func TestNewRefusesARegionalRuleThatReachesNoLocale(t *testing.T) {
+func TestNewRefusesARegionalEntryThatReachesNoLocale(t *testing.T) {
 	cart := mapFS(map[string]string{
 		"en/cart.json": `{"items": {"one": "1 item", "other": "{{count}} items"}}`,
 		"uk/cart.json": `{"items": {"one": "{{count}} товар", "other": "{{count}} товарів"}}`,
 	})
-	_, err := i18n.New("en", i18n.WithMessages(cart), i18n.WithPlural("uk-UA", i18n.DefaultRule))
-	if !errors.Is(err, i18n.ErrUnusedRule) || !strings.Contains(err.Error(), `"uk-UA"`) {
-		t.Errorf("New = %v, want ErrUnusedRule naming uk-UA", err)
+	for kind, opt := range map[string]i18n.Option{
+		"plural rule": i18n.WithPlural("uk-UA", i18n.DefaultRule),
+		"format":      i18n.WithFormat("uk-UA", i18n.Invariant),
+	} {
+		_, err := i18n.New("en", i18n.WithMessages(cart), opt)
+		if !errors.Is(err, i18n.ErrUnusedRule) || !strings.Contains(err.Error(), `the `+kind+` for "uk-UA"`) {
+			t.Errorf("%s: New = %v, want ErrUnusedRule naming the %s for uk-UA", kind, err, kind)
+		}
 	}
 
 	// A rule for uk beside it, or a regional rule whose language has no

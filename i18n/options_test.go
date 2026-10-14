@@ -44,7 +44,7 @@ func TestOptionsAcceptValidArguments(t *testing.T) {
 		i18n.WithTranslations("en", "app", map[string]any{"k": "v"}),
 		i18n.WithTranslations("de", "empty", nil),
 		i18n.WithPlural("pt-BR", i18n.DefaultRule),
-		i18n.WithFormat("en_gb", i18n.Invariant),
+		i18n.WithFormat("fr_ca", i18n.Invariant), // no fr catalog, so nothing to reach
 		i18n.WithMissingHandler(nil),
 	)
 	if err != nil {

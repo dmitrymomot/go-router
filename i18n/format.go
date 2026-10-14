@@ -91,7 +91,7 @@ func completeSpec(s FormatSpec) FormatSpec {
 
 // specFor returns the resolved FormatSpec for the locale at index idx: exact
 // tag, then base language, then Invariant, as decided once at New (see
-// resolveFormat) and stored per locale. Bundle is immutable after New, so
+// resolve) and stored per locale. Bundle is immutable after New, so
 // this address is stable for the Bundle's whole lifetime.
 func (b *Bundle) specFor(idx int) *FormatSpec {
 	return &b.locales[idx].format

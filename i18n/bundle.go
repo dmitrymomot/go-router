@@ -131,11 +131,20 @@ func New(defaultLocale string, opts ...Option) (*Bundle, error) {
 		ld.tag = tag
 		ld.contentLanguage = []string{tag}
 		ld.lang = Locale{tag: tag}.Lang()
-		ld.rule, ld.ruleWired = resolvePlural(cf.plurals, tag, ld.lang)
-		ld.format = resolveFormat(cf.formats, tag, ld.lang)
+		ld.rule, ld.ruleWired = resolve(cf.plurals, tag, ld.lang)
+		if !ld.ruleWired {
+			ld.rule = DefaultRule
+		}
+		ld.format = Invariant
+		if spec, ok := resolve(cf.formats, tag, ld.lang); ok {
+			ld.format = completeSpec(spec)
+		}
 		compileInto(ld, rc)
 	}
-	if err := b.checkRegionalPlurals(cf.plurals); err != nil {
+	if err := checkUnreached(b.byTag, "plural rule", cf.plurals); err != nil {
+		return nil, err
+	}
+	if err := checkUnreached(b.byTag, "format", cf.formats); err != nil {
 		return nil, err
 	}
 	// Chains reference every locale's index, so they are built only once the
@@ -202,51 +211,41 @@ func mergeCatalog(dst, src *rawCatalog) error {
 	return nil
 }
 
-// resolvePlural picks a locale's rule: exact tag, then base language, then
-// DefaultRule. wired is false for DefaultRule, which probing skips.
-func resolvePlural(rules map[string]PluralRule, tag, lang string) (rule PluralRule, wired bool) {
-	if r, ok := rules[tag]; ok {
-		return r, true
+// resolve picks the entry of a locale from rules or formats: exact tag, then
+// base language. A region never reduces further, and the default locale is no
+// fallback: German dates for a Vietnamese reader are worse than neutral ones.
+func resolve[T any](m map[string]T, tag, lang string) (T, bool) {
+	if v, ok := m[tag]; ok {
+		return v, true
 	}
-	if r, ok := rules[lang]; ok {
-		return r, true
-	}
-	return DefaultRule, false
+	v, ok := m[lang]
+	return v, ok
 }
 
-// checkRegionalPlurals refuses a rule wired for a region that has no catalog
-// when the catalog of its base language got no rule: WithPlural("uk-UA", r)
-// beside a "uk" catalog alone. Resolution never reduces a region, so that rule
-// reaches no locale and uk falls to DefaultRule in silence. A rule for a
-// region without a catalog is fine otherwise, so an application may wire all
-// of cldr.All up front.
-func (b *Bundle) checkRegionalPlurals(rules map[string]PluralRule) error {
-	for _, tag := range slices.Sorted(maps.Keys(rules)) {
+// checkUnreached refuses an entry wired for a region that has no catalog when
+// its base language has a catalog and no entry: WithPlural("uk-UA", r) or
+// WithFormat("uk-UA", s) beside a "uk" catalog alone. resolve never reduces a
+// region, so that entry reaches no locale and uk falls to the built-in default
+// in silence. An entry for a region whose language has no catalog, or has an
+// entry of its own, is fine, so an application may wire all of cldr.All and
+// cldr.AllFormats up front.
+func checkUnreached[T any](byTag map[string]int, kind string, m map[string]T) error {
+	for _, tag := range slices.Sorted(maps.Keys(m)) {
 		lang := Locale{tag: tag}.Lang()
 		if lang == tag {
 			continue
 		}
-		if _, ok := b.byTag[tag]; ok {
+		if _, ok := byTag[tag]; ok {
 			continue
 		}
-		if i, ok := b.byTag[lang]; ok && !b.locales[i].ruleWired {
-			return fmt.Errorf("%w: the plural rule for %q reaches no locale, and locale %q has none; wire it for %q", ErrUnusedRule, tag, lang, lang)
+		if _, ok := byTag[lang]; !ok {
+			continue
+		}
+		if _, ok := m[lang]; !ok {
+			return fmt.Errorf("%w: the %s for %q reaches no locale, and locale %q has none; wire one for %q", ErrUnusedRule, kind, tag, lang, lang)
 		}
 	}
 	return nil
-}
-
-// resolveFormat picks a locale's spec: exact tag, then base language, then
-// Invariant. It deliberately never falls back to the default locale's spec —
-// German dates for a Vietnamese reader are worse than neutral ones.
-func resolveFormat(formats map[string]FormatSpec, tag, lang string) FormatSpec {
-	if s, ok := formats[tag]; ok {
-		return completeSpec(s)
-	}
-	if s, ok := formats[lang]; ok {
-		return completeSpec(s)
-	}
-	return Invariant
 }
 
 // compileInto compiles a locale's raw catalog. Every message in the bundle is

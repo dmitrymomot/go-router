@@ -244,7 +244,7 @@ func TestFormatSpecLangAppliesToRegion(t *testing.T) {
 }
 
 // TestFormatNeverFallsBackToDefaultLocaleSpec is the load-bearing rule from
-// resolveFormat's doc comment. The bundle's default locale (en) gets an
+// resolve's doc comment. The bundle's default locale (en) gets an
 // explicit, non-Invariant spec; a different, supported-but-unconfigured locale
 // (uk) must still render with Invariant, not silently inherit en's spec
 // through its default-locale status.
