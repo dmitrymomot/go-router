@@ -64,7 +64,7 @@ func appendCurrencySpec(dst []byte, m Money, s *FormatSpec) []byte {
 // negative value) renders no fractional part at all.
 func appendMinorMag(dst []byte, mag uint64, units int, s *FormatSpec) []byte {
 	if units <= 0 {
-		return appendGroupedUint(dst, mag, s.GroupSep)
+		return appendGroupedUintSpec(dst, mag, s)
 	}
 	if units > maxCurrencyDigits {
 		units = maxCurrencyDigits
@@ -73,7 +73,7 @@ func appendMinorMag(dst []byte, mag uint64, units int, s *FormatSpec) []byte {
 	for range units {
 		div *= 10
 	}
-	dst = appendGroupedUint(dst, mag/div, s.GroupSep)
+	dst = appendGroupedUintSpec(dst, mag/div, s)
 	dst = append(dst, s.DecimalSep...)
 	// Emit exactly `units` fractional digits, most significant first. frac <
 	// div always holds, so this both pads and truncates correctly: 5 minor

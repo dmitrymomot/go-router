@@ -323,3 +323,57 @@ func TestAppendNumberZeroAlloc(t *testing.T) {
 		}
 	}
 }
+
+func TestMinGroupingDigits(t *testing.T) {
+	es := deSpec
+	es.MinGroupingDigits = 2
+	b := newBundle(t, i18n.WithFormat("de", es))
+	de := b.ParseOrDefault("de")
+	for _, tc := range []struct{ name, got, want string }{
+		{"Number 4 digits", b.Number(de, 1234.5), "1234,5"},
+		{"Number 5 digits", b.Number(de, 12345.5), "12.345,5"},
+		{"Number 7 digits", b.Number(de, -1234567), "-1.234.567"},
+		{"NumberInt 4 digits", b.NumberInt(de, -1234), "-1234"},
+		{"NumberInt 5 digits", b.NumberInt(de, 12345), "12.345"},
+		{"NumberInt 3 digits", b.NumberInt(de, 999), "999"},
+		{"Currency 4 digits", b.Currency(de, i18n.Money{Minor: 123400, Digits: 2, Symbol: "€"}), "1234,00 €"},
+		{"Currency 5 digits", b.Currency(de, i18n.Money{Minor: 1234500, Digits: 2, Symbol: "€"}), "12.345,00 €"},
+		{"Currency no minor", b.Currency(de, i18n.Money{Minor: 1234, Symbol: "¥"}), "1234 ¥"},
+		{"Percent", b.Percent(de, 12.34), "1234 %"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+
+	// Zero and one both group from four digits.
+	for _, mgd := range []int{0, 1} {
+		s := deSpec
+		s.MinGroupingDigits = mgd
+		b := newBundle(t, i18n.WithFormat("de", s))
+		if got := b.NumberInt(b.ParseOrDefault("de"), 1234); got != "1.234" {
+			t.Errorf("MinGroupingDigits %d: NumberInt(1234) = %q, want 1.234", mgd, got)
+		}
+	}
+}
+
+func TestPercentBefore(t *testing.T) {
+	tr := deSpec
+	tr.PercentSpace = false
+	tr.PercentBefore = true
+	eu := tr
+	eu.PercentSpace = true
+	b := newBundle(t, i18n.WithFormat("de", tr), i18n.WithFormat("vi", eu))
+	de, vi := b.ParseOrDefault("de"), b.ParseOrDefault("vi")
+	for _, tc := range []struct{ name, got, want string }{
+		{"tr", b.Percent(de, 0.5), "%50"},
+		{"tr negative", b.Percent(de, -0.125), "-%12,5"},
+		{"tr grouped", b.Percent(de, 12.5), "%1.250"},
+		{"eu", b.Percent(vi, 0.5), "% 50"},
+		{"NaN", b.Percent(de, math.NaN()), "%NaN"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}

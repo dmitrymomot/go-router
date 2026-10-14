@@ -22,8 +22,34 @@ type FormatSpec struct {
 	CurrencyBefore bool
 	// CurrencySpace inserts a space between symbol and amount.
 	CurrencySpace bool
-	// PercentSpace inserts a space before the percent sign (fr: "50 %").
+	// MinGroupingDigits is how many digits the leading group needs before
+	// grouping starts. CLDR sets 2 for es, pl and others, so 1234 stays
+	// "1234" while 12345 reads "12.345". Zero and one both group 1,234.
+	MinGroupingDigits int
+	// PercentSpace inserts a space between the number and the percent sign
+	// (fr: "50 %").
 	PercentSpace bool
+	// PercentBefore puts the percent sign before the number (tr: "%50").
+	PercentBefore bool
+}
+
+// groupSep returns the group separator for an integer part of digits digits:
+// none while the leading group is shorter than MinGroupingDigits.
+func (s *FormatSpec) groupSep(digits int) string {
+	if digits < 3+max(s.MinGroupingDigits, 1) {
+		return ""
+	}
+	return s.GroupSep
+}
+
+// decimalLen counts the decimal digits of n; 0 has one.
+func decimalLen(n uint64) int {
+	d := 1
+	for n >= 10 {
+		n /= 10
+		d++
+	}
+	return d
 }
 
 // Invariant is the FormatSpec applied to any locale with no wired spec: a
@@ -120,7 +146,13 @@ func appendIntSpec(dst []byte, n int64, s *FormatSpec) []byte {
 	if n < 0 {
 		dst = append(dst, '-')
 	}
-	return appendGroupedUint(dst, absU64(n), s.GroupSep)
+	return appendGroupedUintSpec(dst, absU64(n), s)
+}
+
+// appendGroupedUintSpec is appendGroupedUint with the separator of s, which
+// MinGroupingDigits may withhold.
+func appendGroupedUintSpec(dst []byte, n uint64, s *FormatSpec) []byte {
+	return appendGroupedUint(dst, n, s.groupSep(decimalLen(n)))
 }
 
 // appendGroupedUint writes n with a separator every three digits. It formats
@@ -182,7 +214,7 @@ func appendNumberSpec(dst []byte, v float64, s *FormatSpec) []byte {
 		raw = raw[1:]
 	}
 	intPart, frac, _ := bytes.Cut(raw, []byte{'.'})
-	dst = appendGroupedDigits(dst, intPart, s.GroupSep)
+	dst = appendGroupedDigits(dst, intPart, s.groupSep(len(intPart)))
 	if len(frac) > 0 {
 		dst = append(dst, s.DecimalSep...)
 		dst = append(dst, frac...)
@@ -227,6 +259,18 @@ const percentFractionScale = 1e6
 // the arithmetic unchanged, so appendNumberSpec still renders them verbatim.
 func appendPercentSpec(dst []byte, ratio float64, s *FormatSpec) []byte {
 	p := math.Round(ratio*100*percentFractionScale) / percentFractionScale
+	if s.PercentBefore {
+		// The minus leads the sign, as in CLDR's "-%50".
+		if p < 0 {
+			dst = append(dst, '-')
+			p = -p
+		}
+		dst = append(dst, '%')
+		if s.PercentSpace {
+			dst = append(dst, ' ')
+		}
+		return appendNumberSpec(dst, p, s)
+	}
 	dst = appendNumberSpec(dst, p, s)
 	if s.PercentSpace {
 		dst = append(dst, ' ')
