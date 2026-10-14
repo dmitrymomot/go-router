@@ -27,9 +27,10 @@ linters:
         text: "G101"
       # G115 flags integer conversions whose range the code already bounds: a
       # slice length or a shard count that min() caps, a rune below utf8.RuneSelf,
-      # and the length of a cookie name written into a fixed-width MAC header.
+      # and the length of a cookie name written into a fixed-width MAC header. The
+      # i18n magnitudes convert a sign-checked value, -(n+1) for a negative one.
       - linters: [gosec]
-        path: ^(compile\.go|host\.go|cookie/cookie\.go|htmx/htmx\.go|middleware/ratelimit\.go)$
+        path: ^(compile\.go|host\.go|cookie/cookie\.go|htmx/htmx\.go|middleware/ratelimit\.go|i18n/format\.go|i18n/cldr/plural\.go)$
         text: "G115"
       # G124 wants Secure, HttpOnly and SameSite on every cookie. NewCookie is the
       # builder that the caller then tunes, the cookie package and the CSRF middleware

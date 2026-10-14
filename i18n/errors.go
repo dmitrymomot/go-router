@@ -1,0 +1,19 @@
+package i18n
+
+import "errors"
+
+// Sentinel errors. All are errors.Is-matchable and single-line.
+var (
+	// ErrInvalidCatalog reports a catalog that could not be loaded:
+	// unparseable JSON, or a directory name that is not a language tag.
+	ErrInvalidCatalog = errors.New("i18n: invalid catalog")
+	// ErrDuplicateKey reports the same key defined twice within one locale.
+	ErrDuplicateKey = errors.New("i18n: duplicate key")
+	// ErrUnknownLocale reports a tag the bundle's catalogs do not support.
+	ErrUnknownLocale = errors.New("i18n: unknown locale")
+	// ErrUnusedRule reports a plural rule or format wired for a region that
+	// has no catalog while its base language has a catalog and no entry.
+	ErrUnusedRule = errors.New("i18n: unused rule")
+	// ErrUnknownKey reports a Key absent from the default locale's catalog.
+	ErrUnknownKey = errors.New("i18n: unknown key")
+)
