@@ -16,7 +16,7 @@ func tagsOf(got []langQ) []string {
 }
 
 func TestParseAcceptLanguage(t *testing.T) {
-	got := parseAcceptLanguage("es-ES,es;q=0.9,en;q=0.8")
+	got := parseAcceptLanguage(nil, "es-ES,es;q=0.9,en;q=0.8")
 	want := []langQ{{"es-ES", 1}, {"es", 0.9}, {"en", 0.8}}
 	if len(got) != len(want) {
 		t.Fatalf("parseAcceptLanguage returned %d entries, want %d: %v", len(got), len(want), got)
@@ -44,9 +44,9 @@ func TestParseAcceptLanguageOrdering(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tagsOf(parseAcceptLanguage(tc.header))
+			got := tagsOf(parseAcceptLanguage(nil, tc.header))
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("parseAcceptLanguage(%q) tags = %v, want %v", tc.header, got, tc.want)
+				t.Errorf("parseAcceptLanguage(nil, %q) tags = %v, want %v", tc.header, got, tc.want)
 			}
 		})
 	}
@@ -61,8 +61,8 @@ func TestParseAcceptLanguageRejects(t *testing.T) {
 		// Junk.
 		"", ",,,", ";q=0.5", "-;q=1",
 	} {
-		if got := parseAcceptLanguage(in); len(got) != 0 {
-			t.Errorf("parseAcceptLanguage(%q) = %v, want none", in, got)
+		if got := parseAcceptLanguage(nil, in); len(got) != 0 {
+			t.Errorf("parseAcceptLanguage(nil, %q) = %v, want none", in, got)
 		}
 	}
 }
@@ -70,7 +70,7 @@ func TestParseAcceptLanguageRejects(t *testing.T) {
 func TestParseAcceptLanguageReadsQAmongParameters(t *testing.T) {
 	// A parameter other than q is ignored, as accept.Quality does for every
 	// header of the module; q still counts beside it.
-	got := parseAcceptLanguage("de;level=1, en;x=y;q=0.5, fr;q=0.8")
+	got := parseAcceptLanguage(nil, "de;level=1, en;x=y;q=0.5, fr;q=0.8")
 	want := []langQ{{"de", 1}, {"fr", 0.8}, {"en", 0.5}}
 	if !slices.Equal(got, want) {
 		t.Errorf("parseAcceptLanguage = %v, want %v", got, want)
@@ -79,7 +79,7 @@ func TestParseAcceptLanguageReadsQAmongParameters(t *testing.T) {
 
 func TestParseAcceptLanguageCaps(t *testing.T) {
 	// Oversized headers are rejected outright, before any parsing work.
-	if got := parseAcceptLanguage(strings.Repeat("en,", maxAcceptLangLen)); len(got) != 0 {
+	if got := parseAcceptLanguage(nil, strings.Repeat("en,", maxAcceptLangLen)); len(got) != 0 {
 		t.Errorf("oversized header parsed %d entries, want 0", len(got))
 	}
 
@@ -95,7 +95,7 @@ func TestParseAcceptLanguageCaps(t *testing.T) {
 	if sb.Len() >= maxAcceptLangLen {
 		t.Fatalf("test header is %d bytes, want < %d", sb.Len(), maxAcceptLangLen)
 	}
-	if got := len(parseAcceptLanguage(sb.String())); got != maxAcceptLangTags {
+	if got := len(parseAcceptLanguage(nil, sb.String())); got != maxAcceptLangTags {
 		t.Errorf("parsed %d entries, want %d", got, maxAcceptLangTags)
 	}
 }
@@ -106,10 +106,10 @@ func TestParseAcceptLanguageIsTotal(t *testing.T) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.Errorf("parseAcceptLanguage(%q) panicked: %v", in, r)
+					t.Errorf("parseAcceptLanguage(nil, %q) panicked: %v", in, r)
 				}
 			}()
-			_ = parseAcceptLanguage(in)
+			_ = parseAcceptLanguage(nil, in)
 		}()
 	}
 }
@@ -120,7 +120,7 @@ func FuzzParseAcceptLanguage(f *testing.F) {
 	f.Add(";q=")
 	f.Add("en;q=NaN")
 	f.Fuzz(func(t *testing.T, s string) {
-		got := parseAcceptLanguage(s)
+		got := parseAcceptLanguage(nil, s)
 		if len(got) > maxAcceptLangTags {
 			t.Errorf("parsed %d entries, want <= %d", len(got), maxAcceptLangTags)
 		}

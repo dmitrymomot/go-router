@@ -35,11 +35,12 @@ type langQ struct {
 // qvalue, are dropped. The sort is stable, so equal-q tags keep header order — the
 // caller's first supported match among them is the server-preference
 // tie-break (RFC 7231 5.3.1).
-func parseAcceptLanguage(header string) []langQ {
+//
+// It appends to out, so a caller can pass a buffer on its stack.
+func parseAcceptLanguage(out []langQ, header string) []langQ {
 	if header == "" || len(header) > maxAcceptLangLen {
-		return nil
+		return out
 	}
-	out := make([]langQ, 0, 8)
 	for part := range strings.SplitSeq(header, ",") {
 		if len(out) >= maxAcceptLangTags {
 			break
@@ -77,7 +78,8 @@ func parseAcceptLanguage(header string) []langQ {
 // nothing matches, which lets a caller (e.g. the middleware's resolver chain)
 // fall through to another source before defaulting.
 func (b *Bundle) negotiate(header string) (int, bool) {
-	for _, lq := range parseAcceptLanguage(header) {
+	var buf [maxAcceptLangTags]langQ
+	for _, lq := range parseAcceptLanguage(buf[:0], header) {
 		if lq.tag == "*" {
 			return b.defaultIdx, true
 		}
