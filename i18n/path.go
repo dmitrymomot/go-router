@@ -44,11 +44,7 @@ func RedirectToLocale[C router.Context](b *Bundle, pattern, name string) router.
 		if err != nil {
 			return err
 		}
-		// What router.Base.Redirect writes, which C does not expose.
-		h := c.Response().Header()
-		h.Add("Vary", "Accept-Language")
-		h.Set(router.HeaderLocation, target)
-		c.Response().WriteHeader(http.StatusFound)
-		return nil
+		c.Response().Header().Add("Vary", "Accept-Language")
+		return baseOf(c).Redirect(http.StatusFound, target)
 	}
 }
