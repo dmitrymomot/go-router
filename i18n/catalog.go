@@ -87,7 +87,7 @@ func loadFS(fsys fs.FS) (map[string]*rawCatalog, error) {
 			out[tag] = rc
 		}
 		ns := strings.TrimSuffix(file, ".json")
-		if err := rc.addNamespace(ns, data); err != nil {
+		if err := rc.flatten(ns, data); err != nil {
 			return fmt.Errorf("%s: %w", p, err)
 		}
 		return nil
@@ -98,11 +98,8 @@ func loadFS(fsys fs.FS) (map[string]*rawCatalog, error) {
 	return out, nil
 }
 
-// addNamespace flattens data under the namespace prefix into rc.
-func (rc *rawCatalog) addNamespace(ns string, data map[string]any) error {
-	return rc.flatten(ns, data)
-}
-
+// flatten adds data to rc under prefix, the namespace at the top level, and
+// joins the keys of nested objects with dots.
 func (rc *rawCatalog) flatten(prefix string, data map[string]any) error {
 	for k, v := range data {
 		key := k

@@ -101,7 +101,7 @@ func (b *Bundle) specFor(idx int) *FormatSpec {
 // shortest representation that round-trips is used, so a caller wanting fixed
 // decimals rounds first. Currency is the method that rounds.
 func (b *Bundle) Number(loc Locale, v float64) string {
-	return string(b.AppendNumber(make([]byte, 0, 32), loc, v))
+	return b.For(loc).Number(v)
 }
 
 // AppendNumber is Number appending into dst.
@@ -111,7 +111,7 @@ func (b *Bundle) AppendNumber(dst []byte, loc Locale, v float64) []byte {
 
 // NumberInt formats n with the locale's grouping separator.
 func (b *Bundle) NumberInt(loc Locale, n int64) string {
-	return string(b.AppendNumberInt(make([]byte, 0, 24), loc, n))
+	return b.For(loc).NumberInt(n)
 }
 
 // AppendNumberInt is NumberInt appending into dst.
@@ -122,7 +122,7 @@ func (b *Bundle) AppendNumberInt(dst []byte, loc Locale, n int64) []byte {
 // Percent formats a ratio as a percentage: 0.5 renders "50%", or "50 %" where
 // the locale's spec sets PercentSpace.
 func (b *Bundle) Percent(loc Locale, ratio float64) string {
-	return string(b.AppendPercent(make([]byte, 0, 16), loc, ratio))
+	return b.For(loc).Percent(ratio)
 }
 
 // AppendPercent is Percent appending into dst.
@@ -223,14 +223,10 @@ func appendNumberSpec(dst []byte, v float64, s *FormatSpec) []byte {
 }
 
 // appendGroupedDigits regroups an already-rendered digit string.
+// digits always holds at least one digit: strconv renders a zero integer part
+// as "0".
 func appendGroupedDigits(dst []byte, digits []byte, groupSep string) []byte {
-	if digits == nil {
-		return append(dst, '0')
-	}
 	n := len(digits)
-	if n == 0 {
-		return append(dst, '0')
-	}
 	lead := n % 3
 	if lead == 0 {
 		lead = 3

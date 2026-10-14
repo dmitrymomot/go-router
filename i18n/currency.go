@@ -27,7 +27,7 @@ type Money struct {
 // viewing USD therefore sees "1.234,56 $", which is correct: multi-currency
 // rendering falls out of the split for free.
 func (b *Bundle) Currency(loc Locale, m Money) string {
-	return string(b.AppendCurrency(make([]byte, 0, 32), loc, m))
+	return b.For(loc).Currency(m)
 }
 
 // AppendCurrency is Currency appending into dst.

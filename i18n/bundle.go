@@ -52,7 +52,6 @@ type localeData struct {
 	// contentLanguage is tag as a header value, built once so the middleware
 	// sets Content-Language with no allocation.
 	contentLanguage []string
-	lang            string
 	// chain is the lookup order: this locale, its base language (if distinct
 	// and present), then the default locale. Deduplicated, precomputed at New.
 	chain  []int
@@ -121,26 +120,21 @@ func New(defaultLocale string, opts ...Option) (*Bundle, error) {
 	}
 	for i, tag := range tags {
 		b.byTag[tag] = i
-	}
-	b.defaultIdx = b.byTag[defTag]
-
-	// The sorted pass above fixed every index, so this pass may walk raw in
-	// map order: each iteration writes a different locale.
-	for tag, rc := range raw {
-		ld := &b.locales[b.byTag[tag]]
+		ld := &b.locales[i]
 		ld.tag = tag
 		ld.contentLanguage = []string{tag}
-		ld.lang = Locale{tag: tag}.Lang()
-		ld.rule, ld.ruleWired = resolve(cf.plurals, tag, ld.lang)
+		lang := Locale{tag: tag}.Lang()
+		ld.rule, ld.ruleWired = resolve(cf.plurals, tag, lang)
 		if !ld.ruleWired {
 			ld.rule = DefaultRule
 		}
 		ld.format = Invariant
-		if spec, ok := resolve(cf.formats, tag, ld.lang); ok {
+		if spec, ok := resolve(cf.formats, tag, lang); ok {
 			ld.format = completeSpec(spec)
 		}
-		compileInto(ld, rc)
+		compileInto(ld, raw[tag])
 	}
+	b.defaultIdx = b.byTag[defTag]
 	if err := checkUnreached(b.byTag, "plural rule", cf.plurals); err != nil {
 		return nil, err
 	}
@@ -182,7 +176,7 @@ func collect(cf *config) (map[string]*rawCatalog, error) {
 			rc = newRawCatalog()
 			raw[tag] = rc
 		}
-		if err := rc.addNamespace(in.ns, in.data); err != nil {
+		if err := rc.flatten(in.ns, in.data); err != nil {
 			return nil, err
 		}
 	}
@@ -276,7 +270,7 @@ func (b *Bundle) buildChain(i int) []int {
 		}
 	}
 	add(i)
-	if lang := b.locales[i].lang; lang != b.locales[i].tag {
+	if lang := (Locale{tag: b.locales[i].tag}).Lang(); lang != b.locales[i].tag {
 		if j, ok := b.byTag[lang]; ok {
 			add(j)
 		}
