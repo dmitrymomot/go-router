@@ -70,6 +70,14 @@ func normalizeTag(s string) string {
 	if len(s) > maxTagLen {
 		return ""
 	}
+	if isCanonicalTag(s) {
+		return s // the common case: a tag from a catalog, a cookie or a link
+	}
+	return normalizeTagFull(s)
+}
+
+// normalizeTagFull is normalizeTag past its length bound and fast path.
+func normalizeTagFull(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
@@ -89,6 +97,29 @@ func normalizeTag(s string) string {
 		return lang // "en-", or a region that was pure whitespace
 	}
 	return lang + "-" + region
+}
+
+// isCanonicalTag reports whether normalizeTag would return s unchanged: one
+// or two subtags of printable ASCII other than '_', a language with no
+// uppercase letter, and a region with no lowercase one. It lets the common
+// case skip the copies of the full normalization.
+func isCanonicalTag(s string) bool {
+	lang, region, hasRegion := strings.Cut(s, "-")
+	if lang == "" || hasRegion && (region == "" || strings.Contains(region, "-")) {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		switch {
+		case c <= ' ' || c > '~' || c == '_':
+			return false
+		case i < len(lang) && c >= 'A' && c <= 'Z':
+			return false
+		case i > len(lang) && c >= 'a' && c <= 'z':
+			return false
+		}
+	}
+	return true
 }
 
 // asciiLower lowercases only ASCII 'A'-'Z' bytes, leaving every other byte

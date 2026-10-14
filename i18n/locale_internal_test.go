@@ -88,7 +88,20 @@ func FuzzNormalizeTag(f *testing.F) {
 	f.Add("pt_br")
 	f.Add("---")
 	f.Add("")
+	f.Add("pt-BR")
+	f.Add("en")
+	f.Add("en-")
+	f.Add("en-gb")
+	f.Add("EN-GB")
+	f.Add("zh-Hant-TW")
+	f.Add("en\u00a0")
 	f.Fuzz(func(t *testing.T, s string) {
+		// The fast path agrees with the full normalization.
+		if isCanonicalTag(s) {
+			if full := normalizeTagFull(s); full != s {
+				t.Errorf("isCanonicalTag(%q), but normalizeTagFull gives %q", s, full)
+			}
+		}
 		got := normalizeTag(s)
 		// Normalization is idempotent: re-normalizing a normalized tag is a no-op.
 		if got != "" {
