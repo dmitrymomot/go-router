@@ -36,11 +36,11 @@ func TestCurrency(t *testing.T) {
 		{"invariant padded", en, usd(5), "$0.05"},
 		{"invariant negative", en, usd(-123456), "-$1,234.56"},
 		// Symbol after the amount, separated by a space; German separators.
-		{"wired spec", de, eur(123456), "1.234,56 €"},
-		{"wired spec negative", de, eur(-123456), "-1.234,56 €"},
+		{"wired spec", de, eur(123456), "1.234,56\u00a0€"},
+		{"wired spec negative", de, eur(-123456), "-1.234,56\u00a0€"},
 		// The locale contributes separators and placement; money contributes
 		// the symbol and the digits. A German reader viewing USD is correct.
-		{"multi currency", de, usd(123456), "1.234,56 $"},
+		{"multi currency", de, usd(123456), "1.234,56\u00a0$"},
 		// JPY has no minor units: no decimal separator at all.
 		{"no minor digits", en, jpy(1235), "¥1,235"},
 		{"three minor digits", en, bhd(1234), ".د.ب1.234"},

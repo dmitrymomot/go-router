@@ -20,18 +20,23 @@ type FormatSpec struct {
 	DateTimeLayout string
 	// CurrencyBefore places the symbol before the amount ($1.50 vs 1,50 €).
 	CurrencyBefore bool
-	// CurrencySpace inserts a space between symbol and amount.
+	// CurrencySpace puts a U+00A0 NO-BREAK SPACE between symbol and amount,
+	// as CLDR does, so a line never breaks between them.
 	CurrencySpace bool
 	// MinGroupingDigits is how many digits the leading group needs before
 	// grouping starts. CLDR sets 2 for es, pl and others, so 1234 stays
 	// "1234" while 12345 reads "12.345". Zero and one both group 1,234.
 	MinGroupingDigits int
-	// PercentSpace inserts a space between the number and the percent sign
-	// (fr: "50 %").
+	// PercentSpace puts a U+00A0 NO-BREAK SPACE between the number and the
+	// percent sign (fr: "50\u00a0%").
 	PercentSpace bool
 	// PercentBefore puts the percent sign before the number (tr: "%50").
 	PercentBefore bool
 }
+
+// nbsp is the space CLDR puts beside a currency symbol or a percent sign:
+// U+00A0 NO-BREAK SPACE, so a line never breaks between sign and number.
+const nbsp = "\u00a0"
 
 // groupSep returns the group separator for an integer part of digits digits:
 // none while the leading group is shorter than MinGroupingDigits.
@@ -119,8 +124,8 @@ func (b *Bundle) AppendNumberInt(dst []byte, loc Locale, n int64) []byte {
 	return appendIntSpec(dst, n, b.specFor(b.locIdx(loc)))
 }
 
-// Percent formats a ratio as a percentage: 0.5 renders "50%", or "50 %" where
-// the locale's spec sets PercentSpace.
+// Percent formats a ratio as a percentage: 0.5 renders "50%", or "50\u00a0%"
+// where the locale's spec sets PercentSpace.
 func (b *Bundle) Percent(loc Locale, ratio float64) string {
 	return b.For(loc).Percent(ratio)
 }
@@ -265,13 +270,13 @@ func appendPercentSpec(dst []byte, ratio float64, s *FormatSpec) []byte {
 		}
 		dst = append(dst, '%')
 		if s.PercentSpace {
-			dst = append(dst, ' ')
+			dst = append(dst, nbsp...)
 		}
 		return appendNumberSpec(dst, p, s)
 	}
 	dst = appendNumberSpec(dst, p, s)
 	if s.PercentSpace {
-		dst = append(dst, ' ')
+		dst = append(dst, nbsp...)
 	}
 	return append(dst, '%')
 }

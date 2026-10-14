@@ -174,8 +174,8 @@ func TestPercent(t *testing.T) {
 		{"zero", en, 0, "0%"},
 		{"one", en, 1, "100%"},
 		// PercentSpace inserts a space before the sign.
-		{"spaced", de, 0.5, "50 %"},
-		{"spaced negative", de, -0.075, "-7,5 %"},
+		{"spaced", de, 0.5, "50\u00a0%"},
+		{"spaced negative", de, -0.075, "-7,5\u00a0%"},
 		// ratio*100 in float64 is a near miss (0.29*100 == 28.999999999999996);
 		// rounding the scaled value collapses the artifact instead of printing it.
 		{"0.29", en, 0.29, "29%"},
@@ -336,10 +336,10 @@ func TestMinGroupingDigits(t *testing.T) {
 		{"NumberInt 4 digits", b.NumberInt(de, -1234), "-1234"},
 		{"NumberInt 5 digits", b.NumberInt(de, 12345), "12.345"},
 		{"NumberInt 3 digits", b.NumberInt(de, 999), "999"},
-		{"Currency 4 digits", b.Currency(de, i18n.Money{Minor: 123400, Digits: 2, Symbol: "€"}), "1234,00 €"},
-		{"Currency 5 digits", b.Currency(de, i18n.Money{Minor: 1234500, Digits: 2, Symbol: "€"}), "12.345,00 €"},
-		{"Currency no minor", b.Currency(de, i18n.Money{Minor: 1234, Symbol: "¥"}), "1234 ¥"},
-		{"Percent", b.Percent(de, 12.34), "1234 %"},
+		{"Currency 4 digits", b.Currency(de, i18n.Money{Minor: 123400, Digits: 2, Symbol: "€"}), "1234,00\u00a0€"},
+		{"Currency 5 digits", b.Currency(de, i18n.Money{Minor: 1234500, Digits: 2, Symbol: "€"}), "12.345,00\u00a0€"},
+		{"Currency no minor", b.Currency(de, i18n.Money{Minor: 1234, Symbol: "¥"}), "1234\u00a0¥"},
+		{"Percent", b.Percent(de, 12.34), "1234\u00a0%"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
@@ -371,7 +371,7 @@ func TestPercentBefore(t *testing.T) {
 		{"tr negative zero", b.Percent(de, -1e-10), "-%0"},
 		{"trailing negative zero", b.Percent(b.ParseOrDefault("en"), -1e-10), "-0%"},
 		{"tr grouped", b.Percent(de, 12.5), "%1.250"},
-		{"eu", b.Percent(vi, 0.5), "% 50"},
+		{"eu", b.Percent(vi, 0.5), "%\u00a050"},
 		{"NaN", b.Percent(de, math.NaN()), "%NaN"},
 	} {
 		if tc.got != tc.want {

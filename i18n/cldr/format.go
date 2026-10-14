@@ -28,7 +28,6 @@ import (
 //     time is "H:mm" renders "09:05" where CLDR writes "9:05".
 //   - Go renders the AM/PM marker in English, and CLDR's day periods (B, as
 //     zh-TW uses) render as AM/PM too.
-//   - The currency and percent space is U+0020, where CLDR writes U+00A0.
 //   - Digits are always ASCII, so locales whose CLDR digits are not (ar-SA,
 //     ar-EG, fa-IR, bn-BD, mr-IN, ne-NP, my-MM) have no spec, and nor do the
 //     locales of Indian grouping (hi-IN, en-IN: 12,34,567).

@@ -48,13 +48,13 @@ func appendCurrencySpec(dst []byte, m Money, s *FormatSpec) []byte {
 	if s.CurrencyBefore {
 		dst = append(dst, m.Symbol...)
 		if s.CurrencySpace {
-			dst = append(dst, ' ')
+			dst = append(dst, nbsp...)
 		}
 		return appendMinorMag(dst, mag, m.Digits, s)
 	}
 	dst = appendMinorMag(dst, mag, m.Digits, s)
 	if s.CurrencySpace {
-		dst = append(dst, ' ')
+		dst = append(dst, nbsp...)
 	}
 	return append(dst, m.Symbol...)
 }
