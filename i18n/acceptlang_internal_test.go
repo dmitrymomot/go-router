@@ -54,16 +54,26 @@ func TestParseAcceptLanguageOrdering(t *testing.T) {
 
 func TestParseAcceptLanguageRejects(t *testing.T) {
 	for _, in := range []string{
-		// q=0 means "not acceptable"; out-of-range, unparseable and NaN q drop the tag.
+		// q=0 means "not acceptable"; a q that is not an RFC 9110 qvalue
+		// drops the tag: out of range, more than three decimals, an exponent.
 		"en;q=0", "en;q=1.5", "en;q=-1", "en;q=abc", "en;q=NaN", "en;q=",
-		// A parameter that is not q.
-		"en;level=1",
+		"en;q=0.12345", "en;q=1e-1", "en;q=1.001",
 		// Junk.
 		"", ",,,", ";q=0.5", "-;q=1",
 	} {
 		if got := parseAcceptLanguage(in); len(got) != 0 {
 			t.Errorf("parseAcceptLanguage(%q) = %v, want none", in, got)
 		}
+	}
+}
+
+func TestParseAcceptLanguageReadsQAmongParameters(t *testing.T) {
+	// A parameter other than q is ignored, as accept.Quality does for every
+	// header of the module; q still counts beside it.
+	got := parseAcceptLanguage("de;level=1, en;x=y;q=0.5, fr;q=0.8")
+	want := []langQ{{"de", 1}, {"fr", 0.8}, {"en", 0.5}}
+	if !slices.Equal(got, want) {
+		t.Errorf("parseAcceptLanguage = %v, want %v", got, want)
 	}
 }
 

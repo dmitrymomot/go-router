@@ -2,10 +2,10 @@ package i18n
 
 import (
 	"cmp"
-	"math"
 	"slices"
-	"strconv"
 	"strings"
+
+	"github.com/dmitrymomot/go-router/internal/accept"
 )
 
 // Bounds on Accept-Language, which is attacker-controlled: without them a
@@ -31,8 +31,8 @@ type langQ struct {
 }
 
 // parseAcceptLanguage parses and sorts an Accept-Language header, highest
-// quality first. Entries with an invalid, out-of-range, NaN, or zero q are
-// dropped. The sort is stable, so equal-q tags keep header order — the
+// quality first. Entries with a q of zero, or one that is not an RFC 9110
+// qvalue, are dropped. The sort is stable, so equal-q tags keep header order — the
 // caller's first supported match among them is the server-preference
 // tie-break (RFC 7231 5.3.1).
 func parseAcceptLanguage(header string) []langQ {
@@ -53,9 +53,11 @@ func parseAcceptLanguage(header string) []langQ {
 		if tag == "" {
 			continue
 		}
-		q, ok := parseQ(params)
-		if !ok || q <= 0 {
-			continue // unparseable, out of range, NaN, or "not acceptable"
+		// Quality reads the q of RFC 9110: 0 to 1 with at most three
+		// decimals, 1 when absent, and 0 when malformed.
+		q := accept.Quality(params)
+		if q <= 0 {
+			continue // malformed, or "not acceptable"
 		}
 		if tag != "*" {
 			if tag = normalizeTag(tag); tag == "" {
@@ -69,26 +71,6 @@ func parseAcceptLanguage(header string) []langQ {
 	// of Negotiate's allocations for a header this small.
 	slices.SortStableFunc(out, func(a, b langQ) int { return cmp.Compare(b.q, a.q) })
 	return out
-}
-
-// parseQ reads the q parameter from a language-range's parameter string. An
-// absent parameter means q=1. ok is false for anything unparseable, out of
-// [0,1], NaN, or a parameter that is not q. NaN especially, because it
-// compares false against everything and would corrupt the sort.
-func parseQ(params string) (float64, bool) {
-	params = strings.TrimSpace(params)
-	if params == "" {
-		return 1, true // "en" with no parameters
-	}
-	key, val, ok := strings.Cut(params, "=")
-	if !ok || !strings.EqualFold(strings.TrimSpace(key), "q") {
-		return 0, false // not a q parameter at all
-	}
-	q, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
-	if err != nil || math.IsNaN(q) || q < 0 || q > 1 {
-		return 0, false
-	}
-	return q, true
 }
 
 // negotiate picks the best supported locale for header. ok is false when
