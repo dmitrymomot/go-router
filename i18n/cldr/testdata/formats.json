@@ -1,0 +1,661 @@
+{
+ "cldr": "48",
+ "locales": {
+  "ar-AE": {
+   "Currency": "1,234.56 €",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026، 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "bg-BG": {
+   "Currency": "1234,56 €",
+   "Date": "7.03.2026 г.",
+   "DateTime": "7.03.2026 г., 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12 345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "ca-ES": {
+   "Currency": "1.234,56 €",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "cs-CZ": {
+   "Currency": "1 234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "da-DK": {
+   "Currency": "1.234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026 21.05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21.05"
+  },
+  "de-AT": {
+   "Currency": "€ 1 234,56",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "de-CH": {
+   "Currency": "€ 1'234.56",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1'234'567.891",
+   "NumberInt": "1'234",
+   "NumberInt5": "12'345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "de-DE": {
+   "Currency": "1.234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "de-LU": {
+   "Currency": "1.234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "el-CY": {
+   "Currency": "1.234,56 €",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026, 9:05 PM",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "el-GR": {
+   "Currency": "1.234,56 €",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026, 9:05 PM",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "en-AU": {
+   "Currency": "€1,234.56",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026, 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "en-CA": {
+   "Currency": "€1,234.56",
+   "Date": "2026-03-07",
+   "DateTime": "2026-03-07, 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "en-GB": {
+   "Currency": "€1,234.56",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026, 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "en-IE": {
+   "Currency": "€1,234.56",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026, 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "en-US": {
+   "Currency": "€1,234.56",
+   "Date": "3/7/2026",
+   "DateTime": "3/7/2026, 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "es-AR": {
+   "Currency": "€ 1.234,56",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026, 9:05 PM",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "es-CL": {
+   "Currency": "€1.234,56",
+   "Date": "07-03-2026",
+   "DateTime": "07-03-2026, 9:05 PM",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "es-CO": {
+   "Currency": "€ 1.234,56",
+   "Date": "7/03/2026",
+   "DateTime": "7/03/2026, 9:05 PM",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "es-ES": {
+   "Currency": "1234,56 €",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "es-MX": {
+   "Currency": "€1,234.56",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026, 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "et-EE": {
+   "Currency": "1234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12 345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "eu-ES": {
+   "Currency": "1.234,56 €",
+   "Date": "2026/3/7",
+   "DateTime": "2026/3/7 (21:05)",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "% 50",
+   "Time": "21:05"
+  },
+  "fi-FI": {
+   "Currency": "1 234,56 €",
+   "Date": "7.3.2026",
+   "DateTime": "7.3.2026 21.05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21.05"
+  },
+  "fil-PH": {
+   "Currency": "€1,234.56",
+   "Date": "3/7/2026",
+   "DateTime": "3/7/2026, 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "fr-BE": {
+   "Currency": "1 234,56 €",
+   "Date": "7/03/2026",
+   "DateTime": "7/03/2026 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "fr-CA": {
+   "Currency": "1 234,56 €",
+   "Date": "2026-03-07",
+   "DateTime": "2026-03-07 21 h 05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21 h 05"
+  },
+  "fr-CH": {
+   "Currency": "1'234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026 21:05",
+   "Number": "-1'234'567,891",
+   "NumberInt": "1'234",
+   "NumberInt5": "12'345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "fr-FR": {
+   "Currency": "1 234,56 €",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "fr-LU": {
+   "Currency": "1.234,56 €",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "ga-IE": {
+   "Currency": "€1,234.56",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "gl-ES": {
+   "Currency": "1.234,56 €",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "he-IL": {
+   "Currency": "1,234.56 €",
+   "Date": "7.3.2026",
+   "DateTime": "7.3.2026, 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "hr-HR": {
+   "Currency": "1.234,56 €",
+   "Date": "07. 03. 2026.",
+   "DateTime": "07. 03. 2026. 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "hu-HU": {
+   "Currency": "1234,56 €",
+   "Date": "2026. 03. 07.",
+   "DateTime": "2026. 03. 07. 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12 345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "id-ID": {
+   "Currency": "€1.234,56",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026 21.05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "21.05"
+  },
+  "it-CH": {
+   "Currency": "€ 1234.56",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1'234'567.891",
+   "NumberInt": "1234",
+   "NumberInt5": "12'345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "it-IT": {
+   "Currency": "1234,56 €",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "ja-JP": {
+   "Currency": "€1,234.56",
+   "Date": "2026/03/07",
+   "DateTime": "2026/03/07 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "ko-KR": {
+   "Currency": "€1,234.56",
+   "Date": "2026. 3. 7.",
+   "DateTime": "2026. 3. 7. PM 9:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "PM 9:05"
+  },
+  "lt-LT": {
+   "Currency": "1 234,56 €",
+   "Date": "2026-03-07",
+   "DateTime": "2026-03-07 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "lv-LV": {
+   "Currency": "1234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12 345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "ms-MY": {
+   "Currency": "€1,234.56",
+   "Date": "7/03/2026",
+   "DateTime": "7/03/2026, 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "mt-MT": {
+   "Currency": "€1,234.56",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "nb-NO": {
+   "Currency": "1 234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "nl-BE": {
+   "Currency": "€ 1.234,56",
+   "Date": "7/03/2026",
+   "DateTime": "7/03/2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "nl-NL": {
+   "Currency": "€ 1.234,56",
+   "Date": "07-03-2026",
+   "DateTime": "07-03-2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "pl-PL": {
+   "Currency": "1234,56 €",
+   "Date": "7.03.2026",
+   "DateTime": "7.03.2026, 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12 345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "pt-BR": {
+   "Currency": "€ 1.234,56",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "pt-PT": {
+   "Currency": "1234,56 €",
+   "Date": "07/03/2026",
+   "DateTime": "07/03/2026, 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12 345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "ro-RO": {
+   "Currency": "1.234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "ru-RU": {
+   "Currency": "1 234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "sk-SK": {
+   "Currency": "1 234,56 €",
+   "Date": "7. 3. 2026",
+   "DateTime": "7. 3. 2026 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "sl-SI": {
+   "Currency": "1234,56 €",
+   "Date": "7. 3. 2026",
+   "DateTime": "7. 3. 2026, 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1234",
+   "NumberInt5": "12.345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "sr-RS": {
+   "Currency": "1.234,56 €",
+   "Date": "7. 3. 2026.",
+   "DateTime": "7. 3. 2026. 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "sv-FI": {
+   "Currency": "1 234,56 €",
+   "Date": "7.3.2026",
+   "DateTime": "7.3.2026 21.05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21.05"
+  },
+  "sv-SE": {
+   "Currency": "1 234,56 €",
+   "Date": "2026-03-07",
+   "DateTime": "2026-03-07 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50 %",
+   "Time": "21:05"
+  },
+  "th-TH": {
+   "Currency": "€1,234.56",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "tr-TR": {
+   "Currency": "€1.234,56",
+   "Date": "7.03.2026",
+   "DateTime": "7.03.2026 21:05",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "%50",
+   "Time": "21:05"
+  },
+  "uk-UA": {
+   "Currency": "1 234,56 €",
+   "Date": "07.03.2026",
+   "DateTime": "07.03.2026, 21:05",
+   "Number": "-1 234 567,891",
+   "NumberInt": "1 234",
+   "NumberInt5": "12 345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "ur-PK": {
+   "Currency": "€1,234.56",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026 9:05 PM",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "9:05 PM"
+  },
+  "vi-VN": {
+   "Currency": "1.234,56 €",
+   "Date": "7/3/2026",
+   "DateTime": "21:05 7/3/2026",
+   "Number": "-1.234.567,891",
+   "NumberInt": "1.234",
+   "NumberInt5": "12.345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "zh-CN": {
+   "Currency": "€1,234.56",
+   "Date": "2026/3/7",
+   "DateTime": "2026/3/7 21:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "21:05"
+  },
+  "zh-HK": {
+   "Currency": "€1,234.56",
+   "Date": "7/3/2026",
+   "DateTime": "7/3/2026 PM9:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "PM9:05"
+  },
+  "zh-TW": {
+   "Currency": "€1,234.56",
+   "Date": "2026/3/7",
+   "DateTime": "2026/3/7 PM9:05",
+   "Number": "-1,234,567.891",
+   "NumberInt": "1,234",
+   "NumberInt5": "12,345",
+   "Percent": "50%",
+   "Time": "PM9:05"
+  }
+ },
+ "money": {
+  "Digits": 2,
+  "Minor": 123456,
+  "Symbol": "€"
+ },
+ "time": "2026-03-07T21:05:00Z"
+}
