@@ -127,10 +127,7 @@ func New(defaultLocale string, opts ...Option) (*Bundle, error) {
 		ld := &b.locales[b.byTag[tag]]
 		ld.tag = tag
 		ld.lang = Locale{tag: tag}.Lang()
-		ld.rule, ld.ruleWired = cf.plurals[ld.lang]
-		if !ld.ruleWired {
-			ld.rule = DefaultRule
-		}
+		ld.rule, ld.ruleWired = resolvePlural(cf.plurals, tag, ld.lang)
 		ld.format = resolveFormat(cf.formats, tag, ld.lang)
 		compileInto(ld, rc)
 	}
@@ -196,6 +193,18 @@ func mergeCatalog(dst, src *rawCatalog) error {
 		}
 	}
 	return nil
+}
+
+// resolvePlural picks a locale's rule: exact tag, then base language, then
+// DefaultRule. wired is false for DefaultRule, which probing skips.
+func resolvePlural(rules map[string]PluralRule, tag, lang string) (rule PluralRule, wired bool) {
+	if r, ok := rules[tag]; ok {
+		return r, true
+	}
+	if r, ok := rules[lang]; ok {
+		return r, true
+	}
+	return DefaultRule, false
 }
 
 // resolveFormat picks a locale's spec: exact tag, then base language, then

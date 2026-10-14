@@ -254,39 +254,67 @@ func TestTNUsesRuleOfLocaleWhereMessageFound(t *testing.T) {
 	}
 }
 
-func TestWithPluralReducesRegionalTagToLanguage(t *testing.T) {
-	// Plural rules are keyed by base language, not the full tag: WithPlural
-	// must reduce "pt-BR" to "pt" when storing the rule, and New must look up
-	// a locale's rule by its base language too. Both halves have to hold for a
-	// rule wired under a regional tag to ever apply to that locale.
-	//
-	// rule diverges from DefaultRule at n=3: DefaultRule sends every count
-	// other than 0/+-1 to Many, which pt-BR/cart.json has no form for, so it
-	// falls back to "other". rule instead sends 2-4 to Few, which
-	// pt-BR/cart.json does define.
-	rule := func(n int) i18n.PluralCategory {
-		switch {
-		case n == 1:
+func TestWithPluralResolvesTagThenLanguage(t *testing.T) {
+	// A rule wired for "pt" covers every pt locale; one wired for "pt-PT"
+	// overrides it there alone. CLDR needs exactly this: Portuguese reads 0 as
+	// one, European Portuguese reads it as other.
+	zeroOne := func(n int) i18n.PluralCategory {
+		if n == 0 || n == 1 || n == -1 {
 			return i18n.One
-		case n >= 2 && n <= 4:
-			return i18n.Few
-		default:
-			return i18n.Other
 		}
+		return i18n.Other
 	}
+	oneOnly := func(n int) i18n.PluralCategory {
+		if n == 1 || n == -1 {
+			return i18n.One
+		}
+		return i18n.Other
+	}
+	items := `{"items": {"one": "{{count}} item", "other": "{{count}} itens"}}`
 	b, err := i18n.New("en",
 		i18n.WithMessages(mapFS(map[string]string{
 			"en/cart.json":    `{"items": {"one": "1 item", "other": "{{count}} items"}}`,
-			"pt-BR/cart.json": `{"items": {"one": "{{count}} item BR", "few": "{{count}} poucos BR", "other": "{{count}} itens BR"}}`,
+			"pt/cart.json":    items,
+			"pt-BR/cart.json": items,
+			"pt-PT/cart.json": items,
 		})),
-		i18n.WithPlural("pt-BR", rule),
+		i18n.WithPlural("pt", zeroOne),
+		i18n.WithPlural("pt_pt", oneOnly), // normalized like any tag
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ptBR := b.ParseOrDefault("pt-BR")
-	if got, want := b.TN(ptBR, "cart.items", 3), "3 poucos BR"; got != want {
-		t.Errorf("TN(3) = %q, want %q", got, want)
+	for tag, want := range map[string]string{
+		"pt":    "0 item",
+		"pt-BR": "0 item",
+		"pt-PT": "0 itens",
+	} {
+		if got := b.TN(b.ParseOrDefault(tag), "cart.items", 0); got != want {
+			t.Errorf("%s: TN(0) = %q, want %q", tag, got, want)
+		}
+	}
+}
+
+func TestWithPluralRegionalRuleSkipsBaseLanguage(t *testing.T) {
+	// A rule wired for "pt-BR" alone leaves a bare pt locale on DefaultRule,
+	// which reads 0 as zero and so falls to "other" in a {one, other} catalog.
+	one := func(int) i18n.PluralCategory { return i18n.One }
+	b, err := i18n.New("en",
+		i18n.WithMessages(mapFS(map[string]string{
+			"en/cart.json":    `{"items": {"one": "1 item", "other": "{{count}} items"}}`,
+			"pt/cart.json":    `{"items": {"one": "{{count}} item", "other": "{{count}} itens"}}`,
+			"pt-BR/cart.json": `{"items": {"one": "{{count}} item BR", "other": "{{count}} itens BR"}}`,
+		})),
+		i18n.WithPlural("pt-BR", one),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got, want := b.TN(b.ParseOrDefault("pt-BR"), "cart.items", 5), "5 item BR"; got != want {
+		t.Errorf("pt-BR: TN(5) = %q, want %q", got, want)
+	}
+	if got, want := b.TN(b.ParseOrDefault("pt"), "cart.items", 5), "5 itens"; got != want {
+		t.Errorf("pt: TN(5) = %q, want %q", got, want)
 	}
 }
 

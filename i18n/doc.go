@@ -31,10 +31,10 @@
 //	    i18n.WithFormat("uk-UA", cldr.FormatUkUA),
 //	)
 //
-// WithFormat's tag must match a real locale tag in your catalog: FormatUkUA
-// applies to a uk-UA locale (resolved tag → base language → Invariant) and
-// will not apply to a bare uk locale, even though WithPlural's base-language
-// key does.
+// Both resolve tag → base language → built-in default, so a rule wired for
+// "uk" covers uk-UA, and one wired for "pt-PT" overrides "pt" there. The
+// reverse does not hold: FormatUkUA applies to a uk-UA locale and not to a
+// bare uk locale. Wire a plural rule per language, a format per region.
 //
 // # Catalogs
 //

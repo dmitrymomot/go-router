@@ -55,23 +55,24 @@ func WithTranslations(tag, ns string, data map[string]any) Option {
 	}
 }
 
-// WithPlural wires a plural rule for one base language ("uk", not "uk-UA" —
-// plural grammar does not vary by region; a regional tag is reduced to its
-// language). Locales with no wired rule use DefaultRule.
+// WithPlural wires a plural rule for a language ("uk") or for one region of it
+// ("pt-PT"). Resolution is tag, then base language, then DefaultRule, so a
+// rule for "pt" covers pt-BR while a rule for "pt-PT" overrides it there:
+// CLDR gives European Portuguese a rule of its own.
 //
 // This package ships no per-language rules. Correct CLDR rules live in
 // package cldr: i18n.WithPlural("uk", cldr.Uk).
 //
-// WithPlural panics if lang is not a language tag or rule is nil.
-func WithPlural(lang string, rule PluralRule) Option {
+// WithPlural panics if tag is not a language tag or rule is nil.
+func WithPlural(tag string, rule PluralRule) Option {
 	if rule == nil {
-		panic(fmt.Sprintf("i18n: WithPlural: nil rule for %q", lang))
+		panic(fmt.Sprintf("i18n: WithPlural: nil rule for %q", tag))
 	}
-	l := newLocale(lang).Lang()
-	if l == "" {
-		panic(fmt.Sprintf("i18n: WithPlural: %q is not a language tag", lang))
+	t := normalizeTag(tag)
+	if t == "" {
+		panic(fmt.Sprintf("i18n: WithPlural: %q is not a language tag", tag))
 	}
-	return func(cf *config) { cf.plurals[l] = rule }
+	return func(cf *config) { cf.plurals[t] = rule }
 }
 
 // WithFormat wires a FormatSpec for one locale tag. Resolution is tag, then
