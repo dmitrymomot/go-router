@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -595,6 +596,39 @@ func ExampleThrottle() {
 
 	fmt.Println(routertest.Get(r, "/report").StatusCode)
 	// Output: 200
+}
+
+func ExampleLoadShed() {
+	r := newAPI()
+	// Past 400 requests in flight, or an average latency past 200ms, the
+	// server turns away a growing share of requests with a 503.
+	r.Use(middleware.LoadShed[*Context](500, 250*time.Millisecond))
+	r.GET("/", sayOK)
+
+	fmt.Println(routertest.Get(r, "/").StatusCode)
+	// Output: 200
+}
+
+func ExampleLoadShedWithConfig() {
+	// queue is yours: how full the job queue is, from 0 to 1.
+	var queue atomic.Int64
+	r := newAPI()
+	r.Use(middleware.LoadShedWithConfig(middleware.LoadShedConfig[*Context]{
+		MaxInFlight: 500,
+		Pressure:    func() float64 { return float64(queue.Load()) / 1000 },
+		Skip:        func(c *Context) bool { return c.Path() == "/healthz" },
+	}))
+	r.GET("/", sayOK)
+	r.GET("/healthz", sayOK)
+
+	fmt.Println(routertest.Get(r, "/").StatusCode)
+	// A full queue turns away all but 5% of the requests at random, with a
+	// Retry-After of one second. The probe is never turned away.
+	queue.Store(1000)
+	fmt.Println(routertest.Get(r, "/healthz").StatusCode)
+	// Output:
+	// 200
+	// 200
 }
 
 func ExampleHeartbeat() {

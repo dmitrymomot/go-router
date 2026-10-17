@@ -32,7 +32,7 @@
 //  7. [Gzip]
 //  8. [ETag]
 //  9. [HTMXRedirect]
-//  10. [Throttle]
+//  10. [Throttle] and [LoadShed]
 //  11. [BodyLimit], then [Decompress] and [AllowContentType]
 //  12. [RateLimit] and auth: [KeyAuth] or [BasicAuth]
 //  13. [CSRF] or [CrossOrigin]
@@ -73,6 +73,10 @@
 // Throttle goes after Logger and Recover, so a request it turns away is
 // logged, and before the body is read and auth runs, so the slots it counts
 // cover that work too.
+//
+// LoadShed sits beside Throttle for the same reason, and it times the
+// requests it lets through from there, so the latency it reads covers the
+// work of every middleware inside it.
 //
 // BodyLimit goes before anything that reads the body, and AllowContentType
 // refuses a body of the wrong type before anything reads it. ParseForm reads
