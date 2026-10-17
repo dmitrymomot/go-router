@@ -1,6 +1,7 @@
 package pagination_test
 
 import (
+	"math"
 	"net/url"
 	"testing"
 
@@ -43,7 +44,7 @@ func FuzzPage(f *testing.F) {
 func FuzzLimitAndOffset(f *testing.F) {
 	f.Add(0, 0, 0)
 	f.Add(-1, -1, -1)
-	f.Add(1<<62, 1<<62, 1<<62)
+	f.Add(math.MaxInt, math.MaxInt, math.MaxInt)
 	f.Fuzz(func(t *testing.T, page, perPage, maxPerPage int) {
 		p := pagination.Page{Number: page, PerPage: perPage}
 		limit, offset := p.Limit(maxPerPage), p.Offset(maxPerPage)
