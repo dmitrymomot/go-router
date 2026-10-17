@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router/internal/drain"
+	"github.com/dmitrymomot/go-router/internal/ja4"
 )
 
 // DefaultShutdownTimeout is how long [Run] waits for the requests in flight
@@ -61,6 +62,23 @@ const DefaultIdleTimeout = 120 * time.Second
 // sse.Serve does it on its own. The channel is nil for a context that no
 // server of this package serves, so the select never picks it.
 func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
+
+// JA4 reports the JA4 fingerprint of the TLS client of the request that ctx
+// belongs to, as in t13d1516h2_8daaf6152771_e5627efa2ab1, or "" when there is
+// none. It is the one a trusted CDN reported, when the RealIP middleware names
+// its header in RealIPConfig.JA4Header and trusts the peer, and else the one
+// the server captured under Config.CaptureJA4. Any context of the request
+// works, the handler context included.
+//
+// A fingerprint names the TLS library of a client, not the client: many users
+// share one, and a client can change it. Weigh it as one signal among others,
+// such as against the User-Agent, and never as an identity.
+func JA4(ctx context.Context) string { return ja4.JA4(ctx) }
+
+// JA3 reports the JA3 hash that a trusted CDN reported for the request that
+// ctx belongs to, when RealIPConfig.JA3Header names its header, or "". The
+// server computes no JA3 of its own.
+func JA3(ctx context.Context) string { return ja4.JA3(ctx) }
 
 // Stopping reports a channel that closes when the server that serves ctx
 // begins to stop: once the ctx of Run ends, right before OnDrain, while the
@@ -114,6 +132,13 @@ func Stopping(ctx context.Context) <-chan struct{} { return drain.Stopping(ctx) 
 // keep the server from OnServer and call SetKeepAlivesEnabled(false) on it
 // from OnDrain.
 //
+// CaptureJA4 makes an HTTPS server compute the JA4 fingerprint of the TLS
+// ClientHello of each connection, which [JA4] reads from the request context.
+// The capture reads the first TLS record before the handshake does, under the
+// header deadline of the server, and buffers at most 16 KiB of it; a
+// ClientHello that spans more than one record leaves the JA4 empty and the
+// connection as it was. OnServer may set ConnContext; Run wraps it.
+//
 // Background lists the functions that run beside the server, such as a queue
 // worker or a cache refresher. Each one starts on its own goroutine once the
 // server listens, with a context that carries the values of ctx, ends only
@@ -143,6 +168,7 @@ type Config struct {
 	OnDrain           func()
 	OnServer          func(*http.Server) error
 	Background        []func(ctx context.Context) error
+	CaptureJA4        bool
 }
 
 // Run serves h until ctx ends, waits Config.DrainDelay, then drains the
@@ -151,7 +177,7 @@ type Config struct {
 //
 // Run reports an error for a nil context, a nil handler, a Config that names
 // neither an address nor a listener, a negative DrainDelay, a nil function in
-// Background, a TLS config with
+// Background, CaptureJA4 on a server without TLS, a TLS config with
 // no certificate, a listener it cannot open, and a drain that runs out of
 // time. It checks the certificate after OnServer and before it listens, even
 // for a ctx that has already ended.
@@ -253,6 +279,9 @@ func (in *instance) build() error {
 	if in.srv.TLSConfig != nil && !hasCertificate(in.srv.TLSConfig) {
 		return errors.New("serve: the TLS config has no certificate; add one through Config.Certificates, Config.TLSConfig or OnServer")
 	}
+	if in.cfg.CaptureJA4 && in.srv.TLSConfig == nil {
+		return errors.New("serve: Config.CaptureJA4 needs a server that ends TLS itself; add a certificate, or read the JA4 that a CDN reports through middleware.RealIPConfig")
+	}
 	return nil
 }
 
@@ -267,6 +296,9 @@ func (in *instance) open(ctx context.Context) error {
 	ln, err := listen(ctx, in.cfg)
 	if err != nil {
 		return err
+	}
+	if in.cfg.CaptureJA4 {
+		ln = ja4.Listener(ln)
 	}
 	in.ln = ln
 	return nil
@@ -296,6 +328,18 @@ func (in *instance) withDrainContext(ctx context.Context) {
 	}
 }
 
+// withJA4Context wraps ConnContext of the server, so that the context of every
+// connection carries the JA4 its listener captured.
+func (in *instance) withJA4Context() {
+	user := in.srv.ConnContext
+	in.srv.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+		if user != nil {
+			ctx = user(ctx, c)
+		}
+		return ja4.WithConn(ctx, c)
+	}
+}
+
 // withSignals returns ctx carrying the channels of Draining and Stopping.
 func (in *instance) withSignals(ctx context.Context) context.Context {
 	return drain.WithStopping(drain.With(ctx, in.draining), in.stopping.ch)
@@ -303,6 +347,9 @@ func (in *instance) withSignals(ctx context.Context) context.Context {
 
 func (in *instance) serve(ctx context.Context) error {
 	in.withDrainContext(ctx)
+	if in.cfg.CaptureJA4 {
+		in.withJA4Context()
+	}
 	bg := startBackground(in.withSignals(context.WithoutCancel(ctx)), in.cfg.Background)
 	stopped := make(chan struct{})
 	drained := make(chan struct{})

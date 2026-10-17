@@ -3,11 +3,13 @@ package middleware_test
 import (
 	"net/http"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/routertest"
+	"github.com/dmitrymomot/go-router/serve"
 )
 
 // clientOf answers with the address that c.ClientIP reports behind cfg.
@@ -100,5 +102,55 @@ func TestTrustSharedNet(t *testing.T) {
 	}
 	if !middleware.NewTrustSet(middleware.TrustSharedNet(true)).Trusted(addr) {
 		t.Error("TrustSharedNet(true) does not trust 100.64.3.4")
+	}
+}
+
+func TestRealIPFingerprintHeaders(t *testing.T) {
+	const cdnJA4 = "t13d1516h2_8daaf6152771_e5627efa2ab1"
+	const cdnJA3 = "e7d705a3286e19ea42f587b344ee6865"
+	newEdge := func(leftmost bool) *router.Router[*Context] {
+		r := newAPI()
+		r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
+			Trust:     middleware.NewTrustSet(middleware.TrustPrefix(netip.MustParsePrefix("130.176.0.0/16"))),
+			Headers:   []string{middleware.HeaderCloudFrontViewerAddress},
+			Leftmost:  leftmost,
+			JA4Header: middleware.HeaderCloudFrontViewerJA4Fingerprint,
+			JA3Header: middleware.HeaderCFJA3Hash,
+		}))
+		r.GET("/", func(c *Context) error {
+			h := c.Request().Header
+			return c.String(http.StatusOK, serve.JA4(c)+"|"+serve.JA3(c)+"|"+
+				h.Get(middleware.HeaderCloudFrontViewerJA4Fingerprint)+"|"+h.Get(middleware.HeaderCFJA3Hash))
+		})
+		return r
+	}
+	headers := func(ja4, ja3 string) []routertest.RequestOption {
+		return []routertest.RequestOption{
+			routertest.Header(middleware.HeaderCloudFrontViewerJA4Fingerprint, ja4),
+			routertest.Header(middleware.HeaderCFJA3Hash, ja3),
+		}
+	}
+	tests := []struct {
+		name     string
+		leftmost bool
+		remote   string
+		ja4, ja3 string
+		want     string
+	}{
+		{"a trusted edge", false, "130.176.1.1:443", cdnJA4, strings.ToUpper(cdnJA3), cdnJA4 + "|" + cdnJA3 + "|" + cdnJA4 + "|" + strings.ToUpper(cdnJA3)},
+		{"a value of the wrong shape", false, "130.176.1.1:443", "not-a-ja4", "beef", "||not-a-ja4|beef"},
+		{"a stranger", false, "203.0.113.1:443", cdnJA4, cdnJA3, "|||"},
+		{"Leftmost vouches for no fingerprint", true, "203.0.113.1:443", cdnJA4, cdnJA3, "|||"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := append(headers(tt.ja4, tt.ja3), routertest.RemoteAddr(tt.remote))
+			if got := routertest.Get(newEdge(tt.leftmost), "/", opts...).String(); got != tt.want {
+				t.Errorf("JA4|JA3|headers = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	if got := routertest.Get(newEdge(false), "/", routertest.RemoteAddr("203.0.113.1:443")).String(); got != "|||" {
+		t.Errorf("a stranger without the headers: %q, want nothing", got)
 	}
 }

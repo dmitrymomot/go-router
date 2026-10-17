@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/ja4"
 )
 
 // RealIPConfig configures [RealIPWithConfig].
@@ -60,12 +61,21 @@ import (
 // [HeaderTrueClientIP] (Akamai), [HeaderXAzureClientIP] (Azure Front Door) or
 // [HeaderXEnvoyExternalAddress] with a [TrustPrefix] for the ranges your
 // account or your network uses. The port that CloudFront appends is dropped.
+//
+// JA4Header and JA3Header name the headers in which such an edge reports the
+// TLS fingerprint of the client, as [HeaderCloudFrontViewerJA4Fingerprint]
+// and [HeaderCFJA3Hash] do. When the peer itself is in Trust, a value of the
+// right shape goes on the request context, where serve.JA4 and serve.JA3 read
+// it; the peer counts here, not the chain, so Leftmost vouches for no
+// fingerprint. The headers of any other peer are deleted.
 type RealIPConfig[C router.Context] struct {
 	Skip                  func(c C) bool
 	Trust                 *TrustSet
 	Headers               []string
 	Hops                  int
 	Leftmost              bool
+	JA4Header             string
+	JA3Header             string
 	SkipPrivate           bool
 	DisableForwardedProto bool
 }
@@ -79,6 +89,9 @@ const (
 	HeaderTrueClientIP            = "True-Client-IP"
 	HeaderXAzureClientIP          = "X-Azure-ClientIP"
 	HeaderXEnvoyExternalAddress   = "X-Envoy-External-Address"
+
+	HeaderCloudFrontViewerJA4Fingerprint = "CloudFront-Viewer-JA4-Fingerprint"
+	HeaderCFJA3Hash                      = "Cf-Ja3-Hash"
 )
 
 // loopbackOnly is the TrustSet of a RealIPConfig that names none.
@@ -155,6 +168,12 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 		}
 	}
 	cfg.Headers = canonicalHeaders(cfg.Headers...)
+	var fingerprints []string
+	for _, name := range []string{cfg.JA4Header, cfg.JA3Header} {
+		if name != "" {
+			fingerprints = append(fingerprints, http.CanonicalHeaderKey(name))
+		}
+	}
 	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {
 		if name == router.HeaderXForwardedProto {
 			return !cfg.DisableForwardedProto
@@ -182,10 +201,18 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 			if !vouched {
 				del = forwardingHeaders
 			}
-			carries := slices.ContainsFunc(del, func(name string) bool {
-				return len(req.Header.Values(name)) > 0
-			})
-			if h.addr == "" && !fix && !carries {
+			present := func(name string) bool { return len(req.Header.Values(name)) > 0 }
+			carries := slices.ContainsFunc(del, present)
+			var ja4v, ja3v string
+			forged := false
+			if fingerprints != nil {
+				if peer, _, ok := splitHop(req.RemoteAddr); ok && cfg.Trust.Trusted(peer.Addr()) {
+					ja4v, ja3v = cfg.fingerprints(req.Header)
+				} else {
+					forged = slices.ContainsFunc(fingerprints, present)
+				}
+			}
+			if h.addr == "" && !fix && !carries && !forged && ja4v == "" && ja3v == "" {
 				return next(c)
 			}
 
@@ -194,10 +221,15 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 			if h.addr != "" {
 				r.RemoteAddr = h.addr
 			}
-			if fix || carries {
+			if fix || carries || forged {
 				r.Header = req.Header.Clone()
 				for _, name := range del {
 					r.Header.Del(name)
+				}
+				if forged {
+					for _, name := range fingerprints {
+						r.Header.Del(name)
+					}
 				}
 				switch {
 				case fix && proto != "":
@@ -206,10 +238,29 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 					r.Header.Del(router.HeaderXForwardedProto)
 				}
 			}
+			if ja4v != "" || ja3v != "" {
+				r = r.WithContext(ja4.WithVouched(r.Context(), ja4v, ja3v))
+			}
 			c.SetRequest(r)
 			return next(c)
 		}
 	}
+}
+
+// fingerprints reads the JA4 and the JA3 that a trusted edge reported, each
+// only when it has the shape of one.
+func (cfg RealIPConfig[C]) fingerprints(h http.Header) (ja4v, ja3v string) {
+	if cfg.JA4Header != "" {
+		if v := strings.TrimSpace(h.Get(cfg.JA4Header)); ja4.Valid(v) {
+			ja4v = v
+		}
+	}
+	if cfg.JA3Header != "" {
+		if v := strings.ToLower(strings.TrimSpace(h.Get(cfg.JA3Header))); ja4.ValidJA3(v) {
+			ja3v = v
+		}
+	}
+	return ja4v, ja3v
 }
 
 // ClientIP reports the address of the peer, without its port. Put [RealIP] in
