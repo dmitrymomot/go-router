@@ -170,6 +170,27 @@ func ExampleTrustCloudflare() {
 	// 203.0.113.1
 }
 
+func ExampleIPFilterWithConfig() {
+	r := newAPI()
+	// The admin pages answer the office alone, except one host in it that
+	// was compromised.
+	r.Route("/admin", func(g *router.Router[*Context]) {
+		g.Use(middleware.IPFilterWithConfig(middleware.IPFilterConfig[*Context]{
+			Allow: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")},
+			Deny:  []netip.Prefix{netip.MustParsePrefix("203.0.113.66/32")},
+		}))
+		g.GET("/", sayOK)
+	})
+
+	for _, addr := range []string{"203.0.113.10:5000", "203.0.113.66:5000", "198.51.100.1:5000"} {
+		fmt.Println(routertest.Get(r, "/admin", routertest.RemoteAddr(addr)).StatusCode)
+	}
+	// Output:
+	// 200
+	// 403
+	// 403
+}
+
 func ExampleClientAddr() {
 	r := newAPI()
 	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{

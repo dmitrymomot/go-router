@@ -34,7 +34,7 @@
 //  9. [HTMXRedirect]
 //  10. [Throttle] and [LoadShed]
 //  11. [BodyLimit], then [Decompress] and [AllowContentType]
-//  12. [RateLimit] and auth: [KeyAuth] or [BasicAuth]
+//  12. [IPFilter], [RateLimit] and auth: [KeyAuth] or [BasicAuth]
 //  13. [CSRF] or [CrossOrigin]
 //  14. [ParseForm]
 //  15. [MinDuration]
@@ -83,6 +83,9 @@
 // the body under the cap in force, and it goes after auth and CSRF, so a
 // stranger cannot make it read a large body. It goes outside Idempotency, so a form that is too
 // large or does not parse is refused before a key is read from it.
+//
+// IPFilter goes after RealIP, whose address it filters by, and before auth,
+// so a client outside the ranges learns nothing of the credentials.
 //
 // RateLimit goes before auth when it counts addresses, and after it when it
 // counts accounts.
