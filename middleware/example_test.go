@@ -147,6 +147,29 @@ func ExampleRealIPWithConfig_hops() {
 	// 203.0.113.9
 }
 
+func ExampleTrustCloudflare() {
+	// The server sits behind Cloudflare alone, so only its edges may set the
+	// client: the private ranges are not trusted.
+	r := newAPI()
+	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
+		Trust: middleware.NewTrustSet(
+			middleware.TrustPrivateNet(false),
+			middleware.TrustLinkLocal(false),
+			middleware.TrustCloudflare(),
+		),
+		Headers: []string{middleware.HeaderCFConnectingIP},
+	}))
+	r.GET("/", func(c *Context) error { return c.String(http.StatusOK, c.ClientIP()) })
+
+	header := routertest.Header(middleware.HeaderCFConnectingIP, "198.51.100.7")
+	fmt.Println(routertest.Get(r, "/", header, routertest.RemoteAddr("173.245.48.10:443")).String())
+	// A client that reaches the origin directly cannot pick its address.
+	fmt.Println(routertest.Get(r, "/", header, routertest.RemoteAddr("203.0.113.1:443")).String())
+	// Output:
+	// 198.51.100.7
+	// 203.0.113.1
+}
+
 func ExampleClientAddr() {
 	r := newAPI()
 	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
