@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -144,6 +145,50 @@ func ExampleRealIPWithConfig_hops() {
 		routertest.Header(router.HeaderXForwardedFor, "1.2.3.4, 203.0.113.9, 198.51.100.20")).String())
 	// Output:
 	// 203.0.113.9
+}
+
+func ExampleTrustCloudflare() {
+	// The server sits behind Cloudflare alone, so only its edges may set the
+	// client: the private ranges are not trusted.
+	r := newAPI()
+	r.Use(middleware.RealIPWithConfig(middleware.RealIPConfig[*Context]{
+		Trust: middleware.NewTrustSet(
+			middleware.TrustPrivateNet(false),
+			middleware.TrustLinkLocal(false),
+			middleware.TrustCloudflare(),
+		),
+		Headers: []string{middleware.HeaderCFConnectingIP},
+	}))
+	r.GET("/", func(c *Context) error { return c.String(http.StatusOK, c.ClientIP()) })
+
+	header := routertest.Header(middleware.HeaderCFConnectingIP, "198.51.100.7")
+	fmt.Println(routertest.Get(r, "/", header, routertest.RemoteAddr("173.245.48.10:443")).String())
+	// A client that reaches the origin directly cannot pick its address.
+	fmt.Println(routertest.Get(r, "/", header, routertest.RemoteAddr("203.0.113.1:443")).String())
+	// Output:
+	// 198.51.100.7
+	// 203.0.113.1
+}
+
+func ExampleIPFilterWithConfig() {
+	r := newAPI()
+	// The admin pages answer the office alone, except one host in it that
+	// was compromised.
+	r.Route("/admin", func(g *router.Router[*Context]) {
+		g.Use(middleware.IPFilterWithConfig(middleware.IPFilterConfig[*Context]{
+			Allow: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")},
+			Deny:  []netip.Prefix{netip.MustParsePrefix("203.0.113.66/32")},
+		}))
+		g.GET("/", sayOK)
+	})
+
+	for _, addr := range []string{"203.0.113.10:5000", "203.0.113.66:5000", "198.51.100.1:5000"} {
+		fmt.Println(routertest.Get(r, "/admin", routertest.RemoteAddr(addr)).StatusCode)
+	}
+	// Output:
+	// 200
+	// 403
+	// 403
 }
 
 func ExampleClientAddr() {
@@ -363,6 +408,32 @@ func ExampleSecureWithConfig() {
 	// ""
 	// nosniff
 	// default-src 'self'
+}
+
+func ExampleCSPNonce() {
+	r := newAPI()
+	r.Use(middleware.SecureWithConfig(middleware.SecureConfig[*Context]{
+		CSP: &middleware.CSPPolicy{
+			DefaultSrc: []string{middleware.CSPSelf},
+			ScriptSrc:  []string{middleware.CSPStrictDynamic},
+			ObjectSrc:  []string{middleware.CSPNone},
+			BaseURI:    []string{middleware.CSPNone},
+		},
+		CSPWithNonce: true,
+	}))
+	// A templ component reads it the same way: middleware.CSPNonce(ctx).
+	r.GET("/", func(c *Context) error {
+		return c.HTML(http.StatusOK, `<script nonce="`+middleware.CSPNonce(c)+`">boot()</script>`)
+	})
+
+	res := routertest.Get(r, "/")
+	// The nonce changes on every request; N stands for it here.
+	nonce := strings.TrimSuffix(strings.TrimPrefix(res.String(), `<script nonce="`), `">boot()</script>`)
+	fmt.Println(strings.ReplaceAll(res.Header.Get(router.HeaderContentSecurityPolicy), nonce, "N"))
+	fmt.Println(strings.ReplaceAll(res.String(), nonce, "N"))
+	// Output:
+	// default-src 'self'; script-src 'strict-dynamic' 'nonce-N'; style-src 'nonce-N'; object-src 'none'; base-uri 'none'
+	// <script nonce="N">boot()</script>
 }
 
 func ExampleCORSWithConfig() {
@@ -595,6 +666,39 @@ func ExampleThrottle() {
 
 	fmt.Println(routertest.Get(r, "/report").StatusCode)
 	// Output: 200
+}
+
+func ExampleLoadShed() {
+	r := newAPI()
+	// Past 400 requests in flight, or an average latency past 200ms, the
+	// server turns away a growing share of requests with a 503.
+	r.Use(middleware.LoadShed[*Context](500, 250*time.Millisecond))
+	r.GET("/", sayOK)
+
+	fmt.Println(routertest.Get(r, "/").StatusCode)
+	// Output: 200
+}
+
+func ExampleLoadShedWithConfig() {
+	// queue is yours: how full the job queue is, from 0 to 1.
+	var queue atomic.Int64
+	r := newAPI()
+	r.Use(middleware.LoadShedWithConfig(middleware.LoadShedConfig[*Context]{
+		MaxInFlight: 500,
+		Pressure:    func() float64 { return float64(queue.Load()) / 1000 },
+		Skip:        func(c *Context) bool { return c.Path() == "/healthz" },
+	}))
+	r.GET("/", sayOK)
+	r.GET("/healthz", sayOK)
+
+	fmt.Println(routertest.Get(r, "/").StatusCode)
+	// A full queue turns away all but 5% of the requests at random, with a
+	// Retry-After of one second. The probe is never turned away.
+	queue.Store(1000)
+	fmt.Println(routertest.Get(r, "/healthz").StatusCode)
+	// Output:
+	// 200
+	// 200
 }
 
 func ExampleHeartbeat() {

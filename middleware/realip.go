@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dmitrymomot/go-router"
+	"github.com/dmitrymomot/go-router/internal/ja4"
 )
 
 // RealIPConfig configures [RealIPWithConfig].
@@ -46,14 +47,52 @@ import (
 // Leftmost takes the first address of the chain in place of the nearest
 // untrusted hop, and vouches for the scheme of any peer. The first address is
 // whatever the client wrote, so use it only where the chain itself is trusted.
+// SkipPrivate, beside Leftmost, passes over the private, loopback, link-local
+// and shared (100.64.0.0/10) addresses and takes the first public one, as an
+// application behind several proxies that each add a private hop needs; a
+// chain with no public address leaves RemoteAddr as it is. Either way the
+// client can forge the result, so it suits a log line and never a rate limit
+// or an access rule.
+//
+// A CDN or an edge proxy that writes the client into a header of its own,
+// and overwrites any value the client sent, needs that header in Headers and
+// its peers in Trust: [HeaderCFConnectingIP] with [TrustCloudflare],
+// [HeaderFastlyClientIP] with [TrustFastly], and [HeaderCloudFrontViewerAddress],
+// [HeaderTrueClientIP] (Akamai), [HeaderXAzureClientIP] (Azure Front Door) or
+// [HeaderXEnvoyExternalAddress] with a [TrustPrefix] for the ranges your
+// account or your network uses. The port that CloudFront appends is dropped.
+//
+// JA4Header and JA3Header name the headers in which such an edge reports the
+// TLS fingerprint of the client, as [HeaderCloudFrontViewerJA4Fingerprint]
+// and [HeaderCFJA3Hash] do. When the peer itself is in Trust, a value of the
+// right shape goes on the request context, where serve.JA4 and serve.JA3 read
+// it; the peer counts here, not the chain, so Leftmost vouches for no
+// fingerprint. The headers of any other peer are deleted.
 type RealIPConfig[C router.Context] struct {
 	Skip                  func(c C) bool
 	Trust                 *TrustSet
 	Headers               []string
 	Hops                  int
 	Leftmost              bool
+	JA4Header             string
+	JA3Header             string
+	SkipPrivate           bool
 	DisableForwardedProto bool
 }
+
+// The headers in which an edge writes the address of the client. Each edge
+// overwrites the value a client sent, so a peer of that edge vouches for it.
+const (
+	HeaderCFConnectingIP          = "CF-Connecting-IP"
+	HeaderFastlyClientIP          = "Fastly-Client-IP"
+	HeaderCloudFrontViewerAddress = "CloudFront-Viewer-Address"
+	HeaderTrueClientIP            = "True-Client-IP"
+	HeaderXAzureClientIP          = "X-Azure-ClientIP"
+	HeaderXEnvoyExternalAddress   = "X-Envoy-External-Address"
+
+	HeaderCloudFrontViewerJA4Fingerprint = "CloudFront-Viewer-JA4-Fingerprint"
+	HeaderCFJA3Hash                      = "Cf-Ja3-Hash"
+)
 
 // loopbackOnly is the TrustSet of a RealIPConfig that names none.
 var loopbackOnly = &TrustSet{loopback: true}
@@ -103,7 +142,8 @@ func RealIP[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // first named header that is present decides, as RealIPConfig describes.
 //
 // RealIPWithConfig panics when Headers names X-Forwarded-Proto, on a negative
-// Hops, and on Hops set beside Leftmost or without Headers.
+// Hops, on Hops set beside Leftmost or without Headers, and on SkipPrivate
+// without Leftmost.
 func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C] {
 	if slices.ContainsFunc(cfg.Headers, func(name string) bool {
 		return strings.EqualFold(name, router.HeaderXForwardedProto)
@@ -118,6 +158,8 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 		panic("middleware: RealIPConfig sets both Hops and Leftmost; pick one")
 	case cfg.Hops > 0 && len(cfg.Headers) == 0:
 		panic("middleware: RealIPConfig sets Hops without Headers; name the header the proxies append to")
+	case cfg.SkipPrivate && !cfg.Leftmost:
+		panic("middleware: RealIPConfig sets SkipPrivate without Leftmost; it picks among the entries from the left")
 	}
 	if cfg.Trust == nil {
 		cfg.Trust = loopbackOnly
@@ -126,6 +168,12 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 		}
 	}
 	cfg.Headers = canonicalHeaders(cfg.Headers...)
+	var fingerprints []string
+	for _, name := range []string{cfg.JA4Header, cfg.JA3Header} {
+		if name != "" {
+			fingerprints = append(fingerprints, http.CanonicalHeaderKey(name))
+		}
+	}
 	unnamed := slices.DeleteFunc(slices.Clone(forwardingHeaders), func(name string) bool {
 		if name == router.HeaderXForwardedProto {
 			return !cfg.DisableForwardedProto
@@ -153,10 +201,18 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 			if !vouched {
 				del = forwardingHeaders
 			}
-			carries := slices.ContainsFunc(del, func(name string) bool {
-				return len(req.Header.Values(name)) > 0
-			})
-			if h.addr == "" && !fix && !carries {
+			present := func(name string) bool { return len(req.Header.Values(name)) > 0 }
+			carries := slices.ContainsFunc(del, present)
+			var ja4v, ja3v string
+			forged := false
+			if fingerprints != nil {
+				if peer, _, ok := splitHop(req.RemoteAddr); ok && cfg.Trust.Trusted(peer.Addr()) {
+					ja4v, ja3v = cfg.fingerprints(req.Header)
+				} else {
+					forged = slices.ContainsFunc(fingerprints, present)
+				}
+			}
+			if h.addr == "" && !fix && !carries && !forged && ja4v == "" && ja3v == "" {
 				return next(c)
 			}
 
@@ -165,10 +221,15 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 			if h.addr != "" {
 				r.RemoteAddr = h.addr
 			}
-			if fix || carries {
+			if fix || carries || forged {
 				r.Header = req.Header.Clone()
 				for _, name := range del {
 					r.Header.Del(name)
+				}
+				if forged {
+					for _, name := range fingerprints {
+						r.Header.Del(name)
+					}
 				}
 				switch {
 				case fix && proto != "":
@@ -177,10 +238,29 @@ func RealIPWithConfig[C router.Context](cfg RealIPConfig[C]) router.Middleware[C
 					r.Header.Del(router.HeaderXForwardedProto)
 				}
 			}
+			if ja4v != "" || ja3v != "" {
+				r = r.WithContext(ja4.WithVouched(r.Context(), ja4v, ja3v))
+			}
 			c.SetRequest(r)
 			return next(c)
 		}
 	}
+}
+
+// fingerprints reads the JA4 and the JA3 that a trusted edge reported, each
+// only when it has the shape of one.
+func (cfg RealIPConfig[C]) fingerprints(h http.Header) (ja4v, ja3v string) {
+	if cfg.JA4Header != "" {
+		if v := strings.TrimSpace(h.Get(cfg.JA4Header)); ja4.Valid(v) {
+			ja4v = v
+		}
+	}
+	if cfg.JA3Header != "" {
+		if v := strings.ToLower(strings.TrimSpace(h.Get(cfg.JA3Header))); ja4.ValidJA3(v) {
+			ja3v = v
+		}
+	}
+	return ja4v, ja3v
 }
 
 // ClientIP reports the address of the peer, without its port. Put [RealIP] in
@@ -235,6 +315,26 @@ type hop struct {
 	proto string
 }
 
+// entryKind says how an entry of a header reads: a bare address, an RFC 7239
+// element, or the address and port of CloudFront.
+type entryKind uint8
+
+const (
+	plainEntry entryKind = iota
+	forwardedEntry
+	viewerEntry
+)
+
+func kindOf(name string) entryKind {
+	switch {
+	case strings.EqualFold(name, router.HeaderForwarded):
+		return forwardedEntry
+	case strings.EqualFold(name, HeaderCloudFrontViewerAddress):
+		return viewerEntry
+	}
+	return plainEntry
+}
+
 func (cfg RealIPConfig[C]) client(req *http.Request) (hop, bool) {
 	if cfg.Hops > 0 {
 		return cfg.countedHop(req)
@@ -251,12 +351,12 @@ func (cfg RealIPConfig[C]) client(req *http.Request) (hop, bool) {
 		if len(values) == 0 {
 			continue
 		}
-		rfc7239 := strings.EqualFold(name, router.HeaderForwarded)
+		kind := kindOf(name)
 		var h hop
 		if cfg.Leftmost {
-			h = leftmostHop(values, rfc7239)
+			h = leftmostHop(values, kind, cfg.SkipPrivate)
 		} else {
-			h = cfg.trustedHop(values, rfc7239)
+			h = cfg.trustedHop(values, kind)
 		}
 		best.proto = cmp.Or(h.proto, best.proto)
 		if h.addr != "" {
@@ -280,13 +380,13 @@ func (cfg RealIPConfig[C]) countedHop(req *http.Request) (hop, bool) {
 		if len(values) == 0 {
 			continue
 		}
-		rfc7239 := strings.EqualFold(name, router.HeaderForwarded)
+		kind := kindOf(name)
 		n := 0
 		for e := range entriesRight(values) {
 			if n++; n < cfg.Hops {
 				continue
 			}
-			h := parseEntry(e, rfc7239)
+			h := parseEntry(e, kind)
 			if _, text, ok := parseHop(h.addr); ok {
 				h.addr = text
 			} else {
@@ -299,10 +399,10 @@ func (cfg RealIPConfig[C]) countedHop(req *http.Request) (hop, bool) {
 	return hop{}, false
 }
 
-func (cfg RealIPConfig[C]) trustedHop(values []string, rfc7239 bool) hop {
+func (cfg RealIPConfig[C]) trustedHop(values []string, kind entryKind) hop {
 	var best hop
 	for e := range entriesRight(values) {
-		h := parseEntry(e, rfc7239)
+		h := parseEntry(e, kind)
 		addr, text, ok := parseHop(h.addr)
 		if !ok {
 			if best.proto == "" {
@@ -346,15 +446,26 @@ func firstEntry(values []string, leftmost bool) string {
 	return ""
 }
 
-func leftmostHop(values []string, rfc7239 bool) hop {
+func leftmostHop(values []string, kind entryKind, public bool) hop {
 	for e := range entriesLeft(values) {
-		h := parseEntry(e, rfc7239)
-		if _, text, ok := parseHop(h.addr); ok {
+		h := parseEntry(e, kind)
+		if addr, text, ok := parseHop(h.addr); ok && (!public || isPublic(addr)) {
 			h.addr = text
 			return h
 		}
 	}
 	return hop{}
+}
+
+// sharedAddressSpace is 100.64.0.0/10 of RFC 6598, which carrier NAT and
+// some cloud networks hand out inside their own network.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+// isPublic reports whether addr is a unicast address on the public internet:
+// not private, loopback, link-local, shared or unspecified.
+func isPublic(addr netip.Addr) bool {
+	addr = addr.WithZone("").Unmap()
+	return addr.IsGlobalUnicast() && !addr.IsPrivate() && !sharedAddressSpace.Contains(addr)
 }
 
 func entriesLeft(values []string) iter.Seq[string] {
@@ -387,8 +498,16 @@ func entriesRight(values []string) iter.Seq[string] {
 	}
 }
 
-func parseEntry(e string, rfc7239 bool) hop {
-	if !rfc7239 {
+func parseEntry(e string, kind entryKind) hop {
+	switch kind {
+	case plainEntry:
+		return hop{addr: e}
+	case viewerEntry:
+		// CloudFront appends the port to every address, to an IPv6 one with
+		// no brackets, as in 2001:db8::1:46532.
+		if i := strings.LastIndexByte(e, ':'); i > 0 && e[0] != '[' && strings.Count(e, ":") > 1 {
+			e = e[:i]
+		}
 		return hop{addr: e}
 	}
 	var h hop

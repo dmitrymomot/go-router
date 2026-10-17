@@ -26,9 +26,11 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/dmitrymomot/go-router/internal/drain"
+	"github.com/dmitrymomot/go-router/internal/ja4"
 )
 
 // DefaultShutdownTimeout is how long [Run] waits for the requests in flight
@@ -60,6 +62,34 @@ const DefaultIdleTimeout = 120 * time.Second
 // sse.Serve does it on its own. The channel is nil for a context that no
 // server of this package serves, so the select never picks it.
 func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
+
+// JA4 reports the JA4 fingerprint of the TLS client of the request that ctx
+// belongs to, as in t13d1516h2_8daaf6152771_e5627efa2ab1, or "" when there is
+// none. It is the one a trusted CDN reported, when the RealIP middleware names
+// its header in RealIPConfig.JA4Header and trusts the peer, and else the one
+// the server captured under Config.CaptureJA4. Any context of the request
+// works, the handler context included.
+//
+// A fingerprint names the TLS library of a client, not the client: many users
+// share one, and a client can change it. Weigh it as one signal among others,
+// such as against the User-Agent, and never as an identity.
+func JA4(ctx context.Context) string { return ja4.JA4(ctx) }
+
+// JA3 reports the JA3 hash that a trusted CDN reported for the request that
+// ctx belongs to, when RealIPConfig.JA3Header names its header, or "". The
+// server computes no JA3 of its own.
+func JA3(ctx context.Context) string { return ja4.JA3(ctx) }
+
+// Stopping reports a channel that closes when the server that serves ctx
+// begins to stop: once the ctx of Run ends, right before OnDrain, while the
+// server still answers through DrainDelay. Under [RunAll] it closes for every
+// server at once, the moment the first one begins to stop, so a private
+// server learns of the stop of the public one. A readiness probe answers 503
+// once it closes, so a load balancer takes the server out of rotation during
+// the delay; package health does it on its own. [Draining] closes later, when
+// the drain itself starts. The channel is nil for a context that no server of
+// this package serves.
+func Stopping(ctx context.Context) <-chan struct{} { return drain.Stopping(ctx) }
 
 // Config is what [Run] builds the server from. Set Addr, or hand over a
 // Listener of your own; a Listener wins, and Run closes it either way.
@@ -101,6 +131,26 @@ func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
 // the balancer still sends would fail its requests. To turn them off anyway,
 // keep the server from OnServer and call SetKeepAlivesEnabled(false) on it
 // from OnDrain.
+//
+// CaptureJA4 makes an HTTPS server compute the JA4 fingerprint of the TLS
+// ClientHello of each connection, which [JA4] reads from the request context.
+// The capture reads the first TLS record before the handshake does, under the
+// header deadline of the server, and buffers at most 16 KiB of it; a
+// ClientHello that spans more than one record leaves the JA4 empty and the
+// connection as it was. OnServer may set ConnContext; Run wraps it.
+//
+// Background lists the functions that run beside the server, such as a queue
+// worker or a cache refresher. Each one starts on its own goroutine once the
+// server listens, with a context that carries the values of ctx, ends only
+// when Run cancels it, and answers [Draining] and [Stopping] like a request
+// context. Once ctx
+// ends, the HTTP drain runs first; then Run cancels that context and waits for
+// the functions within ShutdownTimeout, a second window after the drain. A
+// negative ShutdownTimeout cancels them and waits for none. A function that
+// reports an error while the server runs stops the server the way a cancelled
+// ctx does, and Run reports that error as it stands. A function that reports
+// nil ends alone, and stops nothing. After the cancel, an error that is
+// [context.Canceled] counts as a clean stop.
 type Config struct {
 	Addr              string
 	Network           string
@@ -117,6 +167,8 @@ type Config struct {
 	OnListen          func(net.Addr)
 	OnDrain           func()
 	OnServer          func(*http.Server) error
+	Background        []func(ctx context.Context) error
+	CaptureJA4        bool
 }
 
 // Run serves h until ctx ends, waits Config.DrainDelay, then drains the
@@ -124,7 +176,8 @@ type Config struct {
 // is the ordinary way to stop, so Run reports nil for it.
 //
 // Run reports an error for a nil context, a nil handler, a Config that names
-// neither an address nor a listener, a negative DrainDelay, a TLS config with
+// neither an address nor a listener, a negative DrainDelay, a nil function in
+// Background, CaptureJA4 on a server without TLS, a TLS config with
 // no certificate, a listener it cannot open, and a drain that runs out of
 // time. It checks the certificate after OnServer and before it listens, even
 // for a ctx that has already ended.
@@ -166,6 +219,9 @@ type instance struct {
 
 	// draining closes when the drain starts; see Draining.
 	draining chan struct{}
+	// stopping closes when the stop begins; see Stopping. RunAll shares one
+	// among its servers.
+	stopping *stopSignal
 
 	ln  net.Listener
 	cfg Config
@@ -181,8 +237,21 @@ func prepare(h http.Handler, cfg Config) (*instance, error) {
 	if cfg.DrainDelay < 0 {
 		return nil, errors.New("serve: Config.DrainDelay is negative")
 	}
-	return &instance{h: h, cfg: cfg}, nil
+	if i := slices.IndexFunc(cfg.Background, func(fn func(context.Context) error) bool { return fn == nil }); i >= 0 {
+		return nil, fmt.Errorf("serve: Config.Background[%d] is nil", i)
+	}
+	return &instance{h: h, cfg: cfg, stopping: newStopSignal()}, nil
 }
+
+// stopSignal is the channel of Stopping, which several parties may close.
+type stopSignal struct {
+	ch   chan struct{}
+	once sync.Once
+}
+
+func newStopSignal() *stopSignal { return &stopSignal{ch: make(chan struct{})} }
+
+func (s *stopSignal) close() { s.once.Do(func() { close(s.ch) }) }
 
 func (in *instance) build() error {
 	logger := in.cfg.Logger
@@ -210,6 +279,9 @@ func (in *instance) build() error {
 	if in.srv.TLSConfig != nil && !hasCertificate(in.srv.TLSConfig) {
 		return errors.New("serve: the TLS config has no certificate; add one through Config.Certificates, Config.TLSConfig or OnServer")
 	}
+	if in.cfg.CaptureJA4 && in.srv.TLSConfig == nil {
+		return errors.New("serve: Config.CaptureJA4 needs a server that ends TLS itself; add a certificate, or read the JA4 that a CDN reports through middleware.RealIPConfig")
+	}
 	return nil
 }
 
@@ -224,6 +296,9 @@ func (in *instance) open(ctx context.Context) error {
 	ln, err := listen(ctx, in.cfg)
 	if err != nil {
 		return err
+	}
+	if in.cfg.CaptureJA4 {
+		ln = ja4.Listener(ln)
 	}
 	in.ln = ln
 	return nil
@@ -249,12 +324,33 @@ func (in *instance) withDrainContext(ctx context.Context) {
 				base = b
 			}
 		}
-		return drain.With(base, in.draining)
+		return in.withSignals(base)
 	}
+}
+
+// withJA4Context wraps ConnContext of the server, so that the context of every
+// connection carries the JA4 its listener captured.
+func (in *instance) withJA4Context() {
+	user := in.srv.ConnContext
+	in.srv.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+		if user != nil {
+			ctx = user(ctx, c)
+		}
+		return ja4.WithConn(ctx, c)
+	}
+}
+
+// withSignals returns ctx carrying the channels of Draining and Stopping.
+func (in *instance) withSignals(ctx context.Context) context.Context {
+	return drain.WithStopping(drain.With(ctx, in.draining), in.stopping.ch)
 }
 
 func (in *instance) serve(ctx context.Context) error {
 	in.withDrainContext(ctx)
+	if in.cfg.CaptureJA4 {
+		in.withJA4Context()
+	}
+	bg := startBackground(in.withSignals(context.WithoutCancel(ctx)), in.cfg.Background)
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
 	var drainErr error
@@ -263,6 +359,7 @@ func (in *instance) serve(ctx context.Context) error {
 		defer close(drained)
 		select {
 		case <-ctx.Done():
+		case <-bg.failed:
 		case <-stopped:
 			return
 		}
@@ -285,11 +382,13 @@ func (in *instance) serve(ctx context.Context) error {
 	}
 	close(stopped)
 	<-drained
+	in.stopping.close()
+	bgErr := bg.stop(in.cfg.ShutdownTimeout)
 
 	if errors.Is(err, http.ErrServerClosed) {
 		err = nil
 	}
-	return joinErrors(err, closeErr, drainErr)
+	return joinErrors(bgErr, err, closeErr, drainErr)
 }
 
 // joinErrors is errors.Join, except that one error is returned as itself.
@@ -335,6 +434,7 @@ func serveOn(srv *http.Server, ln net.Listener) error {
 // shuts it down. A server whose serving fails during the delay is already
 // closed, so there is nothing left to drain.
 func (in *instance) drain(ctx context.Context, stopped <-chan struct{}) error {
+	in.stopping.close()
 	if in.cfg.OnDrain != nil {
 		in.cfg.OnDrain()
 	}

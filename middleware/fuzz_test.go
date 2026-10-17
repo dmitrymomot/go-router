@@ -42,7 +42,7 @@ func FuzzForwardedEntry(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, entry string) {
-		h := parseEntry(entry, true)
+		h := parseEntry(entry, forwardedEntry)
 		if h.proto != "" && h.proto != "http" && h.proto != "https" {
 			t.Fatalf("scheme = %q, want a normalized HTTP scheme or none", h.proto)
 		}
@@ -57,7 +57,8 @@ func FuzzForwardedEntry(f *testing.F) {
 				t.Fatalf("normalized %q = %v, want a valid address with no mapping and no zone", h.addr, a)
 			}
 		}
-		parseEntry(entry, false)
+		parseEntry(entry, plainEntry)
+		parseEntry(entry, viewerEntry)
 	})
 }
 
