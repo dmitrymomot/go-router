@@ -42,3 +42,16 @@ func ExampleOf() {
 	// Output:
 	// Brave 138 on Windows 11 (Desktop)
 }
+
+func ExampleAcceptCH() {
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	// From the second request on, Chromium sends the real versions and the
+	// model, which useragent.Of reads.
+	r.Use(useragent.AcceptCH[*appContext])
+	r.GET("/", func(c *appContext) error { return c.String(http.StatusOK, useragent.Of(c).String()) })
+
+	res := routertest.Get(r, "/")
+	fmt.Println(res.Header.Get("Accept-CH"))
+	// Output:
+	// Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Model
+}

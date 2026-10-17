@@ -9,7 +9,8 @@
 // Parsing never fails. Input it does not know gives zero values, with
 // Device.Type of [DeviceUnknown] and Raw kept. A Chromium browser freezes its
 // User-Agent, so read a request through [Of], or [ParseHeaders], which take
-// the real values from the Sec-CH-UA headers.
+// the real values from the Sec-CH-UA headers; [AcceptCH] asks the browser to
+// send the ones it holds back by default.
 //
 //	ua := useragent.Of(c)
 //	if ua.IsBot() {

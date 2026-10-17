@@ -16,7 +16,7 @@ import (
 // ignored. A bot keeps what its string says.
 //
 // A browser sends the platform version, the model and the full version list
-// only to a server that asked for them in Accept-CH.
+// only to a server that asked for them; see [AcceptCH].
 func ParseHeaders(h http.Header) UserAgent {
 	res := Parse(h.Get(router.HeaderUserAgent))
 	if res.IsBot() {
@@ -27,7 +27,7 @@ func ParseHeaders(h http.Header) UserAgent {
 }
 
 func applyClientHints(res *UserAgent, h http.Header) {
-	if name, ver, ok := pickBrand(h.Get("Sec-CH-UA-Full-Version-List")); ok {
+	if name, ver, ok := pickBrand(h.Get(HeaderSecCHUAFullVersionList)); ok {
 		if name != res.Browser.Name {
 			res.Browser.Name = name
 			res.Browser.Version = Version{}
@@ -35,7 +35,7 @@ func applyClientHints(res *UserAgent, h http.Header) {
 		if v := parseVersion(ver); v.Major > 0 {
 			res.Browser.Version = v
 		}
-	} else if name, ver, ok := pickBrand(h.Get("Sec-CH-UA")); ok {
+	} else if name, ver, ok := pickBrand(h.Get(HeaderSecCHUA)); ok {
 		if name != res.Browser.Name {
 			res.Browser.Name = name
 			res.Browser.Version = Version{}
@@ -46,16 +46,16 @@ func applyClientHints(res *UserAgent, h http.Header) {
 			res.Browser.Version = v
 		}
 	}
-	if p := unquote(h.Get("Sec-CH-UA-Platform")); p != "" {
-		applyPlatform(res, p, parseVersion(unquote(h.Get("Sec-CH-UA-Platform-Version"))))
+	if p := unquote(h.Get(HeaderSecCHUAPlatform)); p != "" {
+		applyPlatform(res, p, parseVersion(unquote(h.Get(HeaderSecCHUAPlatformVersion))))
 	}
-	if m := unquote(h.Get("Sec-CH-UA-Model")); m != "" && !strings.EqualFold(m, "k") {
+	if m := unquote(h.Get(HeaderSecCHUAModel)); m != "" && !strings.EqualFold(m, "k") {
 		res.Device.Model = m
 		if b := brandFromModel(m); b != "" {
 			res.Device.Brand = b
 		}
 	}
-	if h.Get("Sec-CH-UA-Mobile") == "?1" &&
+	if h.Get(HeaderSecCHUAMobile) == "?1" &&
 		(res.Device.Type == DeviceUnknown || res.Device.Type == DeviceDesktop) {
 		res.Device.Type = DeviceMobile
 	}
