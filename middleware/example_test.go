@@ -410,6 +410,32 @@ func ExampleSecureWithConfig() {
 	// default-src 'self'
 }
 
+func ExampleCSPNonce() {
+	r := newAPI()
+	r.Use(middleware.SecureWithConfig(middleware.SecureConfig[*Context]{
+		CSP: &middleware.CSPPolicy{
+			DefaultSrc: []string{middleware.CSPSelf},
+			ScriptSrc:  []string{middleware.CSPStrictDynamic},
+			ObjectSrc:  []string{middleware.CSPNone},
+			BaseURI:    []string{middleware.CSPNone},
+		},
+		CSPWithNonce: true,
+	}))
+	// A templ component reads it the same way: middleware.CSPNonce(ctx).
+	r.GET("/", func(c *Context) error {
+		return c.HTML(http.StatusOK, `<script nonce="`+middleware.CSPNonce(c)+`">boot()</script>`)
+	})
+
+	res := routertest.Get(r, "/")
+	// The nonce changes on every request; N stands for it here.
+	nonce := strings.TrimSuffix(strings.TrimPrefix(res.String(), `<script nonce="`), `">boot()</script>`)
+	fmt.Println(strings.ReplaceAll(res.Header.Get(router.HeaderContentSecurityPolicy), nonce, "N"))
+	fmt.Println(strings.ReplaceAll(res.String(), nonce, "N"))
+	// Output:
+	// default-src 'self'; script-src 'strict-dynamic' 'nonce-N'; style-src 'nonce-N'; object-src 'none'; base-uri 'none'
+	// <script nonce="N">boot()</script>
+}
+
 func ExampleCORSWithConfig() {
 	r := newAPI()
 	// A wildcard origin beside AllowCredentials panics: no browser honors it.

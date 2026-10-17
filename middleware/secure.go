@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -27,7 +28,11 @@ const SecureOmit = "-"
 // or [SecureOmit].
 //
 // ContentSecurityPolicy is sent only when it is set, and CSPReportOnly sends
-// it as a report rather than a rule. The HSTS fields build
+// it as a report rather than a rule. CSP is the same policy written as fields,
+// which the middleware checks and renders once; set one of the two. With
+// CSPWithNonce, every request gets a fresh nonce, which goes into script-src
+// and style-src and which [CSPNonce] reads, so an inline script or style that
+// carries it runs without 'unsafe-inline'. The HSTS fields build
 // Strict-Transport-Security, which goes out over HTTPS alone; HSTSMaxAge is a
 // [time.Duration], so write 365*24*time.Hour.
 type SecureConfig[C router.Context] struct {
@@ -35,6 +40,8 @@ type SecureConfig[C router.Context] struct {
 	ContentTypeNosniff        string
 	FrameOptions              string
 	ContentSecurityPolicy     string
+	CSP                       *CSPPolicy
+	CSPWithNonce              bool
 	CSPReportOnly             bool
 	ReferrerPolicy            string
 	CrossOriginOpenerPolicy   string
@@ -66,7 +73,11 @@ func Secure[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // SecureWithConfig is [Secure] with a configuration.
 //
 // SecureWithConfig panics on an HSTSMaxAge under one second, which is the
-// shape of a caller who wrote a number of seconds in place of a duration.
+// shape of a caller who wrote a number of seconds in place of a duration. It
+// also panics when both ContentSecurityPolicy and CSP are set, on
+// CSPWithNonce without CSP, and on a CSP with no directive or with a source
+// that is not one token, such as "https://a.example https://b.example" in
+// one entry, or a keyword without its quotes, such as "self".
 func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C] {
 	nosniff := setting(cfg.ContentTypeNosniff, "nosniff")
 	frame := setting(cfg.FrameOptions, "SAMEORIGIN")
@@ -84,6 +95,21 @@ func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C
 	} {
 		if p[1] != "" {
 			policies = append(policies, p)
+		}
+	}
+
+	switch {
+	case cfg.CSP != nil && cfg.ContentSecurityPolicy != "":
+		panic("middleware: SecureConfig sets both ContentSecurityPolicy and CSP; pick one")
+	case cfg.CSPWithNonce && cfg.CSP == nil:
+		panic("middleware: SecureConfig sets CSPWithNonce without CSP; the nonce goes into the typed policy")
+	}
+	policy := cfg.ContentSecurityPolicy
+	var policyParts []string
+	if cfg.CSP != nil {
+		policy = cfg.CSP.render(cfg.CSPWithNonce)
+		if cfg.CSPWithNonce {
+			policyParts = strings.Split(policy, cspNonceSlot)
 		}
 	}
 
@@ -130,8 +156,13 @@ func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C
 			for _, p := range policies {
 				h.Set(p[0], p[1])
 			}
-			if cfg.ContentSecurityPolicy != "" {
-				h.Set(csp, cfg.ContentSecurityPolicy)
+			switch {
+			case policyParts != nil:
+				nonce := newCSPNonce()
+				h.Set(csp, strings.Join(policyParts, nonce))
+				c.SetContext(context.WithValue(c.Request().Context(), cspNonceKey{}, nonce))
+			case policy != "":
+				h.Set(csp, policy)
 			}
 			if hsts != "" && router.SchemeOf(c.Request()) == "https" {
 				h.Set(router.HeaderStrictTransportSecurity, hsts)
