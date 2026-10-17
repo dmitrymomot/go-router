@@ -32,6 +32,10 @@ type Server struct {
 // servers, and the grace period of the orchestrator has to cover it. Setting
 // DrainDelay on the first server alone is usually enough.
 //
+// The Background functions of a server stop after its own drain, within its
+// own ShutdownTimeout, before the next server starts to drain. One that fails
+// stops every server, as a failed server does.
+//
 // Each error names the index of its server, on the first line of its text;
 // [errors.Is] and [errors.As] see through that. RunAll closes every
 // Config.Listener on every path, as Run does. For a ctx that has already

@@ -101,6 +101,18 @@ func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
 // the balancer still sends would fail its requests. To turn them off anyway,
 // keep the server from OnServer and call SetKeepAlivesEnabled(false) on it
 // from OnDrain.
+//
+// Background lists the functions that run beside the server, such as a queue
+// worker or a cache refresher. Each one starts on its own goroutine once the
+// server listens, with a context that carries the values of ctx, ends only
+// when Run cancels it, and answers [Draining] like a request context. Once ctx
+// ends, the HTTP drain runs first; then Run cancels that context and waits for
+// the functions within ShutdownTimeout, a second window after the drain. A
+// negative ShutdownTimeout cancels them and waits for none. A function that
+// reports an error while the server runs stops the server the way a cancelled
+// ctx does, and Run reports that error as it stands. A function that reports
+// nil ends alone, and stops nothing. After the cancel, an error that is
+// [context.Canceled] counts as a clean stop.
 type Config struct {
 	Addr              string
 	Network           string
@@ -117,6 +129,7 @@ type Config struct {
 	OnListen          func(net.Addr)
 	OnDrain           func()
 	OnServer          func(*http.Server) error
+	Background        []func(ctx context.Context) error
 }
 
 // Run serves h until ctx ends, waits Config.DrainDelay, then drains the
@@ -124,7 +137,8 @@ type Config struct {
 // is the ordinary way to stop, so Run reports nil for it.
 //
 // Run reports an error for a nil context, a nil handler, a Config that names
-// neither an address nor a listener, a negative DrainDelay, a TLS config with
+// neither an address nor a listener, a negative DrainDelay, a nil function in
+// Background, a TLS config with
 // no certificate, a listener it cannot open, and a drain that runs out of
 // time. It checks the certificate after OnServer and before it listens, even
 // for a ctx that has already ended.
@@ -180,6 +194,9 @@ func prepare(h http.Handler, cfg Config) (*instance, error) {
 	}
 	if cfg.DrainDelay < 0 {
 		return nil, errors.New("serve: Config.DrainDelay is negative")
+	}
+	if i := slices.IndexFunc(cfg.Background, func(fn func(context.Context) error) bool { return fn == nil }); i >= 0 {
+		return nil, fmt.Errorf("serve: Config.Background[%d] is nil", i)
 	}
 	return &instance{h: h, cfg: cfg}, nil
 }
@@ -255,6 +272,7 @@ func (in *instance) withDrainContext(ctx context.Context) {
 
 func (in *instance) serve(ctx context.Context) error {
 	in.withDrainContext(ctx)
+	bg := startBackground(ctx, in.draining, in.cfg.Background)
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
 	var drainErr error
@@ -263,6 +281,7 @@ func (in *instance) serve(ctx context.Context) error {
 		defer close(drained)
 		select {
 		case <-ctx.Done():
+		case <-bg.failed:
 		case <-stopped:
 			return
 		}
@@ -285,11 +304,12 @@ func (in *instance) serve(ctx context.Context) error {
 	}
 	close(stopped)
 	<-drained
+	bgErr := bg.stop(in.cfg.ShutdownTimeout)
 
 	if errors.Is(err, http.ErrServerClosed) {
 		err = nil
 	}
-	return joinErrors(err, closeErr, drainErr)
+	return joinErrors(bgErr, err, closeErr, drainErr)
 }
 
 // joinErrors is errors.Join, except that one error is returned as itself.

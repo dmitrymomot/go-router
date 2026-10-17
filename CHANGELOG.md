@@ -2,6 +2,12 @@
 
 All notable changes to this module are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before v1, a minor release may break the API; each break is listed below with the way to migrate.
 
+## [Unreleased]
+
+### Added
+
+- **`serve.Config.Background`**, functions that run beside the server, such as a queue worker. They start once the server listens, with a context that keeps the values of ctx and answers `serve.Draining`. On a stop, the HTTP drain runs first; then Run cancels their context and waits for them within `ShutdownTimeout`. A function that fails while the server runs stops the server, and `Run` reports its error as it stands. `RunAll` stops the functions of each server after the drain of that server.
+
 ## [0.5.0] - 2026-10-15
 
 ### Added

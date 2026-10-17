@@ -220,3 +220,50 @@ func ExampleDraining() {
 	// bye
 	// Run returned: <nil>
 }
+
+func ExampleConfig_background() {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	// A worker beside the server. Its context ends only after the HTTP drain,
+	// so a job that a request queued during the drain still gets done.
+	jobs := make(chan string)
+	taken := make(chan struct{})
+	worker := func(ctx context.Context) error {
+		for {
+			select {
+			case job := <-jobs:
+				fmt.Println("worker:", job)
+				taken <- struct{}{}
+			case <-ctx.Done():
+				fmt.Println("worker: stopped")
+				return ctx.Err()
+			}
+		}
+	}
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jobs <- "send the welcome mail"
+		<-taken
+		//nolint:errcheck // The example has no better place to report it.
+		fmt.Fprint(w, "queued")
+	})
+
+	err := serve.Run(ctx, h, serve.Config{
+		Addr:       "127.0.0.1:0",
+		Logger:     slog.New(slog.DiscardHandler),
+		Background: []func(context.Context) error{worker},
+		OnListen: func(addr net.Addr) {
+			go func() {
+				fmt.Println(get("http://" + addr.String()))
+				stop()
+			}()
+		},
+	})
+	fmt.Println("Run returned:", err)
+	// Output:
+	// worker: send the welcome mail
+	// 200 queued
+	// worker: stopped
+	// Run returned: <nil>
+}
