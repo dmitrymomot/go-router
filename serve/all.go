@@ -54,11 +54,13 @@ func RunAll(ctx context.Context, servers ...Server) error {
 	}
 
 	ins := make([]*instance, len(servers))
+	stopping := newStopSignal()
 	for i, s := range servers {
 		in, err := prepare(s.Handler, s.Config)
 		if err != nil {
 			return serverError{i: i, err: err}
 		}
+		in.stopping = stopping
 		ins[i] = in
 	}
 	for i, in := range ins {
@@ -110,6 +112,7 @@ func RunAll(ctx context.Context, servers ...Server) error {
 	}
 	wg.Go(func() {
 		<-stop.Done()
+		stopping.close()
 		for i := range ins {
 			cancels[i]()
 			<-done[i]

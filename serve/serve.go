@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/dmitrymomot/go-router/internal/drain"
@@ -60,6 +61,17 @@ const DefaultIdleTimeout = 120 * time.Second
 // sse.Serve does it on its own. The channel is nil for a context that no
 // server of this package serves, so the select never picks it.
 func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
+
+// Stopping reports a channel that closes when the server that serves ctx
+// begins to stop: once the ctx of Run ends, right before OnDrain, while the
+// server still answers through DrainDelay. Under [RunAll] it closes for every
+// server at once, the moment the first one begins to stop, so a private
+// server learns of the stop of the public one. A readiness probe answers 503
+// once it closes, so a load balancer takes the server out of rotation during
+// the delay; package health does it on its own. [Draining] closes later, when
+// the drain itself starts. The channel is nil for a context that no server of
+// this package serves.
+func Stopping(ctx context.Context) <-chan struct{} { return drain.Stopping(ctx) }
 
 // Config is what [Run] builds the server from. Set Addr, or hand over a
 // Listener of your own; a Listener wins, and Run closes it either way.
@@ -105,7 +117,8 @@ func Draining(ctx context.Context) <-chan struct{} { return drain.Done(ctx) }
 // Background lists the functions that run beside the server, such as a queue
 // worker or a cache refresher. Each one starts on its own goroutine once the
 // server listens, with a context that carries the values of ctx, ends only
-// when Run cancels it, and answers [Draining] like a request context. Once ctx
+// when Run cancels it, and answers [Draining] and [Stopping] like a request
+// context. Once ctx
 // ends, the HTTP drain runs first; then Run cancels that context and waits for
 // the functions within ShutdownTimeout, a second window after the drain. A
 // negative ShutdownTimeout cancels them and waits for none. A function that
@@ -180,6 +193,9 @@ type instance struct {
 
 	// draining closes when the drain starts; see Draining.
 	draining chan struct{}
+	// stopping closes when the stop begins; see Stopping. RunAll shares one
+	// among its servers.
+	stopping *stopSignal
 
 	ln  net.Listener
 	cfg Config
@@ -198,8 +214,18 @@ func prepare(h http.Handler, cfg Config) (*instance, error) {
 	if i := slices.IndexFunc(cfg.Background, func(fn func(context.Context) error) bool { return fn == nil }); i >= 0 {
 		return nil, fmt.Errorf("serve: Config.Background[%d] is nil", i)
 	}
-	return &instance{h: h, cfg: cfg}, nil
+	return &instance{h: h, cfg: cfg, stopping: newStopSignal()}, nil
 }
+
+// stopSignal is the channel of Stopping, which several parties may close.
+type stopSignal struct {
+	ch   chan struct{}
+	once sync.Once
+}
+
+func newStopSignal() *stopSignal { return &stopSignal{ch: make(chan struct{})} }
+
+func (s *stopSignal) close() { s.once.Do(func() { close(s.ch) }) }
 
 func (in *instance) build() error {
 	logger := in.cfg.Logger
@@ -266,13 +292,18 @@ func (in *instance) withDrainContext(ctx context.Context) {
 				base = b
 			}
 		}
-		return drain.With(base, in.draining)
+		return in.withSignals(base)
 	}
+}
+
+// withSignals returns ctx carrying the channels of Draining and Stopping.
+func (in *instance) withSignals(ctx context.Context) context.Context {
+	return drain.WithStopping(drain.With(ctx, in.draining), in.stopping.ch)
 }
 
 func (in *instance) serve(ctx context.Context) error {
 	in.withDrainContext(ctx)
-	bg := startBackground(ctx, in.draining, in.cfg.Background)
+	bg := startBackground(in.withSignals(context.WithoutCancel(ctx)), in.cfg.Background)
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
 	var drainErr error
@@ -304,6 +335,7 @@ func (in *instance) serve(ctx context.Context) error {
 	}
 	close(stopped)
 	<-drained
+	in.stopping.close()
 	bgErr := bg.stop(in.cfg.ShutdownTimeout)
 
 	if errors.Is(err, http.ErrServerClosed) {
@@ -355,6 +387,7 @@ func serveOn(srv *http.Server, ln net.Listener) error {
 // shuts it down. A server whose serving fails during the delay is already
 // closed, so there is nothing left to drain.
 func (in *instance) drain(ctx context.Context, stopped <-chan struct{}) error {
+	in.stopping.close()
 	if in.cfg.OnDrain != nil {
 		in.cfg.OnDrain()
 	}

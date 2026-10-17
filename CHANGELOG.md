@@ -7,6 +7,7 @@ All notable changes to this module are recorded here. The format follows [Keep a
 ### Added
 
 - **`serve.Config.Background`**, functions that run beside the server, such as a queue worker. They start once the server listens, with a context that keeps the values of ctx and answers `serve.Draining`. On a stop, the HTTP drain runs first; then Run cancels their context and waits for them within `ShutdownTimeout`. A function that fails while the server runs stops the server, and `Run` reports its error as it stands. `RunAll` stops the functions of each server after the drain of that server.
+- **`serve.Stopping`**, a channel that closes when the server begins to stop, right before `OnDrain` and the `DrainDelay`, while the server still answers. Under `RunAll` it closes for every server at once, so the readiness probe of a private server turns 503 the moment the public one begins to stop. `serve.Draining` still closes later, when the drain itself starts.
 
 ## [0.5.0] - 2026-10-15
 

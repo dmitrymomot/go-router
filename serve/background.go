@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/dmitrymomot/go-router/internal/drain"
 )
 
 // background is the Config.Background functions of one server while they
@@ -28,14 +26,14 @@ type background struct {
 }
 
 // startBackground starts each of fns on its own goroutine, with a context
-// that keeps the values of ctx, ends only on stop, and carries draining.
-func startBackground(ctx context.Context, draining <-chan struct{}, fns []func(context.Context) error) *background {
+// derived from ctx that ends on stop.
+func startBackground(ctx context.Context, fns []func(context.Context) error) *background {
 	bg := new(background)
 	if len(fns) == 0 {
 		return bg
 	}
 	bg.failed = make(chan struct{})
-	rctx, cancel := context.WithCancel(drain.With(context.WithoutCancel(ctx), draining))
+	rctx, cancel := context.WithCancel(ctx)
 	bg.cancel = cancel
 	for _, fn := range fns {
 		bg.wg.Go(func() { bg.report(fn(rctx)) })
