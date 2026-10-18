@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/dmitrymomot/go-router"
 )
@@ -22,42 +21,6 @@ func tmpl(name string, data any) router.Component {
 		return templates.ExecuteTemplate(w, name, data)
 	})
 }
-
-const sessionCookie = "tenants_session"
-
-const sessionMaxAge = 12 * time.Hour
-
-// writeSession signs the workspace slug and the email into a cookie with no
-// Domain attribute, so it belongs to the host that set it: signing in at
-// acme.lvh.me leaves beta.lvh.me signed out. The slug is signed in as well, so
-// a cookie replayed on another workspace host is told apart even when the
-// attacker controls a host of their own.
-func writeSession(c Ctx, email string) error {
-	return c.Cookies.Set(c, c.NewCookie(sessionCookie, sessionValue(c.Workspace.Slug, email), sessionMaxAge))
-}
-
-func sessionValue(slug, email string) string { return slug + "\x00" + email }
-
-// readSession reports the account the session cookie names, and only when the
-// cookie was signed for the workspace of c and the email still holds an
-// account there.
-func readSession(c Ctx) (string, bool) {
-	v, err := c.Cookies.Get(c, sessionCookie)
-	if err != nil {
-		return "", false
-	}
-	slug, email, ok := strings.Cut(v, "\x00")
-	if !ok || slug != c.Workspace.Slug {
-		return "", false
-	}
-	email = cleanEmail(email)
-	if email == "" || !c.Store.HasAccount(slug, email) {
-		return "", false
-	}
-	return email, true
-}
-
-func clearSession(c Ctx) { c.ClearCookie(sessionCookie) }
 
 // origin is the scheme and authority of host. The port comes from the request
 // that asked, so one binary serves lvh.me:8080 here and lvh.me there.

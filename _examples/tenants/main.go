@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,9 +17,9 @@ import (
 	"time"
 
 	"github.com/dmitrymomot/go-router"
-	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/serve"
+	"github.com/dmitrymomot/go-router/session"
 )
 
 // baseDomain is the apex. A workspace named Acme answers on acme.lvh.me.
@@ -34,15 +33,13 @@ const addr = "localhost:8080"
 
 const maxBodyBytes = 8 << 10
 
-// Context is what every handler receives. The factory gives it the store and
-// the codec that signs the session cookie. The signed-in email and the
-// workspace of the subdomain are filled in by middleware.
+// Context is what every handler receives. The factory gives it the store. The
+// workspace of the subdomain, the session and the signed-in account ride on
+// the request context, where middleware of packages tenant, session and user
+// puts them.
 type Context struct {
 	router.Base
-	Store     *Store
-	Cookies   *cookie.Codec
-	Email     string
-	Workspace Workspace
+	Store *Store
 }
 
 type Ctx = *Context
@@ -51,7 +48,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	r := newRouter(NewStore(), cookie.NewCodec(sessionKey()))
+	r := newRouter(NewStore())
 
 	if err := serve.Run(ctx, r, serve.Config{
 		Addr:              addr,
@@ -70,9 +67,9 @@ func main() {
 	}
 }
 
-func newRouter(store *Store, codec *cookie.Codec) *router.Router[Ctx] {
+func newRouter(store *Store) *router.Router[Ctx] {
 	r := router.New(func(http.ResponseWriter, *http.Request) Ctx {
-		return &Context{Store: store, Cookies: codec}
+		return &Context{Store: store}
 	})
 
 	r.ErrorHandler(renderError)
@@ -95,7 +92,7 @@ func newRouter(store *Store, codec *cookie.Codec) *router.Router[Ctx] {
 	r.RedirectHost("www."+baseDomain, http.StatusMovedPermanently, baseDomain)
 
 	// One table for every workspace: the subdomain is the {tenant} parameter.
-	r.Host(tenantHost, workspaceRoutes)
+	r.Host(tenantHost, workspaceRoutes(store, session.NewMemoryStore()))
 
 	// Everything else, such as a request sent straight to 127.0.0.1:8080.
 	r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })
@@ -111,18 +108,4 @@ func renderError(c Ctx, err error) error {
 		Message string
 		ApexURL string
 	}{Status: he.Status, Message: he.Message, ApexURL: apexURL(c)}))
-}
-
-// sessionKey signs the session cookie. A key that lives only for this run ends
-// every session with the process, which is right for an example and wrong for
-// a service.
-func sessionKey() []byte {
-	if key := []byte(os.Getenv("SESSION_KEY")); len(key) >= cookie.MinKeyLen {
-		return key
-	}
-	key := make([]byte, cookie.MinKeyLen)
-	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program.
-	rand.Read(key)
-	slog.Info("no SESSION_KEY of 32 bytes or more, so this run signs with a new one")
-	return key
 }

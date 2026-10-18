@@ -8,6 +8,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/session"
 )
 
 const minPasswordRunes = 8
@@ -79,20 +80,31 @@ func nameRefused(err error) (string, bool) {
 
 // enter spends the ticket signup issued, on the host the session belongs to.
 func enter(c Ctx) error {
+	w := workspaceOf(c)
 	t, ok := c.Store.Redeem(c.Query("ticket"))
-	if !ok || t.workspace != c.Workspace.Slug {
+	if !ok || t.workspace != w.Slug {
 		return c.Redirect(http.StatusSeeOther, "/login")
 	}
-	if err := writeSession(c, t.email); err != nil {
+	if err := signIn(c, w, t.email); err != nil {
 		return err
 	}
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
+// signIn starts the session of email in the workspace w. Renew gives the
+// session a new token first, so a token planted in the browser before the
+// login names nothing after it.
+func signIn(c Ctx, w Workspace, email string) error {
+	if err := session.Renew(c); err != nil {
+		return err
+	}
+	return session.Put(c, sessionData{Workspace: w.Slug, Email: email})
+}
+
 func loginForm(c Ctx) error {
 	return c.Render(http.StatusOK, tmpl("login", credentialsPage{
 		CSRFToken: middleware.CSRFTokenFrom(c),
-		Workspace: c.Workspace.Name,
+		Workspace: workspaceOf(c).Name,
 	}))
 }
 
@@ -102,28 +114,33 @@ func login(c Ctx) error {
 		return err
 	}
 
+	w := workspaceOf(c)
 	email := cleanEmail(in.Email)
 	page := credentialsPage{
 		CSRFToken: middleware.CSRFTokenFrom(c),
 		Email:     email,
-		Workspace: c.Workspace.Name,
+		Workspace: w.Name,
 	}
 
 	// One sentence for both failures, so the form says nothing about which
 	// addresses hold an account in this workspace.
-	if err := c.Store.Authenticate(c.Workspace.Slug, email, in.Password); err != nil {
+	if err := c.Store.Authenticate(w.Slug, email, in.Password); err != nil {
 		return refuse(c, "login", page, "That email and password do not match.")
 	}
 
-	if err := writeSession(c, email); err != nil {
+	if err := signIn(c, w, email); err != nil {
 		return err
 	}
 
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
+// signout deletes the session from the store, so a copy of the cookie names
+// nothing either, and clears the cookie.
 func signout(c Ctx) error {
-	clearSession(c)
+	if err := session.Destroy(c); err != nil {
+		return err
+	}
 	return c.Redirect(http.StatusSeeOther, "/login")
 }
 

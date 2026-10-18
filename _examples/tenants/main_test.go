@@ -5,10 +5,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/dmitrymomot/go-router"
-	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/routertest"
 )
 
@@ -18,13 +16,9 @@ const (
 	testPassword = "correct horse"
 )
 
-// testCodec signs the session cookie of every test router, so a test can read
-// the session back.
-var testCodec = cookie.NewCodec([]byte(strings.Repeat("k", cookie.MinKeyLen)))
-
 func newTestRouter(t *testing.T) *router.Router[Ctx] {
 	t.Helper()
-	return newRouter(NewStore(), testCodec)
+	return newRouter(NewStore())
 }
 
 func host(slug string) string { return slug + "." + apex }
@@ -201,8 +195,27 @@ func TestLoginBelongsToTheWorkspace(t *testing.T) {
 	if got := sessionOf(t, res); got.Domain != "" {
 		t.Errorf("session cookie domain = %q, want none", got.Domain)
 	}
-	if email, ok := routertest.SignedCookie(t, res, testCodec, sessionCookie); !ok || email != sessionValue("acme", "ann@example.com") {
-		t.Errorf("the session carries %q, %v, want the acme slug and ann@example.com", email, ok)
+	if page := cl.Get("/"); !strings.Contains(page.String(), "Signed in as ann@example.com") {
+		t.Errorf("the dashboard does not name the account of the session: %s", page)
+	}
+}
+
+// A token that an attacker planted in the browser before the login must name
+// nothing after it, or the attacker shares the session they planted.
+func TestLoginGivesTheSessionANewToken(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
+
+	cl := browser(t, h, host("acme"))
+	first := sessionOf(t, logIn(t, cl, "ann@example.com", testPassword))
+	second := sessionOf(t, logIn(t, cl, "ann@example.com", testPassword))
+	if first.Value == second.Value {
+		t.Fatal("a second login kept the token of the first")
+	}
+
+	old := routertest.Get(h, "http://"+host("acme")+"/", routertest.Host(host("acme")), routertest.Cookie(first))
+	if !strings.Contains(old.String(), "as a guest") {
+		t.Errorf("the token from before the login still signs in: %s", old)
 	}
 }
 
@@ -261,6 +274,36 @@ func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 	if cl.Cookie(sessionCookie) != nil {
 		t.Error("the browser still holds the session after sign out")
 	}
+}
+
+// The store forgets the session at sign-out, so a copy of the cookie taken
+// before it signs nobody in.
+func TestSignoutEndsACopyOfTheCookieToo(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
+
+	cl := browser(t, h, host("acme"))
+	copied := sessionOf(t, logIn(t, cl, "ann@example.com", testPassword))
+	page := cl.Get("/")
+	cl.Do(http.MethodPost, "/signout", routertest.FormBody(url.Values{"_csrf": {hiddenToken(t, page.String())}})).
+		Expect(t).Redirect(http.StatusSeeOther, "/login")
+
+	res := routertest.Get(h, "http://"+host("acme")+"/", routertest.Host(host("acme")), routertest.Cookie(copied))
+	if !strings.Contains(res.String(), "as a guest") {
+		t.Errorf("a copy of the cookie outlived the sign-out: %s", res)
+	}
+}
+
+func TestAGuestWhoSignsOutIsSentToTheDoor(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
+
+	// The guest page has no sign-out form, so take the token from the login
+	// form, as a stale tab would hold it.
+	cl := browser(t, h, host("acme"))
+	page := cl.Get("/login")
+	cl.Do(http.MethodPost, "/signout", routertest.FormBody(url.Values{"_csrf": {hiddenToken(t, page.String())}})).
+		Expect(t).Redirect(http.StatusSeeOther, "/login")
 }
 
 func hiddenToken(t *testing.T, body string) string {
@@ -365,16 +408,19 @@ func TestASessionOfOneWorkspaceOpensNoOther(t *testing.T) {
 	}
 }
 
-// A cookie signed for the right workspace still needs an account behind it.
-func TestASessionNeedsAMemberOfTheWorkspace(t *testing.T) {
+// A cookie that names no session in the store signs nobody in, and the
+// browser is told to drop it.
+func TestAnUnknownSessionIsAGuest(t *testing.T) {
 	h := newTestRouter(t)
 	signUp(t, browser(t, h, apex), "Acme", "ann@acme.com", testPassword)
 
-	forged := testCodec.Encode(sessionCookie, []byte(sessionValue("acme", "mallory@example.com")), time.Now().Add(time.Hour))
 	res := routertest.Get(h, "http://"+host("acme")+"/", routertest.Host(host("acme")),
-		routertest.Cookie(&http.Cookie{Name: sessionCookie, Value: forged}))
+		routertest.Cookie(&http.Cookie{Name: sessionCookie, Value: "made-up"}))
 	res.Expect(t).Status(http.StatusOK)
-	if strings.Contains(res.String(), "mallory@example.com") {
-		t.Errorf("a non-member signed in: %s", res)
+	if !strings.Contains(res.String(), "as a guest") {
+		t.Errorf("a made-up session signed in: %s", res)
+	}
+	if got := sessionOf(t, res); got.MaxAge >= 0 {
+		t.Errorf("the made-up cookie was not cleared: %+v", got)
 	}
 }

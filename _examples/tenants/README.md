@@ -10,7 +10,7 @@ Then open <http://lvh.me:8080> and create a workspace. The app sends you to its 
 
 `lvh.me` and every name under it resolve to 127.0.0.1, so the subdomains work with no entry in `/etc/hosts` and no DNS of your own.
 
-Nothing is stored. The workspaces and their accounts live in maps that go away with the process, and so does the key that signs the session.
+Nothing is stored. The workspaces, their accounts and the sessions live in maps that go away with the process.
 
 ## An account belongs to a workspace
 
@@ -28,7 +28,7 @@ The apex sells the product and makes workspaces. It has no login and no session 
 | Read the workspace | `GET acme.lvh.me/` | the dashboard, signed in or as a guest |
 | Come back | `GET acme.lvh.me/login` | the door of that workspace |
 | Sign in | `POST acme.lvh.me/login` | `303` to the dashboard, or the form again |
-| Leave | `POST acme.lvh.me/signout` | `303` to the door |
+| Leave | `POST acme.lvh.me/signout` | `303` to the door, and the session is gone from the store |
 | Ask an unknown host | `GET 127.0.0.1:8080/` | `404` and a page naming the hosts that do answer |
 
 ## The five pieces worth copying
@@ -44,17 +44,25 @@ r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })
 
 An exact host wins over a pattern, so `www.lvh.me` never reads as a workspace named `www`: it answers every request with a `301` to the same path and query on the apex. The port never appears in a pattern: the router strips it before it matches, so the same lines serve `lvh.me:8080` here and `lvh.me` in production. Links to a workspace fill in the same pattern, `router.MustExpand(tenantHost, "tenant", slug)`, so the table and the links cannot drift apart.
 
-**The subdomain reaches the handler as a parameter.** One middleware turns it into the workspace, and every handler under it reads `c.Workspace`:
+**The subdomain reaches the handler as a parameter.** Package `tenant` turns it into the workspace, or answers 404, and every handler under it reads the workspace with `tenant.From`:
 
 ```go
-slug := c.Param("tenant")
-w, ok := c.Store.Get(slug)
-if !ok {
-	return router.ErrNotFound.WithMessage("no workspace at %s", c.Host())
-}
+tenant.MiddlewareWithConfig(tenant.Config[Ctx, Workspace]{
+	Lookup: findWorkspace, // store.Get, or tenant.ErrUnknown
+	OnReject: func(c Ctx, _ error) error {
+		return router.ErrNotFound.WithMessage("no workspace at %s", c.Host())
+	},
+}),
 ```
 
-**A session that belongs to one host.** The context holds the codec: the factory puts one `*cookie.Codec` on every `Context` as `c.Cookies`. `NewCookie` gives the session cookie the router's defaults and no `Domain`, and `c.Cookies.Set` signs the email with an HMAC, so the cookie belongs to the host that set it and to no other. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out.
+**A session that belongs to one host, and an account that belongs to one workspace.** Package `session` keeps the session in a store on the server and gives the browser only a random token, in a cookie with the router's defaults and no `Domain`, so it belongs to the host that set it. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out. Package `user` turns the session into the account, and lets a guest through:
+
+```go
+session.MiddlewareWithConfig(session.Config[Ctx, sessionData]{Store: sessions, Cookie: sessionCookie, Lifetime: sessionLifetime}),
+user.Middleware[Ctx](findAccount, user.FromSession(func(d sessionData) string { return d.Email })),
+```
+
+The session also names its workspace, and `findAccount` checks it against the workspace of the host, so a session of one workspace opens no other even where its token travels. A login calls `session.Renew` before `session.Put`, so a token planted in the browser before the login names nothing after it. Sign-out calls `session.Destroy`, which deletes the record, so a copy of the cookie signs nobody in either. `user.RequireWithConfig` sends a guest who posts the sign-out form to the door.
 
 **A ticket to cross the hosts.** Signup runs on the apex, and no server may set a cookie for a host below its own, so the apex cannot start the session it just earned. It hands over a ticket instead: one random id, good for one minute and one visit.
 
@@ -74,7 +82,7 @@ func passwordMatches(password string, salt, want []byte) bool {
 
 An address with no account in this workspace derives against a throwaway salt before it is refused, so it cannot answer faster than a known one with the wrong password, and both get the same sentence. A signup form has to say that a subdomain is taken; a login form must not say who has an account.
 
-`cookie.NewCodec` panics on a key under 32 bytes, so `SESSION_KEY` is either long enough or ignored for one this run generates. `cookie.NewCodec(newKey, oldKey)` rotates the key: it signs with the new one and still reads what the old one signed. A service that can take a dependency should prefer argon2id from `golang.org/x/crypto`. This example takes none.
+A service that can take a dependency should prefer argon2id from `golang.org/x/crypto`. This example takes none.
 
 ## The files
 
@@ -83,10 +91,10 @@ An address with no account in this workspace derives against a throwaway salt be
 | `main.go` | the context type, the server, the host scopes and the error page |
 | `landing.go` | the apex: the pitch and the signup form |
 | `auth.go` | signup, the ticket, the login form and what each refuses |
-| `workspace.go` | the workspace host: the lookup middleware and the dashboard |
+| `workspace.go` | the workspace host: the tenant, session and user middleware, and the dashboard |
 | `password.go` | the salt, the derivation and the constant-time compare |
 | `store.go` | the workspaces, their accounts, the tickets and the slug rules |
-| `view.go` | the templates, the signed session and the absolute URLs |
+| `view.go` | the templates and the absolute URLs |
 | `templates/` | the layout and the six pages |
 
 ## What a real app would add
