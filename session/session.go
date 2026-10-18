@@ -374,6 +374,10 @@ func Put[T any](ctx context.Context, v T) error {
 // at any change of privilege. A request with no session has nothing to move,
 // and Renew does nothing.
 //
+// It saves the new record before it deletes the old one, so a failed save
+// leaves the session as it was. A failed delete is reported after the cookie
+// names the new token: the old record then lives until it expires.
+//
 // Renew panics when ctx passed no session middleware.
 func Renew(ctx context.Context) error {
 	s := stateOf(ctx, "Renew")
@@ -383,11 +387,15 @@ func Renew(ctx context.Context) error {
 	if s.token == "" {
 		return nil
 	}
-	if err := s.m.store.Delete(ctx, s.token); err != nil {
-		return fmt.Errorf("session: delete: %w", err)
-	}
+	old := s.token
 	now := time.Now()
-	return s.save(ctx, NewToken(), s.data, now, s.m.expiry(now, now))
+	if err := s.save(ctx, NewToken(), s.data, now, s.m.expiry(now, now)); err != nil {
+		return err
+	}
+	if err := s.m.store.Delete(ctx, old); err != nil {
+		return fmt.Errorf("session: delete the old record: %w", err)
+	}
+	return nil
 }
 
 // Destroy deletes the record of the session of ctx and clears the cookie, as

@@ -492,10 +492,21 @@ func TestStoreErrors(t *testing.T) {
 
 	store.save = down
 	c.Do(http.MethodPost, "/cart?item=tea").Expect(t).Status(http.StatusInternalServerError)
+	// A Renew whose save fails leaves the session as it was.
+	before := sessionToken(t, c)
+	c.Do(http.MethodPost, "/login?as=grace").Expect(t).Status(http.StatusInternalServerError)
 	store.save = nil
+	if sessionToken(t, c) != before {
+		t.Error("a failed Renew moved the cookie")
+	}
+	c.Get("/show").Expect(t).Body("ada|")
 
+	// A Renew whose delete fails has moved the session already, and says so.
 	store.del = down
 	c.Do(http.MethodPost, "/login?as=grace").Expect(t).Status(http.StatusInternalServerError)
+	if sessionToken(t, c) == before {
+		t.Error("the cookie still names the old token after the new one was saved")
+	}
 	c.Do(http.MethodPost, "/logout").Expect(t).Status(http.StatusInternalServerError)
 	store.del = nil
 	c.Get("/show").Expect(t).Body("ada|")
