@@ -11,6 +11,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/internal/sessionfake"
 	"github.com/dmitrymomot/go-router/routertest"
 	"github.com/dmitrymomot/go-router/session"
 )
@@ -98,7 +99,7 @@ func sessionToken(t *testing.T, c *routertest.Client) string {
 }
 
 func TestASessionAcrossRequests(t *testing.T) {
-	store := newFakeStore()
+	store := sessionfake.New()
 	c := newApp(t, session.Config[*appContext, Data]{Store: store})
 
 	c.Get("/show").Expect(t).Status(http.StatusOK).Body("none").Header("Vary", "Cookie")
@@ -125,7 +126,7 @@ func TestASessionAcrossRequests(t *testing.T) {
 
 func TestTheHostCookieOverHTTPS(t *testing.T) {
 	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](newFakeStore()))
+	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
 	routes(r)
 	c := routertest.NewClient(t, r, routertest.Header("X-Forwarded-Proto", "https"))
 
@@ -144,7 +145,7 @@ func TestTheHostCookieOverHTTPS(t *testing.T) {
 }
 
 func TestPutKeepsTheTokenOfAServerStore(t *testing.T) {
-	c := newApp(t, session.Config[*appContext, Data]{Store: newFakeStore()})
+	c := newApp(t, session.Config[*appContext, Data]{Store: sessionfake.New()})
 	c.Do(http.MethodPost, "/cart?item=tea")
 	res := c.Do(http.MethodPost, "/cart?item=jam")
 	if got := res.Header.Values("Set-Cookie"); len(got) != 0 {
@@ -153,7 +154,7 @@ func TestPutKeepsTheTokenOfAServerStore(t *testing.T) {
 }
 
 func TestRenewMovesTheSessionToANewToken(t *testing.T) {
-	store := newFakeStore()
+	store := sessionfake.New()
 	c := newApp(t, session.Config[*appContext, Data]{Store: store})
 
 	c.Do(http.MethodPost, "/cart?item=tea")
@@ -175,7 +176,7 @@ func TestRenewMovesTheSessionToANewToken(t *testing.T) {
 }
 
 func TestRenewWithoutASessionStartsNone(t *testing.T) {
-	store := newFakeStore()
+	store := sessionfake.New()
 	r := newRouter()
 	r.Use(session.Middleware[*appContext, Data](store))
 	r.POST("/", func(c *appContext) error {
@@ -191,7 +192,7 @@ func TestRenewWithoutASessionStartsNone(t *testing.T) {
 }
 
 func TestDestroyEndsTheSession(t *testing.T) {
-	store := newFakeStore()
+	store := sessionfake.New()
 	c := newApp(t, session.Config[*appContext, Data]{Store: store})
 
 	c.Do(http.MethodPost, "/login?as=ada")
@@ -220,7 +221,7 @@ func c2(store session.Store) http.Handler {
 
 func TestPutKeepsTheOtherCookies(t *testing.T) {
 	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](newFakeStore()))
+	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
 	r.POST("/", func(c *appContext) error {
 		c.SetCookie(c.NewCookie("theme", "dark", time.Hour))
 		if err := session.Put(c, Data{UserID: "a"}); err != nil {
@@ -238,7 +239,7 @@ func TestPutKeepsTheOtherCookies(t *testing.T) {
 }
 
 func TestDestroyThenPutStartsANewSession(t *testing.T) {
-	store := newFakeStore()
+	store := sessionfake.New()
 	r := newRouter()
 	r.Use(session.Middleware[*appContext, Data](store))
 	routes(r)
@@ -266,7 +267,7 @@ func TestDestroyThenPutStartsANewSession(t *testing.T) {
 }
 
 func TestAStoreOnTheServerRevokes(t *testing.T) {
-	store := newFakeStore()
+	store := sessionfake.New()
 	c := newApp(t, session.Config[*appContext, Data]{Store: store})
 	c.Do(http.MethodPost, "/login?as=ada")
 
@@ -281,7 +282,7 @@ func TestAStoreOnTheServerRevokes(t *testing.T) {
 }
 
 func TestAnUnknownCookieIsCleared(t *testing.T) {
-	r := c2(newFakeStore())
+	r := c2(sessionfake.New())
 	res := routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: "session", Value: "made-up"}))
 	res.Expect(t).Body("none")
 	if ck := res.Cookies(); len(ck) != 1 || ck[0].MaxAge >= 0 {
@@ -295,7 +296,7 @@ func TestAnUnknownCookieIsCleared(t *testing.T) {
 }
 
 func TestARecordThatDoesNotDecodeIsNoSession(t *testing.T) {
-	store := newFakeStore()
+	store := sessionfake.New()
 	if _, err := store.Save(context.Background(), "tok", []byte("not json"), time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +309,7 @@ func TestARecordThatDoesNotDecodeIsNoSession(t *testing.T) {
 
 func TestTheLifetimeEndsASession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newApp(t, session.Config[*appContext, Data]{Store: newFakeStore(), Lifetime: time.Hour})
+		c := newApp(t, session.Config[*appContext, Data]{Store: sessionfake.New(), Lifetime: time.Hour})
 		c.Do(http.MethodPost, "/login?as=ada")
 		time.Sleep(59 * time.Minute)
 		c.Get("/show").Expect(t).Body("ada|")
@@ -321,7 +322,7 @@ func TestTheLifetimeEndsARecordTheStoreKept(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// A store that keeps records forever, so the middleware checks the
 		// expiry of the record itself.
-		store := &foreverStore{fakeStore: newFakeStore()}
+		store := &foreverStore{Store: sessionfake.New()}
 		c := newApp(t, session.Config[*appContext, Data]{Store: store, Lifetime: time.Hour})
 		c.Do(http.MethodPost, "/login?as=ada")
 		tok := sessionToken(t, c)
@@ -331,16 +332,16 @@ func TestTheLifetimeEndsARecordTheStoreKept(t *testing.T) {
 }
 
 type foreverStore struct {
-	*fakeStore
+	*sessionfake.Store
 }
 
 func (s *foreverStore) Save(ctx context.Context, token string, data []byte, _ time.Time) (string, error) {
-	return s.fakeStore.Save(ctx, token, data, time.Now().Add(1000*time.Hour))
+	return s.Store.Save(ctx, token, data, time.Now().Add(1000*time.Hour))
 }
 
 func TestTheIdleTimeoutMovesForward(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := newFakeStore()
+		store := sessionfake.New()
 		c := newApp(t, session.Config[*appContext, Data]{Store: store, Lifetime: 3 * time.Hour, IdleTimeout: time.Hour})
 		c.Do(http.MethodPost, "/login?as=ada")
 
@@ -370,7 +371,7 @@ func TestTheIdleTimeoutMovesForward(t *testing.T) {
 
 func TestTheIdleTimeoutEndsAQuietSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newApp(t, session.Config[*appContext, Data]{Store: newFakeStore(), IdleTimeout: time.Hour})
+		c := newApp(t, session.Config[*appContext, Data]{Store: sessionfake.New(), IdleTimeout: time.Hour})
 		c.Do(http.MethodPost, "/login?as=ada")
 		time.Sleep(61 * time.Minute)
 		c.Get("/show").Expect(t).Body("none")
@@ -436,7 +437,7 @@ func TestACookieStoreRefusesALargeValue(t *testing.T) {
 
 func TestErrCommitted(t *testing.T) {
 	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](newFakeStore()))
+	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
 	var errs []error
 	r.GET("/", func(c *appContext) error {
 		if err := c.String(http.StatusOK, "streamed"); err != nil {
@@ -454,7 +455,7 @@ func TestErrCommitted(t *testing.T) {
 }
 
 type failingStore struct {
-	*fakeStore
+	*sessionfake.Store
 	load, save, del error
 }
 
@@ -462,26 +463,26 @@ func (s *failingStore) Load(ctx context.Context, token string) ([]byte, error) {
 	if s.load != nil {
 		return nil, s.load
 	}
-	return s.fakeStore.Load(ctx, token)
+	return s.Store.Load(ctx, token)
 }
 
 func (s *failingStore) Save(ctx context.Context, token string, data []byte, expires time.Time) (string, error) {
 	if s.save != nil {
 		return "", s.save
 	}
-	return s.fakeStore.Save(ctx, token, data, expires)
+	return s.Store.Save(ctx, token, data, expires)
 }
 
 func (s *failingStore) Delete(ctx context.Context, token string) error {
 	if s.del != nil {
 		return s.del
 	}
-	return s.fakeStore.Delete(ctx, token)
+	return s.Store.Delete(ctx, token)
 }
 
 func TestStoreErrors(t *testing.T) {
 	down := errors.New("db down")
-	store := &failingStore{fakeStore: newFakeStore()}
+	store := &failingStore{Store: sessionfake.New()}
 	c := routertest.NewClient(t, c2(store))
 	c.Do(http.MethodPost, "/login?as=ada")
 
@@ -502,7 +503,7 @@ func TestStoreErrors(t *testing.T) {
 
 func TestAnIdleSaveErrorAnswers500(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := &failingStore{fakeStore: newFakeStore()}
+		store := &failingStore{Store: sessionfake.New()}
 		r := newRouter()
 		r.Use(session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: store, IdleTimeout: time.Hour}))
 		routes(r)
@@ -516,7 +517,7 @@ func TestAnIdleSaveErrorAnswers500(t *testing.T) {
 
 func TestAValueThatDoesNotEncode(t *testing.T) {
 	r := newRouter()
-	r.Use(session.Middleware[*appContext, chan int](newFakeStore()))
+	r.Use(session.Middleware[*appContext, chan int](sessionfake.New()))
 	var got error
 	r.POST("/", func(c *appContext) error {
 		got = session.Put(c, make(chan int))
@@ -531,7 +532,7 @@ func TestAValueThatDoesNotEncode(t *testing.T) {
 func TestSkipPassesWithoutASession(t *testing.T) {
 	r := newRouter()
 	r.Use(session.MiddlewareWithConfig(session.Config[*appContext, Data]{
-		Store: &failingStore{fakeStore: newFakeStore(), load: errors.New("never")},
+		Store: &failingStore{Store: sessionfake.New(), load: errors.New("never")},
 		Skip:  func(c *appContext) bool { return true },
 	}))
 	routes(r)
@@ -547,10 +548,10 @@ func TestFromWithoutTheMiddleware(t *testing.T) {
 func TestPanics(t *testing.T) {
 	mustPanic(t, "needs a Store", func() { session.Middleware[*appContext, Data](nil) })
 	mustPanic(t, "cannot name a cookie", func() {
-		session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: newFakeStore(), Cookie: "a b"})
+		session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: sessionfake.New(), Cookie: "a b"})
 	})
 	mustPanic(t, "of zero or more", func() {
-		session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: newFakeStore(), IdleTimeout: -1})
+		session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: sessionfake.New(), IdleTimeout: -1})
 	})
 	mustPanic(t, "needs a codec", func() { session.NewCookieStore(nil) })
 	mustPanic(t, "Put needs session.Middleware", func() { _ = session.Put(context.Background(), Data{}) })
@@ -558,7 +559,7 @@ func TestPanics(t *testing.T) {
 	mustPanic(t, "Destroy needs session.Middleware", func() { _ = session.Destroy(context.Background()) })
 
 	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](newFakeStore()))
+	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
 	r.GET("/", func(c *appContext) error {
 		mustPanic(t, "Put[string] on a session of session_test.Data", func() { _ = session.Put(c, "x") })
 		return nil

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/internal/sessionfake"
 	"github.com/dmitrymomot/go-router/routertest"
 	"github.com/dmitrymomot/go-router/session"
 )
@@ -15,7 +16,7 @@ import (
 func Example() {
 	// The store is yours: a table of sessions behind the three methods of
 	// Store. This one is the fake of the tests.
-	store := newFakeStore()
+	store := sessionfake.New()
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
 	r.Use(session.Middleware[*appContext, Data](store))

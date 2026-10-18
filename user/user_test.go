@@ -10,6 +10,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/internal/sessionfake"
 	"github.com/dmitrymomot/go-router/routertest"
 	"github.com/dmitrymomot/go-router/session"
 	"github.com/dmitrymomot/go-router/user"
@@ -136,7 +137,7 @@ type sessionData struct {
 
 func TestFromSession(t *testing.T) {
 	r := newRouter()
-	r.Use(session.Middleware[*appContext, sessionData](newFakeStore()))
+	r.Use(session.Middleware[*appContext, sessionData](sessionfake.New()))
 	r.Use(user.Middleware[*appContext](lookup, user.FromSession(func(d sessionData) string { return d.UserID }), user.FromBearer()))
 	r.POST("/login", func(c *appContext) error {
 		if err := session.Renew(c); err != nil {
