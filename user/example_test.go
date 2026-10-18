@@ -1,7 +1,6 @@
 package user_test
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 
@@ -11,55 +10,33 @@ import (
 )
 
 func Example() {
-	// The Lookup is yours: one query against the accounts table, which also
-	// turns away an account that is suspended.
-	find := func(_ context.Context, id string) (Account, error) {
-		if a, ok := accounts[id]; ok {
+	// The load function is yours. Here it reads a header; an application
+	// reads its session and looks the account up.
+	users := user.New(func(c *appContext) (Account, error) {
+		if a, ok := accounts[c.Request().Header.Get("X-User")]; ok {
 			return a, nil
 		}
 		return Account{}, user.ErrUnknown
-	}
+	})
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
 	// Every page knows its user, and a visitor still sees the public ones.
-	r.Use(user.Middleware[*appContext](find, user.FromCookie(codec, "uid")))
+	r.Use(users.Middleware())
 	r.GET("/", func(c *appContext) error {
-		if a, ok := user.From[Account](c); ok {
+		if a, ok := users.From(c); ok {
 			return c.String(http.StatusOK, "hello, "+a.Name)
 		}
 		return c.String(http.StatusOK, "hello, visitor")
 	})
-	r.Route("/settings", func(s *router.Router[*appContext]) {
-		s.Use(user.RequireWithConfig[*appContext, Account](user.RequireConfig{LoginURL: "/login"}))
-		s.GET("/", show)
-	})
+	r.With(users.Require(user.RequireConfig{LoginURL: "/login"})).GET("/settings", show)
 
-	fmt.Println(routertest.Get(r, "/", signed("uid", "u1")).String())
+	fmt.Println(routertest.Get(r, "/", routertest.Header("X-User", "u1")).String())
 	fmt.Println(routertest.Get(r, "/").String())
 	fmt.Println(routertest.Get(r, "/settings").Header.Get("Location"))
+	fmt.Println(routertest.Get(r, "/settings", routertest.Header("Accept", "application/json")).StatusCode)
 	// Output:
 	// hello, Ada
 	// hello, visitor
 	// /login?next=%2Fsettings
-}
-
-func ExampleMiddlewareWithConfig() {
-	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
-	r.Use(user.MiddlewareWithConfig(user.Config[*appContext, Account]{
-		Lookup: lookup,
-		// The user of a checked API key wins over a Bearer token.
-		Sources: []user.Source{
-			user.FromFunc("", func(c *appContext) (string, bool) { return c.KeyUser, c.KeyUser != "" }),
-			user.FromBearer(),
-		},
-	}))
-	// The API needs a user on every route.
-	r.Use(user.Require[*appContext, Account]())
-	r.GET("/me", show)
-
-	fmt.Println(routertest.Get(r, "/me").StatusCode)
-	fmt.Println(routertest.Get(r, "/me", routertest.Header("Authorization", "Bearer u2")).String())
-	// Output:
 	// 401
-	// Grace
 }
