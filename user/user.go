@@ -7,7 +7,8 @@
 // accounts table, and reports [ErrUnknown] for an id that names no user. The
 // first source whose id the Lookup knows wins.
 //
-//	r.Use(user.Middleware[*Context](store.Account, user.FromCookie(codec, "uid")))
+//	r.Use(session.Middleware[*Context, Data](sessions))
+//	r.Use(user.Middleware[*Context](store.Account, user.FromSession(func(d Data) string { return d.UserID })))
 //	r.GET("/settings", settings)
 //
 //	func settings(c *Context) error {
@@ -44,6 +45,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
+	"github.com/dmitrymomot/go-router/session"
 )
 
 var (
@@ -62,8 +64,8 @@ const DefaultNextParam = "next"
 
 // Source reads a candidate user id from a request. It carries the request
 // header it reads, so that the middleware can name every such header in Vary.
-// Build one with [FromCookie], [FromBearer], [FromHeader] or [FromFunc]; the
-// zero Source is invalid.
+// Build one with [FromSession], [FromCookie], [FromBearer], [FromHeader] or
+// [FromFunc]; the zero Source is invalid.
 //
 // An id from a plain header is whatever the client sent. The signed cookie and
 // a session are safe to trust; a Bearer token is safe when the Lookup checks
@@ -74,6 +76,31 @@ type Source struct {
 	// that reads any.
 	ctx  reflect.Type
 	vary string
+}
+
+// FromSession reads the id from the session value of type T that
+// session.Middleware loaded, through id, so the session middleware goes
+// first:
+//
+//	r.Use(session.Middleware[*Context, Data](store))
+//	r.Use(user.Middleware[*Context](accounts.Find, user.FromSession(func(d Data) string { return d.UserID })))
+//
+// A request with no session, or a session whose id reports "", passes to the
+// next source.
+//
+// FromSession panics if id is nil.
+func FromSession[T any](id func(s T) string) Source {
+	if id == nil {
+		panic("user: FromSession needs a function")
+	}
+	return Source{vary: router.HeaderCookie, read: func(c router.Context) (string, bool) {
+		s, ok := session.From[T](c)
+		if !ok {
+			return "", false
+		}
+		v := id(s)
+		return v, v != ""
+	}}
 }
 
 // FromCookie reads the id from the cookie name, which codec verifies, so a

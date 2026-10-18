@@ -11,6 +11,7 @@ import (
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/cookie"
 	"github.com/dmitrymomot/go-router/routertest"
+	"github.com/dmitrymomot/go-router/session"
 	"github.com/dmitrymomot/go-router/user"
 )
 
@@ -127,6 +128,31 @@ func TestSources(t *testing.T) {
 			routertest.Get(r, "/", tt.opts...).Expect(t).Status(http.StatusOK).Body(tt.want).Header("Vary", tt.vary)
 		})
 	}
+}
+
+type sessionData struct {
+	UserID string
+}
+
+func TestFromSession(t *testing.T) {
+	r := newRouter()
+	r.Use(session.Middleware[*appContext, sessionData](session.NewMemoryStore()))
+	r.Use(user.Middleware[*appContext](lookup, user.FromSession(func(d sessionData) string { return d.UserID }), user.FromBearer()))
+	r.POST("/login", func(c *appContext) error {
+		if err := session.Renew(c); err != nil {
+			return err
+		}
+		return session.Put(c, sessionData{UserID: c.Request().URL.Query().Get("as")})
+	})
+	r.GET("/", show)
+
+	c := routertest.NewClient(t, r)
+	c.Get("/").Expect(t).Body("anonymous").Header("Vary", "Cookie")
+	c.Do(http.MethodPost, "/login?as=")
+	// A session with no user passes to the next source.
+	c.Get("/", routertest.Header("Authorization", "Bearer u1")).Expect(t).Body("Ada")
+	c.Do(http.MethodPost, "/login?as=u2")
+	c.Get("/", routertest.Header("Authorization", "Bearer u1")).Expect(t).Body("Grace")
 }
 
 func TestTheFirstKnownSourceWins(t *testing.T) {
@@ -250,6 +276,7 @@ func TestNewContextForAJob(t *testing.T) {
 
 func TestPanics(t *testing.T) {
 	mustPanic(t, "needs a codec", func() { user.FromCookie(nil, "uid") })
+	mustPanic(t, "FromSession needs a function", func() { user.FromSession[sessionData](nil) })
 	mustPanic(t, "FromCookie needs a name", func() { user.FromCookie(codec, "") })
 	mustPanic(t, "FromHeader needs a name", func() { user.FromHeader("") })
 	mustPanic(t, "FromFunc needs a function", func() { user.FromFunc[*appContext]("", nil) })
