@@ -256,6 +256,22 @@ func TestRequireSendsABrowserToTheLoginPage(t *testing.T) {
 	routertest.Get(r, "/app/settings", signed("uid", "u2")).Expect(t).Status(http.StatusOK).Body("Grace")
 }
 
+func TestRequireKeepsThePrefixOfAMount(t *testing.T) {
+	inner := newRouter()
+	inner.Use(user.Middleware[*appContext](lookup, user.FromBearer()))
+	inner.Use(user.RequireWithConfig[*appContext, Account](user.RequireConfig{LoginURL: "/login"}))
+	inner.GET("/settings", show)
+
+	r := newRouter()
+	r.MountHandler("/admin", inner)
+	routertest.Get(r, "/admin/settings?x=1").Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fadmin%2Fsettings%3Fx%3D1")
+
+	// A request built by hand has no RequestURI, and URL serves.
+	req := routertest.Request(http.MethodGet, "/settings")
+	req.RequestURI = ""
+	routertest.Serve(inner, req).Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fsettings")
+}
+
 func TestRequireTakesAnotherNextParam(t *testing.T) {
 	r := newRouter()
 	r.Use(user.Middleware[*appContext](lookup, user.FromBearer()))

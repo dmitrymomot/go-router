@@ -303,8 +303,9 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 //
 // LoginURL is the login page of a browser, a local path such as "/login".
 // When it is set, a request with no user is sent there with a 303, and a GET
-// or HEAD request adds its own path and query as the NextParam parameter, so
-// the login handler sends the user back with c.LocalRedirect. Any other
+// or HEAD request adds the path and query the client asked for, with the
+// prefix of a mount, as the NextParam parameter, so the login handler sends
+// the user back with c.LocalRedirect. Any other
 // method gets no next value, since the login could not repeat the request.
 // When LoginURL is empty, the request is refused with router.ErrUnauthorized,
 // which suits an API.
@@ -353,7 +354,7 @@ func RequireWithConfig[C router.Context, T any](cfg RequireConfig) router.Middle
 			target := *login
 			if m := c.Request().Method; m == http.MethodGet || m == http.MethodHead {
 				q := target.Query()
-				q.Set(param, c.Request().URL.RequestURI())
+				q.Set(param, nextOf(c.Request()))
 				target.RawQuery = q.Encode()
 			}
 			c.Response().Header().Set(router.HeaderLocation, target.String())
@@ -361,6 +362,16 @@ func RequireWithConfig[C router.Context, T any](cfg RequireConfig) router.Middle
 			return nil
 		}
 	}
+}
+
+// nextOf reports the path and query the client asked for. RequestURI keeps
+// it whole where MountHandler strips a prefix from URL.Path; a request built
+// by hand, or one in absolute form for a proxy, falls back to URL.
+func nextOf(r *http.Request) string {
+	if router.IsLocalURL(r.RequestURI) {
+		return r.RequestURI
+	}
+	return r.URL.RequestURI()
 }
 
 // ctxKey carries the user of type T. Each user type has a key of its own.
