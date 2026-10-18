@@ -2,6 +2,17 @@
 
 All notable changes to this module are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before v1, a minor release may break the API; each break is listed below with the way to migrate.
 
+## [Unreleased]
+
+### Added
+
+- **Package `user`**. `user.New(load)` takes the one function that knows who the user is, `func(c C) (T, error)`, which reads the session, an API key or any field of the application context and returns your own user type, or `user.ErrUnknown` for a visitor. The `*user.Users[C, T]` it returns binds both types once: `Middleware()` puts the user on the request context and lets a visitor pass, `From(ctx)` reads it in a handler, a component or any derived context (the package function `user.From[T]` does the same where the value is out of reach), and `Require(RequireConfig{...})` refuses a visitor. Require answers 401 with `WWW-Authenticate: Bearer`, or the `Challenge` you set; with a `LoginURL` it sends a client that prefers HTML there with a 303 and the path of a GET in `next`, the prefix of a mount included, for `c.LocalRedirect` after the login; a `LoginURL` on another host, such as the apex of a multi-tenant app, gets the absolute URL of the request in `next`, whose host the login checks before it redirects; and still answers a client that prefers JSON with a 401. The package does not check membership in a tenant. `user.NewContext` puts a user on the context of a job.
+- **Package `session`**, for the session of a signed-in user whose row the application keeps. `session.NewToken()` makes a token of 32 random bytes and its SHA-256: the secret goes in the cookie and only the hash in the database. `session.HashToken(secret)` hashes a secret the same way. `session.New[C](session.Config[S]{Find, Touch, Expires, Cookie})` returns a `*session.Sessions[C, S]`. Its `Middleware()` hashes the cookie of each request, asks `Find` for the row, runs the optional `Touch` to record the use, and puts the row on the request context, where `From(ctx)` reads it; a cookie whose row is gone, or whose `Expires` passed, is cleared, and the request passes as a visitor. `Start(c, token, row, expires)` sets the cookie after the application inserts the row and puts the row on the context, and `End(c)` clears the cookie after the application deletes the row; both report `session.ErrCommitted` once the header went out. A session exists only after a sign-in, so there is nothing to rotate and a token planted before it names nothing after it. Deleting the rows of a user signs that user out on every device. The cookie is `__Host-session` over HTTPS, so no other host can set one that stands in front of it, and `session` over HTTP. The state of a visitor, such as a cart, belongs in a signed cookie of package `cookie`.
+
+### Changed
+
+- **The `tenants` example** signs in with packages `tenant`, `session` and `user` in place of a cookie it signed by hand. A sign-in inserts a session row under the hash of a new token and ends the session the browser held, and a sign-out deletes the row, so a copy of the cookie signs nobody in.
+
 ## [0.6.0] - 2026-10-18
 
 ### Added
@@ -644,6 +655,7 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
+[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/dmitrymomot/go-router/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dmitrymomot/go-router/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dmitrymomot/go-router/compare/v0.3.0...v0.4.0

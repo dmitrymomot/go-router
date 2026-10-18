@@ -8,6 +8,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
+	"github.com/dmitrymomot/go-router/session"
 )
 
 const minPasswordRunes = 8
@@ -79,20 +80,33 @@ func nameRefused(err error) (string, bool) {
 
 // enter spends the ticket signup issued, on the host the session belongs to.
 func enter(c Ctx) error {
+	w := workspaceOf(c)
 	t, ok := c.Store.Redeem(c.Query("ticket"))
-	if !ok || t.workspace != c.Workspace.Slug {
+	if !ok || t.workspace != w.Slug {
 		return c.Redirect(http.StatusSeeOther, "/login")
 	}
-	if err := writeSession(c, t.email); err != nil {
+	if err := signIn(c, w, t.email); err != nil {
 		return err
 	}
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
+// signIn starts the session of email in the workspace w: a new token, a new
+// row under its hash, and the cookie. A session the browser already held ends,
+// so a token planted before the sign-in names nothing after it.
+func signIn(c Ctx, w Workspace, email string) error {
+	if old, ok := c.Auth.Sessions.From(c); ok {
+		c.Auth.Table.Delete(old.Hash)
+	}
+	tok := session.NewToken()
+	row := c.Auth.Table.Create(w.Slug, email, tok.Hash)
+	return c.Auth.Sessions.Start(c, tok, row, row.Expires)
+}
+
 func loginForm(c Ctx) error {
 	return c.Render(http.StatusOK, tmpl("login", credentialsPage{
 		CSRFToken: middleware.CSRFTokenFrom(c),
-		Workspace: c.Workspace.Name,
+		Workspace: workspaceOf(c).Name,
 	}))
 }
 
@@ -102,28 +116,36 @@ func login(c Ctx) error {
 		return err
 	}
 
+	w := workspaceOf(c)
 	email := cleanEmail(in.Email)
 	page := credentialsPage{
 		CSRFToken: middleware.CSRFTokenFrom(c),
 		Email:     email,
-		Workspace: c.Workspace.Name,
+		Workspace: w.Name,
 	}
 
 	// One sentence for both failures, so the form says nothing about which
 	// addresses hold an account in this workspace.
-	if err := c.Store.Authenticate(c.Workspace.Slug, email, in.Password); err != nil {
+	if err := c.Store.Authenticate(w.Slug, email, in.Password); err != nil {
 		return refuse(c, "login", page, "That email and password do not match.")
 	}
 
-	if err := writeSession(c, email); err != nil {
+	if err := signIn(c, w, email); err != nil {
 		return err
 	}
 
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
+// signout deletes the row of the session, so a copy of the cookie names
+// nothing either, and clears the cookie.
 func signout(c Ctx) error {
-	clearSession(c)
+	if s, ok := c.Auth.Sessions.From(c); ok {
+		c.Auth.Table.Delete(s.Hash)
+	}
+	if err := c.Auth.Sessions.End(c); err != nil {
+		return err
+	}
 	return c.Redirect(http.StatusSeeOther, "/login")
 }
 
