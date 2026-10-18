@@ -55,10 +55,10 @@ tenant.MiddlewareWithConfig(tenant.Config[Ctx, Workspace]{
 }),
 ```
 
-**A session that belongs to one host, and an account that belongs to one workspace.** Package `session` keeps the session in a store on the server and gives the browser only a random token, in a cookie with the router's defaults and no `Domain`, so it belongs to the host that set it. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out. Package `user` turns the session into the account, and lets a guest through:
+**A session that belongs to one host, and an account that belongs to one workspace.** Package `session` keeps the session in a store on the server and gives the browser only a random token, in a cookie with the router's defaults and no `Domain`, so it belongs to the host that set it. Over HTTPS the cookie is `__Host-session`, a name the browser keeps to this host, so no other subdomain of `lvh.me` can set one that stands in front of it. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out. Package `user` turns the session into the account, and lets a guest through:
 
 ```go
-session.MiddlewareWithConfig(session.Config[Ctx, sessionData]{Store: sessions, Cookie: sessionCookie, Lifetime: sessionLifetime}),
+session.MiddlewareWithConfig(session.Config[Ctx, sessionData]{Store: sessions, Lifetime: sessionLifetime}),
 user.Middleware[Ctx](findAccount, user.FromSession(func(d sessionData) string { return d.Email })),
 ```
 

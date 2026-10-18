@@ -12,11 +12,6 @@ import (
 	"github.com/dmitrymomot/go-router/user"
 )
 
-// sessionCookie names the session cookie. It carries no Domain, so it belongs
-// to the host that set it: signing in at acme.lvh.me leaves beta.lvh.me signed
-// out.
-const sessionCookie = "tenants_session"
-
 const sessionLifetime = 12 * time.Hour
 
 // sessionData is what a session holds: the account, and the workspace it
@@ -61,9 +56,12 @@ func workspaceRoutes(store *Store, sessions session.Store) func(h *router.Router
 					return router.ErrNotFound.WithMessage("no workspace at %s", c.Host())
 				},
 			}),
+			// The cookie carries no Domain, so it belongs to the host that set
+			// it: signing in at acme.lvh.me leaves beta.lvh.me signed out. Over
+			// HTTPS its name takes the __Host- prefix, so no other host can set
+			// one that stands in front of it.
 			session.MiddlewareWithConfig(session.Config[Ctx, sessionData]{
 				Store:    sessions,
-				Cookie:   sessionCookie,
 				Lifetime: sessionLifetime,
 			}),
 			user.Middleware[Ctx](findAccount, user.FromSession(func(d sessionData) string { return d.Email })),

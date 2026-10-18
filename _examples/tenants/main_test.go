@@ -8,6 +8,7 @@ import (
 
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/routertest"
+	"github.com/dmitrymomot/go-router/session"
 )
 
 const (
@@ -65,7 +66,7 @@ func sessionOf(t *testing.T, res *routertest.Response) *http.Cookie {
 	t.Helper()
 
 	for _, c := range res.Cookies() {
-		if c.Name == sessionCookie {
+		if c.Name == session.DefaultCookie {
 			return c
 		}
 	}
@@ -114,7 +115,7 @@ func TestSignupHandsTheOwnerToTheWorkspaceHost(t *testing.T) {
 	}
 	// The apex cannot set a cookie for a host below it, so it sets none.
 	for _, c := range made.Cookies() {
-		if c.Name == sessionCookie {
+		if c.Name == session.DefaultCookie {
 			t.Error("the apex started a session it cannot own")
 		}
 	}
@@ -138,7 +139,7 @@ func TestATicketWorksOnceAndOnItsOwnHost(t *testing.T) {
 	again := browser(t, h, apex).Follow(made)
 	again.Expect(t).Redirect(http.StatusSeeOther, "/login")
 	for _, c := range again.Cookies() {
-		if c.Name == sessionCookie && c.MaxAge >= 0 {
+		if c.Name == session.DefaultCookie && c.MaxAge >= 0 {
 			t.Error("a spent ticket still started a session")
 		}
 	}
@@ -245,7 +246,7 @@ func TestLoginRefusesAWrongPasswordAndAnUnknownEmail(t *testing.T) {
 			t.Errorf("the form does not refuse the credentials: %s", res)
 		}
 		for _, c := range res.Cookies() {
-			if c.Name == sessionCookie && c.MaxAge >= 0 {
+			if c.Name == session.DefaultCookie && c.MaxAge >= 0 {
 				t.Error("a refused login still set a session")
 			}
 		}
@@ -271,7 +272,7 @@ func TestSignoutSendsTheReaderBackToTheDoor(t *testing.T) {
 	if got := sessionOf(t, res); got.MaxAge >= 0 {
 		t.Errorf("sign out left the session alive: %+v", got)
 	}
-	if cl.Cookie(sessionCookie) != nil {
+	if cl.Cookie(session.DefaultCookie) != nil {
 		t.Error("the browser still holds the session after sign out")
 	}
 }
@@ -291,6 +292,34 @@ func TestSignoutEndsACopyOfTheCookieToo(t *testing.T) {
 	res := routertest.Get(h, "http://"+host("acme")+"/", routertest.Host(host("acme")), routertest.Cookie(copied))
 	if !strings.Contains(res.String(), "as a guest") {
 		t.Errorf("a copy of the cookie outlived the sign-out: %s", res)
+	}
+}
+
+// Over HTTPS the session cookie takes the __Host- prefix, which a browser
+// keeps to this host alone.
+func TestTheSessionCookieOverHTTPS(t *testing.T) {
+	h := newTestRouter(t)
+	signUp(t, browser(t, h, apex), "Acme", "ann@example.com", testPassword)
+
+	cl := routertest.NewClient(t, h, routertest.Host(host("acme")), routertest.Header("X-Forwarded-Proto", "https"))
+	// Over HTTPS the CSRF cookie is __Host-csrf, so take the token from the
+	// form, as a browser does.
+	form := cl.Get("/login")
+	res := cl.Do(http.MethodPost, "/login", routertest.FormBody(url.Values{
+		"_csrf": {hiddenToken(t, form.String())}, "email": {"ann@example.com"}, "password": {testPassword},
+	}))
+	res.Expect(t).Redirect(http.StatusSeeOther, "/")
+	var got *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == session.DefaultHostCookie {
+			got = c
+		}
+	}
+	if got == nil || !got.Secure || got.Domain != "" || got.Path != "/" {
+		t.Fatalf("session cookie = %+v, want a Secure __Host- cookie at / with no Domain", got)
+	}
+	if page := cl.Get("/"); !strings.Contains(page.String(), "Signed in as ann@example.com") {
+		t.Errorf("the session does not sign in over HTTPS: %s", page)
 	}
 }
 
@@ -415,7 +444,7 @@ func TestAnUnknownSessionIsAGuest(t *testing.T) {
 	signUp(t, browser(t, h, apex), "Acme", "ann@acme.com", testPassword)
 
 	res := routertest.Get(h, "http://"+host("acme")+"/", routertest.Host(host("acme")),
-		routertest.Cookie(&http.Cookie{Name: sessionCookie, Value: "made-up"}))
+		routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: "made-up"}))
 	res.Expect(t).Status(http.StatusOK)
 	if !strings.Contains(res.String(), "as a guest") {
 		t.Errorf("a made-up session signed in: %s", res)
