@@ -142,10 +142,7 @@ type Config[S any] struct {
 // is C. Build one with [New]; the zero Sessions is invalid. A Sessions is safe
 // for concurrent use.
 type Sessions[C router.Context, S any] struct {
-	find    func(ctx context.Context, hash []byte) (S, error)
-	touch   func(ctx context.Context, s S) error
-	expires func(s S) time.Time
-	cookie  string
+	cfg Config[S]
 }
 
 // New builds a [Sessions] from cfg. Name the context type and let the row type
@@ -160,7 +157,7 @@ func New[C router.Context, S any](cfg Config[S]) *Sessions[C, S] {
 	if cfg.Cookie != "" && (&http.Cookie{Name: cfg.Cookie}).Valid() != nil {
 		panic(fmt.Sprintf("session: New cannot name a cookie %q", cfg.Cookie))
 	}
-	return &Sessions[C, S]{find: cfg.Find, touch: cfg.Touch, expires: cfg.Expires, cookie: cfg.Cookie}
+	return &Sessions[C, S]{cfg: cfg}
 }
 
 // Middleware puts the session row of each request on the request context,
@@ -172,12 +169,12 @@ func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 		return func(c C) error {
 			router.AddVary(c.Response().Header(), router.HeaderCookie)
 
-			cookies := c.Request().CookiesNamed(s.cookieName(c))
-			if len(cookies) == 0 || cookies[0].Value == "" {
+			ck, err := c.Request().Cookie(s.cookieName(c))
+			if err != nil || ck.Value == "" {
 				return next(c)
 			}
-			row, err := s.find(c, HashToken(cookies[0].Value))
-			if err == nil && s.expires != nil && !time.Now().Before(s.expires(row)) {
+			row, err := s.cfg.Find(c, HashToken(ck.Value))
+			if err == nil && s.cfg.Expires != nil && !time.Now().Before(s.cfg.Expires(row)) {
 				err = ErrNotFound
 			}
 			if errors.Is(err, ErrNotFound) {
@@ -187,8 +184,8 @@ func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 			if err != nil {
 				return stop(err, "find")
 			}
-			if s.touch != nil {
-				if err := s.touch(c, row); err != nil {
+			if s.cfg.Touch != nil {
+				if err := s.cfg.Touch(c, row); err != nil {
 					return stop(err, "touch")
 				}
 			}
@@ -263,8 +260,8 @@ func (s *Sessions[C, S]) From(ctx context.Context) (S, bool) {
 // cookieName reports the name of the session cookie of the request of c.
 func (s *Sessions[C, S]) cookieName(c router.Context) string {
 	switch {
-	case s.cookie != "":
-		return s.cookie
+	case s.cfg.Cookie != "":
+		return s.cfg.Cookie
 	case router.SchemeOf(c.Request()) == "https":
 		return DefaultHostCookie
 	default:
@@ -276,16 +273,11 @@ func (s *Sessions[C, S]) cookieName(c router.Context) string {
 // response already sets it.
 func (s *Sessions[C, S]) hasCookie(c router.Context) bool {
 	name := s.cookieName(c)
-	if len(c.Request().CookiesNamed(name)) > 0 {
+	if _, err := c.Request().Cookie(name); err == nil {
 		return true
 	}
-	prefix := name + "="
-	for _, l := range c.Response().Header().Values(router.HeaderSetCookie) {
-		if strings.HasPrefix(l, prefix) {
-			return true
-		}
-	}
-	return false
+	_, found := otherCookies(c.Response().Header(), name)
+	return found
 }
 
 // setCookie writes the session cookie, in place of one that an earlier call
@@ -294,18 +286,23 @@ func (s *Sessions[C, S]) setCookie(c router.Context, value string, maxAge time.D
 	name := s.cookieName(c)
 	// The context of a router always carries its Base.
 	b, _ := router.FromContext(c)
-	line := b.NewCookie(name, value, maxAge).String()
-
 	h := c.Response().Header()
+	kept, _ := otherCookies(h, name)
+	h[router.HeaderSetCookie] = append(kept, b.NewCookie(name, value, maxAge).String())
+}
+
+// otherCookies reports the Set-Cookie lines of h for cookies other than name,
+// and whether h sets name.
+func otherCookies(h http.Header, name string) (kept []string, found bool) {
 	prefix := name + "="
-	lines := h.Values(router.HeaderSetCookie)
-	kept := lines[:0:0]
-	for _, l := range lines {
-		if !strings.HasPrefix(l, prefix) {
-			kept = append(kept, l)
+	for _, l := range h.Values(router.HeaderSetCookie) {
+		if strings.HasPrefix(l, prefix) {
+			found = true
+			continue
 		}
+		kept = append(kept, l)
 	}
-	h[router.HeaderSetCookie] = append(kept, line)
+	return kept, found
 }
 
 // setRow puts row on the request context of c.
