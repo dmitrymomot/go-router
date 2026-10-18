@@ -2,6 +2,17 @@
 
 All notable changes to this module are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the module follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before v1, a minor release may break the API; each break is listed below with the way to migrate.
 
+## [Unreleased]
+
+### Added
+
+- **Package `user`**, in the shape of `tenant`. `user.Middleware[C](lookup, sources...)` reads a candidate id from each source in order, turns it into your own user type through `lookup func(ctx, id) (T, error)`, and puts it on the request context, where `user.From[T](ctx)` reads it in a handler, a component or any derived context. The sources are `FromSession` over the value of package `session`, `FromCookie` over a cookie that a `cookie.Codec` verifies, `FromBearer`, `FromHeader` and `FromFunc` over the application context, and the header of each goes in `Vary`. A Lookup reports `user.ErrUnknown` to pass to the next source. `Middleware` lets a visitor pass; `MiddlewareWithConfig` refuses a request with no user with `router.ErrUnauthorized` through `OnReject`, unless `Optional` is set. `user.Require[C, T]()` gates a scope with a 401, and `RequireWithConfig` with a `LoginURL` sends a browser there with a 303 and the path of a GET in `next`, for `c.LocalRedirect` after the login. The package does not check membership in a tenant. `user.NewContext` puts a user on the context of a job.
+- **Package `session`**. `session.Middleware[C, T](store)` loads the session that the cookie names, and `session.From[T](ctx)` reads its value, a type of yours that `encoding/json/v2` encodes. `session.Put` stores a new value and starts a session for a visitor who has none, `session.Renew` moves the session to a new token at a login against fixation, and `session.Destroy` ends it at logout. All three write the store at the call and set the cookie in the header at once, and report `session.ErrCommitted` once the header went out. `Config` sets the cookie name, a `Lifetime` (`DefaultLifetime` is 24h) and a rolling `IdleTimeout` that writes the store at most once per half of it. A `session.Store` has three methods, `Load`, `Save` and `Delete`. `session.NewMemoryStore` keeps the records in the process and revokes a session at the next request once its record is gone; `session.NewCookieStore` seals the whole record into the cookie with a `cookie.Codec` and cannot revoke. A store on a database is yours to write.
+
+### Changed
+
+- **The `tenants` example** signs in with packages `tenant`, `session` and `user` in place of a cookie it signed by hand. A login renews the token, and a sign-out deletes the session from the store, so a copy of the cookie signs nobody in.
+
 ## [0.6.0] - 2026-10-18
 
 ### Added
@@ -644,6 +655,7 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
+[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/dmitrymomot/go-router/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dmitrymomot/go-router/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dmitrymomot/go-router/compare/v0.3.0...v0.4.0
