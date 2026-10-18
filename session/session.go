@@ -135,11 +135,13 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 
 			// The context of a router always carries its Base.
 			b, _ := router.FromContext(c)
+			// The state goes on the context before the load, so a store
+			// reads the cookie name from it.
 			s := &state{m: m, b: b}
+			c.SetContext(context.WithValue(c.Request().Context(), stateKey{}, s))
 			if err := load[T](c, s); err != nil {
 				return err
 			}
-			c.SetContext(context.WithValue(c.Request().Context(), stateKey{}, s))
 			return next(c)
 		}
 	}
@@ -170,6 +172,16 @@ type state struct {
 }
 
 type stateKey struct{}
+
+// CookieName reports the name of the session cookie of the request that ctx
+// belongs to, which a [Store] that keeps the record in the cookie binds the
+// record to. Outside the middleware it reports [DefaultCookie].
+func CookieName(ctx context.Context) string {
+	if s, ok := ctx.Value(stateKey{}).(*state); ok {
+		return s.m.cookie
+	}
+	return DefaultCookie
+}
 
 // record is the form a session takes in the store. The times are Unix
 // seconds, which is all a cookie can carry.

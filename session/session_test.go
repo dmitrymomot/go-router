@@ -376,6 +376,17 @@ func TestACookieStore(t *testing.T) {
 	// A record signed for another cookie of the same codec does not open.
 	other := codec.Encode("other", []byte(`{"d":{"uid":"eve"},"c":0,"e":99999999999}`), time.Now().Add(time.Hour))
 	routertest.Get(c2Named(store, "sid"), "/show", routertest.Cookie(&http.Cookie{Name: "sid", Value: other})).Expect(t).Body("none")
+
+	// Nor does the session of one app moved to the cookie of another that
+	// shares the codec.
+	moved := &http.Cookie{Name: "admin_sid", Value: first.Value}
+	routertest.Get(c2Named(store, "admin_sid"), "/show", routertest.Cookie(moved)).Expect(t).Body("none")
+}
+
+func TestCookieNameOutsideTheMiddleware(t *testing.T) {
+	if got := session.CookieName(context.Background()); got != session.DefaultCookie {
+		t.Errorf("CookieName = %q, want %q", got, session.DefaultCookie)
+	}
 }
 
 func c2Named(store session.Store, name string) http.Handler {

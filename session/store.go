@@ -118,13 +118,13 @@ func (m *MemoryStore) Len() int {
 	return len(m.records)
 }
 
-// cookiePurpose is the name a CookieStore binds a sealed record to, so a value
-// that the same codec signed for another cookie does not open as a session.
-const cookiePurpose = "session"
-
 // CookieStore keeps the whole record in the cookie, sealed by a
 // [cookie.Codec], so the server stores nothing. Build one with
 // [NewCookieStore].
+//
+// It binds the record to the name of the cookie, which [CookieName] reads
+// from ctx, as [cookie.Codec.Set] does: a value moved to a cookie of another
+// name does not open.
 //
 // It cannot revoke a session: Delete does nothing, and a copy of the cookie
 // stays valid until it runs out, after a logout too. Keep the Lifetime short,
@@ -149,8 +149,8 @@ func NewCookieStore(codec *cookie.Codec) *CookieStore {
 
 // Load implements [Store]. A token that does not open, or that ran out,
 // reports [ErrNotFound].
-func (s *CookieStore) Load(_ context.Context, token string) ([]byte, error) {
-	data, err := s.codec.Decode(cookiePurpose, token)
+func (s *CookieStore) Load(ctx context.Context, token string) ([]byte, error) {
+	data, err := s.codec.Decode(CookieName(ctx), token)
 	if err != nil {
 		return nil, ErrNotFound
 	}
@@ -158,8 +158,8 @@ func (s *CookieStore) Load(_ context.Context, token string) ([]byte, error) {
 }
 
 // Save implements [Store]. It reports the sealed record as the token.
-func (s *CookieStore) Save(_ context.Context, _ string, data []byte, expires time.Time) (string, error) {
-	return s.codec.Encode(cookiePurpose, data, expires), nil
+func (s *CookieStore) Save(ctx context.Context, _ string, data []byte, expires time.Time) (string, error) {
+	return s.codec.Encode(CookieName(ctx), data, expires), nil
 }
 
 // Delete implements [Store]. It does nothing: the record lives in the cookie.
