@@ -1,68 +1,67 @@
-// Package session keeps the state of a visitor across requests: a token in a
-// cookie names a record in a [Store], and the record holds a value of a type
-// of the application.
+// Package session carries the session of a signed-in user: a random token in
+// a cookie names a row that the application keeps, such as a row of its
+// sessions table, and the middleware puts that row on the request context.
 //
-//	type Data struct {
-//		UserID string
-//	}
+// The package owns the mechanics: it makes the token, sets and clears the
+// cookie, hashes the token of each request and asks the application for the
+// row. The application owns the row: its columns, its tenant, the device it
+// records, and the queries that list or revoke sessions. Only the hash of a
+// token reaches the database, so a copy of the table opens no session.
 //
-//	r.Use(session.Middleware[*Context, Data](store))
+//	sessions := session.New[*Context](session.Config[Row]{
+//		Find: store.SessionByHash, // SELECT ... WHERE token_hash = $1 AND expires_at > now()
+//	})
+//	r.Use(sessions.Middleware())
 //
 //	func login(c *Context) error {
-//		... check the password ...
-//		if err := session.Renew(c); err != nil {
+//		... check the credentials ...
+//		tok := session.NewToken()
+//		row, err := c.Store.CreateSession(c, account.ID, tok.Hash)
+//		if err != nil {
 //			return err
 //		}
-//		if err := session.Put(c, Data{UserID: a.ID}); err != nil {
+//		if err := sessions.Start(c, tok, row.ExpiresAt); err != nil {
 //			return err
 //		}
 //		return c.Redirect(http.StatusSeeOther, "/")
 //	}
 //
-// [From] reads the value through any context of the request. [Put] stores a
-// new value, and starts a session for a visitor who has none. [Renew] gives
-// the session a new token, which a login needs, so a token that an attacker
-// planted before it is worth nothing after it. [Destroy] ends the session at
-// logout.
+// A session exists only once a user signed in. Each sign-in makes a new token
+// and a new row, so there is nothing to rotate, and a token planted in the
+// browser before it names nothing after it. A sign-in whose answer never
+// reaches the browser leaves a row that no cookie names, and that row expires.
+// State of a visitor, such as a cart or a flash message, belongs in a signed
+// cookie of package cookie.
 //
-// Put, Renew and Destroy write the store at the call and set the cookie in
-// the header at once, so a failure reaches the handler that caused it, and the
-// cookie is in place before the first byte of the body. Once the header went
-// out, or once the handler returned, they report [ErrCommitted] and change
-// nothing. They belong to the goroutine of the handler.
-//
-// The package ships no store on the server: implement the three methods of
-// [Store] on the database of the application. Such a store can revoke a
-// session: the middleware loads the record on every request, so a record that
-// is gone ends the session at the next one. To sign a user out on every
-// device, delete each record of the user in the store. [CookieStore] keeps the
-// record in the cookie and cannot revoke it.
-//
-// The package keeps the value and nothing else: no passwords, no users. Put
-// the id of the user in the value, and let package user resolve it with
-// user.FromSession.
+// To sign out, the application deletes the row and calls [Sessions.End]. A row
+// that is gone ends its session at the next request, so deleting the rows of a
+// user signs that user out on every device.
 package session
 
 import (
-	"cmp"
 	"context"
-	"encoding/json/v2"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
-	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
-	"github.com/dmitrymomot/go-router/cookie"
 )
 
-// ErrCommitted is what [Put], [Renew] and [Destroy] report once the header of
-// the response went out, or once the handler returned, since the cookie can no
-// longer change.
-var ErrCommitted = errors.New("session: the response is already committed")
+var (
+	// ErrNotFound is what Config.Find reports for a hash that names no live
+	// session. The middleware then clears the cookie, and the request passes
+	// as a visitor.
+	ErrNotFound = errors.New("session: no such session")
+
+	// ErrCommitted is what [Sessions.Start] and [Sessions.End] report once the
+	// header of the response went out, since the cookie can no longer change.
+	ErrCommitted = errors.New("session: the response is already committed")
+)
 
 const (
 	// DefaultCookie is the name of the session cookie over HTTP, and
@@ -72,256 +71,195 @@ const (
 	// cookie of that name to stand in front of it.
 	DefaultCookie     = "session"
 	DefaultHostCookie = "__Host-session"
-
-	// DefaultLifetime is how long a session lasts from its start or its
-	// last [Renew], whatever the visitor does.
-	DefaultLifetime = 24 * time.Hour
 )
 
-// Config configures [MiddlewareWithConfig]. T is the type of the value that
-// a session holds, any type that encoding/json/v2 encodes.
-//
-// Store is required. Cookie names the cookie. When it is empty, the cookie is
-// [DefaultHostCookie] over HTTPS and [DefaultCookie] over HTTP, where a
-// browser drops a Secure cookie, as router.Base.Scheme decides. The middleware
-// builds the cookie as router.Base.NewCookie does: Path "/", no Domain,
-// HttpOnly, SameSite=Lax, and Secure on https, with a MaxAge that ends with
-// the session. A Cookie of your own with the __Host- prefix works over HTTPS
-// alone.
-//
-// The middleware reads the first cookie of the name that the request carries
-// and no other. Under the __Host- prefix that cookie is the one this host set.
-// Over HTTP, and under a name of your own without the prefix, a parent domain
-// can set a cookie of the same name that the browser may send first, which
-// signs the visitor out or into a session of the attacker; serve HTTPS, or
-// keep the parent domain to hosts you trust.
-//
-// Lifetime caps a session from its start or its last [Renew], and defaults
-// to [DefaultLifetime]. IdleTimeout, when set, also ends a session that sees
-// no request for that long: each request moves the end forward, up to the
-// Lifetime, and writes the store at most once per half of IdleTimeout.
-//
-// A request for which Skip reports true passes with no session.
-type Config[C router.Context, T any] struct {
-	Skip        func(c C) bool
-	Store       Store
-	Cookie      string
-	Lifetime    time.Duration
-	IdleTimeout time.Duration
+// Token is the secret of a new session and its hash. Build one with
+// [NewToken].
+type Token struct {
+	// Secret goes in the cookie, and never in the database.
+	Secret string
+	// Hash goes in the database: the middleware hashes the cookie of each
+	// request the same way and passes the result to Config.Find.
+	Hash []byte
 }
 
-// Middleware loads the session of the request from store, so [From] reads
-// it, and handlers can [Put], [Renew] and [Destroy] it.
-//
-// Middleware panics if store is nil.
-func Middleware[C router.Context, T any](store Store) router.Middleware[C] {
-	return MiddlewareWithConfig(Config[C, T]{Store: store})
+// NewToken reports a new token: 32 bytes from crypto/rand as the secret, in
+// unpadded base64url, and the SHA-256 of that secret as the hash. A secret of
+// 256 random bits needs no slow hash: no one can guess it.
+func NewToken() Token {
+	var b [32]byte
+	//nolint:errcheck // crypto/rand.Read never fails; it crashes the program.
+	rand.Read(b[:])
+	secret := base64.RawURLEncoding.EncodeToString(b[:])
+	return Token{Secret: secret, Hash: HashToken(secret)}
 }
 
-// MiddlewareWithConfig is [Middleware] with a configuration.
+// HashToken reports the hash of the secret of a token, as the middleware
+// computes it for Config.Find.
+func HashToken(secret string) []byte {
+	sum := sha256.Sum256([]byte(secret))
+	return sum[:]
+}
+
+// Config configures [New]. S is the session row of the application.
 //
-// A cookie that names no live session is cleared before the handler runs, and
-// so is one whose record does not decode into T. Every response of the scope
-// names Cookie in Vary. An error of the store answers the request with a 500.
+// Find is required. It reports the row whose token has hash, and
+// [ErrNotFound] for a hash that names no live session: one that never
+// existed, was deleted, or expired. Find checks the expiry, as a query with
+// "expires_at > now()" does. Any other error stops the request: a
+// *router.HTTPError goes to the error handler as it stands, and anything else
+// as a 500. Find runs with the handler context, so it reads the tenant of the
+// request, and it must be safe for concurrent use.
 //
-// MiddlewareWithConfig panics if Store is nil, the cookie name is not a valid
-// token, or Lifetime or IdleTimeout is negative.
-func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Middleware[C] {
-	if cfg.Store == nil {
-		panic("session: MiddlewareWithConfig needs a Store")
-	}
-	if cfg.Lifetime < 0 || cfg.IdleTimeout < 0 {
-		panic("session: MiddlewareWithConfig needs a Lifetime and an IdleTimeout of zero or more")
-	}
-	m := &manager{
-		store:    cfg.Store,
-		cookie:   cfg.Cookie,
-		lifetime: cmp.Or(cfg.Lifetime, DefaultLifetime),
-		idle:     cfg.IdleTimeout,
-		typ:      reflect.TypeFor[T](),
+// Touch, when set, runs after Find on each request that carries a session,
+// to record the last use or to move a rolling expiry forward. It decides
+// itself how often to write, as an UPDATE with "WHERE last_used_at < now() -
+// interval '5 minutes'" does. Its errors stop the request as those of Find do.
+//
+// Cookie names the cookie. When it is empty, the cookie is [DefaultHostCookie]
+// over HTTPS and [DefaultCookie] over HTTP, where a browser drops a Secure
+// cookie, as router.Base.Scheme decides. The middleware reads the first cookie
+// of the name that the request carries and no other. Under the __Host- prefix
+// that cookie is the one this host set. Over HTTP, and under a name of your
+// own without the prefix, a parent domain can set a cookie of the same name
+// that the browser may send first; serve HTTPS, or keep the parent domain to
+// hosts you trust.
+type Config[S any] struct {
+	Find   func(ctx context.Context, hash []byte) (S, error)
+	Touch  func(ctx context.Context, s S) error
+	Cookie string
+}
+
+// Sessions carries the session row of type S for a router whose context type
+// is C. Build one with [New]; the zero Sessions is invalid. A Sessions is safe
+// for concurrent use.
+type Sessions[C router.Context, S any] struct {
+	find   func(ctx context.Context, hash []byte) (S, error)
+	touch  func(ctx context.Context, s S) error
+	cookie string
+}
+
+// New builds a [Sessions] from cfg. Name the context type and let the row type
+// follow from cfg, as in session.New[*Context](cfg).
+//
+// New panics if Find is nil or the Cookie is not a valid cookie name.
+func New[C router.Context, S any](cfg Config[S]) *Sessions[C, S] {
+	if cfg.Find == nil {
+		panic("session: New needs a Find function")
 	}
 	//nolint:gosec // A cookie with only a name, to check that name.
-	if m.cookie != "" && (&http.Cookie{Name: m.cookie}).Valid() != nil {
-		panic(fmt.Sprintf("session: MiddlewareWithConfig cannot name a cookie %q", m.cookie))
+	if cfg.Cookie != "" && (&http.Cookie{Name: cfg.Cookie}).Valid() != nil {
+		panic(fmt.Sprintf("session: New cannot name a cookie %q", cfg.Cookie))
 	}
+	return &Sessions[C, S]{find: cfg.Find, touch: cfg.Touch, cookie: cfg.Cookie}
+}
 
+// Middleware puts the session row of each request on the request context,
+// where [Sessions.From] reads it. A request with no cookie passes as a
+// visitor, and so does one whose cookie names no live session, which the
+// middleware also clears. Every response of the scope names Cookie in Vary.
+func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
-			if cfg.Skip != nil && cfg.Skip(c) {
-				return next(c)
-			}
 			router.AddVary(c.Response().Header(), router.HeaderCookie)
 
-			// The context of a router always carries its Base.
-			b, _ := router.FromContext(c)
-			// The state goes on the context before the load, so a store
-			// reads the cookie name from it.
-			s := &state{m: m, b: b, name: m.cookieName(b)}
-			c.SetContext(context.WithValue(c.Request().Context(), stateKey{}, s))
-			// A Base belongs to one request, so a call that comes after the
-			// handler returned, from a goroutine it started, must not reach it.
-			defer s.close()
-			if err := load[T](c, s); err != nil {
-				return err
+			cookies := c.Request().CookiesNamed(s.cookieName(c))
+			if len(cookies) == 0 || cookies[0].Value == "" {
+				return next(c)
 			}
+			row, err := s.find(c, HashToken(cookies[0].Value))
+			if errors.Is(err, ErrNotFound) {
+				s.setCookie(c, "", -1)
+				return next(c)
+			}
+			if err != nil {
+				return stop(err, "find")
+			}
+			if s.touch != nil {
+				if err := s.touch(c, row); err != nil {
+					return stop(err, "touch")
+				}
+			}
+			c.SetContext(context.WithValue(c.Request().Context(), ctxKey[S]{}, &entry[S]{row: row}))
 			return next(c)
 		}
 	}
 }
 
-// manager holds the configuration of one middleware.
-type manager struct {
-	store Store
-	typ   reflect.Type
-	// cookie is the Cookie of the Config, or "" for the default of the
-	// scheme.
-	cookie   string
-	lifetime time.Duration
-	idle     time.Duration
+// stop turns an error of Find or Touch into the error of the request.
+func stop(err error, step string) error {
+	if _, ok := errors.AsType[*router.HTTPError](err); ok {
+		return err
+	}
+	return router.ErrInternalServerError.WithError(fmt.Errorf("session: %s: %w", step, err))
 }
 
-// cookieName reports the name of the session cookie for the request of b.
-func (m *manager) cookieName(b *router.Base) string {
+// Start sets the cookie of a new session: the secret of t, until expires.
+// The application stores t.Hash in the row first. A zero expires makes a
+// cookie that lasts until the browser closes. A Set-Cookie of the session
+// cookie that this response already carries is replaced.
+//
+// Start reports [ErrCommitted] once the header went out. It panics if t has
+// no secret.
+func (s *Sessions[C, S]) Start(c router.Context, t Token, expires time.Time) error {
+	if t.Secret == "" {
+		panic("session: Start needs a token from NewToken")
+	}
+	if c.Response().Committed {
+		return ErrCommitted
+	}
+	var maxAge time.Duration
+	if !expires.IsZero() {
+		maxAge = max(time.Until(expires), time.Second)
+	}
+	s.setCookie(c, t.Secret, maxAge)
+	return nil
+}
+
+// End clears the session cookie, and [Sessions.From] reports false for the
+// rest of the request. The application deletes the row itself, before or
+// after, in its own transaction.
+//
+// End reports [ErrCommitted] once the header went out.
+func (s *Sessions[C, S]) End(c router.Context) error {
+	if c.Response().Committed {
+		return ErrCommitted
+	}
+	s.setCookie(c, "", -1)
+	if e, ok := c.Value(ctxKey[S]{}).(*entry[S]); ok {
+		e.ended = true
+	}
+	return nil
+}
+
+// From reports the session row that ctx carries. ok is false for a visitor,
+// and after [Sessions.End].
+func (s *Sessions[C, S]) From(ctx context.Context) (S, bool) {
+	return From[S](ctx)
+}
+
+// cookieName reports the name of the session cookie of the request of c.
+func (s *Sessions[C, S]) cookieName(c router.Context) string {
 	switch {
-	case m.cookie != "":
-		return m.cookie
-	case b.Scheme() == "https":
+	case s.cookie != "":
+		return s.cookie
+	case router.SchemeOf(c.Request()) == "https":
 		return DefaultHostCookie
 	default:
 		return DefaultCookie
 	}
 }
 
-// state is the session of one request.
-type state struct {
-	m *manager
-	b *router.Base
-	// name is the name of the session cookie of this request.
-	name string
-	// data is the value, a T, or nil when the request has no session.
-	data any
-	// token is "" when the request has no session.
-	token   string
-	created time.Time
-	expires time.Time
-	// mu orders the calls on the state, and closed is true once the handler
-	// returned.
-	mu sync.Mutex
-	// sent is true once the request carried the cookie or a Set-Cookie for it
-	// went out, so Destroy knows to clear it.
-	sent   bool
-	closed bool
-}
-
-func (s *state) close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closed = true
-}
-
-type stateKey struct{}
-
-// CookieName reports the name of the session cookie of the request that ctx
-// belongs to, which a [Store] that keeps the record in the cookie binds the
-// record to: the Cookie of the Config, or the default for the scheme of the
-// request. Outside the middleware, and on a context that does not derive
-// from the request, it reports [DefaultCookie].
-func CookieName(ctx context.Context) string {
-	if s, ok := ctx.Value(stateKey{}).(*state); ok {
-		return s.name
-	}
-	return DefaultCookie
-}
-
-// record is the form a session takes in the store. The times are Unix
-// seconds, which is all a cookie can carry.
-type record[T any] struct {
-	Data    T     `json:"d"`
-	Created int64 `json:"c"`
-	Expires int64 `json:"e"`
-}
-
-// load reads the session that the cookie of the request names, and moves its
-// end forward under an IdleTimeout.
-func load[T any](ctx context.Context, s *state) error {
-	cookies := s.b.Request().CookiesNamed(s.name)
-	if len(cookies) == 0 || cookies[0].Value == "" {
-		return nil
-	}
-	token := cookies[0].Value
-	s.sent = true
-
-	raw, err := s.m.store.Load(ctx, token)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		s.clearCookie()
-		return nil
-	case err != nil:
-		return router.ErrInternalServerError.WithError(fmt.Errorf("session: load: %w", err))
-	}
-	var rec record[T]
-	now := time.Now()
-	if ok := json.Unmarshal(raw, &rec) == nil && now.Before(time.Unix(rec.Expires, 0)); !ok {
-		s.clearCookie()
-		return nil
-	}
-	s.data, s.token = rec.Data, token
-	s.created, s.expires = time.Unix(rec.Created, 0), time.Unix(rec.Expires, 0)
-
-	if s.m.idle > 0 {
-		end := s.m.expiry(s.created, now)
-		if end.Sub(s.expires) >= s.m.idle/2 {
-			return s.save(ctx, s.token, s.data, s.created, end)
-		}
-	}
-	return nil
-}
-
-// expiry reports when a session that began at created ends, when the last
-// request came at now.
-func (m *manager) expiry(created, now time.Time) time.Time {
-	end := created.Add(m.lifetime)
-	if idle := now.Add(m.idle); m.idle > 0 && idle.Before(end) {
-		end = idle
-	}
-	return end.Truncate(time.Second)
-}
-
-// save stores the record and points the cookie at it.
-func (s *state) save(ctx context.Context, token string, data any, created, expires time.Time) error {
-	raw, err := json.Marshal(record[any]{Data: data, Created: created.Unix(), Expires: expires.Unix()})
-	if err != nil {
-		return fmt.Errorf("session: encode the value: %w", err)
-	}
-	maxAge := max(time.Until(expires), time.Second)
-	// A store on the server reports the token it was given, so a cookie that
-	// cannot carry it fails here, before the store holds a record that no
-	// cookie names.
-	if len(s.cookieLine(token, maxAge)) > cookie.MaxSize {
-		return cookie.ErrTooLarge
-	}
-	token, err = s.m.store.Save(ctx, token, raw, expires)
-	if err != nil {
-		return fmt.Errorf("session: save: %w", err)
-	}
-	if token != s.token || !expires.Equal(s.expires) {
-		if err := s.setCookie(token, maxAge); err != nil {
-			return err
-		}
-	}
-	s.data, s.token, s.created, s.expires = data, token, created, expires
-	return nil
-}
-
 // setCookie writes the session cookie, in place of one that an earlier call
 // of this request wrote.
-func (s *state) setCookie(value string, maxAge time.Duration) error {
-	line := s.cookieLine(value, maxAge)
-	if len(line) > cookie.MaxSize {
-		return cookie.ErrTooLarge
-	}
-	h := s.b.Response().Header()
-	prefix := s.name + "="
+func (s *Sessions[C, S]) setCookie(c router.Context, value string, maxAge time.Duration) {
+	name := s.cookieName(c)
+	// The context of a router always carries its Base.
+	b, _ := router.FromContext(c)
+	line := b.NewCookie(name, value, maxAge).String()
+
+	h := c.Response().Header()
+	prefix := name + "="
 	lines := h.Values(router.HeaderSetCookie)
 	kept := lines[:0:0]
 	for _, l := range lines {
@@ -330,127 +268,25 @@ func (s *state) setCookie(value string, maxAge time.Duration) error {
 		}
 	}
 	h[router.HeaderSetCookie] = append(kept, line)
-	s.sent = true
-	return nil
 }
 
-// cookieLine reports the Set-Cookie line of the session cookie.
-func (s *state) cookieLine(value string, maxAge time.Duration) string {
-	return s.b.NewCookie(s.name, value, maxAge).String()
+// entry holds the row of a request, and whether End ended it.
+type entry[S any] struct {
+	row   S
+	ended bool
 }
 
-func (s *state) clearCookie() {
-	// A cookie with a maxAge below zero is short, so it always fits.
-	_ = s.setCookie("", -1)
-}
+// ctxKey carries the session row of type S. Each row type has a key of its
+// own.
+type ctxKey[S any] struct{}
 
-// stateOf reports the session of ctx, and panics when no middleware put one
-// there: that is a route without the middleware, which no request can fix.
-func stateOf(ctx context.Context, fn string) *state {
-	s, ok := ctx.Value(stateKey{}).(*state)
-	if !ok {
-		panic("session: " + fn + " needs session.Middleware on the route")
-	}
-	return s
-}
-
-func (s *state) mustBeOpen() error {
-	if s.closed || s.b.Response().Committed {
-		return ErrCommitted
-	}
-	return nil
-}
-
-// From reports the value of the session of ctx. ok is false when the request
-// has no session, when T is not the type of the middleware, and when ctx
-// passed no session middleware.
-func From[T any](ctx context.Context) (T, bool) {
-	s, ok := ctx.Value(stateKey{}).(*state)
-	if !ok {
-		var zero T
+// From reports the session row of type S that ctx carries. ok is false for a
+// visitor, and after [Sessions.End].
+func From[S any](ctx context.Context) (S, bool) {
+	e, ok := ctx.Value(ctxKey[S]{}).(*entry[S])
+	if !ok || e.ended {
+		var zero S
 		return zero, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.data.(T)
-	return v, ok
-}
-
-// Put stores v as the value of the session of ctx. A request with no session
-// starts one, with a new token and a cookie.
-//
-// At a login, call [Renew] first: Put keeps the token that the request
-// carried.
-//
-// Put panics when ctx passed no session middleware, or when T is not the type
-// of the middleware.
-func Put[T any](ctx context.Context, v T) error {
-	s := stateOf(ctx, "Put")
-	if typ := reflect.TypeFor[T](); typ != s.m.typ {
-		panic(fmt.Sprintf("session: Put[%v] on a session of %v", typ, s.m.typ))
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.mustBeOpen(); err != nil {
-		return err
-	}
-	if s.token == "" {
-		now := time.Now()
-		return s.save(ctx, NewToken(), v, now, s.m.expiry(now, now))
-	}
-	return s.save(ctx, s.token, v, s.created, s.expires)
-}
-
-// Renew moves the session of ctx to a new token, with its value, and deletes
-// the record of the old one. The Lifetime starts again. Call it at a login and
-// at any change of privilege. A request with no session has nothing to move,
-// and Renew does nothing.
-//
-// It saves the new record before it deletes the old one, so a failed save
-// leaves the session as it was. A failed delete is reported after the cookie
-// names the new token: the old record then lives until it expires.
-//
-// Renew panics when ctx passed no session middleware.
-func Renew(ctx context.Context) error {
-	s := stateOf(ctx, "Renew")
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.mustBeOpen(); err != nil {
-		return err
-	}
-	if s.token == "" {
-		return nil
-	}
-	old := s.token
-	now := time.Now()
-	if err := s.save(ctx, NewToken(), s.data, now, s.m.expiry(now, now)); err != nil {
-		return err
-	}
-	if err := s.m.store.Delete(ctx, old); err != nil {
-		return fmt.Errorf("session: delete the old record: %w", err)
-	}
-	return nil
-}
-
-// Destroy deletes the record of the session of ctx and clears the cookie, as
-// a logout does. A later [Put] in the same request starts a new session.
-//
-// Destroy panics when ctx passed no session middleware.
-func Destroy(ctx context.Context) error {
-	s := stateOf(ctx, "Destroy")
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.mustBeOpen(); err != nil {
-		return err
-	}
-	if s.token != "" {
-		if err := s.m.store.Delete(ctx, s.token); err != nil {
-			return fmt.Errorf("session: delete: %w", err)
-		}
-	}
-	if s.sent {
-		s.clearCookie()
-	}
-	s.data, s.token, s.created, s.expires = nil, "", time.Time{}, time.Time{}
-	return nil
+	return e.row, true
 }

@@ -1,77 +1,114 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
-	"github.com/dmitrymomot/go-router/cookie"
-	"github.com/dmitrymomot/go-router/internal/sessionfake"
 	"github.com/dmitrymomot/go-router/routertest"
 	"github.com/dmitrymomot/go-router/session"
 )
 
-type Data struct {
-	UserID string `json:"uid"`
-	Cart   []string
+// Row is the session row of the tests, as a sessions table would hold it.
+type Row struct {
+	ID      string
+	UserID  string
+	Hash    []byte
+	Touched int
+}
+
+// table stands in for the sessions table of an application.
+type table struct {
+	rows    map[string]*Row
+	findErr error
+	mu      sync.Mutex
+}
+
+func newTable() *table { return &table{rows: make(map[string]*Row)} }
+
+func (t *table) insert(userID string, hash []byte) Row {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := &Row{ID: "s" + userID, UserID: userID, Hash: bytes.Clone(hash)}
+	t.rows[string(hash)] = r
+	return *r
+}
+
+func (t *table) find(_ context.Context, hash []byte) (Row, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.findErr != nil {
+		return Row{}, t.findErr
+	}
+	r, ok := t.rows[string(hash)]
+	if !ok {
+		return Row{}, session.ErrNotFound
+	}
+	return *r, nil
+}
+
+func (t *table) touch(_ context.Context, row Row) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rows[string(row.Hash)].Touched++
+	return nil
+}
+
+func (t *table) delete(hash []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.rows, string(hash))
 }
 
 type appContext struct {
 	router.Base
 }
 
-func newRouter() *router.Router[*appContext] {
-	return router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
-}
-
-// routes mounts the handlers every test drives: /show reads the session,
-// /login renews it and puts the user, /cart adds to it, and /logout ends it.
-func routes(r *router.Router[*appContext]) {
+// app mounts the routes every test drives: /show reads the session, /login
+// starts one for the user named in the query, and /logout ends it.
+func app(t *table, sessions *session.Sessions[*appContext, Row]) *router.Router[*appContext] {
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	r.Use(sessions.Middleware())
 	r.GET("/show", func(c *appContext) error {
-		d, ok := session.From[Data](c)
+		row, ok := sessions.From(c)
 		if !ok {
 			return c.String(http.StatusOK, "none")
 		}
-		return c.String(http.StatusOK, d.UserID+"|"+strings.Join(d.Cart, ","))
+		return c.String(http.StatusOK, row.UserID)
 	})
 	r.POST("/login", func(c *appContext) error {
-		if err := session.Renew(c); err != nil {
-			return err
-		}
-		d, _ := session.From[Data](c)
-		d.UserID = c.Request().URL.Query().Get("as")
-		if err := session.Put(c, d); err != nil {
-			return err
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-	r.POST("/cart", func(c *appContext) error {
-		d, _ := session.From[Data](c)
-		d.Cart = append(d.Cart, c.Request().URL.Query().Get("item"))
-		if err := session.Put(c, d); err != nil {
+		tok := session.NewToken()
+		t.insert(c.Request().URL.Query().Get("as"), tok.Hash)
+		if err := sessions.Start(c, tok, time.Now().Add(time.Hour)); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
 	r.POST("/logout", func(c *appContext) error {
-		if err := session.Destroy(c); err != nil {
+		row, ok := sessions.From(c)
+		if ok {
+			t.delete(row.Hash)
+		}
+		if err := sessions.End(c); err != nil {
 			return err
+		}
+		if _, still := sessions.From(c); still {
+			return c.String(http.StatusOK, "still signed in")
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
+	return r
 }
 
-func newApp(t *testing.T, cfg session.Config[*appContext, Data]) *routertest.Client {
-	t.Helper()
-	r := newRouter()
-	r.Use(session.MiddlewareWithConfig(cfg))
-	routes(r)
-	return routertest.NewClient(t, r)
+func newApp(t *table) *router.Router[*appContext] {
+	return app(t, session.New[*appContext](session.Config[Row]{Find: t.find, Touch: t.touch}))
 }
 
 func mustPanic(t *testing.T, want string, f func()) {
@@ -90,397 +127,134 @@ func mustPanic(t *testing.T, want string, f func()) {
 	f()
 }
 
-func sessionToken(t *testing.T, c *routertest.Client) string {
-	t.Helper()
-	if ck := c.Cookie(session.DefaultCookie); ck != nil {
-		return ck.Value
-	}
-	return ""
-}
-
 func TestASessionAcrossRequests(t *testing.T) {
-	store := sessionfake.New()
-	c := newApp(t, session.Config[*appContext, Data]{Store: store})
+	tab := newTable()
+	c := routertest.NewClient(t, newApp(tab))
 
 	c.Get("/show").Expect(t).Status(http.StatusOK).Body("none").Header("Vary", "Cookie")
-	if store.Len() != 0 {
-		t.Errorf("a visitor who stored nothing has %d records, want 0", store.Len())
-	}
 
-	res := c.Do(http.MethodPost, "/cart?item=tea")
+	res := c.Do(http.MethodPost, "/login?as=ada")
 	res.Expect(t).Status(http.StatusNoContent)
 	ck := res.Cookies()
-	if len(ck) != 1 || ck[0].Name != "session" || !ck[0].HttpOnly || ck[0].SameSite != http.SameSiteLaxMode || ck[0].Path != "/" {
+	if len(ck) != 1 || ck[0].Name != session.DefaultCookie || !ck[0].HttpOnly || ck[0].SameSite != http.SameSiteLaxMode || ck[0].Path != "/" {
 		t.Fatalf("Set-Cookie = %v, want one HttpOnly, Lax session cookie at /", ck)
 	}
-	if ck[0].MaxAge <= 0 || ck[0].MaxAge > int(session.DefaultLifetime/time.Second) {
+	if ck[0].MaxAge <= 0 || ck[0].MaxAge > 3600 {
 		t.Errorf("MaxAge = %d, want it to end with the session", ck[0].MaxAge)
 	}
 
-	c.Do(http.MethodPost, "/cart?item=jam").Expect(t).Status(http.StatusNoContent)
-	c.Get("/show").Expect(t).Body("|tea,jam")
-	if store.Len() != 1 {
-		t.Errorf("one visitor has %d records, want 1", store.Len())
+	c.Get("/show").Expect(t).Body("ada")
+	c.Get("/show").Expect(t).Body("ada")
+	if r := tab.rows[string(session.HashToken(ck[0].Value))]; r == nil || r.Touched != 2 {
+		t.Errorf("row = %+v, want it touched by both requests", r)
 	}
 }
 
-func TestTheHostCookieOverHTTPS(t *testing.T) {
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
-	routes(r)
-	c := routertest.NewClient(t, r, routertest.Header("X-Forwarded-Proto", "https"))
-
-	res := c.Do(http.MethodPost, "/login?as=ada")
-	ck := res.Cookies()
-	if len(ck) != 1 || ck[0].Name != session.DefaultHostCookie || !ck[0].Secure || ck[0].Path != "/" || ck[0].Domain != "" {
-		t.Fatalf("Set-Cookie = %v, want one Secure __Host- cookie at / with no Domain", ck)
-	}
-	c.Get("/show").Expect(t).Body("ada|")
-
-	// A cookie of the HTTP name means nothing over HTTPS, so a parent domain
-	// that sets it cannot stand in front of the session.
-	tossed := routertest.Get(r, "/show", routertest.Header("X-Forwarded-Proto", "https"),
-		routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: c.Cookie(session.DefaultHostCookie).Value}))
-	tossed.Expect(t).Body("none")
-}
-
-func TestPutKeepsTheTokenOfAServerStore(t *testing.T) {
-	c := newApp(t, session.Config[*appContext, Data]{Store: sessionfake.New()})
-	c.Do(http.MethodPost, "/cart?item=tea")
-	res := c.Do(http.MethodPost, "/cart?item=jam")
-	if got := res.Header.Values("Set-Cookie"); len(got) != 0 {
-		t.Errorf("Set-Cookie = %v, want none: the token did not change", got)
-	}
-}
-
-func TestRenewMovesTheSessionToANewToken(t *testing.T) {
-	store := sessionfake.New()
-	c := newApp(t, session.Config[*appContext, Data]{Store: store})
-
-	c.Do(http.MethodPost, "/cart?item=tea")
-	planted := sessionToken(t, c)
-
-	c.Do(http.MethodPost, "/login?as=ada").Expect(t).Status(http.StatusNoContent)
-	if got := sessionToken(t, c); got == planted || got == "" {
-		t.Fatalf("token after login = %q, want a new one", got)
-	}
-	c.Get("/show").Expect(t).Body("ada|tea")
-
-	// The token from before the login names nothing now.
-	if _, err := store.Load(context.Background(), planted); !errors.Is(err, session.ErrNotFound) {
-		t.Errorf("Load of the old token = %v, want ErrNotFound", err)
-	}
-	if store.Len() != 1 {
-		t.Errorf("store holds %d records, want 1", store.Len())
-	}
-}
-
-func TestRenewWithoutASessionStartsNone(t *testing.T) {
-	store := sessionfake.New()
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](store))
-	r.POST("/", func(c *appContext) error {
-		if err := session.Renew(c); err != nil {
-			return err
+func TestTheTableHoldsOnlyTheHash(t *testing.T) {
+	tab := newTable()
+	res := routertest.Do(newApp(tab), http.MethodPost, "/login?as=ada")
+	secret := res.Cookies()[0].Value
+	for k, r := range tab.rows {
+		if strings.Contains(k, secret) || bytes.Contains(r.Hash, []byte(secret)) {
+			t.Error("the table holds the secret")
 		}
-		return c.NoContent(http.StatusNoContent)
-	})
-	res := routertest.Do(r, http.MethodPost, "/")
-	if len(res.Cookies()) != 0 || store.Len() != 0 {
-		t.Errorf("Renew of no session set %v and stored %d records, want nothing", res.Cookies(), store.Len())
+		if sum := sha256.Sum256([]byte(secret)); !bytes.Equal(r.Hash, sum[:]) {
+			t.Errorf("hash = %x, want the SHA-256 of the secret", r.Hash)
+		}
 	}
 }
 
-func TestDestroyEndsTheSession(t *testing.T) {
-	store := sessionfake.New()
-	c := newApp(t, session.Config[*appContext, Data]{Store: store})
-
+func TestEndSignsOut(t *testing.T) {
+	tab := newTable()
+	c := routertest.NewClient(t, newApp(tab))
 	c.Do(http.MethodPost, "/login?as=ada")
+	copied := c.Cookie(session.DefaultCookie)
+
 	res := c.Do(http.MethodPost, "/logout")
 	res.Expect(t).Status(http.StatusNoContent)
 	if ck := res.Cookies(); len(ck) != 1 || ck[0].MaxAge >= 0 {
 		t.Errorf("Set-Cookie = %v, want one that clears the cookie", ck)
 	}
-	if store.Len() != 0 {
-		t.Errorf("store holds %d records after logout, want 0", store.Len())
-	}
 	c.Get("/show").Expect(t).Body("none")
 
-	// A visitor with no cookie gets no Set-Cookie from a logout.
-	if got := routertest.NewClient(t, c2(store)).Do(http.MethodPost, "/logout").Header.Values("Set-Cookie"); len(got) != 0 {
-		t.Errorf("Set-Cookie = %v, want none", got)
+	// The row is gone, so a copy of the cookie signs nobody in, and the
+	// browser is told to drop it.
+	stale := routertest.Get(newApp(tab), "/show", routertest.Cookie(copied))
+	stale.Expect(t).Body("none")
+	if ck := stale.Cookies(); len(ck) != 1 || ck[0].MaxAge >= 0 {
+		t.Errorf("Set-Cookie = %v, want the stale cookie cleared", ck)
 	}
 }
 
-func c2(store session.Store) http.Handler {
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](store))
-	routes(r)
-	return r
+func TestAnEmptyCookieIsAVisitor(t *testing.T) {
+	res := routertest.Get(newApp(newTable()), "/show", routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: ""}))
+	res.Expect(t).Body("none")
+	if len(res.Cookies()) != 0 {
+		t.Errorf("Set-Cookie = %v, want none", res.Cookies())
+	}
 }
 
-func TestPutKeepsTheOtherCookies(t *testing.T) {
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
+func TestTheHostCookieOverHTTPS(t *testing.T) {
+	tab := newTable()
+	r := newApp(tab)
+	c := routertest.NewClient(t, r, routertest.Header("X-Forwarded-Proto", "https"))
+
+	ck := c.Do(http.MethodPost, "/login?as=ada").Cookies()
+	if len(ck) != 1 || ck[0].Name != session.DefaultHostCookie || !ck[0].Secure || ck[0].Path != "/" || ck[0].Domain != "" {
+		t.Fatalf("Set-Cookie = %v, want one Secure __Host- cookie at / with no Domain", ck)
+	}
+	c.Get("/show").Expect(t).Body("ada")
+
+	// A cookie of the HTTP name means nothing over HTTPS, so a parent domain
+	// that sets it cannot stand in front of the session.
+	tossed := routertest.Get(r, "/show", routertest.Header("X-Forwarded-Proto", "https"),
+		routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: ck[0].Value}))
+	tossed.Expect(t).Body("none")
+}
+
+func TestACookieOfYourOwn(t *testing.T) {
+	tab := newTable()
+	r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, Cookie: "sid"}))
+	c := routertest.NewClient(t, r)
+	if ck := c.Do(http.MethodPost, "/login?as=ada").Cookies(); len(ck) != 1 || ck[0].Name != "sid" {
+		t.Fatalf("Set-Cookie = %v, want the cookie sid", ck)
+	}
+	c.Get("/show").Expect(t).Body("ada")
+}
+
+func TestStartReplacesAnEarlierCookie(t *testing.T) {
+	tab := newTable()
+	sessions := session.New[*appContext](session.Config[Row]{Find: tab.find})
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	r.Use(sessions.Middleware())
 	r.POST("/", func(c *appContext) error {
 		c.SetCookie(c.NewCookie("theme", "dark", time.Hour))
-		if err := session.Put(c, Data{UserID: "a"}); err != nil {
+		if err := sessions.End(c); err != nil {
 			return err
 		}
-		if err := session.Put(c, Data{UserID: "b"}); err != nil {
+		// A session cookie that lasts until the browser closes.
+		if err := sessions.Start(c, session.NewToken(), time.Time{}); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
 	ck := routertest.Do(r, http.MethodPost, "/").Cookies()
-	if len(ck) != 2 || ck[0].Name != "theme" || ck[1].Name != "session" {
-		t.Errorf("Set-Cookie = %v, want theme, then one session cookie", ck)
-	}
-}
-
-func TestDestroyThenPutStartsANewSession(t *testing.T) {
-	store := sessionfake.New()
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](store))
-	routes(r)
-	r.POST("/switch", func(c *appContext) error {
-		if err := session.Destroy(c); err != nil {
-			return err
-		}
-		if err := session.Put(c, Data{UserID: "grace"}); err != nil {
-			return err
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-	c := routertest.NewClient(t, r)
-	c.Do(http.MethodPost, "/login?as=ada")
-	old := sessionToken(t, c)
-
-	res := c.Do(http.MethodPost, "/switch")
-	if got := res.Header.Values("Set-Cookie"); len(got) != 1 {
-		t.Fatalf("Set-Cookie = %v, want the clear replaced by the new cookie", got)
-	}
-	if sessionToken(t, c) == old {
-		t.Error("the new session kept the old token")
-	}
-	c.Get("/show").Expect(t).Body("grace|")
-}
-
-func TestAStoreOnTheServerRevokes(t *testing.T) {
-	store := sessionfake.New()
-	c := newApp(t, session.Config[*appContext, Data]{Store: store})
-	c.Do(http.MethodPost, "/login?as=ada")
-
-	if err := store.Delete(context.Background(), sessionToken(t, c)); err != nil {
-		t.Fatal(err)
-	}
-	res := c.Get("/show")
-	res.Expect(t).Body("none")
-	if ck := res.Cookies(); len(ck) != 1 || ck[0].MaxAge >= 0 {
-		t.Errorf("Set-Cookie = %v, want the stale cookie cleared", ck)
-	}
-}
-
-func TestAnUnknownCookieIsCleared(t *testing.T) {
-	r := c2(sessionfake.New())
-	res := routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: "session", Value: "made-up"}))
-	res.Expect(t).Body("none")
-	if ck := res.Cookies(); len(ck) != 1 || ck[0].MaxAge >= 0 {
-		t.Errorf("Set-Cookie = %v, want the cookie cleared", ck)
-	}
-	// An empty cookie is no session, and nothing to clear.
-	res = routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: "session", Value: ""}))
-	if len(res.Cookies()) != 0 {
-		t.Errorf("Set-Cookie = %v, want none", res.Cookies())
-	}
-}
-
-func TestARecordThatDoesNotDecodeIsNoSession(t *testing.T) {
-	store := sessionfake.New()
-	if _, err := store.Save(context.Background(), "tok", []byte("not json"), time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	res := routertest.Get(c2(store), "/show", routertest.Cookie(&http.Cookie{Name: "session", Value: "tok"}))
-	res.Expect(t).Body("none")
-	if len(res.Cookies()) != 1 {
-		t.Errorf("Set-Cookie = %v, want the cookie cleared", res.Cookies())
-	}
-}
-
-func TestTheLifetimeEndsASession(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c := newApp(t, session.Config[*appContext, Data]{Store: sessionfake.New(), Lifetime: time.Hour})
-		c.Do(http.MethodPost, "/login?as=ada")
-		time.Sleep(59 * time.Minute)
-		c.Get("/show").Expect(t).Body("ada|")
-		time.Sleep(time.Minute)
-		c.Get("/show").Expect(t).Body("none")
-	})
-}
-
-func TestTheLifetimeEndsARecordTheStoreKept(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// A store that keeps records forever, so the middleware checks the
-		// expiry of the record itself.
-		store := &foreverStore{Store: sessionfake.New()}
-		c := newApp(t, session.Config[*appContext, Data]{Store: store, Lifetime: time.Hour})
-		c.Do(http.MethodPost, "/login?as=ada")
-		tok := sessionToken(t, c)
-		time.Sleep(2 * time.Hour)
-		routertest.Get(c2(store), "/show", routertest.Cookie(&http.Cookie{Name: "session", Value: tok})).Expect(t).Body("none")
-	})
-}
-
-type foreverStore struct {
-	*sessionfake.Store
-}
-
-func (s *foreverStore) Save(ctx context.Context, token string, data []byte, _ time.Time) (string, error) {
-	return s.Store.Save(ctx, token, data, time.Now().Add(1000*time.Hour))
-}
-
-func TestTheIdleTimeoutMovesForward(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		store := sessionfake.New()
-		c := newApp(t, session.Config[*appContext, Data]{Store: store, Lifetime: 3 * time.Hour, IdleTimeout: time.Hour})
-		c.Do(http.MethodPost, "/login?as=ada")
-
-		// Before half of the timeout, a request writes nothing.
-		time.Sleep(20 * time.Minute)
-		res := c.Get("/show")
-		res.Expect(t).Body("ada|")
-		if got := res.Header.Values("Set-Cookie"); len(got) != 0 {
-			t.Errorf("Set-Cookie = %v, want none before half the timeout", got)
-		}
-
-		// After it, the end moves forward, and the cookie with it.
-		time.Sleep(20 * time.Minute)
-		res = c.Get("/show")
-		if ck := res.Cookies(); len(ck) != 1 || ck[0].MaxAge != 3600 {
-			t.Errorf("Set-Cookie = %v, want a MaxAge of one hour", ck)
-		}
-
-		// Steady use keeps the session up to the Lifetime, and no further.
-		for range 5 {
-			time.Sleep(40 * time.Minute)
-			c.Get("/show")
-		}
-		c.Get("/show").Expect(t).Body("none")
-	})
-}
-
-func TestTheIdleTimeoutEndsAQuietSession(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c := newApp(t, session.Config[*appContext, Data]{Store: sessionfake.New(), IdleTimeout: time.Hour})
-		c.Do(http.MethodPost, "/login?as=ada")
-		time.Sleep(61 * time.Minute)
-		c.Get("/show").Expect(t).Body("none")
-	})
-}
-
-func TestACookieStore(t *testing.T) {
-	codec := cookie.NewEncryptedCodec([]byte(strings.Repeat("k", cookie.KeyLen)))
-	store := session.NewCookieStore(codec)
-	c := newApp(t, session.Config[*appContext, Data]{Store: store, Cookie: "sid"})
-
-	c.Do(http.MethodPost, "/cart?item=tea").Expect(t).Status(http.StatusNoContent)
-	first := c.Cookie("sid")
-	if first == nil || strings.Contains(first.Value, "tea") {
-		t.Fatalf("cookie = %v, want a sealed record", first)
-	}
-	c.Do(http.MethodPost, "/login?as=ada")
-	c.Get("/show").Expect(t).Body("ada|tea")
-
-	// A cookie store cannot revoke: the copy from before still opens.
-	routertest.Get(c2Named(store, "sid"), "/show", routertest.Cookie(first)).Expect(t).Body("|tea")
-
-	// A record signed for another cookie of the same codec does not open.
-	other := codec.Encode("other", []byte(`{"d":{"uid":"eve"},"c":0,"e":99999999999}`), time.Now().Add(time.Hour))
-	routertest.Get(c2Named(store, "sid"), "/show", routertest.Cookie(&http.Cookie{Name: "sid", Value: other})).Expect(t).Body("none")
-
-	// Nor does the session of one app moved to the cookie of another that
-	// shares the codec.
-	moved := &http.Cookie{Name: "admin_sid", Value: first.Value}
-	routertest.Get(c2Named(store, "admin_sid"), "/show", routertest.Cookie(moved)).Expect(t).Body("none")
-}
-
-func TestCookieNameOutsideTheMiddleware(t *testing.T) {
-	if got := session.CookieName(context.Background()); got != session.DefaultCookie {
-		t.Errorf("CookieName = %q, want %q", got, session.DefaultCookie)
-	}
-}
-
-func c2Named(store session.Store, name string) http.Handler {
-	r := newRouter()
-	r.Use(session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: store, Cookie: name}))
-	routes(r)
-	return r
-}
-
-func TestACookieStoreRefusesALargeValue(t *testing.T) {
-	store := session.NewCookieStore(cookie.NewCodec([]byte(strings.Repeat("k", cookie.MinKeyLen))))
-	var got error
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](store))
-	r.POST("/", func(c *appContext) error {
-		got = session.Put(c, Data{UserID: strings.Repeat("x", cookie.MaxSize)})
-		return c.NoContent(http.StatusNoContent)
-	})
-	res := routertest.Do(r, http.MethodPost, "/")
-	if !errors.Is(got, cookie.ErrTooLarge) {
-		t.Errorf("Put = %v, want ErrTooLarge", got)
-	}
-	if len(res.Cookies()) != 0 {
-		t.Errorf("Set-Cookie = %v, want none", res.Cookies())
-	}
-}
-
-func TestALongCookieNameStoresNothing(t *testing.T) {
-	store := sessionfake.New()
-	r := newRouter()
-	r.Use(session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: store, Cookie: strings.Repeat("n", cookie.MaxSize)}))
-	var got error
-	r.POST("/", func(c *appContext) error {
-		got = session.Put(c, Data{UserID: "ada"})
-		return c.NoContent(http.StatusNoContent)
-	})
-	routertest.Do(r, http.MethodPost, "/")
-	if !errors.Is(got, cookie.ErrTooLarge) || store.Len() != 0 {
-		t.Errorf("Put = %v with %d records, want ErrTooLarge and none stored", got, store.Len())
-	}
-}
-
-func TestACallAfterTheHandlerReturned(t *testing.T) {
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
-	start, done := make(chan struct{}), make(chan error, 1)
-	r.GET("/", func(c *appContext) error {
-		ctx := c.Request().Context()
-		go func() {
-			<-start
-			done <- session.Put(ctx, Data{UserID: "late"})
-		}()
-		return c.NoContent(http.StatusNoContent)
-	})
-	res := routertest.Get(r, "/")
-	close(start)
-	if err := <-done; !errors.Is(err, session.ErrCommitted) {
-		t.Errorf("Put after the handler returned = %v, want ErrCommitted", err)
-	}
-	if len(res.Cookies()) != 0 {
-		t.Errorf("Set-Cookie = %v, want none", res.Cookies())
+	if len(ck) != 2 || ck[0].Name != "theme" || ck[1].Name != session.DefaultCookie || ck[1].MaxAge != 0 {
+		t.Errorf("Set-Cookie = %v, want theme, then one session cookie with no MaxAge", ck)
 	}
 }
 
 func TestErrCommitted(t *testing.T) {
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
+	tab := newTable()
+	sessions := session.New[*appContext](session.Config[Row]{Find: tab.find})
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	r.Use(sessions.Middleware())
 	var errs []error
 	r.GET("/", func(c *appContext) error {
 		if err := c.String(http.StatusOK, "streamed"); err != nil {
 			return err
 		}
-		errs = append(errs, session.Put(c, Data{}), session.Renew(c), session.Destroy(c))
+		errs = append(errs, sessions.Start(c, session.NewToken(), time.Now().Add(time.Hour)), sessions.End(c))
 		return nil
 	})
 	routertest.Get(r, "/").Expect(t).Body("streamed")
@@ -491,137 +265,53 @@ func TestErrCommitted(t *testing.T) {
 	}
 }
 
-type failingStore struct {
-	*sessionfake.Store
-	load, save, del error
-}
+func TestErrorsOfFindAndTouch(t *testing.T) {
+	tab := newTable()
+	tok := session.NewToken()
+	tab.insert("ada", tok.Hash)
+	sid := routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: tok.Secret})
 
-func (s *failingStore) Load(ctx context.Context, token string) ([]byte, error) {
-	if s.load != nil {
-		return nil, s.load
-	}
-	return s.Store.Load(ctx, token)
-}
+	tab.findErr = errors.New("db down")
+	routertest.Get(newApp(tab), "/show", sid).Expect(t).Status(http.StatusInternalServerError)
+	tab.findErr = router.ErrForbidden.WithMessage("suspended")
+	routertest.Get(newApp(tab), "/show", sid).Expect(t).Status(http.StatusForbidden).Contains("suspended")
+	tab.findErr = nil
 
-func (s *failingStore) Save(ctx context.Context, token string, data []byte, expires time.Time) (string, error) {
-	if s.save != nil {
-		return "", s.save
-	}
-	return s.Store.Save(ctx, token, data, expires)
-}
-
-func (s *failingStore) Delete(ctx context.Context, token string) error {
-	if s.del != nil {
-		return s.del
-	}
-	return s.Store.Delete(ctx, token)
-}
-
-func TestStoreErrors(t *testing.T) {
-	down := errors.New("db down")
-	store := &failingStore{Store: sessionfake.New()}
-	c := routertest.NewClient(t, c2(store))
-	c.Do(http.MethodPost, "/login?as=ada")
-
-	store.load = down
-	c.Get("/show").Expect(t).Status(http.StatusInternalServerError)
-	store.load = nil
-
-	store.save = down
-	c.Do(http.MethodPost, "/cart?item=tea").Expect(t).Status(http.StatusInternalServerError)
-	// A Renew whose save fails leaves the session as it was.
-	before := sessionToken(t, c)
-	c.Do(http.MethodPost, "/login?as=grace").Expect(t).Status(http.StatusInternalServerError)
-	store.save = nil
-	if sessionToken(t, c) != before {
-		t.Error("a failed Renew moved the cookie")
-	}
-	c.Get("/show").Expect(t).Body("ada|")
-
-	// A Renew whose delete fails has moved the session already, and says so.
-	store.del = down
-	c.Do(http.MethodPost, "/login?as=grace").Expect(t).Status(http.StatusInternalServerError)
-	if sessionToken(t, c) == before {
-		t.Error("the cookie still names the old token after the new one was saved")
-	}
-	c.Do(http.MethodPost, "/logout").Expect(t).Status(http.StatusInternalServerError)
-	store.del = nil
-	c.Get("/show").Expect(t).Body("ada|")
-}
-
-func TestAnIdleSaveErrorAnswers500(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		store := &failingStore{Store: sessionfake.New()}
-		r := newRouter()
-		r.Use(session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: store, IdleTimeout: time.Hour}))
-		routes(r)
-		c := routertest.NewClient(t, r)
-		c.Do(http.MethodPost, "/login?as=ada")
-		time.Sleep(45 * time.Minute)
-		store.save = errors.New("db down")
-		c.Get("/show").Expect(t).Status(http.StatusInternalServerError)
-	})
-}
-
-func TestAValueThatDoesNotEncode(t *testing.T) {
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, chan int](sessionfake.New()))
-	var got error
-	r.POST("/", func(c *appContext) error {
-		got = session.Put(c, make(chan int))
-		return c.NoContent(http.StatusNoContent)
-	})
-	routertest.Do(r, http.MethodPost, "/")
-	if got == nil || !strings.Contains(got.Error(), "encode") {
-		t.Errorf("Put = %v, want an encode error", got)
-	}
-}
-
-func TestSkipPassesWithoutASession(t *testing.T) {
-	r := newRouter()
-	r.Use(session.MiddlewareWithConfig(session.Config[*appContext, Data]{
-		Store: &failingStore{Store: sessionfake.New(), load: errors.New("never")},
-		Skip:  func(c *appContext) bool { return true },
+	r := app(tab, session.New[*appContext](session.Config[Row]{
+		Find:  tab.find,
+		Touch: func(context.Context, Row) error { return errors.New("db down") },
 	}))
-	routes(r)
-	routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: "session", Value: "x"})).Expect(t).Status(http.StatusOK).Body("none")
+	routertest.Get(r, "/show", sid).Expect(t).Status(http.StatusInternalServerError)
 }
 
 func TestFromWithoutTheMiddleware(t *testing.T) {
-	if _, ok := session.From[Data](context.Background()); ok {
+	if _, ok := session.From[Row](context.Background()); ok {
 		t.Error("From found a session on a bare context")
 	}
 }
 
-func TestPanics(t *testing.T) {
-	mustPanic(t, "needs a Store", func() { session.Middleware[*appContext, Data](nil) })
-	mustPanic(t, "cannot name a cookie", func() {
-		session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: sessionfake.New(), Cookie: "a b"})
-	})
-	mustPanic(t, "of zero or more", func() {
-		session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: sessionfake.New(), IdleTimeout: -1})
-	})
-	mustPanic(t, "needs a codec", func() { session.NewCookieStore(nil) })
-	mustPanic(t, "Put needs session.Middleware", func() { _ = session.Put(context.Background(), Data{}) })
-	mustPanic(t, "Renew needs session.Middleware", func() { _ = session.Renew(context.Background()) })
-	mustPanic(t, "Destroy needs session.Middleware", func() { _ = session.Destroy(context.Background()) })
-
-	r := newRouter()
-	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
-	r.GET("/", func(c *appContext) error {
-		mustPanic(t, "Put[string] on a session of session_test.Data", func() { _ = session.Put(c, "x") })
-		return nil
-	})
-	routertest.Get(r, "/")
-}
-
-func TestNewTokenIsUnique(t *testing.T) {
+func TestNewToken(t *testing.T) {
 	seen := map[string]bool{}
 	for range 100 {
 		tok := session.NewToken()
-		if seen[tok] || len(tok) < 26 {
-			t.Fatalf("NewToken = %q, want a fresh token of 26 characters or more", tok)
+		if seen[tok.Secret] || len(tok.Secret) != 43 || !bytes.Equal(tok.Hash, session.HashToken(tok.Secret)) {
+			t.Fatalf("NewToken = %+v, want a fresh 43-character secret and its hash", tok)
 		}
-		seen[tok] = true
+		seen[tok.Secret] = true
 	}
+}
+
+func TestPanics(t *testing.T) {
+	mustPanic(t, "needs a Find function", func() { session.New[*appContext](session.Config[Row]{}) })
+	mustPanic(t, "cannot name a cookie", func() {
+		session.New[*appContext](session.Config[Row]{Find: newTable().find, Cookie: "a b"})
+	})
+
+	sessions := session.New[*appContext](session.Config[Row]{Find: newTable().find})
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	r.GET("/", func(c *appContext) error {
+		mustPanic(t, "needs a token from NewToken", func() { _ = sessions.Start(c, session.Token{}, time.Time{}) })
+		return nil
+	})
+	routertest.Get(r, "/")
 }
