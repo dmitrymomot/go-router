@@ -174,6 +174,18 @@ func TestRequireKeepsThePrefixOfAMount(t *testing.T) {
 	routertest.Serve(inner, req).Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fsettings")
 }
 
+func TestRequireSendsABrowserToALoginOnAnotherHost(t *testing.T) {
+	r := newRouter()
+	gate := users.Require(user.RequireConfig{LoginURL: "https://example.com/login"})
+	r.With(gate).GET("/settings", show)
+	r.With(gate).POST("/settings", show)
+
+	routertest.Get(r, "https://acme.example.com/settings?tab=keys", routertest.Host("acme.example.com"),
+		routertest.Header("X-Forwarded-Proto", "https")).Expect(t).
+		Redirect(http.StatusSeeOther, "https://example.com/login?next=https%3A%2F%2Facme.example.com%2Fsettings%3Ftab%3Dkeys")
+	routertest.Do(r, http.MethodPost, "/settings").Expect(t).Redirect(http.StatusSeeOther, "https://example.com/login")
+}
+
 func TestRequireTakesAnotherNextParam(t *testing.T) {
 	r := newRouter()
 	r.With(users.Require(user.RequireConfig{LoginURL: "/login", NextParam: "return_to"})).GET("/", show)
@@ -192,9 +204,11 @@ func TestNewContextForAJob(t *testing.T) {
 
 func TestPanics(t *testing.T) {
 	mustPanic(t, "needs a load function", func() { user.New[*appContext, Account](nil) })
-	mustPanic(t, "a local path", func() {
-		users.Require(user.RequireConfig{LoginURL: "https://evil.example/login"})
-	})
+	for _, bad := range []string{"login", "//apex.example/login", "ftp://apex.example/login", "https:///login"} {
+		mustPanic(t, "a local path or an absolute http or https URL", func() {
+			users.Require(user.RequireConfig{LoginURL: bad})
+		})
+	}
 	mustPanic(t, "cannot use the LoginURL", func() {
 		users.Require(user.RequireConfig{LoginURL: "/login#form"})
 	})

@@ -115,14 +115,18 @@ func (u *Users[C, T]) Middleware() router.Middleware[C] {
 
 // RequireConfig configures [Users.Require].
 //
-// LoginURL is the login page of a browser, a local path such as "/login".
-// When it is set, a request with no user from a client that prefers HTML is
-// sent there with a 303, and a GET or HEAD request adds the path and query the
-// client asked for, with the prefix of a mount, as the NextParam parameter, so
-// the login handler sends the user back with c.LocalRedirect. Any other method
-// gets no next value, since the login could not repeat the request. A client
-// that prefers JSON, and every client when LoginURL is empty, gets
-// router.ErrUnauthorized.
+// LoginURL is the login page of a browser: a local path such as "/login", or
+// an absolute http or https URL on another host, such as the apex of a
+// multi-tenant app. When it is set, a request with no user from a client that
+// prefers HTML is sent there with a 303, and a GET or HEAD request adds what
+// the client asked for as the NextParam parameter. For a local LoginURL that
+// is the path and query, with the prefix of a mount, so the login handler
+// sends the user back with c.LocalRedirect. For a LoginURL on another host it
+// is the absolute URL of the request, so the login handler must check its
+// host against the hosts it serves before it redirects there, since
+// LocalRedirect refuses it. Any other method gets no next value, since the
+// login could not repeat the request. A client that prefers JSON, and every
+// client when LoginURL is empty, gets router.ErrUnauthorized.
 //
 // NextParam is the query parameter of LoginURL that carries the path, and
 // defaults to [DefaultNextParam].
@@ -139,17 +143,19 @@ type RequireConfig struct {
 // Require refuses a request with no user, as [RequireConfig] describes. It goes
 // inside [Users.Middleware].
 //
-// Require panics if LoginURL is set and is not a local path, as
-// [router.IsLocalURL] decides, or holds a fragment.
+// Require panics if LoginURL is set and is neither a local path, as
+// [router.IsLocalURL] decides, nor an absolute http or https URL with a host,
+// or if it holds a fragment.
 func (u *Users[C, T]) Require(cfg RequireConfig) router.Middleware[C] {
 	var login *url.URL
 	if cfg.LoginURL != "" {
-		if !router.IsLocalURL(cfg.LoginURL) {
-			panic(fmt.Sprintf("user: Require needs a LoginURL that is a local path, and got %q", cfg.LoginURL))
-		}
 		l, err := url.Parse(cfg.LoginURL)
 		if err != nil || l.Fragment != "" {
 			panic(fmt.Sprintf("user: Require cannot use the LoginURL %q", cfg.LoginURL))
+		}
+		absolute := (l.Scheme == "http" || l.Scheme == "https") && l.Host != ""
+		if !absolute && !router.IsLocalURL(cfg.LoginURL) {
+			panic(fmt.Sprintf("user: Require needs a LoginURL that is a local path or an absolute http or https URL, and got %q", cfg.LoginURL))
 		}
 		login = l
 	}
@@ -170,7 +176,7 @@ func (u *Users[C, T]) Require(cfg RequireConfig) router.Middleware[C] {
 			target := *login
 			if m := c.Request().Method; m == http.MethodGet || m == http.MethodHead {
 				q := target.Query()
-				q.Set(param, nextOf(c.Request()))
+				q.Set(param, nextOf(c.Request(), login.Host != ""))
 				target.RawQuery = q.Encode()
 			}
 			c.Response().Header().Set(router.HeaderLocation, target.String())
@@ -192,14 +198,20 @@ func prefersJSON(c router.Context) bool {
 	return ok && b.Accepts(router.MIMETextHTML, router.MIMEApplicationJSON) == router.MIMEApplicationJSON
 }
 
-// nextOf reports the path and query the client asked for. RequestURI keeps
-// it whole where MountHandler strips a prefix from URL.Path; a request built
-// by hand, or one in absolute form for a proxy, falls back to URL.
-func nextOf(r *http.Request) string {
+// nextOf reports what the client asked for: the path and query, or with
+// absolute set, the whole URL, for a login page on another host. RequestURI
+// keeps the path whole where MountHandler strips a prefix from URL.Path; a
+// request built by hand, or one in absolute form for a proxy, falls back to
+// URL.
+func nextOf(r *http.Request, absolute bool) string {
+	path := r.URL.RequestURI()
 	if router.IsLocalURL(r.RequestURI) {
-		return r.RequestURI
+		path = r.RequestURI
 	}
-	return r.URL.RequestURI()
+	if !absolute {
+		return path
+	}
+	return router.SchemeOf(r) + "://" + r.Host + path
 }
 
 // ctxKey carries the user of type T. Each user type has a key of its own.
