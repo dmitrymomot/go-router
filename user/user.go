@@ -21,11 +21,10 @@
 // derived from any of them. A background job puts a user on its own context
 // with [NewContext].
 //
-// A request that names no user the Lookup knows is refused with
-// router.ErrUnauthorized. Set Config.Optional for a scope that also serves
-// visitors, and put [Require] on the routes inside it that need a user: it
-// answers 401, or sends a browser to the login page with the path it asked
-// for.
+// The middleware only resolves: a request that names no user the Lookup
+// knows passes as a visitor, and [From] reports false. Put [Require] on the
+// routes that need a user: it answers 401, or sends a browser to the login
+// page with the path it asked for.
 //
 // The package checks who the user is, and nothing else. Membership of the
 // user in a tenant, and what the user may do there, stay checks of the
@@ -53,8 +52,8 @@ var (
 	// middleware then asks the next source.
 	ErrUnknown = errors.New("user: unknown user")
 
-	// ErrMissing is the cause of the 401 for a request in which no source
-	// found an id at all.
+	// ErrMissing is the cause of the 401 of [Require] for a request that
+	// carries no user.
 	ErrMissing = errors.New("user: the request names no user")
 )
 
@@ -200,21 +199,12 @@ func mustName(fn, name string) {
 // application vouches for, such as the session, before one the client
 // controls.
 //
-// A request that names no user the Lookup knows is refused with
-// router.ErrUnauthorized, wrapping [ErrMissing] when no source found an id and
-// [ErrUnknown] when the Lookup knew none of them. OnReject answers it: return
-// an error to report it in place of the request, or nil to say that OnReject
-// wrote the answer itself; either way the request goes no further. A nil
-// OnReject reports err. Optional lets such a request pass with no user, so
-// [From] reports false.
-//
-// A request for which Skip reports true passes with no user.
+// A request that names no user the Lookup knows passes with no user, so
+// [From] reports false. So does a request for which Skip reports true.
 type Config[C router.Context, T any] struct {
-	Skip     func(c C) bool
-	Lookup   func(ctx context.Context, id string) (T, error)
-	OnReject func(c C, err error) error
-	Sources  []Source
-	Optional bool
+	Skip    func(c C) bool
+	Lookup  func(ctx context.Context, id string) (T, error)
+	Sources []Source
 }
 
 // Middleware resolves the user from sources, asked in order, through lookup,
@@ -223,12 +213,10 @@ type Config[C router.Context, T any] struct {
 //
 // Middleware panics if lookup is nil or sources is empty.
 func Middleware[C router.Context, T any](lookup func(ctx context.Context, id string) (T, error), sources ...Source) router.Middleware[C] {
-	return MiddlewareWithConfig(Config[C, T]{Lookup: lookup, Sources: sources, Optional: true})
+	return MiddlewareWithConfig(Config[C, T]{Lookup: lookup, Sources: sources})
 }
 
-// MiddlewareWithConfig is [Middleware] with a configuration. Unlike
-// Middleware, it refuses a request with no user unless Config.Optional is
-// set.
+// MiddlewareWithConfig is [Middleware] with a configuration.
 //
 // Vary names the header of every source in the list, not only the header of
 // the source that won, since a request without that header would resolve
@@ -264,7 +252,6 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 			}
 			router.AddVary(c.Response().Header(), vary...)
 
-			cause := ErrMissing
 			for _, s := range sources {
 				id, ok := s.read(c)
 				if !ok {
@@ -276,7 +263,6 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 					c.SetContext(NewContext(c.Request().Context(), u))
 					return next(c)
 				case errors.Is(err, ErrUnknown):
-					cause = ErrUnknown
 					continue
 				}
 				if _, ok := errors.AsType[*router.HTTPError](err); ok {
@@ -287,14 +273,7 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 				return router.ErrInternalServerError.WithError(fmt.Errorf("user: look up the user: %w", err))
 			}
 
-			if cfg.Optional {
-				return next(c)
-			}
-			err := router.ErrUnauthorized.WithError(cause)
-			if cfg.OnReject == nil {
-				return err
-			}
-			return cfg.OnReject(c, err)
+			return next(c)
 		}
 	}
 }
@@ -318,8 +297,8 @@ type RequireConfig struct {
 }
 
 // Require refuses with router.ErrUnauthorized a request that carries no user
-// of type T, which suits an API. It goes inside [Middleware], or inside a
-// [MiddlewareWithConfig] that is Optional.
+// of type T, which suits an API. It goes inside [Middleware] or
+// [MiddlewareWithConfig], which put the user on the context.
 func Require[C router.Context, T any]() router.Middleware[C] {
 	return RequireWithConfig[C, T](RequireConfig{})
 }
@@ -385,7 +364,7 @@ func NewContext[T any](ctx context.Context, u T) context.Context {
 }
 
 // From reports the user of type T that ctx carries. ok is false when ctx
-// carries none, as for a visitor of an Optional scope.
+// carries none, as for a visitor.
 func From[T any](ctx context.Context) (T, bool) {
 	u, ok := ctx.Value(ctxKey[T]{}).(T)
 	return u, ok

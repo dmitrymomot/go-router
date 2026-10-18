@@ -181,38 +181,31 @@ func TestTheFirstKnownSourceWins(t *testing.T) {
 	}
 }
 
-func TestTheCauseOfTheRefusal(t *testing.T) {
-	var got error
+func TestMiddlewareWithConfigNeverRefuses(t *testing.T) {
 	r := newRouter()
 	r.Use(user.MiddlewareWithConfig(user.Config[*appContext, Account]{
 		Lookup:  lookup,
 		Sources: []user.Source{user.FromBearer()},
-		OnReject: func(c *appContext, err error) error {
-			got = err
-			return c.String(http.StatusTeapot, "sign in")
-		},
 	}))
 	r.GET("/", show)
-
-	routertest.Get(r, "/").Expect(t).Status(http.StatusTeapot).Body("sign in")
-	if !errors.Is(got, user.ErrMissing) || router.StatusOf(got) != http.StatusUnauthorized {
-		t.Errorf("err = %v, want a 401 wrapping ErrMissing", got)
-	}
-	routertest.Get(r, "/", routertest.Header("Authorization", "Bearer nobody")).Expect(t).Status(http.StatusTeapot)
-	if !errors.Is(got, user.ErrUnknown) || router.StatusOf(got) != http.StatusUnauthorized {
-		t.Errorf("err = %v, want a 401 wrapping ErrUnknown", got)
-	}
+	routertest.Get(r, "/").Expect(t).Status(http.StatusOK).Body("anonymous")
+	routertest.Get(r, "/", routertest.Header("Authorization", "Bearer nobody")).Expect(t).Status(http.StatusOK).Body("anonymous")
+	routertest.Get(r, "/", routertest.Header("Authorization", "Bearer u1")).Expect(t).Status(http.StatusOK).Body("Ada")
 }
 
-func TestARequiredUserWithoutOnReject(t *testing.T) {
+func TestRequireReportsErrMissing(t *testing.T) {
+	var got error
 	r := newRouter()
-	r.Use(user.MiddlewareWithConfig(user.Config[*appContext, Account]{
-		Lookup:  lookup,
-		Sources: []user.Source{user.FromBearer()},
-	}))
+	r.ErrorHandler(func(c *appContext, err error) error {
+		got = err
+		return c.NoContent(router.StatusOf(err))
+	})
+	r.Use(user.Middleware[*appContext](lookup, user.FromBearer()), user.Require[*appContext, Account]())
 	r.GET("/", show)
 	routertest.Get(r, "/").Expect(t).Status(http.StatusUnauthorized)
-	routertest.Get(r, "/", routertest.Header("Authorization", "Bearer u1")).Expect(t).Status(http.StatusOK).Body("Ada")
+	if !errors.Is(got, user.ErrMissing) {
+		t.Errorf("err = %v, want it to wrap ErrMissing", got)
+	}
 }
 
 func TestSkipPassesWithoutAUser(t *testing.T) {

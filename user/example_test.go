@@ -53,6 +53,8 @@ func ExampleMiddlewareWithConfig() {
 			user.FromBearer(),
 		},
 	}))
+	// The API needs a user on every route.
+	r.Use(user.Require[*appContext, Account]())
 	r.GET("/me", show)
 
 	fmt.Println(routertest.Get(r, "/me").StatusCode)
