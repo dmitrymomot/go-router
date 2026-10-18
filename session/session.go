@@ -20,7 +20,7 @@
 //		if err != nil {
 //			return err
 //		}
-//		if err := sessions.Start(c, tok, row.ExpiresAt); err != nil {
+//		if err := sessions.Start(c, tok, row, row.ExpiresAt); err != nil {
 //			return err
 //		}
 //		return c.Redirect(http.StatusSeeOther, "/")
@@ -106,10 +106,17 @@ func HashToken(secret string) []byte {
 // Find is required. It reports the row whose token has hash, and
 // [ErrNotFound] for a hash that names no live session: one that never
 // existed, was deleted, or expired. Find checks the expiry, as a query with
-// "expires_at > now()" does. Any other error stops the request: a
-// *router.HTTPError goes to the error handler as it stands, and anything else
-// as a 500. Find runs with the handler context, so it reads the tenant of the
-// request, and it must be safe for concurrent use.
+// "expires_at > now()" does. Report ErrNotFound too for a session that the
+// application refuses, such as one of a suspended account: the middleware
+// then clears the cookie, so the browser still reaches the login page. Any
+// other error stops the request and keeps the cookie, which suits a database
+// that is down: a *router.HTTPError goes to the error handler as it stands,
+// and anything else as a 500. Find runs with the handler context, so it reads
+// the tenant of the request, and it must be safe for concurrent use.
+//
+// Expires, when set, reports when a row ends. The middleware then treats a
+// row whose end passed as ErrNotFound, so a Find that forgets the expiry still
+// ends the session.
 //
 // Touch, when set, runs after Find on each request that carries a session,
 // to record the last use or to move a rolling expiry forward. It decides
@@ -125,18 +132,20 @@ func HashToken(secret string) []byte {
 // that the browser may send first; serve HTTPS, or keep the parent domain to
 // hosts you trust.
 type Config[S any] struct {
-	Find   func(ctx context.Context, hash []byte) (S, error)
-	Touch  func(ctx context.Context, s S) error
-	Cookie string
+	Find    func(ctx context.Context, hash []byte) (S, error)
+	Touch   func(ctx context.Context, s S) error
+	Expires func(s S) time.Time
+	Cookie  string
 }
 
 // Sessions carries the session row of type S for a router whose context type
 // is C. Build one with [New]; the zero Sessions is invalid. A Sessions is safe
 // for concurrent use.
 type Sessions[C router.Context, S any] struct {
-	find   func(ctx context.Context, hash []byte) (S, error)
-	touch  func(ctx context.Context, s S) error
-	cookie string
+	find    func(ctx context.Context, hash []byte) (S, error)
+	touch   func(ctx context.Context, s S) error
+	expires func(s S) time.Time
+	cookie  string
 }
 
 // New builds a [Sessions] from cfg. Name the context type and let the row type
@@ -151,7 +160,7 @@ func New[C router.Context, S any](cfg Config[S]) *Sessions[C, S] {
 	if cfg.Cookie != "" && (&http.Cookie{Name: cfg.Cookie}).Valid() != nil {
 		panic(fmt.Sprintf("session: New cannot name a cookie %q", cfg.Cookie))
 	}
-	return &Sessions[C, S]{find: cfg.Find, touch: cfg.Touch, cookie: cfg.Cookie}
+	return &Sessions[C, S]{find: cfg.Find, touch: cfg.Touch, expires: cfg.Expires, cookie: cfg.Cookie}
 }
 
 // Middleware puts the session row of each request on the request context,
@@ -168,6 +177,9 @@ func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 				return next(c)
 			}
 			row, err := s.find(c, HashToken(cookies[0].Value))
+			if err == nil && s.expires != nil && !time.Now().Before(s.expires(row)) {
+				err = ErrNotFound
+			}
 			if errors.Is(err, ErrNotFound) {
 				s.setCookie(c, "", -1)
 				return next(c)
@@ -180,7 +192,7 @@ func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 					return stop(err, "touch")
 				}
 			}
-			c.SetContext(context.WithValue(c.Request().Context(), ctxKey[S]{}, &entry[S]{row: row}))
+			setRow(c, row)
 			return next(c)
 		}
 	}
@@ -194,14 +206,17 @@ func stop(err error, step string) error {
 	return router.ErrInternalServerError.WithError(fmt.Errorf("session: %s: %w", step, err))
 }
 
-// Start sets the cookie of a new session: the secret of t, until expires.
-// The application stores t.Hash in the row first. A zero expires makes a
-// cookie that lasts until the browser closes. A Set-Cookie of the session
-// cookie that this response already carries is replaced.
+// Start sets the cookie of a new session: the secret of t, until expires,
+// and puts row on the request context, so [Sessions.From] reports it for the
+// rest of the request. The application stores t.Hash in row first. A zero
+// expires makes a cookie that lasts until the browser closes. A Set-Cookie of
+// the session cookie that this response already carries is replaced. The user
+// that a later middleware resolved for this request stays as it was.
 //
-// Start reports [ErrCommitted] once the header went out. It panics if t has
-// no secret.
-func (s *Sessions[C, S]) Start(c router.Context, t Token, expires time.Time) error {
+// Start reports [ErrCommitted] once the header went out, and an error for an
+// expires that is not in the future, which would sign the user out at once.
+// It panics if t has no secret.
+func (s *Sessions[C, S]) Start(c router.Context, t Token, row S, expires time.Time) error {
 	if t.Secret == "" {
 		panic("session: Start needs a token from NewToken")
 	}
@@ -210,22 +225,29 @@ func (s *Sessions[C, S]) Start(c router.Context, t Token, expires time.Time) err
 	}
 	var maxAge time.Duration
 	if !expires.IsZero() {
-		maxAge = max(time.Until(expires), time.Second)
+		if maxAge = time.Until(expires); maxAge <= 0 {
+			return fmt.Errorf("session: Start got the expiry %v, which is not in the future", expires)
+		}
+		maxAge = max(maxAge, time.Second)
 	}
 	s.setCookie(c, t.Secret, maxAge)
+	setRow(c, row)
 	return nil
 }
 
-// End clears the session cookie, and [Sessions.From] reports false for the
-// rest of the request. The application deletes the row itself, before or
-// after, in its own transaction.
+// End clears the session cookie, when the request carried one or the
+// response sets one, and [Sessions.From] reports false for the rest of the
+// request. The application deletes the row itself, before or after, in its
+// own transaction.
 //
 // End reports [ErrCommitted] once the header went out.
 func (s *Sessions[C, S]) End(c router.Context) error {
 	if c.Response().Committed {
 		return ErrCommitted
 	}
-	s.setCookie(c, "", -1)
+	if s.hasCookie(c) {
+		s.setCookie(c, "", -1)
+	}
 	if e, ok := c.Value(ctxKey[S]{}).(*entry[S]); ok {
 		e.ended = true
 	}
@@ -250,6 +272,22 @@ func (s *Sessions[C, S]) cookieName(c router.Context) string {
 	}
 }
 
+// hasCookie reports whether the request carries the session cookie or the
+// response already sets it.
+func (s *Sessions[C, S]) hasCookie(c router.Context) bool {
+	name := s.cookieName(c)
+	if len(c.Request().CookiesNamed(name)) > 0 {
+		return true
+	}
+	prefix := name + "="
+	for _, l := range c.Response().Header().Values(router.HeaderSetCookie) {
+		if strings.HasPrefix(l, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // setCookie writes the session cookie, in place of one that an earlier call
 // of this request wrote.
 func (s *Sessions[C, S]) setCookie(c router.Context, value string, maxAge time.Duration) {
@@ -268,6 +306,11 @@ func (s *Sessions[C, S]) setCookie(c router.Context, value string, maxAge time.D
 		}
 	}
 	h[router.HeaderSetCookie] = append(kept, line)
+}
+
+// setRow puts row on the request context of c.
+func setRow[S any](c router.Context, row S) {
+	c.SetContext(context.WithValue(c.Request().Context(), ctxKey[S]{}, &entry[S]{row: row}))
 }
 
 // entry holds the row of a request, and whether End ended it.

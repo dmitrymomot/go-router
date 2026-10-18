@@ -100,7 +100,7 @@ func signIn(c Ctx, w Workspace, email string) error {
 	}
 	tok := session.NewToken()
 	row := c.Auth.Table.Create(w.Slug, email, tok.Hash)
-	return c.Auth.Sessions.Start(c, tok, row.Expires)
+	return c.Auth.Sessions.Start(c, tok, row, row.Expires)
 }
 
 func loginForm(c Ctx) error {

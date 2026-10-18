@@ -85,9 +85,13 @@ func app(t *table, sessions *session.Sessions[*appContext, Row]) *router.Router[
 	})
 	r.POST("/login", func(c *appContext) error {
 		tok := session.NewToken()
-		t.insert(c.Request().URL.Query().Get("as"), tok.Hash)
-		if err := sessions.Start(c, tok, time.Now().Add(time.Hour)); err != nil {
+		row := t.insert(c.Request().URL.Query().Get("as"), tok.Hash)
+		if err := sessions.Start(c, tok, row, time.Now().Add(time.Hour)); err != nil {
 			return err
+		}
+		// The new row is on the context for the rest of the request.
+		if got, ok := sessions.From(c); !ok || got.ID != row.ID {
+			return c.String(http.StatusOK, "the old session after Start")
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
@@ -186,6 +190,65 @@ func TestEndSignsOut(t *testing.T) {
 	}
 }
 
+func TestEndWithoutACookieSetsNone(t *testing.T) {
+	res := routertest.Do(newApp(newTable()), http.MethodPost, "/logout")
+	res.Expect(t).Status(http.StatusNoContent)
+	if got := res.Header.Values("Set-Cookie"); len(got) != 0 {
+		t.Errorf("Set-Cookie = %v, want none for a visitor", got)
+	}
+}
+
+func TestEndAfterStartClearsTheNewCookie(t *testing.T) {
+	tab := newTable()
+	sessions := session.New[*appContext](session.Config[Row]{Find: tab.find})
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	r.POST("/", func(c *appContext) error {
+		if err := sessions.Start(c, session.NewToken(), Row{UserID: "ada"}, time.Now().Add(time.Hour)); err != nil {
+			return err
+		}
+		if err := sessions.End(c); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+	if ck := routertest.Do(r, http.MethodPost, "/").Cookies(); len(ck) != 1 || ck[0].MaxAge >= 0 {
+		t.Errorf("Set-Cookie = %v, want the cookie of Start replaced by one that clears it", ck)
+	}
+}
+
+func TestStartRefusesAPastExpiry(t *testing.T) {
+	tab := newTable()
+	sessions := session.New[*appContext](session.Config[Row]{Find: tab.find})
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	var got error
+	r.POST("/", func(c *appContext) error {
+		got = sessions.Start(c, session.NewToken(), Row{}, time.Now().Add(-time.Second))
+		return c.NoContent(http.StatusNoContent)
+	})
+	res := routertest.Do(r, http.MethodPost, "/")
+	if got == nil || !strings.Contains(got.Error(), "not in the future") || len(res.Cookies()) != 0 {
+		t.Errorf("Start = %v with Set-Cookie %v, want an error and no cookie", got, res.Cookies())
+	}
+}
+
+func TestExpiresEndsARowThatFindKept(t *testing.T) {
+	tab := newTable()
+	tok := session.NewToken()
+	tab.insert("ada", tok.Hash)
+	end := time.Now().Add(-time.Minute)
+	r := app(tab, session.New[*appContext](session.Config[Row]{
+		Find:    tab.find, // forgets the expiry
+		Expires: func(Row) time.Time { return end },
+	}))
+	res := routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: tok.Secret}))
+	res.Expect(t).Body("none")
+	if ck := res.Cookies(); len(ck) != 1 || ck[0].MaxAge >= 0 {
+		t.Errorf("Set-Cookie = %v, want the expired cookie cleared", ck)
+	}
+	end = time.Now().Add(time.Hour)
+	routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: tok.Secret})).Expect(t).Body("ada")
+}
+
 func TestAnEmptyCookieIsAVisitor(t *testing.T) {
 	res := routertest.Get(newApp(newTable()), "/show", routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: ""}))
 	res.Expect(t).Body("none")
@@ -233,7 +296,7 @@ func TestStartReplacesAnEarlierCookie(t *testing.T) {
 			return err
 		}
 		// A session cookie that lasts until the browser closes.
-		if err := sessions.Start(c, session.NewToken(), time.Time{}); err != nil {
+		if err := sessions.Start(c, session.NewToken(), Row{}, time.Time{}); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -254,7 +317,7 @@ func TestErrCommitted(t *testing.T) {
 		if err := c.String(http.StatusOK, "streamed"); err != nil {
 			return err
 		}
-		errs = append(errs, sessions.Start(c, session.NewToken(), time.Now().Add(time.Hour)), sessions.End(c))
+		errs = append(errs, sessions.Start(c, session.NewToken(), Row{}, time.Now().Add(time.Hour)), sessions.End(c))
 		return nil
 	})
 	routertest.Get(r, "/").Expect(t).Body("streamed")
@@ -310,7 +373,7 @@ func TestPanics(t *testing.T) {
 	sessions := session.New[*appContext](session.Config[Row]{Find: newTable().find})
 	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
 	r.GET("/", func(c *appContext) error {
-		mustPanic(t, "needs a token from NewToken", func() { _ = sessions.Start(c, session.Token{}, time.Time{}) })
+		mustPanic(t, "needs a token from NewToken", func() { _ = sessions.Start(c, session.Token{}, Row{}, time.Time{}) })
 		return nil
 	})
 	routertest.Get(r, "/")

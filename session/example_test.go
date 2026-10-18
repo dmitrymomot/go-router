@@ -21,8 +21,8 @@ func Example() {
 	r.POST("/login", func(c *appContext) error {
 		// ... check the credentials ...
 		tok := session.NewToken()
-		tab.insert("ada", tok.Hash) // INSERT INTO sessions (user_id, token_hash, ...)
-		if err := sessions.Start(c, tok, time.Now().Add(30*24*time.Hour)); err != nil {
+		row := tab.insert("ada", tok.Hash) // INSERT INTO sessions (user_id, token_hash, ...)
+		if err := sessions.Start(c, tok, row, time.Now().Add(30*24*time.Hour)); err != nil {
 			return err
 		}
 		return c.Redirect(http.StatusSeeOther, "/")
