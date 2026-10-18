@@ -193,66 +193,71 @@ func slugify(name string) string {
 
 const maxSlugLen = 30
 
-// SessionTable is the session.Store of the example, in place of a table of the
-// database. Like the workspaces, it lives in a map that goes away with the
-// process. A service keeps its sessions where every process reads them and
-// where a restart leaves them: a table, or Redis.
-type SessionTable struct {
-	rows  map[string]sessionRow
-	mu    sync.Mutex
-	saves int
+// Session is a row of the sessions table: the account it signs in, and the
+// hash of its token. The token itself never reaches the table.
+type Session struct {
+	Expires   time.Time
+	Workspace string
+	Email     string
+	Hash      []byte
 }
 
-// sweepEvery is how many saves pass between two sweeps of the expired rows,
+// SessionTable stands in for the sessions table of a database. Like the
+// workspaces, it lives in a map that goes away with the process; a service
+// keeps its sessions where every process reads them and where a restart
+// leaves them.
+type SessionTable struct {
+	rows    map[string]Session
+	mu      sync.Mutex
+	inserts int
+}
+
+// sweepEvery is how many inserts pass between two sweeps of the expired rows,
 // the job that DELETE FROM sessions WHERE expires <= now() does for a table.
 const sweepEvery = 256
 
-type sessionRow struct {
-	expires time.Time
-	data    []byte
-}
-
 func NewSessionTable() *SessionTable {
-	return &SessionTable{rows: make(map[string]sessionRow)}
+	return &SessionTable{rows: make(map[string]Session)}
 }
 
-// Load reports the row of token, as SELECT data FROM sessions WHERE token = $1
-// AND expires > now() would.
-func (t *SessionTable) Load(_ context.Context, token string) ([]byte, error) {
+// Create inserts the session of email in the workspace slug, under the hash
+// of a new token, as INSERT INTO sessions would.
+func (t *SessionTable) Create(slug, email string, hash []byte) Session {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	r, ok := t.rows[token]
-	if !ok {
-		return nil, session.ErrNotFound
-	}
-	if !time.Now().Before(r.expires) {
-		delete(t.rows, token)
-		return nil, session.ErrNotFound
-	}
-	return slices.Clone(r.data), nil
-}
-
-// Save writes the row of token, as an upsert would. A token from the
-// middleware is a fresh random one, so the table reports it as it stands.
-func (t *SessionTable) Save(_ context.Context, token string, data []byte, expires time.Time) (string, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.rows[token] = sessionRow{expires: expires, data: slices.Clone(data)}
-	if t.saves++; t.saves >= sweepEvery {
-		t.saves = 0
+	row := Session{Workspace: slug, Email: email, Hash: slices.Clone(hash), Expires: time.Now().Add(sessionLifetime)}
+	t.rows[string(hash)] = row
+	if t.inserts++; t.inserts >= sweepEvery {
+		t.inserts = 0
 		now := time.Now()
-		maps.DeleteFunc(t.rows, func(_ string, r sessionRow) bool { return !now.Before(r.expires) })
+		maps.DeleteFunc(t.rows, func(_ string, r Session) bool { return !now.Before(r.Expires) })
 	}
-	return token, nil
+	return row
 }
 
-// Delete removes the row of token, which ends the session at the next request.
-func (t *SessionTable) Delete(_ context.Context, token string) error {
+// Find reports the live session whose token has hash, as SELECT ... WHERE
+// token_hash = $1 AND expires > now() would. It is the Find of session.Config.
+func (t *SessionTable) Find(_ context.Context, hash []byte) (Session, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	delete(t.rows, token)
-	return nil
+	row, ok := t.rows[string(hash)]
+	if !ok {
+		return Session{}, session.ErrNotFound
+	}
+	if !time.Now().Before(row.Expires) {
+		delete(t.rows, string(hash))
+		return Session{}, session.ErrNotFound
+	}
+	return row, nil
+}
+
+// Delete removes the session whose token has hash, which ends it at the next
+// request.
+func (t *SessionTable) Delete(hash []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.rows, string(hash))
 }

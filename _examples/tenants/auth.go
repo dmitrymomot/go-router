@@ -91,14 +91,16 @@ func enter(c Ctx) error {
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
-// signIn starts the session of email in the workspace w. Renew gives the
-// session a new token first, so a token planted in the browser before the
-// login names nothing after it.
+// signIn starts the session of email in the workspace w: a new token, a new
+// row under its hash, and the cookie. A session the browser already held ends,
+// so a token planted before the sign-in names nothing after it.
 func signIn(c Ctx, w Workspace, email string) error {
-	if err := session.Renew(c); err != nil {
-		return err
+	if old, ok := c.Auth.Sessions.From(c); ok {
+		c.Auth.Table.Delete(old.Hash)
 	}
-	return session.Put(c, sessionData{Workspace: w.Slug, Email: email})
+	tok := session.NewToken()
+	row := c.Auth.Table.Create(w.Slug, email, tok.Hash)
+	return c.Auth.Sessions.Start(c, tok, row.Expires)
 }
 
 func loginForm(c Ctx) error {
@@ -135,10 +137,13 @@ func login(c Ctx) error {
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
-// signout deletes the session from the store, so a copy of the cookie names
+// signout deletes the row of the session, so a copy of the cookie names
 // nothing either, and clears the cookie.
 func signout(c Ctx) error {
-	if err := session.Destroy(c); err != nil {
+	if s, ok := c.Auth.Sessions.From(c); ok {
+		c.Auth.Table.Delete(s.Hash)
+	}
+	if err := c.Auth.Sessions.End(c); err != nil {
 		return err
 	}
 	return c.Redirect(http.StatusSeeOther, "/login")

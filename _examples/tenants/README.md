@@ -55,14 +55,20 @@ tenant.MiddlewareWithConfig(tenant.Config[Ctx, Workspace]{
 }),
 ```
 
-**A session that belongs to one host, and an account that belongs to one workspace.** Package `session` keeps the session in a store on the server, here `SessionTable`, which stands in for a table of the database with the three methods of `session.Store`, and gives the browser only a random token, in a cookie with the router's defaults and no `Domain`, so it belongs to the host that set it. Over HTTPS the cookie is `__Host-session`, a name the browser keeps to this host, so no other subdomain of `lvh.me` can set one that stands in front of it. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out. Package `user` turns the session into the account, and lets a guest through:
+**A session that belongs to one host, and an account that belongs to one workspace.** A sign-in makes a new token with `session.NewToken`, inserts a row of `SessionTable` under the SHA-256 of the token, and `Start` puts the token itself in the cookie. The table never holds a token, so a copy of it opens no session. The cookie has the router's defaults and no `Domain`, so it belongs to the host that set it, and over HTTPS it is `__Host-session`, a name the browser keeps to this host. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out. On each request the session middleware hashes the cookie and asks the table for the row, and the user middleware turns the row into the account, or lets a guest through:
 
 ```go
-session.MiddlewareWithConfig(session.Config[Ctx, sessionData]{Store: sessions, Lifetime: sessionLifetime}),
-user.Middleware[Ctx](findAccount, user.FromSession(func(d sessionData) string { return d.Email })),
+sessions := session.New[Ctx](session.Config[Session]{Find: table.Find})
+users := user.New(func(c Ctx) (Account, error) {
+	s, ok := sessions.From(c)
+	if !ok || s.Workspace != workspaceOf(c).Slug {
+		return Account{}, user.ErrUnknown
+	}
+	// ... the account of s.Email in that workspace ...
+})
 ```
 
-The session also names its workspace, and `findAccount` checks it against the workspace of the host, so a session of one workspace opens no other even where its token travels. A login calls `session.Renew` before `session.Put`, so a token planted in the browser before the login names nothing after it. Sign-out calls `session.Destroy`, which deletes the record, so a copy of the cookie signs nobody in either. `user.RequireWithConfig` sends a guest who posts the sign-out form to the door.
+The row names its workspace, and the user function checks it against the workspace of the host, so a session of one workspace opens no other. A session exists only after a sign-in, and each sign-in makes a new token and ends the session the browser held, so a token planted before it names nothing after it. Sign-out deletes the row and calls `End`, so a copy of the cookie signs nobody in either. `users.Require` sends a guest who posts the sign-out form to the door.
 
 **A ticket to cross the hosts.** Signup runs on the apex, and no server may set a cookie for a host below its own, so the apex cannot start the session it just earned. It hands over a ticket instead: one random id, good for one minute and one visit.
 
@@ -91,7 +97,7 @@ A service that can take a dependency should prefer argon2id from `golang.org/x/c
 | `main.go` | the context type, the server, the host scopes and the error page |
 | `landing.go` | the apex: the pitch and the signup form |
 | `auth.go` | signup, the ticket, the login form and what each refuses |
-| `workspace.go` | the workspace host: the tenant, session and user middleware, and the dashboard |
+| `workspace.go` | the workspace host: the sign-in wiring, the tenant, session and user middleware, and the dashboard |
 | `password.go` | the salt, the derivation and the constant-time compare |
 | `store.go` | the workspaces, their accounts, the tickets, the slug rules and the session table |
 | `view.go` | the templates and the absolute URLs |

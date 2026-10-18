@@ -32,13 +32,14 @@ const addr = "localhost:8080"
 
 const maxBodyBytes = 8 << 10
 
-// Context is what every handler receives. The factory gives it the store. The
-// workspace of the subdomain, the session and the signed-in account ride on
-// the request context, where middleware of packages tenant, session and user
-// puts them.
+// Context is what every handler receives. The factory gives it the store and
+// the sign-in. The workspace of the subdomain, the session and the signed-in
+// account ride on the request context, where middleware of packages tenant,
+// session and user puts them.
 type Context struct {
 	router.Base
 	Store *Store
+	Auth  *Auth
 }
 
 type Ctx = *Context
@@ -67,8 +68,9 @@ func main() {
 }
 
 func newRouter(store *Store) *router.Router[Ctx] {
+	auth := newAuth(store)
 	r := router.New(func(http.ResponseWriter, *http.Request) Ctx {
-		return &Context{Store: store}
+		return &Context{Store: store, Auth: auth}
 	})
 
 	r.ErrorHandler(renderError)
@@ -91,7 +93,7 @@ func newRouter(store *Store) *router.Router[Ctx] {
 	r.RedirectHost("www."+baseDomain, http.StatusMovedPermanently, baseDomain)
 
 	// One table for every workspace: the subdomain is the {tenant} parameter.
-	r.Host(tenantHost, workspaceRoutes(store, NewSessionTable()))
+	r.Host(tenantHost, workspaceRoutes(store, auth))
 
 	// Everything else, such as a request sent straight to 127.0.0.1:8080.
 	r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })
