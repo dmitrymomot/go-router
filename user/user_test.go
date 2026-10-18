@@ -136,7 +136,7 @@ type sessionData struct {
 
 func TestFromSession(t *testing.T) {
 	r := newRouter()
-	r.Use(session.Middleware[*appContext, sessionData](session.NewMemoryStore()))
+	r.Use(session.Middleware[*appContext, sessionData](newFakeStore()))
 	r.Use(user.Middleware[*appContext](lookup, user.FromSession(func(d sessionData) string { return d.UserID }), user.FromBearer()))
 	r.POST("/login", func(c *appContext) error {
 		if err := session.Renew(c); err != nil {

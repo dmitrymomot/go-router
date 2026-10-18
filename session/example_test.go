@@ -13,9 +13,9 @@ import (
 )
 
 func Example() {
-	// MemoryStore suits a test; a table of yours, behind the three methods of
-	// Store, suits a fleet.
-	store := session.NewMemoryStore()
+	// The store is yours: a table of sessions behind the three methods of
+	// Store. This one is the fake of the tests.
+	store := newFakeStore()
 
 	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
 	r.Use(session.Middleware[*appContext, Data](store))
