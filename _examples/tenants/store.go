@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"slices"
@@ -8,6 +9,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/dmitrymomot/go-router/session"
 )
 
 // A workspace lives at its own subdomain, and the slug is that subdomain.
@@ -188,3 +191,53 @@ func slugify(name string) string {
 }
 
 const maxSlugLen = 30
+
+// SessionTable is the session.Store of the example, in place of a table of the
+// database. Like the workspaces, it lives in a map that goes away with the
+// process. A service keeps its sessions where every process reads them and
+// where a restart leaves them: a table, or Redis.
+type SessionTable struct {
+	rows map[string]sessionRow
+	mu   sync.Mutex
+}
+
+type sessionRow struct {
+	expires time.Time
+	data    []byte
+}
+
+func NewSessionTable() *SessionTable {
+	return &SessionTable{rows: make(map[string]sessionRow)}
+}
+
+// Load reports the row of token, as SELECT data FROM sessions WHERE token = $1
+// AND expires > now() would.
+func (t *SessionTable) Load(_ context.Context, token string) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	r, ok := t.rows[token]
+	if !ok || !time.Now().Before(r.expires) {
+		return nil, session.ErrNotFound
+	}
+	return slices.Clone(r.data), nil
+}
+
+// Save writes the row of token, as an upsert would. A token from the
+// middleware is a fresh random one, so the table reports it as it stands.
+func (t *SessionTable) Save(_ context.Context, token string, data []byte, expires time.Time) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.rows[token] = sessionRow{expires: expires, data: slices.Clone(data)}
+	return token, nil
+}
+
+// Delete removes the row of token, which ends the session at the next request.
+func (t *SessionTable) Delete(_ context.Context, token string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.rows, token)
+	return nil
+}

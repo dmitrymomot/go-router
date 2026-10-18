@@ -19,7 +19,6 @@ import (
 	"github.com/dmitrymomot/go-router"
 	"github.com/dmitrymomot/go-router/middleware"
 	"github.com/dmitrymomot/go-router/serve"
-	"github.com/dmitrymomot/go-router/session"
 )
 
 // baseDomain is the apex. A workspace named Acme answers on acme.lvh.me.
@@ -92,7 +91,7 @@ func newRouter(store *Store) *router.Router[Ctx] {
 	r.RedirectHost("www."+baseDomain, http.StatusMovedPermanently, baseDomain)
 
 	// One table for every workspace: the subdomain is the {tenant} parameter.
-	r.Host(tenantHost, workspaceRoutes(store, session.NewMemoryStore()))
+	r.Host(tenantHost, workspaceRoutes(store, NewSessionTable()))
 
 	// Everything else, such as a request sent straight to 127.0.0.1:8080.
 	r.Host("*", func(h *router.Router[Ctx]) { h.GET("/", unknownHost) })

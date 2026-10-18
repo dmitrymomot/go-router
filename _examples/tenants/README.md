@@ -55,7 +55,7 @@ tenant.MiddlewareWithConfig(tenant.Config[Ctx, Workspace]{
 }),
 ```
 
-**A session that belongs to one host, and an account that belongs to one workspace.** Package `session` keeps the session in a store on the server and gives the browser only a random token, in a cookie with the router's defaults and no `Domain`, so it belongs to the host that set it. Over HTTPS the cookie is `__Host-session`, a name the browser keeps to this host, so no other subdomain of `lvh.me` can set one that stands in front of it. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out. Package `user` turns the session into the account, and lets a guest through:
+**A session that belongs to one host, and an account that belongs to one workspace.** Package `session` keeps the session in a store on the server, here `SessionTable`, which stands in for a table of the database with the three methods of `session.Store`, and gives the browser only a random token, in a cookie with the router's defaults and no `Domain`, so it belongs to the host that set it. Over HTTPS the cookie is `__Host-session`, a name the browser keeps to this host, so no other subdomain of `lvh.me` can set one that stands in front of it. Signing in at `acme.lvh.me` leaves `beta.lvh.me` signed out. Package `user` turns the session into the account, and lets a guest through:
 
 ```go
 session.MiddlewareWithConfig(session.Config[Ctx, sessionData]{Store: sessions, Lifetime: sessionLifetime}),
@@ -93,7 +93,7 @@ A service that can take a dependency should prefer argon2id from `golang.org/x/c
 | `auth.go` | signup, the ticket, the login form and what each refuses |
 | `workspace.go` | the workspace host: the tenant, session and user middleware, and the dashboard |
 | `password.go` | the salt, the derivation and the constant-time compare |
-| `store.go` | the workspaces, their accounts, the tickets and the slug rules |
+| `store.go` | the workspaces, their accounts, the tickets, the slug rules and the session table |
 | `view.go` | the templates and the absolute URLs |
 | `templates/` | the layout and the six pages |
 
