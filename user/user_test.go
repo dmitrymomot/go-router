@@ -158,6 +158,13 @@ func TestRequireAnswersAJSONClientWith401(t *testing.T) {
 		Expect(t).Status(http.StatusUnauthorized)
 	routertest.Get(r, "/settings", routertest.Header("Accept", "text/html,application/xhtml+xml")).
 		Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fsettings")
+	// A tie goes to JSON, and a JSON ranked lower goes to HTML.
+	routertest.Get(r, "/settings", routertest.Header("Accept", "text/html, application/json")).
+		Expect(t).Status(http.StatusUnauthorized)
+	routertest.Get(r, "/settings", routertest.Header("Accept", "text/html, application/json;q=0.5")).
+		Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fsettings")
+	routertest.Get(r, "/settings", routertest.Header("Accept", "*/*")).
+		Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fsettings")
 }
 
 func TestRequireKeepsThePrefixOfAMount(t *testing.T) {

@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/dmitrymomot/go-router"
 )
@@ -191,11 +192,16 @@ func (u *Users[C, T]) From(ctx context.Context) (T, bool) {
 	return From[T](ctx)
 }
 
-// prefersJSON reports whether the client ranks JSON above HTML, as an API
-// client does. A browser, and a client that sends no Accept, prefer HTML.
+// prefersJSON reports whether the client names JSON in Accept and ranks it
+// no lower than HTML, as an API client does; a tie goes to JSON. A browser,
+// which names HTML and not JSON, and a client that sends no Accept or only
+// "*/*", prefer HTML.
 func prefersJSON(c router.Context) bool {
+	if !strings.Contains(strings.Join(c.Request().Header.Values(router.HeaderAccept), ","), "json") {
+		return false
+	}
 	b, ok := router.FromContext(c)
-	return ok && b.Accepts(router.MIMETextHTML, router.MIMEApplicationJSON) == router.MIMEApplicationJSON
+	return ok && b.Accepts(router.MIMEApplicationJSON, router.MIMETextHTML) == router.MIMEApplicationJSON
 }
 
 // nextOf reports what the client asked for: the path and query, or with
