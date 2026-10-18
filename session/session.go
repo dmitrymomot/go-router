@@ -164,8 +164,8 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 
 // manager holds the configuration of one middleware.
 type manager struct {
-	store    Store
-	typ reflect.Type
+	store Store
+	typ   reflect.Type
 	// cookie is the Cookie of the Config, or "" for the default of the
 	// scheme.
 	cookie   string
