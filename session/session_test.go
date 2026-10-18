@@ -435,6 +435,21 @@ func TestACookieStoreRefusesALargeValue(t *testing.T) {
 	}
 }
 
+func TestALongCookieNameStoresNothing(t *testing.T) {
+	store := sessionfake.New()
+	r := newRouter()
+	r.Use(session.MiddlewareWithConfig(session.Config[*appContext, Data]{Store: store, Cookie: strings.Repeat("n", cookie.MaxSize)}))
+	var got error
+	r.POST("/", func(c *appContext) error {
+		got = session.Put(c, Data{UserID: "ada"})
+		return c.NoContent(http.StatusNoContent)
+	})
+	routertest.Do(r, http.MethodPost, "/")
+	if !errors.Is(got, cookie.ErrTooLarge) || store.Len() != 0 {
+		t.Errorf("Put = %v with %d records, want ErrTooLarge and none stored", got, store.Len())
+	}
+}
+
 func TestErrCommitted(t *testing.T) {
 	r := newRouter()
 	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))

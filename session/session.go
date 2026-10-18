@@ -276,13 +276,19 @@ func (s *state) save(ctx context.Context, token string, data any, created, expir
 	if err != nil {
 		return fmt.Errorf("session: encode the value: %w", err)
 	}
+	maxAge := max(time.Until(expires), time.Second)
+	// A store on the server reports the token it was given, so a cookie that
+	// cannot carry it fails here, before the store holds a record that no
+	// cookie names.
+	if len(s.cookieLine(token, maxAge)) > cookie.MaxSize {
+		return cookie.ErrTooLarge
+	}
 	token, err = s.m.store.Save(ctx, token, raw, expires)
 	if err != nil {
 		return fmt.Errorf("session: save: %w", err)
 	}
 	if token != s.token || !expires.Equal(s.expires) {
-		maxAge := time.Until(expires)
-		if err := s.setCookie(token, max(maxAge, time.Second)); err != nil {
+		if err := s.setCookie(token, maxAge); err != nil {
 			return err
 		}
 	}
@@ -293,7 +299,7 @@ func (s *state) save(ctx context.Context, token string, data any, created, expir
 // setCookie writes the session cookie, in place of one that an earlier call
 // of this request wrote.
 func (s *state) setCookie(value string, maxAge time.Duration) error {
-	line := s.b.NewCookie(s.name, value, maxAge).String()
+	line := s.cookieLine(value, maxAge)
 	if len(line) > cookie.MaxSize {
 		return cookie.ErrTooLarge
 	}
@@ -309,6 +315,11 @@ func (s *state) setCookie(value string, maxAge time.Duration) error {
 	h[router.HeaderSetCookie] = append(kept, line)
 	s.sent = true
 	return nil
+}
+
+// cookieLine reports the Set-Cookie line of the session cookie.
+func (s *state) cookieLine(value string, maxAge time.Duration) string {
+	return s.b.NewCookie(s.name, value, maxAge).String()
 }
 
 func (s *state) clearCookie() {
