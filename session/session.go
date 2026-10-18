@@ -224,7 +224,8 @@ type stateKey struct{}
 // CookieName reports the name of the session cookie of the request that ctx
 // belongs to, which a [Store] that keeps the record in the cookie binds the
 // record to: the Cookie of the Config, or the default for the scheme of the
-// request. Outside the middleware it reports [DefaultCookie].
+// request. Outside the middleware, and on a context that does not derive
+// from the request, it reports [DefaultCookie].
 func CookieName(ctx context.Context) string {
 	if s, ok := ctx.Value(stateKey{}).(*state); ok {
 		return s.name

@@ -34,6 +34,11 @@ var ErrNotFound = errors.New("session: no such session")
 // so the package ships no such store. Deleting a record revokes the session at
 // the next request, since the middleware loads the record on every one.
 //
+// The ctx of each call is the context of the request, and it carries the name
+// of the cookie that [CookieName] reports. A Store that wraps another passes
+// ctx on, or context.WithoutCancel(ctx) to outlive the request, never a fresh
+// context.Background(), which would bind a [CookieStore] to the wrong name.
+//
 // Any other error of a Store goes to the handler, or answers the request with
 // a 500 when the middleware meets it. A Store must be safe for concurrent use.
 type Store interface {
