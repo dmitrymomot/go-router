@@ -148,14 +148,17 @@ type RequireConfig struct {
 // [router.IsLocalURL] decides, nor an absolute http or https URL with a host,
 // or if it holds a fragment.
 func (u *Users[C, T]) Require(cfg RequireConfig) router.Middleware[C] {
-	var login *url.URL
+	var (
+		login  *url.URL
+		remote bool // the login page is on another host
+	)
 	if cfg.LoginURL != "" {
 		l, err := url.Parse(cfg.LoginURL)
 		if err != nil || l.Fragment != "" {
 			panic(fmt.Sprintf("user: Require cannot use the LoginURL %q", cfg.LoginURL))
 		}
-		absolute := (l.Scheme == "http" || l.Scheme == "https") && l.Host != ""
-		if !absolute && !router.IsLocalURL(cfg.LoginURL) {
+		remote = (l.Scheme == "http" || l.Scheme == "https") && l.Host != ""
+		if !remote && !router.IsLocalURL(cfg.LoginURL) {
 			panic(fmt.Sprintf("user: Require needs a LoginURL that is a local path or an absolute http or https URL, and got %q", cfg.LoginURL))
 		}
 		login = l
@@ -177,12 +180,12 @@ func (u *Users[C, T]) Require(cfg RequireConfig) router.Middleware[C] {
 			target := *login
 			if m := c.Request().Method; m == http.MethodGet || m == http.MethodHead {
 				q := target.Query()
-				q.Set(param, nextOf(c.Request(), login.Host != ""))
+				q.Set(param, nextOf(c.Request(), remote))
 				target.RawQuery = q.Encode()
 			}
-			c.Response().Header().Set(router.HeaderLocation, target.String())
-			c.Response().WriteHeader(http.StatusSeeOther)
-			return nil
+			// The context of a router always carries its Base.
+			b, _ := router.FromContext(c)
+			return b.Redirect(http.StatusSeeOther, target.String())
 		}
 	}
 }
