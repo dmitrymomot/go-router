@@ -28,7 +28,8 @@
 // Put, Renew and Destroy write the store at the call and set the cookie in
 // the header at once, so a failure reaches the handler that caused it, and the
 // cookie is in place before the first byte of the body. Once the header went
-// out they report [ErrCommitted] and change nothing.
+// out, or once the handler returned, they report [ErrCommitted] and change
+// nothing. They belong to the goroutine of the handler.
 //
 // The package ships no store on the server: implement the three methods of
 // [Store] on the database of the application. Such a store can revoke a
@@ -51,6 +52,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmitrymomot/go-router"
@@ -58,7 +60,8 @@ import (
 )
 
 // ErrCommitted is what [Put], [Renew] and [Destroy] report once the header of
-// the response went out, since the cookie can no longer change.
+// the response went out, or once the handler returned, since the cookie can no
+// longer change.
 var ErrCommitted = errors.New("session: the response is already committed")
 
 const (
@@ -155,6 +158,9 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 			// reads the cookie name from it.
 			s := &state{m: m, b: b, name: m.cookieName(b)}
 			c.SetContext(context.WithValue(c.Request().Context(), stateKey{}, s))
+			// A Base belongs to one request, so a call that comes after the
+			// handler returned, from a goroutine it started, must not reach it.
+			defer s.close()
 			if err := load[T](c, s); err != nil {
 				return err
 			}
@@ -198,9 +204,19 @@ type state struct {
 	token   string
 	created time.Time
 	expires time.Time
+	// mu orders the calls on the state, and closed is true once the handler
+	// returned.
+	mu sync.Mutex
 	// sent is true once the request carried the cookie or a Set-Cookie for it
 	// went out, so Destroy knows to clear it.
-	sent bool
+	sent   bool
+	closed bool
+}
+
+func (s *state) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
 }
 
 type stateKey struct{}
@@ -338,7 +354,7 @@ func stateOf(ctx context.Context, fn string) *state {
 }
 
 func (s *state) mustBeOpen() error {
-	if s.b.Response().Committed {
+	if s.closed || s.b.Response().Committed {
 		return ErrCommitted
 	}
 	return nil
@@ -353,6 +369,8 @@ func From[T any](ctx context.Context) (T, bool) {
 		var zero T
 		return zero, false
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	v, ok := s.data.(T)
 	return v, ok
 }
@@ -370,6 +388,8 @@ func Put[T any](ctx context.Context, v T) error {
 	if typ := reflect.TypeFor[T](); typ != s.m.typ {
 		panic(fmt.Sprintf("session: Put[%v] on a session of %v", typ, s.m.typ))
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.mustBeOpen(); err != nil {
 		return err
 	}
@@ -392,6 +412,8 @@ func Put[T any](ctx context.Context, v T) error {
 // Renew panics when ctx passed no session middleware.
 func Renew(ctx context.Context) error {
 	s := stateOf(ctx, "Renew")
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.mustBeOpen(); err != nil {
 		return err
 	}
@@ -415,6 +437,8 @@ func Renew(ctx context.Context) error {
 // Destroy panics when ctx passed no session middleware.
 func Destroy(ctx context.Context) error {
 	s := stateOf(ctx, "Destroy")
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.mustBeOpen(); err != nil {
 		return err
 	}

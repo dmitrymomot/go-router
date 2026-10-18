@@ -450,6 +450,28 @@ func TestALongCookieNameStoresNothing(t *testing.T) {
 	}
 }
 
+func TestACallAfterTheHandlerReturned(t *testing.T) {
+	r := newRouter()
+	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
+	start, done := make(chan struct{}), make(chan error, 1)
+	r.GET("/", func(c *appContext) error {
+		ctx := c.Request().Context()
+		go func() {
+			<-start
+			done <- session.Put(ctx, Data{UserID: "late"})
+		}()
+		return c.NoContent(http.StatusNoContent)
+	})
+	res := routertest.Get(r, "/")
+	close(start)
+	if err := <-done; !errors.Is(err, session.ErrCommitted) {
+		t.Errorf("Put after the handler returned = %v, want ErrCommitted", err)
+	}
+	if len(res.Cookies()) != 0 {
+		t.Errorf("Set-Cookie = %v, want none", res.Cookies())
+	}
+}
+
 func TestErrCommitted(t *testing.T) {
 	r := newRouter()
 	r.Use(session.Middleware[*appContext, Data](sessionfake.New()))
