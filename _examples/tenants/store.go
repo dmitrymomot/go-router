@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -197,9 +198,14 @@ const maxSlugLen = 30
 // process. A service keeps its sessions where every process reads them and
 // where a restart leaves them: a table, or Redis.
 type SessionTable struct {
-	rows map[string]sessionRow
-	mu   sync.Mutex
+	rows  map[string]sessionRow
+	mu    sync.Mutex
+	saves int
 }
+
+// sweepEvery is how many saves pass between two sweeps of the expired rows,
+// the job that DELETE FROM sessions WHERE expires <= now() does for a table.
+const sweepEvery = 256
 
 type sessionRow struct {
 	expires time.Time
@@ -217,7 +223,11 @@ func (t *SessionTable) Load(_ context.Context, token string) ([]byte, error) {
 	defer t.mu.Unlock()
 
 	r, ok := t.rows[token]
-	if !ok || !time.Now().Before(r.expires) {
+	if !ok {
+		return nil, session.ErrNotFound
+	}
+	if !time.Now().Before(r.expires) {
+		delete(t.rows, token)
 		return nil, session.ErrNotFound
 	}
 	return slices.Clone(r.data), nil
@@ -230,6 +240,11 @@ func (t *SessionTable) Save(_ context.Context, token string, data []byte, expire
 	defer t.mu.Unlock()
 
 	t.rows[token] = sessionRow{expires: expires, data: slices.Clone(data)}
+	if t.saves++; t.saves >= sweepEvery {
+		t.saves = 0
+		now := time.Now()
+		maps.DeleteFunc(t.rows, func(_ string, r sessionRow) bool { return !now.Before(r.expires) })
+	}
 	return token, nil
 }
 
