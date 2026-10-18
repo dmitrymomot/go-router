@@ -30,11 +30,12 @@
 // cookie is in place before the first byte of the body. Once the header went
 // out they report [ErrCommitted] and change nothing.
 //
-// A store on the server, such as [MemoryStore] or a table of the application,
-// can revoke a session: the middleware loads the record on every request, so
-// a record that is gone ends the session at the next one. To sign a user out
-// on every device, delete each record of the user in the store. [CookieStore]
-// keeps the record in the cookie and cannot revoke it.
+// The package ships no store on the server: implement the three methods of
+// [Store] on the database of the application. Such a store can revoke a
+// session: the middleware loads the record on every request, so a record that
+// is gone ends the session at the next one. To sign a user out on every
+// device, delete each record of the user in the store. [CookieStore] keeps the
+// record in the cookie and cannot revoke it.
 //
 // The package keeps the value and nothing else: no passwords, no users. Put
 // the id of the user in the value, and let package user resolve it with

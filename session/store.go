@@ -1,11 +1,9 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/dmitrymomot/go-router/cookie"
@@ -29,6 +27,13 @@ var ErrNotFound = errors.New("session: no such session")
 // the record, so the next Load of the token reports ErrNotFound; a token that
 // names nothing is no error.
 //
+// A store on the server must keep its records where every process of the
+// application reads them, and past a restart: a table of the database, or a
+// key-value store such as Redis. A record kept in the memory of one process
+// signs the user out at each deploy and on each process that did not save it,
+// so the package ships no such store. Deleting a record revokes the session at
+// the next request, since the middleware loads the record on every one.
+//
 // Any other error of a Store goes to the handler, or answers the request with
 // a 500 when the middleware meets it. A Store must be safe for concurrent use.
 type Store interface {
@@ -41,81 +46,6 @@ type Store interface {
 // [rand.Text], which a cookie carries as it stands.
 func NewToken() string {
 	return rand.Text()
-}
-
-// sweepEvery is how many saves a MemoryStore makes between two passes that
-// drop the records that ran out.
-const sweepEvery = 1024
-
-// MemoryStore keeps the records in the memory of the process. It suits tests
-// and a program of one process: a restart signs everyone out, and a second
-// process does not see the sessions of the first. Build one with
-// [NewMemoryStore].
-//
-// Delete revokes a session at once, since the middleware loads the record on
-// every request.
-type MemoryStore struct {
-	records map[string]memoryRecord
-	mu      sync.Mutex
-	saves   int
-}
-
-type memoryRecord struct {
-	expires time.Time
-	data    []byte
-}
-
-// NewMemoryStore builds an empty [MemoryStore].
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{records: make(map[string]memoryRecord)}
-}
-
-// Load implements [Store].
-func (m *MemoryStore) Load(_ context.Context, token string) ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	r, ok := m.records[token]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	if !time.Now().Before(r.expires) {
-		delete(m.records, token)
-		return nil, ErrNotFound
-	}
-	return bytes.Clone(r.data), nil
-}
-
-// Save implements [Store]. It reports token as it stands.
-func (m *MemoryStore) Save(_ context.Context, token string, data []byte, expires time.Time) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.records[token] = memoryRecord{expires: expires, data: bytes.Clone(data)}
-	if m.saves++; m.saves >= sweepEvery {
-		m.saves = 0
-		now := time.Now()
-		for t, r := range m.records {
-			if !now.Before(r.expires) {
-				delete(m.records, t)
-			}
-		}
-	}
-	return token, nil
-}
-
-// Delete implements [Store].
-func (m *MemoryStore) Delete(_ context.Context, token string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.records, token)
-	return nil
-}
-
-// Len reports how many records the store holds, including any that ran out
-// and were not dropped yet.
-func (m *MemoryStore) Len() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.records)
 }
 
 // CookieStore keeps the whole record in the cookie, sealed by a
