@@ -61,6 +61,9 @@ var (
 // path a browser asked for, as in "/login?next=%2Fsettings".
 const DefaultNextParam = "next"
 
+// DefaultChallenge is the WWW-Authenticate value of the 401 of [Require].
+const DefaultChallenge = "Bearer"
+
 // Source reads a candidate user id from a request. It carries the request
 // header it reads, so that the middleware can name every such header in Vary.
 // Build one with [FromSession], [FromCookie], [FromBearer], [FromHeader] or
@@ -291,13 +294,19 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 //
 // NextParam is the query parameter of LoginURL that carries the path, and
 // defaults to [DefaultNextParam].
+//
+// Challenge is the WWW-Authenticate value of the 401, and an empty one sends
+// [DefaultChallenge], as middleware.KeyAuth does. A header that an earlier
+// middleware set stays.
 type RequireConfig struct {
 	LoginURL  string
 	NextParam string
+	Challenge string
 }
 
-// Require refuses with router.ErrUnauthorized a request that carries no user
-// of type T, which suits an API. It goes inside [Middleware] or
+// Require refuses with router.ErrUnauthorized, and a WWW-Authenticate of
+// [DefaultChallenge], a request that carries no user of type T, which suits an
+// API. It goes inside [Middleware] or
 // [MiddlewareWithConfig], which put the user on the context.
 func Require[C router.Context, T any]() router.Middleware[C] {
 	return RequireWithConfig[C, T](RequireConfig{})
@@ -321,6 +330,7 @@ func RequireWithConfig[C router.Context, T any](cfg RequireConfig) router.Middle
 		login = u
 	}
 	param := cmp.Or(cfg.NextParam, DefaultNextParam)
+	challenge := cmp.Or(cfg.Challenge, DefaultChallenge)
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
@@ -328,6 +338,9 @@ func RequireWithConfig[C router.Context, T any](cfg RequireConfig) router.Middle
 				return next(c)
 			}
 			if login == nil {
+				if h := c.Response().Header(); h.Get(router.HeaderWWWAuthenticate) == "" {
+					h.Set(router.HeaderWWWAuthenticate, challenge)
+				}
 				return router.ErrUnauthorized.WithError(ErrMissing)
 			}
 			target := *login

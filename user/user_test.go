@@ -229,7 +229,7 @@ func TestRequireAnswers401(t *testing.T) {
 	r.GET("/", show)
 
 	routertest.Get(r, "/").Expect(t).Status(http.StatusOK).Body("anonymous")
-	routertest.Get(r, "/api/me").Expect(t).Status(http.StatusUnauthorized)
+	routertest.Get(r, "/api/me").Expect(t).Status(http.StatusUnauthorized).Header("WWW-Authenticate", "Bearer")
 	routertest.Get(r, "/api/me", routertest.Header("Authorization", "Bearer u1")).Expect(t).Status(http.StatusOK).Body("Ada")
 }
 
@@ -263,6 +263,27 @@ func TestRequireKeepsThePrefixOfAMount(t *testing.T) {
 	req := routertest.Request(http.MethodGet, "/settings")
 	req.RequestURI = ""
 	routertest.Serve(inner, req).Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fsettings")
+}
+
+func TestRequireTakesAChallenge(t *testing.T) {
+	r := newRouter()
+	r.Use(user.Middleware[*appContext](lookup, user.FromBearer()))
+	r.Route("/api", func(api *router.Router[*appContext]) {
+		api.Use(user.RequireWithConfig[*appContext, Account](user.RequireConfig{Challenge: `Bearer realm="api"`}))
+		api.GET("/me", show)
+	})
+	r.Route("/set", func(api *router.Router[*appContext]) {
+		api.Use(func(next router.HandlerFunc[*appContext]) router.HandlerFunc[*appContext] {
+			return func(c *appContext) error {
+				c.Response().Header().Set("WWW-Authenticate", "Basic")
+				return next(c)
+			}
+		})
+		api.Use(user.Require[*appContext, Account]())
+		api.GET("/me", show)
+	})
+	routertest.Get(r, "/api/me").Expect(t).Status(http.StatusUnauthorized).Header("WWW-Authenticate", `Bearer realm="api"`)
+	routertest.Get(r, "/set/me").Expect(t).Status(http.StatusUnauthorized).Header("WWW-Authenticate", "Basic")
 }
 
 func TestRequireTakesAnotherNextParam(t *testing.T) {
