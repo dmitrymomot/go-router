@@ -266,6 +266,39 @@ func TestRequireKeepsThePrefixOfAMount(t *testing.T) {
 	routertest.Serve(inner, req).Expect(t).Redirect(http.StatusSeeOther, "/login?next=%2Fsettings")
 }
 
+func TestRequireOfAnotherTypePanics(t *testing.T) {
+	var got error
+	r := newRouter()
+	r.ErrorHandler(func(c *appContext, err error) error {
+		got = err
+		return c.NoContent(router.StatusOf(err))
+	})
+	r.Use(user.Middleware[*appContext](lookup, user.FromBearer()))
+	r.Use(user.Require[*appContext, *Account]())
+	r.GET("/", show)
+	// The router turns the panic into a 500 that carries its message.
+	routertest.Get(r, "/").Expect(t).Status(http.StatusInternalServerError)
+	if want := "Require[*user_test.Account] behind a user middleware for user_test.Account"; got == nil || !strings.Contains(got.Error(), want) {
+		t.Errorf("err = %v, want it to name %q", got, want)
+	}
+}
+
+func TestRequireWithoutAMiddlewareRefuses(t *testing.T) {
+	r := newRouter()
+	r.Use(user.Require[*appContext, Account]())
+	r.GET("/", show)
+	routertest.Get(r, "/").Expect(t).Status(http.StatusUnauthorized)
+}
+
+func TestRequireFindsTheTypeOfAnOuterMiddleware(t *testing.T) {
+	r := newRouter()
+	r.Use(user.Middleware[*appContext](lookup, user.FromBearer()))
+	r.Use(user.Middleware[*appContext](func(context.Context, string) (string, error) { return "", user.ErrUnknown }, user.FromHeader("X-Key")))
+	r.Use(user.Require[*appContext, Account]())
+	r.GET("/", show)
+	routertest.Get(r, "/").Expect(t).Status(http.StatusUnauthorized)
+}
+
 func TestRequireTakesAChallenge(t *testing.T) {
 	r := newRouter()
 	r.Use(user.Middleware[*appContext](lookup, user.FromBearer()))

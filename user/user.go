@@ -254,6 +254,7 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 				return next(c)
 			}
 			router.AddVary(c.Response().Header(), vary...)
+			c.SetContext(markResolved[T](c.Request().Context()))
 
 			for _, s := range sources {
 				id, ok := s.read(c)
@@ -315,6 +316,10 @@ func Require[C router.Context, T any]() router.Middleware[C] {
 // RequireWithConfig is [Require] with a configuration, which sends a browser
 // to the login page.
 //
+// T must be the type that the Lookup of the user middleware returns: a
+// Require[*Account] behind a Middleware whose Lookup returns Account panics at
+// the first request without a user.
+//
 // RequireWithConfig panics if LoginURL is set and is not a local path, as
 // [router.IsLocalURL] decides, or holds a fragment.
 func RequireWithConfig[C router.Context, T any](cfg RequireConfig) router.Middleware[C] {
@@ -337,6 +342,7 @@ func RequireWithConfig[C router.Context, T any](cfg RequireConfig) router.Middle
 			if _, ok := From[T](c); ok {
 				return next(c)
 			}
+			mustMatch[T](c)
 			if login == nil {
 				if h := c.Response().Header(); h.Get(router.HeaderWWWAuthenticate) == "" {
 					h.Set(router.HeaderWWWAuthenticate, challenge)
@@ -364,6 +370,39 @@ func nextOf(r *http.Request) string {
 		return r.RequestURI
 	}
 	return r.URL.RequestURI()
+}
+
+// resolved lists the user types that the middlewares of a request resolve,
+// the innermost first, so Require can tell a T that none of them resolves.
+type resolved struct {
+	typ  reflect.Type
+	prev *resolved
+}
+
+type resolvedKey struct{}
+
+func markResolved[T any](ctx context.Context) context.Context {
+	prev, _ := ctx.Value(resolvedKey{}).(*resolved)
+	return context.WithValue(ctx, resolvedKey{}, &resolved{typ: reflect.TypeFor[T](), prev: prev})
+}
+
+// mustMatch panics when a user middleware ran on the request and none of them
+// resolves T: Require[T] would refuse every request, and nothing would say
+// why. A request with no user middleware, such as one it skipped, passes.
+func mustMatch[T any](ctx context.Context) {
+	r, _ := ctx.Value(resolvedKey{}).(*resolved)
+	if r == nil {
+		return
+	}
+	want := reflect.TypeFor[T]()
+	var got []string
+	for ; r != nil; r = r.prev {
+		if r.typ == want {
+			return
+		}
+		got = append(got, r.typ.String())
+	}
+	panic(fmt.Sprintf("user: Require[%v] behind a user middleware for %s, so no request can pass", want, strings.Join(got, ", ")))
 }
 
 // ctxKey carries the user of type T. Each user type has a key of its own.
