@@ -61,8 +61,13 @@ import (
 var ErrCommitted = errors.New("session: the response is already committed")
 
 const (
-	// DefaultCookie is the name of the session cookie.
-	DefaultCookie = "session"
+	// DefaultCookie is the name of the session cookie over HTTP, and
+	// DefaultHostCookie its name over HTTPS. The __Host- prefix makes the
+	// browser refuse the cookie unless it is Secure, at Path "/" and with no
+	// Domain, so neither a parent domain nor a sibling subdomain can set a
+	// cookie of that name to stand in front of it.
+	DefaultCookie     = "session"
+	DefaultHostCookie = "__Host-session"
 
 	// DefaultLifetime is how long a session lasts from its start or its
 	// last [Renew], whatever the visitor does.
@@ -72,10 +77,20 @@ const (
 // Config configures [MiddlewareWithConfig]. T is the type of the value that
 // a session holds, any type that encoding/json/v2 encodes.
 //
-// Store is required. Cookie names the cookie, and defaults to
-// [DefaultCookie]. The middleware builds it as router.Base.NewCookie does:
-// Path "/", HttpOnly, SameSite=Lax, and Secure on https, with a MaxAge that
-// ends with the session.
+// Store is required. Cookie names the cookie. When it is empty, the cookie is
+// [DefaultHostCookie] over HTTPS and [DefaultCookie] over HTTP, where a
+// browser drops a Secure cookie, as router.Base.Scheme decides. The middleware
+// builds the cookie as router.Base.NewCookie does: Path "/", no Domain,
+// HttpOnly, SameSite=Lax, and Secure on https, with a MaxAge that ends with
+// the session. A Cookie of your own with the __Host- prefix works over HTTPS
+// alone.
+//
+// The middleware reads the first cookie of the name that the request carries
+// and no other. Under the __Host- prefix that cookie is the one this host set.
+// Over HTTP, and under a name of your own without the prefix, a parent domain
+// can set a cookie of the same name that the browser may send first, which
+// signs the visitor out or into a session of the attacker; serve HTTPS, or
+// keep the parent domain to hosts you trust.
 //
 // Lifetime caps a session from its start or its last [Renew], and defaults
 // to [DefaultLifetime]. IdleTimeout, when set, also ends a session that sees
@@ -116,13 +131,13 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 	}
 	m := &manager{
 		store:    cfg.Store,
-		cookie:   cmp.Or(cfg.Cookie, DefaultCookie),
+		cookie:   cfg.Cookie,
 		lifetime: cmp.Or(cfg.Lifetime, DefaultLifetime),
 		idle:     cfg.IdleTimeout,
 		typ:      reflect.TypeFor[T](),
 	}
 	//nolint:gosec // A cookie with only a name, to check that name.
-	if (&http.Cookie{Name: m.cookie}).Valid() != nil {
+	if m.cookie != "" && (&http.Cookie{Name: m.cookie}).Valid() != nil {
 		panic(fmt.Sprintf("session: MiddlewareWithConfig cannot name a cookie %q", m.cookie))
 	}
 
@@ -137,7 +152,7 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 			b, _ := router.FromContext(c)
 			// The state goes on the context before the load, so a store
 			// reads the cookie name from it.
-			s := &state{m: m, b: b}
+			s := &state{m: m, b: b, name: m.cookieName(b)}
 			c.SetContext(context.WithValue(c.Request().Context(), stateKey{}, s))
 			if err := load[T](c, s); err != nil {
 				return err
@@ -150,16 +165,32 @@ func MiddlewareWithConfig[C router.Context, T any](cfg Config[C, T]) router.Midd
 // manager holds the configuration of one middleware.
 type manager struct {
 	store    Store
-	typ      reflect.Type
+	typ reflect.Type
+	// cookie is the Cookie of the Config, or "" for the default of the
+	// scheme.
 	cookie   string
 	lifetime time.Duration
 	idle     time.Duration
+}
+
+// cookieName reports the name of the session cookie for the request of b.
+func (m *manager) cookieName(b *router.Base) string {
+	switch {
+	case m.cookie != "":
+		return m.cookie
+	case b.Scheme() == "https":
+		return DefaultHostCookie
+	default:
+		return DefaultCookie
+	}
 }
 
 // state is the session of one request.
 type state struct {
 	m *manager
 	b *router.Base
+	// name is the name of the session cookie of this request.
+	name string
 	// data is the value, a T, or nil when the request has no session.
 	data any
 	// token is "" when the request has no session.
@@ -175,10 +206,11 @@ type stateKey struct{}
 
 // CookieName reports the name of the session cookie of the request that ctx
 // belongs to, which a [Store] that keeps the record in the cookie binds the
-// record to. Outside the middleware it reports [DefaultCookie].
+// record to: the Cookie of the Config, or the default for the scheme of the
+// request. Outside the middleware it reports [DefaultCookie].
 func CookieName(ctx context.Context) string {
 	if s, ok := ctx.Value(stateKey{}).(*state); ok {
-		return s.m.cookie
+		return s.name
 	}
 	return DefaultCookie
 }
@@ -194,7 +226,7 @@ type record[T any] struct {
 // load reads the session that the cookie of the request names, and moves its
 // end forward under an IdleTimeout.
 func load[T any](ctx context.Context, s *state) error {
-	cookies := s.b.Request().CookiesNamed(s.m.cookie)
+	cookies := s.b.Request().CookiesNamed(s.name)
 	if len(cookies) == 0 || cookies[0].Value == "" {
 		return nil
 	}
@@ -260,12 +292,12 @@ func (s *state) save(ctx context.Context, token string, data any, created, expir
 // setCookie writes the session cookie, in place of one that an earlier call
 // of this request wrote.
 func (s *state) setCookie(value string, maxAge time.Duration) error {
-	line := s.b.NewCookie(s.m.cookie, value, maxAge).String()
+	line := s.b.NewCookie(s.name, value, maxAge).String()
 	if len(line) > cookie.MaxSize {
 		return cookie.ErrTooLarge
 	}
 	h := s.b.Response().Header()
-	prefix := s.m.cookie + "="
+	prefix := s.name + "="
 	lines := h.Values(router.HeaderSetCookie)
 	kept := lines[:0:0]
 	for _, l := range lines {

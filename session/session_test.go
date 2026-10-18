@@ -123,6 +123,26 @@ func TestASessionAcrossRequests(t *testing.T) {
 	}
 }
 
+func TestTheHostCookieOverHTTPS(t *testing.T) {
+	r := newRouter()
+	r.Use(session.Middleware[*appContext, Data](session.NewMemoryStore()))
+	routes(r)
+	c := routertest.NewClient(t, r, routertest.Header("X-Forwarded-Proto", "https"))
+
+	res := c.Do(http.MethodPost, "/login?as=ada")
+	ck := res.Cookies()
+	if len(ck) != 1 || ck[0].Name != session.DefaultHostCookie || !ck[0].Secure || ck[0].Path != "/" || ck[0].Domain != "" {
+		t.Fatalf("Set-Cookie = %v, want one Secure __Host- cookie at / with no Domain", ck)
+	}
+	c.Get("/show").Expect(t).Body("ada|")
+
+	// A cookie of the HTTP name means nothing over HTTPS, so a parent domain
+	// that sets it cannot stand in front of the session.
+	tossed := routertest.Get(r, "/show", routertest.Header("X-Forwarded-Proto", "https"),
+		routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: c.Cookie(session.DefaultHostCookie).Value}))
+	tossed.Expect(t).Body("none")
+}
+
 func TestPutKeepsTheTokenOfAServerStore(t *testing.T) {
 	c := newApp(t, session.Config[*appContext, Data]{Store: session.NewMemoryStore()})
 	c.Do(http.MethodPost, "/cart?item=tea")
