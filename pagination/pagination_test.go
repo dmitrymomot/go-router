@@ -1,6 +1,7 @@
 package pagination_test
 
 import (
+	"errors"
 	"math"
 	"net/http"
 	"net/url"
@@ -177,7 +178,7 @@ func TestCheckLimit(t *testing.T) {
 				}
 				return
 			}
-			fe, ok := err.(router.FieldError)
+			fe, ok := errors.AsType[router.FieldError](err)
 			if !ok || fe.Field != "size" || fe.Message != tt.message {
 				t.Fatalf("err = %#v, want size %q", err, tt.message)
 			}

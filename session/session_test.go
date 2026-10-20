@@ -501,12 +501,13 @@ func TestFindStartsAnotherSession(t *testing.T) {
 	var sessions *session.Sessions[*appContext, Row]
 	sessions = session.New[*appContext](session.Config[Row]{
 		Find: func(ctx context.Context, hash []byte) (Row, error) {
-			c := ctx.(*appContext) // Find runs with the handler context.
 			if !bytes.Equal(hash, ended.Hash) {
-				return tab.find(c, hash)
+				return tab.find(ctx, hash)
 			}
+			c := ctx.(*appContext) // Find runs with the handler context.
 			tok := session.NewToken()
 			row := tab.insert("admin", tok.Hash)
+			//nolint:contextcheck // c is ctx itself, the handler context.
 			if err := sessions.Start(c, tok, row, time.Now().Add(time.Hour)); err != nil {
 				return Row{}, err
 			}

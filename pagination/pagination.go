@@ -147,7 +147,10 @@ func capOf(maxPerPage int) int {
 }
 
 func limit(perPage, maxPerPage int) int32 {
-	maxPerPage = capOf(maxPerPage)
+	// The bounds stay in sight here, so the conversion below is known safe.
+	if maxPerPage < 1 || maxPerPage > MaxPerPage {
+		maxPerPage = MaxPerPage
+	}
 	if perPage < 1 {
 		perPage = DefaultPerPage
 	}
