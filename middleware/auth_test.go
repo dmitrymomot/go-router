@@ -605,3 +605,37 @@ func TestBasicAuthNeedsAValidator(t *testing.T) {
 		middleware.BasicAuthWithConfig(middleware.BasicAuthConfig[*appContext]{})
 	})
 }
+
+func TestKeyAuthOnRejectTellsAMissingKeyFromAnInvalidOne(t *testing.T) {
+	var seen error
+	r := keyAuthRouter(middleware.KeyAuthConfig[*appContext]{
+		Validator: keyValidator,
+		OnReject: func(_ *appContext, err error) error {
+			seen = err
+			return err
+		},
+	})
+
+	tests := []struct {
+		name      string
+		req       *http.Request
+		want, not error
+	}{
+		{"no key", httptest.NewRequest(http.MethodGet, "/", nil), middleware.ErrKeyMissing, middleware.ErrKeyInvalid},
+		{"a wrong key", bearer("bad"), middleware.ErrKeyInvalid, middleware.ErrKeyMissing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seen = nil
+			if rec := do(r, tt.req); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			if !errors.Is(seen, tt.want) || errors.Is(seen, tt.not) {
+				t.Errorf("OnReject saw %v, want %v alone", seen, tt.want)
+			}
+			if !errors.Is(seen, router.ErrUnauthorized) {
+				t.Errorf("OnReject saw %v, want a 401", seen)
+			}
+		})
+	}
+}

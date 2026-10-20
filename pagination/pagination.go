@@ -34,6 +34,10 @@
 // keep to their range for any value, bound or not, so a zero Page reads as the
 // first page.
 //
+// A request struct with query keys of its own, such as cursor in place of
+// after, declares its own fields and calls [CheckLimit] from its Validate, for
+// the same 422.
+//
 // The package does not count rows, build SQL, or encode cursors: an After
 // value is whatever the previous answer handed out.
 package pagination
@@ -68,7 +72,7 @@ func (p Page) Validate() error {
 	if p.Number < 1 {
 		errs = append(errs, router.FieldError{Field: "page", Message: "must be 1 or more"})
 	}
-	if err := checkPerPage("per_page", p.PerPage); err != nil {
+	if err := CheckLimit("per_page", p.PerPage, MaxPerPage); err != nil {
 		errs = append(errs, err)
 	}
 	if errs == nil && int64(p.Number-1) > math.MaxInt32/int64(p.PerPage) {
@@ -101,27 +105,49 @@ type Cursor struct {
 
 // Validate refuses a limit outside 1 to [MaxPerPage], as a
 // [router.FieldError] named "limit".
-func (c Cursor) Validate() error { return checkPerPage("limit", c.PerPage) }
+func (c Cursor) Validate() error { return CheckLimit("limit", c.PerPage, MaxPerPage) }
 
 // Limit reports the page size, capped at maxPerPage, which a value below 1
 // leaves at [MaxPerPage]. A PerPage below 1 reads as [DefaultPerPage]. Ask the
 // database for one row more to learn whether a next page exists.
 func (c Cursor) Limit(maxPerPage int) int32 { return limit(c.PerPage, maxPerPage) }
 
-func checkPerPage(field string, n int) error {
+// CheckLimit refuses a page size n outside 1 to maxPerPage as a
+// [router.FieldError] named field, as Validate of [Page] and [Cursor] does. A
+// maxPerPage below 1 or above [MaxPerPage] reads as MaxPerPage, the cap that
+// Limit applies too.
+//
+// It serves a request struct with keys of its own, such as cursor in place of
+// after:
+//
+//	type listUsers struct {
+//		Cursor string `query:"cursor"`
+//		Size   int    `query:"size" default:"20"`
+//	}
+//
+//	func (l listUsers) Validate() error { return pagination.CheckLimit("size", l.Size, 50) }
+func CheckLimit(field string, n, maxPerPage int) error {
+	maxPerPage = capOf(maxPerPage)
 	switch {
 	case n < 1:
 		return router.FieldError{Field: field, Message: "must be 1 or more"}
-	case n > MaxPerPage:
-		return router.FieldError{Field: field, Message: "must be " + strconv.Itoa(MaxPerPage) + " or less"}
+	case n > maxPerPage:
+		return router.FieldError{Field: field, Message: "must be " + strconv.Itoa(maxPerPage) + " or less"}
 	}
 	return nil
 }
 
-func limit(perPage, maxPerPage int) int32 {
+// capOf reports the cap of an endpoint: maxPerPage, or [MaxPerPage] for a
+// value below 1 or above it.
+func capOf(maxPerPage int) int {
 	if maxPerPage < 1 || maxPerPage > MaxPerPage {
-		maxPerPage = MaxPerPage
+		return MaxPerPage
 	}
+	return maxPerPage
+}
+
+func limit(perPage, maxPerPage int) int32 {
+	maxPerPage = capOf(maxPerPage)
 	if perPage < 1 {
 		perPage = DefaultPerPage
 	}

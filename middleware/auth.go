@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"slices"
 	"strconv"
@@ -16,9 +17,20 @@ const DefaultRealm = "Restricted"
 
 const basicScheme = "Basic"
 
+// The causes of a 401 of [KeyAuth]. The 401 that KeyAuthConfig.OnReject gets
+// wraps one of them, so OnReject tells the two failures apart with errors.Is.
+// errors.Is with router.ErrUnauthorized matches both, since it compares the
+// status alone.
 var (
-	errMissingKey         = router.ErrUnauthorized.WithMessage("missing key")
-	errInvalidKey         = router.ErrUnauthorized.WithMessage("invalid key")
+	// ErrKeyMissing is the cause when the request carries no API key.
+	ErrKeyMissing = errors.New("middleware: missing key")
+	// ErrKeyInvalid is the cause when Validator refuses the key.
+	ErrKeyInvalid = errors.New("middleware: invalid key")
+)
+
+var (
+	errMissingKey         = router.ErrUnauthorized.WithMessage("missing key").WithError(ErrKeyMissing)
+	errInvalidKey         = router.ErrUnauthorized.WithMessage("invalid key").WithError(ErrKeyInvalid)
 	errMissingCredentials = router.ErrUnauthorized.WithMessage("missing credentials")
 	errInvalidCredentials = router.ErrUnauthorized.WithMessage("invalid credentials")
 	errMalformedBasicAuth = router.ErrBadRequest.WithMessage("malformed credentials")
@@ -43,8 +55,8 @@ func SecureCompare(a, b string) bool {
 // Challenge is the WWW-Authenticate value of a 401, and an empty one sends
 // "Bearer".
 //
-// OnReject answers a refused request. It gets the failure: a 401 for a missing
-// or bad key, or the error of Validator. Return an error to report it in place
+// OnReject answers a refused request. It gets the failure: a 401 that wraps
+// [ErrKeyMissing] or [ErrKeyInvalid], or the error of Validator. Return an error to report it in place
 // of the request, or nil to say that OnReject wrote the answer itself. A nil
 // OnReject reports the failure. ContinueOnNilReject lets the request through
 // when OnReject reports nil, which suits an optional sign-in. The challenge

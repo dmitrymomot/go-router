@@ -369,6 +369,12 @@ func TestPanics(t *testing.T) {
 	mustPanic(t, "cannot name a cookie", func() {
 		session.New[*appContext](session.Config[Row]{Find: newTable().find, Cookie: "a b"})
 	})
+	mustPanic(t, "cannot name a cookie", func() {
+		session.New[*appContext](session.Config[Row]{Find: newTable().find, LegacyCookie: "a b"})
+	})
+	mustPanic(t, "as both Cookie and LegacyCookie", func() {
+		session.New[*appContext](session.Config[Row]{Find: newTable().find, Cookie: "sid", LegacyCookie: "sid"})
+	})
 
 	sessions := session.New[*appContext](session.Config[Row]{Find: newTable().find})
 	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
@@ -377,4 +383,148 @@ func TestPanics(t *testing.T) {
 		return nil
 	})
 	routertest.Get(r, "/")
+}
+
+func cookieNamed(cks []*http.Cookie, name string) *http.Cookie {
+	for _, ck := range cks {
+		if ck.Name == name {
+			return ck
+		}
+	}
+	return nil
+}
+
+func TestLegacyCookie(t *testing.T) {
+	https := routertest.Header("X-Forwarded-Proto", "https")
+	hour := func(Row) time.Time { return time.Now().Add(time.Hour) }
+	legacy := func(v string) routertest.RequestOption {
+		return routertest.Cookie(&http.Cookie{Name: "session", Value: v})
+	}
+
+	t.Run("moves to the session cookie", func(t *testing.T) {
+		tab := newTable()
+		tok := session.NewToken()
+		tab.insert("ada", tok.Hash)
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, Expires: hour, LegacyCookie: "session"}))
+
+		res := routertest.Get(r, "/show", https, legacy(tok.Secret))
+		res.Expect(t).Body("ada")
+		cks := res.Cookies()
+		main, old := cookieNamed(cks, session.DefaultHostCookie), cookieNamed(cks, "session")
+		if main == nil || main.Value != tok.Secret || main.MaxAge < 3590 || main.MaxAge > 3600 || !main.Secure {
+			t.Errorf("session cookie = %v, want the same secret for about an hour", main)
+		}
+		if old == nil || old.MaxAge != -1 {
+			t.Errorf("legacy cookie = %v, want it cleared", old)
+		}
+		// The next request carries the new cookie alone.
+		routertest.Get(r, "/show", https, routertest.Cookie(main)).Expect(t).Body("ada")
+	})
+
+	t.Run("a session cookie without Expires", func(t *testing.T) {
+		tab := newTable()
+		tok := session.NewToken()
+		tab.insert("ada", tok.Hash)
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		main := cookieNamed(routertest.Get(r, "/show", https, legacy(tok.Secret)).Cookies(), session.DefaultHostCookie)
+		if main == nil || main.Value != tok.Secret || main.MaxAge != 0 {
+			t.Errorf("session cookie = %v, want one that lasts until the browser closes", main)
+		}
+	})
+
+	t.Run("a legacy cookie that names nothing", func(t *testing.T) {
+		tab := newTable()
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		res := routertest.Get(r, "/show", https, legacy("stale"))
+		res.Expect(t).Body("none")
+		cks := res.Cookies()
+		if len(cks) != 1 || cks[0].Name != "session" || cks[0].MaxAge != -1 {
+			t.Errorf("Set-Cookie = %v, want the legacy cookie cleared alone", cks)
+		}
+	})
+
+	t.Run("beside the session cookie", func(t *testing.T) {
+		tab := newTable()
+		ada, grace := session.NewToken(), session.NewToken()
+		tab.insert("ada", ada.Hash)
+		tab.insert("grace", grace.Hash)
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		res := routertest.Get(r, "/show", https, legacy(grace.Secret),
+			routertest.Cookie(&http.Cookie{Name: session.DefaultHostCookie, Value: ada.Secret}))
+		res.Expect(t).Body("ada")
+		cks := res.Cookies()
+		if len(cks) != 1 || cks[0].Name != "session" || cks[0].MaxAge != -1 {
+			t.Errorf("Set-Cookie = %v, want the legacy cookie cleared alone", cks)
+		}
+	})
+
+	t.Run("a failing Find keeps it", func(t *testing.T) {
+		tab := newTable()
+		tab.findErr = errors.New("db down")
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		res := routertest.Get(r, "/show", https, legacy("any"))
+		res.Expect(t).Status(http.StatusInternalServerError)
+		if cks := res.Cookies(); len(cks) != 0 {
+			t.Errorf("Set-Cookie = %v, want none", cks)
+		}
+	})
+
+	t.Run("End clears it", func(t *testing.T) {
+		tab := newTable()
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		res := routertest.Do(r, http.MethodPost, "/logout", https, legacy("stale"),
+			routertest.Cookie(&http.Cookie{Name: session.DefaultHostCookie, Value: "stale"}))
+		cks := res.Cookies()
+		if len(cks) != 2 || cookieNamed(cks, "session").MaxAge != -1 || cookieNamed(cks, session.DefaultHostCookie).MaxAge != -1 {
+			t.Errorf("Set-Cookie = %v, want both cookies cleared", cks)
+		}
+	})
+
+	t.Run("the same name as the session cookie over HTTP", func(t *testing.T) {
+		tab := newTable()
+		tok := session.NewToken()
+		tab.insert("ada", tok.Hash)
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: session.DefaultCookie}))
+		res := routertest.Get(r, "/show", legacy(tok.Secret))
+		res.Expect(t).Body("ada")
+		if cks := res.Cookies(); len(cks) != 0 {
+			t.Errorf("Set-Cookie = %v, want none", cks)
+		}
+	})
+}
+
+func TestFindStartsAnotherSession(t *testing.T) {
+	// An impersonation that ended: Find revokes it and starts a session of
+	// the admin in its place.
+	tab := newTable()
+	ended := session.NewToken()
+	var sessions *session.Sessions[*appContext, Row]
+	sessions = session.New[*appContext](session.Config[Row]{
+		Find: func(ctx context.Context, hash []byte) (Row, error) {
+			c := ctx.(*appContext) // Find runs with the handler context.
+			if !bytes.Equal(hash, ended.Hash) {
+				return tab.find(c, hash)
+			}
+			tok := session.NewToken()
+			row := tab.insert("admin", tok.Hash)
+			if err := sessions.Start(c, tok, row, time.Now().Add(time.Hour)); err != nil {
+				return Row{}, err
+			}
+			return row, nil
+		},
+		LegacyCookie: "old",
+	})
+	r := app(tab, sessions)
+
+	for _, name := range []string{session.DefaultCookie, "old"} {
+		t.Run(name, func(t *testing.T) {
+			res := routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: name, Value: ended.Secret}))
+			res.Expect(t).Body("admin")
+			main := cookieNamed(res.Cookies(), session.DefaultCookie)
+			if main == nil || main.Value == ended.Secret || main.MaxAge <= 0 {
+				t.Fatalf("session cookie = %v, want the new session of the admin", main)
+			}
+			routertest.Get(r, "/show", routertest.Cookie(main)).Expect(t).Body("admin")
+		})
+	}
 }

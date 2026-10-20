@@ -148,3 +148,50 @@ func TestCursor(t *testing.T) {
 		t.Errorf("the zero Cursor under a cap of 10: Limit = %d, want 10", l)
 	}
 }
+
+type listOwnKeys struct {
+	Cursor string `query:"cursor"`
+	Size   int    `query:"size" default:"20"`
+}
+
+func (l listOwnKeys) Validate() error { return pagination.CheckLimit("size", l.Size, 50) }
+
+func TestCheckLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		n, max  int
+		message string
+	}{
+		{name: "inside the cap", n: 50, max: 50},
+		{name: "below 1", n: 0, max: 50, message: "must be 1 or more"},
+		{name: "above the cap", n: 51, max: 50, message: "must be 50 or less"},
+		{name: "a cap above MaxPerPage reads as MaxPerPage", n: 101, max: 500, message: "must be 100 or less"},
+		{name: "a cap below 1 reads as MaxPerPage", n: 100, max: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := pagination.CheckLimit("size", tt.n, tt.max)
+			if tt.message == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			fe, ok := err.(router.FieldError)
+			if !ok || fe.Field != "size" || fe.Message != tt.message {
+				t.Fatalf("err = %#v, want size %q", err, tt.message)
+			}
+		})
+	}
+}
+
+func TestCheckLimitInARequestStructOfItsOwn(t *testing.T) {
+	got, err := bind[listOwnKeys](t, "/?cursor=abc&size=30")
+	if err != nil || got.Cursor != "abc" || got.Size != 30 {
+		t.Fatalf("got %+v, %v; want abc and 30", got, err)
+	}
+	_, err = bind[listOwnKeys](t, "/?size=60")
+	if router.StatusOf(err) != http.StatusUnprocessableEntity || fields(err) != "size" {
+		t.Fatalf("err = %v, want a 422 naming size", err)
+	}
+}

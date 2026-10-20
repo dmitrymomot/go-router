@@ -111,8 +111,24 @@ func HashToken(secret string) []byte {
 // then clears the cookie, so the browser still reaches the login page. Any
 // other error stops the request and keeps the cookie, which suits a database
 // that is down: a *router.HTTPError goes to the error handler as it stands,
-// and anything else as a 500. Find runs with the handler context, so it reads
-// the tenant of the request, and it must be safe for concurrent use.
+// and anything else as a 500. Find must be safe for concurrent use.
+//
+// The ctx of Find and Touch is always the handler context, the C of
+// [Sessions], so it reads the tenant of the request, and ctx.(C) never fails
+// there:
+//
+//	Find: func(ctx context.Context, hash []byte) (Row, error) {
+//		c := ctx.(*Context)
+//		return c.Store.SessionByHash(c, hash)
+//	},
+//
+// Find may also put another session in place of the one the cookie names: it
+// calls [Sessions.Start] with a new token and that row, and returns the row.
+// The middleware then carries on with that row and the cookie that Start set.
+// An application that lets an admin act as another user does so when the
+// cookie names an impersonation that ended: Find revokes it, starts a new
+// session of the admin, and returns it. Declare the Sessions variable before
+// New, so Find can refer to it.
 //
 // Expires, when set, reports when a row ends. The middleware then treats a
 // row whose end passed as ErrNotFound, so a Find that forgets the expiry still
@@ -131,11 +147,23 @@ func HashToken(secret string) []byte {
 // own without the prefix, a parent domain can set a cookie of the same name
 // that the browser may send first; serve HTTPS, or keep the parent domain to
 // hosts you trust.
+//
+// LegacyCookie, when set, names the cookie of an earlier version of the
+// application, such as "session" before a move to the __Host- name. The
+// middleware reads it only for a request without the session cookie, and on
+// the same response it moves the secret to the session cookie and clears the
+// legacy one, so no user signs in again. The session cookie it sets lasts
+// until Expires reports, or until the browser closes when Expires is nil. A
+// legacy cookie whose session is gone is cleared too, and so is one beside a
+// session cookie. The legacy name carries the weakness that the move is meant
+// to end, since any host under the parent domain can set it, so remove
+// LegacyCookie once the longest session that it could name has expired.
 type Config[S any] struct {
-	Find    func(ctx context.Context, hash []byte) (S, error)
-	Touch   func(ctx context.Context, s S) error
-	Expires func(s S) time.Time
-	Cookie  string
+	Find         func(ctx context.Context, hash []byte) (S, error)
+	Touch        func(ctx context.Context, s S) error
+	Expires      func(s S) time.Time
+	Cookie       string
+	LegacyCookie string
 }
 
 // Sessions carries the session row of type S for a router whose context type
@@ -148,14 +176,20 @@ type Sessions[C router.Context, S any] struct {
 // New builds a [Sessions] from cfg. Name the context type and let the row type
 // follow from cfg, as in session.New[*Context](cfg).
 //
-// New panics if Find is nil or the Cookie is not a valid cookie name.
+// New panics if Find is nil, if Cookie or LegacyCookie is not a valid cookie
+// name, or if both name the same cookie.
 func New[C router.Context, S any](cfg Config[S]) *Sessions[C, S] {
 	if cfg.Find == nil {
 		panic("session: New needs a Find function")
 	}
-	//nolint:gosec // A cookie with only a name, to check that name.
-	if cfg.Cookie != "" && (&http.Cookie{Name: cfg.Cookie}).Valid() != nil {
-		panic(fmt.Sprintf("session: New cannot name a cookie %q", cfg.Cookie))
+	for _, name := range []string{cfg.Cookie, cfg.LegacyCookie} {
+		//nolint:gosec // A cookie with only a name, to check that name.
+		if name != "" && (&http.Cookie{Name: name}).Valid() != nil {
+			panic(fmt.Sprintf("session: New cannot name a cookie %q", name))
+		}
+	}
+	if cfg.LegacyCookie != "" && cfg.LegacyCookie == cfg.Cookie {
+		panic(fmt.Sprintf("session: New got %q as both Cookie and LegacyCookie", cfg.Cookie))
 	}
 	return &Sessions[C, S]{cfg: cfg}
 }
@@ -169,16 +203,24 @@ func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 		return func(c C) error {
 			router.AddVary(c.Response().Header(), router.HeaderCookie)
 
-			ck, err := c.Request().Cookie(s.cookieName(c))
-			if err != nil || ck.Value == "" {
+			name := s.cookieName(c)
+			legacy := s.legacyName(name)
+			secret, from := cookieValue(c.Request(), name), name
+			if secret == "" && legacy != "" {
+				secret, from = cookieValue(c.Request(), legacy), legacy
+			}
+			if secret == "" {
 				return next(c)
 			}
-			row, err := s.cfg.Find(c, HashToken(ck.Value))
+			row, err := s.cfg.Find(c, HashToken(secret))
 			if err == nil && s.cfg.Expires != nil && !time.Now().Before(s.cfg.Expires(row)) {
 				err = ErrNotFound
 			}
 			if errors.Is(err, ErrNotFound) {
-				s.setCookie(c, "", -1)
+				if from == name {
+					setCookie(c, name, "", -1)
+				}
+				clearLegacy(c, legacy)
 				return next(c)
 			}
 			if err != nil {
@@ -189,9 +231,46 @@ func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 					return stop(err, "touch")
 				}
 			}
+			clearLegacy(c, legacy)
+			// A Find that started another session set the cookie already.
+			if _, started := otherCookies(c.Response().Header(), name); from == legacy && !started {
+				var maxAge time.Duration
+				if s.cfg.Expires != nil {
+					maxAge = max(time.Until(s.cfg.Expires(row)), time.Second)
+				}
+				setCookie(c, name, secret, maxAge)
+			}
 			setRow(c, row)
 			return next(c)
 		}
+	}
+}
+
+// cookieValue reports the value of the first cookie name that r carries, or
+// "" when it carries none.
+func cookieValue(r *http.Request, name string) string {
+	if ck, err := r.Cookie(name); err == nil {
+		return ck.Value
+	}
+	return ""
+}
+
+// legacyName reports the name of the legacy cookie beside the session cookie
+// name, or "" when there is none.
+func (s *Sessions[C, S]) legacyName(name string) string {
+	if s.cfg.LegacyCookie == name {
+		return ""
+	}
+	return s.cfg.LegacyCookie
+}
+
+// clearLegacy clears the legacy cookie, when the request carries one.
+func clearLegacy(c router.Context, legacy string) {
+	if legacy == "" {
+		return
+	}
+	if _, err := c.Request().Cookie(legacy); err == nil {
+		setCookie(c, legacy, "", -1)
 	}
 }
 
@@ -227,24 +306,26 @@ func (s *Sessions[C, S]) Start(c router.Context, t Token, row S, expires time.Ti
 		}
 		maxAge = max(maxAge, time.Second)
 	}
-	s.setCookie(c, t.Secret, maxAge)
+	setCookie(c, s.cookieName(c), t.Secret, maxAge)
 	setRow(c, row)
 	return nil
 }
 
 // End clears the session cookie, when the request carried one or the
-// response sets one, and [Sessions.From] reports false for the rest of the
-// request. The application deletes the row itself, before or after, in its
-// own transaction.
+// response sets one, and the LegacyCookie that the request carries, and
+// [Sessions.From] reports false for the rest of the request. The application
+// deletes the row itself, before or after, in its own transaction.
 //
 // End reports [ErrCommitted] once the header went out.
 func (s *Sessions[C, S]) End(c router.Context) error {
 	if c.Response().Committed {
 		return ErrCommitted
 	}
-	if s.hasCookie(c) {
-		s.setCookie(c, "", -1)
+	name := s.cookieName(c)
+	if hasCookie(c, name) {
+		setCookie(c, name, "", -1)
 	}
+	clearLegacy(c, s.legacyName(name))
 	if e, ok := c.Value(ctxKey[S]{}).(*entry[S]); ok {
 		e.ended = true
 	}
@@ -269,10 +350,9 @@ func (s *Sessions[C, S]) cookieName(c router.Context) string {
 	}
 }
 
-// hasCookie reports whether the request carries the session cookie or the
+// hasCookie reports whether the request carries the cookie name or the
 // response already sets it.
-func (s *Sessions[C, S]) hasCookie(c router.Context) bool {
-	name := s.cookieName(c)
+func hasCookie(c router.Context, name string) bool {
 	if _, err := c.Request().Cookie(name); err == nil {
 		return true
 	}
@@ -280,10 +360,9 @@ func (s *Sessions[C, S]) hasCookie(c router.Context) bool {
 	return found
 }
 
-// setCookie writes the session cookie, in place of one that an earlier call
-// of this request wrote.
-func (s *Sessions[C, S]) setCookie(c router.Context, value string, maxAge time.Duration) {
-	name := s.cookieName(c)
+// setCookie writes the cookie name, in place of one that an earlier call of
+// this request wrote.
+func setCookie(c router.Context, name, value string, maxAge time.Duration) {
 	// The context of a router always carries its Base.
 	b, _ := router.FromContext(c)
 	h := c.Response().Header()
