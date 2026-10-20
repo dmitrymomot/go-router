@@ -166,11 +166,13 @@ func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C
 			case policyParts != nil:
 				nonce := newCSPNonce()
 				h.Set(csp, strings.Join(policyParts, nonce))
-				ctx := context.WithValue(c.Request().Context(), cspNonceKey{}, nonce)
+				ctx := c.Request().Context()
 				if cfg.CSPNonceContext != nil {
 					ctx = cfg.CSPNonceContext(ctx, nonce)
 				}
-				c.SetContext(ctx)
+				// The key of CSPNonce goes on last, so a hook that returns a
+				// context it did not derive from ctx cannot drop it.
+				c.SetContext(context.WithValue(ctx, cspNonceKey{}, nonce))
 			case policy != "":
 				h.Set(csp, policy)
 			}

@@ -636,6 +636,10 @@ func TestKeyAuthOnRejectTellsAMissingKeyFromAnInvalidOne(t *testing.T) {
 			if !errors.Is(seen, router.ErrUnauthorized) {
 				t.Errorf("OnReject saw %v, want a 401", seen)
 			}
+			// A 401 with no cause stays out of the log and out of the body.
+			if he := router.HTTPErrorOf(seen); he.Err != nil || seen.Error() != he.Error() {
+				t.Errorf("the 401 carries the cause %v, want none", he.Err)
+			}
 		})
 	}
 }

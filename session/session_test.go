@@ -370,7 +370,10 @@ func TestPanics(t *testing.T) {
 		session.New[*appContext](session.Config[Row]{Find: newTable().find, Cookie: "a b"})
 	})
 	mustPanic(t, "cannot name a cookie", func() {
-		session.New[*appContext](session.Config[Row]{Find: newTable().find, LegacyCookie: "a b"})
+		session.New[*appContext](session.Config[Row]{Find: newTable().find, LegacyCookie: "a b", Expires: func(Row) time.Time { return time.Time{} }})
+	})
+	mustPanic(t, "needs Expires beside LegacyCookie", func() {
+		session.New[*appContext](session.Config[Row]{Find: newTable().find, LegacyCookie: "old"})
 	})
 	mustPanic(t, "as both Cookie and LegacyCookie", func() {
 		session.New[*appContext](session.Config[Row]{Find: newTable().find, Cookie: "sid", LegacyCookie: "sid"})
@@ -421,20 +424,9 @@ func TestLegacyCookie(t *testing.T) {
 		routertest.Get(r, "/show", https, routertest.Cookie(main)).Expect(t).Body("ada")
 	})
 
-	t.Run("a session cookie without Expires", func(t *testing.T) {
-		tab := newTable()
-		tok := session.NewToken()
-		tab.insert("ada", tok.Hash)
-		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
-		main := cookieNamed(routertest.Get(r, "/show", https, legacy(tok.Secret)).Cookies(), session.DefaultHostCookie)
-		if main == nil || main.Value != tok.Secret || main.MaxAge != 0 {
-			t.Errorf("session cookie = %v, want one that lasts until the browser closes", main)
-		}
-	})
-
 	t.Run("a legacy cookie that names nothing", func(t *testing.T) {
 		tab := newTable()
-		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, Expires: hour, LegacyCookie: "session"}))
 		res := routertest.Get(r, "/show", https, legacy("stale"))
 		res.Expect(t).Body("none")
 		cks := res.Cookies()
@@ -448,7 +440,7 @@ func TestLegacyCookie(t *testing.T) {
 		ada, grace := session.NewToken(), session.NewToken()
 		tab.insert("ada", ada.Hash)
 		tab.insert("grace", grace.Hash)
-		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, Expires: hour, LegacyCookie: "session"}))
 		res := routertest.Get(r, "/show", https, legacy(grace.Secret),
 			routertest.Cookie(&http.Cookie{Name: session.DefaultHostCookie, Value: ada.Secret}))
 		res.Expect(t).Body("ada")
@@ -461,7 +453,7 @@ func TestLegacyCookie(t *testing.T) {
 	t.Run("a failing Find keeps it", func(t *testing.T) {
 		tab := newTable()
 		tab.findErr = errors.New("db down")
-		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, Expires: hour, LegacyCookie: "session"}))
 		res := routertest.Get(r, "/show", https, legacy("any"))
 		res.Expect(t).Status(http.StatusInternalServerError)
 		if cks := res.Cookies(); len(cks) != 0 {
@@ -471,7 +463,7 @@ func TestLegacyCookie(t *testing.T) {
 
 	t.Run("End clears it", func(t *testing.T) {
 		tab := newTable()
-		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: "session"}))
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, Expires: hour, LegacyCookie: "session"}))
 		res := routertest.Do(r, http.MethodPost, "/logout", https, legacy("stale"),
 			routertest.Cookie(&http.Cookie{Name: session.DefaultHostCookie, Value: "stale"}))
 		cks := res.Cookies()
@@ -484,7 +476,7 @@ func TestLegacyCookie(t *testing.T) {
 		tab := newTable()
 		tok := session.NewToken()
 		tab.insert("ada", tok.Hash)
-		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, LegacyCookie: session.DefaultCookie}))
+		r := app(tab, session.New[*appContext](session.Config[Row]{Find: tab.find, Expires: hour, LegacyCookie: session.DefaultCookie}))
 		res := routertest.Get(r, "/show", legacy(tok.Secret))
 		res.Expect(t).Body("ada")
 		if cks := res.Cookies(); len(cks) != 0 {
@@ -513,6 +505,7 @@ func TestFindStartsAnotherSession(t *testing.T) {
 			}
 			return row, nil
 		},
+		Expires:      func(Row) time.Time { return time.Now().Add(time.Hour) },
 		LegacyCookie: "old",
 	})
 	r := app(tab, sessions)

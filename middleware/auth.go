@@ -29,12 +29,23 @@ var (
 )
 
 var (
-	errMissingKey         = router.ErrUnauthorized.WithMessage("missing key").WithError(ErrKeyMissing)
-	errInvalidKey         = router.ErrUnauthorized.WithMessage("invalid key").WithError(ErrKeyInvalid)
+	errMissingKey         = &keyFailure{router.ErrUnauthorized.WithMessage("missing key"), ErrKeyMissing}
+	errInvalidKey         = &keyFailure{router.ErrUnauthorized.WithMessage("invalid key"), ErrKeyInvalid}
 	errMissingCredentials = router.ErrUnauthorized.WithMessage("missing credentials")
 	errInvalidCredentials = router.ErrUnauthorized.WithMessage("invalid credentials")
 	errMalformedBasicAuth = router.ErrBadRequest.WithMessage("malformed credentials")
 )
+
+// keyFailure is a 401 of KeyAuth with its cause beside it, not inside it: an
+// HTTPError with no Err stays out of the log and its body names no cause, as
+// before the causes were exported.
+type keyFailure struct {
+	he    *router.HTTPError
+	cause error
+}
+
+func (e *keyFailure) Error() string   { return e.he.Error() }
+func (e *keyFailure) Unwrap() []error { return []error{e.he, e.cause} }
 
 // SecureCompare reports whether a and b are equal, in time that does not
 // depend on where they differ. Use it to compare a secret, so a caller cannot

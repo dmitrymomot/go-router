@@ -151,11 +151,12 @@ func HashToken(secret string) []byte {
 // LegacyCookie, when set, names the cookie of an earlier version of the
 // application, such as "session" before a move to the __Host- name. The
 // middleware reads it only for a request without the session cookie, and on
-// the same response it moves the secret to the session cookie and clears the
-// legacy one, so no user signs in again. The session cookie it sets lasts
-// until Expires reports, or until the browser closes when Expires is nil. A
-// legacy cookie whose session is gone is cleared too, and so is one beside a
-// session cookie. The legacy name carries the weakness that the move is meant
+// the same response it moves the secret to the session cookie, which lasts
+// until Expires reports, and clears the legacy one, so no user signs in again.
+// LegacyCookie needs Expires, since the browser does not send the lifetime of
+// the legacy cookie. A legacy cookie whose session is gone is cleared too, and
+// so is one beside a session cookie. The clearing names Path "/" and no
+// Domain, so it removes a legacy cookie set that way and no other. The legacy name carries the weakness that the move is meant
 // to end, since any host under the parent domain can set it, so remove
 // LegacyCookie once the longest session that it could name has expired.
 type Config[S any] struct {
@@ -177,7 +178,8 @@ type Sessions[C router.Context, S any] struct {
 // follow from cfg, as in session.New[*Context](cfg).
 //
 // New panics if Find is nil, if Cookie or LegacyCookie is not a valid cookie
-// name, or if both name the same cookie.
+// name, if both name the same cookie, or if LegacyCookie is set without
+// Expires.
 func New[C router.Context, S any](cfg Config[S]) *Sessions[C, S] {
 	if cfg.Find == nil {
 		panic("session: New needs a Find function")
@@ -190,6 +192,9 @@ func New[C router.Context, S any](cfg Config[S]) *Sessions[C, S] {
 	}
 	if cfg.LegacyCookie != "" && cfg.LegacyCookie == cfg.Cookie {
 		panic(fmt.Sprintf("session: New got %q as both Cookie and LegacyCookie", cfg.Cookie))
+	}
+	if cfg.LegacyCookie != "" && cfg.Expires == nil {
+		panic("session: New needs Expires beside LegacyCookie, to know how long the moved cookie lasts")
 	}
 	return &Sessions[C, S]{cfg: cfg}
 }
@@ -234,11 +239,7 @@ func (s *Sessions[C, S]) Middleware() router.Middleware[C] {
 			clearLegacy(c, legacy)
 			// A Find that started another session set the cookie already.
 			if _, started := otherCookies(c.Response().Header(), name); from == legacy && !started {
-				var maxAge time.Duration
-				if s.cfg.Expires != nil {
-					maxAge = max(time.Until(s.cfg.Expires(row)), time.Second)
-				}
-				setCookie(c, name, secret, maxAge)
+				setCookie(c, name, secret, max(time.Until(s.cfg.Expires(row)), time.Second))
 			}
 			setRow(c, row)
 			return next(c)
