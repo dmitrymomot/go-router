@@ -4,6 +4,8 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-20
+
 ### Added
 
 - **`user.Require(signedIn, cfg)`**, the refusal of `Users.Require` for an application that keeps its user elsewhere, such as on a field of its context type: a login redirect with `next`, or a 401 with a challenge. `Users.Require` now calls it.
@@ -669,7 +671,8 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/dmitrymomot/go-router/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/dmitrymomot/go-router/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dmitrymomot/go-router/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dmitrymomot/go-router/compare/v0.4.0...v0.5.0
