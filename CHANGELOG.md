@@ -4,6 +4,8 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-20
+
 ### Added
 
 - **Package `user`**. `user.New(load)` takes the one function that knows who the user is, `func(c C) (T, error)`, which reads the session, an API key or any field of the application context and returns your own user type, or `user.ErrUnknown` for a visitor. The `*user.Users[C, T]` it returns binds both types once: `Middleware()` puts the user on the request context and lets a visitor pass, `From(ctx)` reads it in a handler, a component or any derived context (the package function `user.From[T]` does the same where the value is out of reach), and `Require(RequireConfig{...})` refuses a visitor. Require answers 401 with `WWW-Authenticate: Bearer`, or the `Challenge` you set; with a `LoginURL` it sends a client that prefers HTML there with a 303 and the path of a GET in `next`, the prefix of a mount included, for `c.LocalRedirect` after the login; a `LoginURL` on another host, such as the apex of a multi-tenant app, gets the absolute URL of the request in `next`, whose host the login checks before it redirects; and still answers a client that prefers JSON with a 401. The package does not check membership in a tenant. `user.NewContext` puts a user on the context of a job.
@@ -655,7 +657,8 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/dmitrymomot/go-router/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dmitrymomot/go-router/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dmitrymomot/go-router/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dmitrymomot/go-router/compare/v0.3.0...v0.4.0
