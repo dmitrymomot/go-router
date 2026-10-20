@@ -146,6 +146,9 @@ type RequireConfig struct {
 	Challenge string
 }
 
+// nextParam is the query key under which Require and Next carry the path.
+func (cfg RequireConfig) nextParam() string { return cmp.Or(cfg.NextParam, DefaultNextParam) }
+
 // Require refuses a request with no user, as [RequireConfig] describes. It goes
 // inside [Users.Middleware].
 //
@@ -186,7 +189,7 @@ func Require[C router.Context](signedIn func(c C) bool, cfg RequireConfig) route
 		}
 		login = l
 	}
-	param := cmp.Or(cfg.NextParam, DefaultNextParam)
+	param := cfg.nextParam()
 	challenge := cmp.Or(cfg.Challenge, DefaultChallenge)
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
@@ -235,7 +238,7 @@ func Require[C router.Context](signedIn func(c C) bool, cfg RequireConfig) route
 //		return c.LocalRedirect(http.StatusSeeOther, cmp.Or(next, "/"))
 //	}
 func Next(c router.Context, cfg RequireConfig) (string, bool) {
-	v := c.Request().URL.Query().Get(cmp.Or(cfg.NextParam, DefaultNextParam))
+	v := c.Request().URL.Query().Get(cfg.nextParam())
 	if !router.IsLocalURL(v) {
 		return "", false
 	}
