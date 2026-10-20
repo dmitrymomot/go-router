@@ -4,6 +4,16 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-20
+
+### Fixed
+
+- **`router.Version`** reads `0.8.1`. It had said `0.3.0` since that release, v0.8.0 included.
+
+### Changed
+
+- **CI** skips its jobs on a pull request that changes no Go code, `go.mod`, `go.sum`, workflow, `justfile` or golangci config. The skipped jobs count as passing, so such a pull request still merges.
+
 ## [0.8.0] - 2026-10-20
 
 ### Added
@@ -671,7 +681,8 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/dmitrymomot/go-router/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/dmitrymomot/go-router/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/dmitrymomot/go-router/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dmitrymomot/go-router/compare/v0.5.0...v0.6.0
