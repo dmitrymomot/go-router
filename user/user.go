@@ -29,6 +29,11 @@
 // and the user type once, so the middleware, Require and From cannot disagree
 // on either.
 //
+// An application that keeps its user elsewhere, such as on a field of its
+// context type, gets the same refusal from the package function [Require],
+// which takes a function that reports whether the request has a user. [Next]
+// reads the path back on the login page, and only when it is local.
+//
 // From reads the user through any context of the request: the handler
 // context, c.Request().Context(), the ctx of a templ component, and a context
 // derived from any of them. The package function [From] does the same where
@@ -114,7 +119,7 @@ func (u *Users[C, T]) Middleware() router.Middleware[C] {
 	}
 }
 
-// RequireConfig configures [Users.Require].
+// RequireConfig configures [Users.Require] and [Require].
 //
 // LoginURL is the login page of a browser: a local path such as "/login", or
 // an absolute http or https URL on another host, such as the apex of a
@@ -144,10 +149,28 @@ type RequireConfig struct {
 // Require refuses a request with no user, as [RequireConfig] describes. It goes
 // inside [Users.Middleware].
 //
-// Require panics if LoginURL is set and is neither a local path, as
-// [router.IsLocalURL] decides, nor an absolute http or https URL with a host,
-// or if it holds a fragment.
+// Require panics as the package function [Require] does.
 func (u *Users[C, T]) Require(cfg RequireConfig) router.Middleware[C] {
+	return Require(func(c C) bool {
+		_, ok := u.From(c)
+		return ok
+	}, cfg)
+}
+
+// Require refuses a request for which signedIn reports false, as
+// [RequireConfig] describes, and lets any other through. It serves an
+// application that keeps its user somewhere [Users] does not, such as a field
+// of its context type:
+//
+//	r.With(user.Require(func(c *Context) bool { return c.Account != nil }, cfg)).GET("/settings", settings)
+//
+// Require panics if signedIn is nil, if LoginURL is set and is neither a local
+// path, as [router.IsLocalURL] decides, nor an absolute http or https URL with
+// a host, or if it holds a fragment.
+func Require[C router.Context](signedIn func(c C) bool, cfg RequireConfig) router.Middleware[C] {
+	if signedIn == nil {
+		panic("user: Require needs a signedIn function")
+	}
 	var (
 		login  *url.URL
 		remote bool // the login page is on another host
@@ -168,7 +191,7 @@ func (u *Users[C, T]) Require(cfg RequireConfig) router.Middleware[C] {
 
 	return func(next router.HandlerFunc[C]) router.HandlerFunc[C] {
 		return func(c C) error {
-			if _, ok := u.From(c); ok {
+			if signedIn(c) {
 				return next(c)
 			}
 			if login == nil || prefersJSON(c) {
@@ -188,6 +211,35 @@ func (u *Users[C, T]) Require(cfg RequireConfig) router.Middleware[C] {
 			return b.Redirect(http.StatusSeeOther, target.String())
 		}
 	}
+}
+
+// Next reports the path that [Require] sent to the login page under the
+// NextParam of cfg, read from the query of the request of c. ok is false when
+// the query holds none, and when the value is not a local path, as
+// [router.IsLocalURL] decides, so a crafted link cannot send the user to
+// another host after the login. It suits a local LoginURL; with a LoginURL on
+// another host, next is an absolute URL whose host the application checks
+// itself.
+//
+// A login that leaves the site, such as an OAuth flow, keeps the value across
+// the round trip, for instance in the cookie that holds its state, and
+// redirects to it at the end with c.LocalRedirect, which checks it again:
+//
+//	func login(c *Context) error {
+//		next, _ := user.Next(c, requireCfg)
+//		... set the state cookie with next in it, and redirect to the provider ...
+//	}
+//
+//	func callback(c *Context) error {
+//		... check the state, sign the user in, read next from the state ...
+//		return c.LocalRedirect(http.StatusSeeOther, cmp.Or(next, "/"))
+//	}
+func Next(c router.Context, cfg RequireConfig) (string, bool) {
+	v := c.Request().URL.Query().Get(cmp.Or(cfg.NextParam, DefaultNextParam))
+	if !router.IsLocalURL(v) {
+		return "", false
+	}
+	return v, true
 }
 
 // From reports the user that ctx carries. ok is false for a visitor.

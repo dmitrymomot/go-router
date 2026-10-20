@@ -111,8 +111,24 @@ func HashToken(secret string) []byte {
 // then clears the cookie, so the browser still reaches the login page. Any
 // other error stops the request and keeps the cookie, which suits a database
 // that is down: a *router.HTTPError goes to the error handler as it stands,
-// and anything else as a 500. Find runs with the handler context, so it reads
-// the tenant of the request, and it must be safe for concurrent use.
+// and anything else as a 500. Find must be safe for concurrent use.
+//
+// The ctx of Find and Touch is always the handler context, the C of
+// [Sessions], so it reads the tenant of the request, and ctx.(C) never fails
+// there:
+//
+//	Find: func(ctx context.Context, hash []byte) (Row, error) {
+//		c := ctx.(*Context)
+//		return c.Store.SessionByHash(c, hash)
+//	},
+//
+// Find may also put another session in place of the one the cookie names: it
+// calls [Sessions.Start] with a new token and that row, and returns the row.
+// The middleware then carries on with that row and the cookie that Start set.
+// An application that lets an admin act as another user does so when the
+// cookie names an impersonation that ended: Find revokes it, starts a new
+// session of the admin, and returns it. Declare the Sessions variable before
+// New, so Find can refer to it.
 //
 // Expires, when set, reports when a row ends. The middleware then treats a
 // row whose end passed as ErrNotFound, so a Find that forgets the expiry still

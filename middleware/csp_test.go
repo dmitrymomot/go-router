@@ -77,6 +77,37 @@ func TestSecureMintsANoncePerRequest(t *testing.T) {
 	}
 }
 
+// templNonceKey stands in for the context key of a template engine.
+type templNonceKey struct{}
+
+func TestSecurePassesTheNonceToCSPNonceContext(t *testing.T) {
+	calls := 0
+	r := newRouter()
+	r.Use(middleware.SecureWithConfig(middleware.SecureConfig[*appContext]{
+		CSP:          &middleware.CSPPolicy{DefaultSrc: []string{middleware.CSPSelf}},
+		CSPWithNonce: true,
+		CSPNonceContext: func(ctx context.Context, nonce string) context.Context {
+			calls++
+			return context.WithValue(ctx, templNonceKey{}, nonce)
+		},
+	}))
+	r.GET("/", func(c *appContext) error {
+		n, _ := c.Value(templNonceKey{}).(string)
+		if n == "" || n != middleware.CSPNonce(c) {
+			return c.String(http.StatusInternalServerError, "mismatch")
+		}
+		return c.String(http.StatusOK, n)
+	})
+
+	rec := do(r, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK || calls != 1 {
+		t.Fatalf("status = %d after %d calls, want 200 after 1", rec.Code, calls)
+	}
+	if got := rec.Header().Get(router.HeaderContentSecurityPolicy); !strings.Contains(got, "'nonce-"+rec.Body.String()+"'") {
+		t.Errorf("policy = %q, want the nonce the hook saw", got)
+	}
+}
+
 func TestCSPNonceOutsideTheMiddleware(t *testing.T) {
 	if n := middleware.CSPNonce(context.Background()); n != "" {
 		t.Errorf("CSPNonce = %q, want empty", n)
@@ -97,6 +128,7 @@ func TestSecureRefusesABadPolicy(t *testing.T) {
 	}{
 		{"both policies", middleware.SecureConfig[*appContext]{ContentSecurityPolicy: "default-src 'self'", CSP: &middleware.CSPPolicy{DefaultSrc: self}}, "both ContentSecurityPolicy and CSP"},
 		{"a nonce without a policy", middleware.SecureConfig[*appContext]{CSPWithNonce: true}, "CSPWithNonce without CSP"},
+		{"a nonce hook without a nonce", middleware.SecureConfig[*appContext]{CSP: &middleware.CSPPolicy{DefaultSrc: self}, CSPNonceContext: func(ctx context.Context, _ string) context.Context { return ctx }}, "CSPNonceContext without CSPWithNonce"},
 		{"an empty policy", middleware.SecureConfig[*appContext]{CSP: &middleware.CSPPolicy{}}, "CSP has no directive"},
 		{"two sources in one", middleware.SecureConfig[*appContext]{CSP: &middleware.CSPPolicy{ScriptSrc: []string{"https://a.example https://b.example"}}}, `source "https://a.example https://b.example" in script-src`},
 		{"an injected directive", middleware.SecureConfig[*appContext]{CSP: &middleware.CSPPolicy{ImgSrc: []string{"*; script-src *"}}}, "in img-src"},

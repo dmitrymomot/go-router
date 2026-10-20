@@ -4,6 +4,18 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **`user.Require(signedIn, cfg)`**, the refusal of `Users.Require` for an application that keeps its user elsewhere, such as on a field of its context type: a login redirect with `next`, or a 401 with a challenge. `Users.Require` now calls it.
+- **`user.Next(c, cfg)`** reads the `NextParam` of the login page from the query, and reports it only when `router.IsLocalURL` accepts it. Its doc shows how an OAuth login keeps the value in its state cookie.
+- **`middleware.ErrKeyMissing` and `middleware.ErrKeyInvalid`**, the causes the 401 of `KeyAuth` now wraps, so `OnReject` answers each failure its own way with `errors.Is`. The response is the same as before.
+- **`SecureConfig.CSPNonceContext`**, a function that gets the nonce of `CSPWithNonce` once per request and returns the request context the handler sees. Pass `templ.WithNonce` and `templ.GetNonce` reads the nonce, with no bridge middleware and no dependency of the router on templ. It panics without `CSPWithNonce`.
+- **`pagination.CheckLimit(field, n, max)`**, the size check of `Page` and `Cursor`, for a request struct with query keys of its own. A `max` above `MaxPerPage` reads as `MaxPerPage`, as `Limit` does.
+
+### Changed
+
+- **The docs of `session.Config.Find`** now state that its `ctx` is always the handler context, so `ctx.(C)` never fails, and that `Find` may call `Start` to put another session in place of the one the cookie names, such as the admin session after an impersonation ends.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added

@@ -211,6 +211,7 @@ func TestNewContextForAJob(t *testing.T) {
 
 func TestPanics(t *testing.T) {
 	mustPanic(t, "needs a load function", func() { user.New[*appContext, Account](nil) })
+	mustPanic(t, "needs a signedIn function", func() { user.Require[*appContext](nil, user.RequireConfig{}) })
 	for _, bad := range []string{"login", "//apex.example/login", "ftp://apex.example/login", "https:///login"} {
 		mustPanic(t, "a local path or an absolute http or https URL", func() {
 			users.Require(user.RequireConfig{LoginURL: bad})
@@ -222,4 +223,51 @@ func TestPanics(t *testing.T) {
 	mustPanic(t, "cannot use the LoginURL", func() {
 		users.Require(user.RequireConfig{LoginURL: "/log%zzin"})
 	})
+}
+
+func TestRequireTakesAFunctionOfItsOwn(t *testing.T) {
+	// The application keeps the user on its context and not under package user.
+	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	gate := user.Require(func(c *appContext) bool { return c.Request().Header.Get("X-User") != "" },
+		user.RequireConfig{LoginURL: "/login"})
+	r.With(gate).GET("/settings", func(c *appContext) error { return c.String(http.StatusOK, "in") })
+
+	routertest.Get(r, "/settings", as("u1")).Expect(t).Status(http.StatusOK).Body("in")
+	routertest.Get(r, "/settings?tab=keys").Expect(t).
+		Redirect(http.StatusSeeOther, "/login?next=%2Fsettings%3Ftab%3Dkeys")
+	routertest.Get(r, "/settings", routertest.Header("Accept", "application/json")).Expect(t).
+		Status(http.StatusUnauthorized).Header("WWW-Authenticate", "Bearer")
+}
+
+func TestNext(t *testing.T) {
+	cfg := user.RequireConfig{LoginURL: "/login"}
+	tests := []struct {
+		name   string
+		cfg    user.RequireConfig
+		target string
+		want   string
+		ok     bool
+	}{
+		{"a local path", cfg, "/login?next=%2Fsettings%3Ftab%3Dkeys", "/settings?tab=keys", true},
+		{"none", cfg, "/login", "", false},
+		{"empty", cfg, "/login?next=", "", false},
+		{"another host", cfg, "/login?next=https%3A%2F%2Fevil.example%2F", "", false},
+		{"a protocol-relative URL", cfg, "/login?next=%2F%2Fevil.example", "", false},
+		{"a backslash", cfg, "/login?next=%2F%5Cevil.example", "", false},
+		{"a relative path", cfg, "/login?next=settings", "", false},
+		{"another param", user.RequireConfig{NextParam: "return_to"}, "/login?return_to=%2Fa&next=%2Fb", "/a", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+			r.GET("/login", func(c *appContext) error {
+				next, ok := user.Next(c, tt.cfg)
+				if next != tt.want || ok != tt.ok {
+					t.Errorf("Next = %q, %v; want %q, %v", next, ok, tt.want, tt.ok)
+				}
+				return nil
+			})
+			routertest.Get(r, tt.target)
+		})
+	}
 }

@@ -378,3 +378,44 @@ func TestPanics(t *testing.T) {
 	})
 	routertest.Get(r, "/")
 }
+
+func cookieNamed(cks []*http.Cookie, name string) *http.Cookie {
+	for _, ck := range cks {
+		if ck.Name == name {
+			return ck
+		}
+	}
+	return nil
+}
+
+func TestFindStartsAnotherSession(t *testing.T) {
+	// An impersonation that ended: Find revokes it and starts a session of
+	// the admin in its place.
+	tab := newTable()
+	ended := session.NewToken()
+	var sessions *session.Sessions[*appContext, Row]
+	sessions = session.New[*appContext](session.Config[Row]{
+		Find: func(ctx context.Context, hash []byte) (Row, error) {
+			if !bytes.Equal(hash, ended.Hash) {
+				return tab.find(ctx, hash)
+			}
+			c := ctx.(*appContext) // Find runs with the handler context.
+			tok := session.NewToken()
+			row := tab.insert("admin", tok.Hash)
+			//nolint:contextcheck // c is ctx itself, the handler context.
+			if err := sessions.Start(c, tok, row, time.Now().Add(time.Hour)); err != nil {
+				return Row{}, err
+			}
+			return row, nil
+		},
+	})
+	r := app(tab, sessions)
+
+	res := routertest.Get(r, "/show", routertest.Cookie(&http.Cookie{Name: session.DefaultCookie, Value: ended.Secret}))
+	res.Expect(t).Body("admin")
+	main := cookieNamed(res.Cookies(), session.DefaultCookie)
+	if main == nil || main.Value == ended.Secret || main.MaxAge <= 0 {
+		t.Fatalf("session cookie = %v, want the new session of the admin", main)
+	}
+	routertest.Get(r, "/show", routertest.Cookie(main)).Expect(t).Body("admin")
+}

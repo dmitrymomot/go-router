@@ -32,15 +32,19 @@ const SecureOmit = "-"
 // which the middleware checks and renders once; set one of the two. With
 // CSPWithNonce, every request gets a fresh nonce, which goes into script-src
 // and style-src and which [CSPNonce] reads, so an inline script or style that
-// carries it runs without 'unsafe-inline'. The HSTS fields build
-// Strict-Transport-Security, which goes out over HTTPS alone; HSTSMaxAge is a
-// [time.Duration], so write 365*24*time.Hour.
+// carries it runs without 'unsafe-inline'. CSPNonceContext, when set, runs once
+// per request with that nonce and returns the request context the handler
+// sees, so a template engine with a key of its own reads it too; pass
+// templ.WithNonce and templ.GetNonce works, with no bridge middleware. The
+// HSTS fields build Strict-Transport-Security, which goes out over HTTPS
+// alone; HSTSMaxAge is a [time.Duration], so write 365*24*time.Hour.
 type SecureConfig[C router.Context] struct {
 	Skip                      func(c C) bool
 	ContentTypeNosniff        string
 	FrameOptions              string
 	ContentSecurityPolicy     string
 	CSP                       *CSPPolicy
+	CSPNonceContext           func(ctx context.Context, nonce string) context.Context
 	CSPWithNonce              bool
 	CSPReportOnly             bool
 	ReferrerPolicy            string
@@ -75,7 +79,7 @@ func Secure[C router.Context](next router.HandlerFunc[C]) router.HandlerFunc[C] 
 // SecureWithConfig panics on an HSTSMaxAge under one second, which is the
 // shape of a caller who wrote a number of seconds in place of a duration. It
 // also panics when both ContentSecurityPolicy and CSP are set, on
-// CSPWithNonce without CSP, and on a CSP with no directive or with a source
+// CSPWithNonce without CSP, on CSPNonceContext without CSPWithNonce, and on a CSP with no directive or with a source
 // that is not one token, such as "https://a.example https://b.example" in
 // one entry, or a keyword without its quotes, such as "self".
 func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C] {
@@ -103,6 +107,8 @@ func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C
 		panic("middleware: SecureConfig sets both ContentSecurityPolicy and CSP; pick one")
 	case cfg.CSPWithNonce && cfg.CSP == nil:
 		panic("middleware: SecureConfig sets CSPWithNonce without CSP; the nonce goes into the typed policy")
+	case cfg.CSPNonceContext != nil && !cfg.CSPWithNonce:
+		panic("middleware: SecureConfig sets CSPNonceContext without CSPWithNonce; there is no nonce to pass")
 	}
 	policy := cfg.ContentSecurityPolicy
 	var policyParts []string
@@ -160,7 +166,13 @@ func SecureWithConfig[C router.Context](cfg SecureConfig[C]) router.Middleware[C
 			case policyParts != nil:
 				nonce := newCSPNonce()
 				h.Set(csp, strings.Join(policyParts, nonce))
-				c.SetContext(context.WithValue(c.Request().Context(), cspNonceKey{}, nonce))
+				ctx := c.Request().Context()
+				if cfg.CSPNonceContext != nil {
+					ctx = cfg.CSPNonceContext(ctx, nonce)
+				}
+				// The key of CSPNonce goes on last, so a hook that returns a
+				// context it did not derive from ctx cannot drop it.
+				c.SetContext(context.WithValue(ctx, cspNonceKey{}, nonce))
 			case policy != "":
 				h.Set(csp, policy)
 			}
