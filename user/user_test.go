@@ -47,8 +47,13 @@ var users = user.New(load)
 
 func as(id string) routertest.RequestOption { return routertest.Header("X-User", id) }
 
+// bareRouter is a router with no middleware.
+func bareRouter() *router.Router[*appContext] {
+	return router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+}
+
 func newRouter() *router.Router[*appContext] {
-	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	r := bareRouter()
 	r.Use(users.Middleware())
 	return r
 }
@@ -227,7 +232,7 @@ func TestPanics(t *testing.T) {
 
 func TestRequireTakesAFunctionOfItsOwn(t *testing.T) {
 	// The application keeps the user on its context and not under package user.
-	r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+	r := bareRouter()
 	gate := user.Require(func(c *appContext) bool { return c.Request().Header.Get("X-User") != "" },
 		user.RequireConfig{LoginURL: "/login"})
 	r.With(gate).GET("/settings", func(c *appContext) error { return c.String(http.StatusOK, "in") })
@@ -259,7 +264,7 @@ func TestNext(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := router.New(func(http.ResponseWriter, *http.Request) *appContext { return new(appContext) })
+			r := bareRouter()
 			r.GET("/login", func(c *appContext) error {
 				next, ok := user.Next(c, tt.cfg)
 				if next != tt.want || ok != tt.ok {
