@@ -11,7 +11,33 @@ permissions:
 
 # Cheapest first: lint gates the tests, the tests gate the benchmarks.
 jobs:
+  # A pull request that touches no Go code skips every job below. Skipped jobs
+  # count as passing for required checks, so such a PR still merges.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.diff.outputs.go }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo go=true >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE...$HEAD" |
+            grep -qE '(\.go|(^|/)go\.(mod|sum|work|work\.sum)|^\.github/workflows/.*|^justfile|^\.golangci\.ya?ml)$'; then
+            echo go=true >> "$GITHUB_OUTPUT"
+          else
+            echo go=false >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -30,6 +56,8 @@ jobs:
       - run: just actionlint
 
   analyze:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -47,6 +75,8 @@ jobs:
       - run: just analyze
 
   golangci:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -65,7 +95,8 @@ jobs:
       - run: just golangci
 
   test:
-    needs: lint
+    needs: [changes, lint]
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -83,6 +114,8 @@ jobs:
       - run: just cross
 
   vuln:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -99,7 +132,8 @@ jobs:
       - run: just vuln
 
   bench:
-    needs: test
+    needs: [changes, test]
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
