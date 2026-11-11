@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>go-router WebSocket chat</title>
+	<link rel="stylesheet" href="/style.css">
+	<script src="/app.js" defer></script>
+</head>
+<body>
+	<main class="card" id="door">
+		<h1>go-router chat</h1>
+		<p class="muted">Pick a name. Everyone in the room sees you arrive.</p>
+		<form id="join" autocomplete="off">
+			<input name="name" placeholder="Your name" maxlength="24" required autofocus>
+			<button type="submit">Join the room</button>
+		</form>
+	</main>
+
+	<div class="chat" id="room" hidden>
+		<header>
+			<h1>go-router chat</h1>
+			<div class="identity">
+				<p class="muted">You are <strong id="me"></strong> · <span id="status">connecting</span></p>
+				<button type="button" id="leave">Leave</button>
+			</div>
+		</header>
+		<div id="log" role="log" aria-live="polite"></div>
+		<form id="say" autocomplete="off">
+			<input name="text" placeholder="Write a message" maxlength="500" required>
+			<button type="submit">Send</button>
+		</form>
+	</div>
+</body>
+</html>

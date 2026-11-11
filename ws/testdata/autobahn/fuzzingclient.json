@@ -1,0 +1,7 @@
+{
+  "outdir": "/config/reports",
+  "servers": [{ "agent": "go-router/ws", "url": "ws://127.0.0.1:9001" }],
+  "cases": ["*"],
+  "exclude-cases": ["12.*", "13.*"],
+  "exclude-agent-cases": {}
+}

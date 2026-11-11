@@ -14,6 +14,7 @@
 # A go build inside an example writes a binary named after its directory, and
 # the patterns above only catch the ones that carry an extension.
 /_examples/*/chat
+/_examples/*/wschat
 
 # Code coverage profiles and other test artifacts
 *.out
@@ -34,3 +35,4 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+ws/testdata/autobahn/reports/
