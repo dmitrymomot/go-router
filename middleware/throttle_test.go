@@ -102,8 +102,15 @@ func TestThrottleBacklogTimeoutAnd503(t *testing.T) {
 
 func TestThrottleContextEndsTheWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		// The client is gone, so the router writes no answer: the rejection
+		// is read where it is made.
+		var rejected error
 		r, started, release := blockingRouter(middleware.ThrottleConfig[*appContext]{
 			Limit: 1, Backlog: 1, BacklogTimeout: time.Minute,
+			OnReject: func(_ *appContext, err error) error {
+				rejected = err
+				return err
+			},
 		})
 		defer close(release)
 		go get(r, "/slow")
@@ -113,8 +120,11 @@ func TestThrottleContextEndsTheWait(t *testing.T) {
 		time.AfterFunc(20*time.Millisecond, cancel)
 		begin := time.Now()
 		req := httptest.NewRequest(http.MethodGet, "/slow", nil).WithContext(ctx)
-		if rec := do(r, req); rec.Code != http.StatusTooManyRequests {
-			t.Fatalf("status = %d, want 429", rec.Code)
+		if rec := do(r, req); rec.Body.Len() != 0 {
+			t.Errorf("body = %q for a client that went away, want none", rec.Body.String())
+		}
+		if !errors.Is(rejected, router.ErrTooManyRequests) {
+			t.Fatalf("rejected with %v, want ErrTooManyRequests", rejected)
 		}
 		if waited := time.Since(begin); waited != 20*time.Millisecond {
 			t.Errorf("the request waited %s, want 20ms, until its context ended", waited)

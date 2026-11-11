@@ -11,8 +11,11 @@ import (
 // [slog.Default], and an empty Message logs "request".
 //
 // Level is the level of an answer under 400, ClientErrorLevel of a 4xx, and
-// ServerErrorLevel of a 5xx; they default to info, warn and error. Attrs adds
-// attributes of your own, and DisableUserAgent leaves the User-Agent out.
+// ServerErrorLevel of a 5xx; they default to info, warn and error.
+// CanceledLevel is the level of a client that went away (see
+// [router.ClientGone]), logged as 499 whatever the error asks for; it
+// defaults to debug. Attrs adds attributes of your own, and DisableUserAgent
+// leaves the User-Agent out.
 type LoggerConfig[C router.Context] struct {
 	Skip             func(c C) bool
 	Logger           *slog.Logger
@@ -20,6 +23,7 @@ type LoggerConfig[C router.Context] struct {
 	Level            slog.Leveler
 	ClientErrorLevel slog.Leveler
 	ServerErrorLevel slog.Leveler
+	CanceledLevel    slog.Leveler
 	Message          string
 	DisableUserAgent bool
 }
@@ -56,6 +60,9 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig[C]) router.Middleware[C
 	if cfg.ServerErrorLevel == nil {
 		cfg.ServerErrorLevel = slog.LevelError
 	}
+	if cfg.CanceledLevel == nil {
+		cfg.CanceledLevel = slog.LevelDebug
+	}
 	if cfg.Message == "" {
 		cfg.Message = "request"
 	}
@@ -74,6 +81,11 @@ func LoggerWithConfig[C router.Context](cfg LoggerConfig[C]) router.Middleware[C
 
 			level := cfg.Level
 			switch {
+			// A request that finished before its client left is no
+			// disconnect, so a nil error on a committed answer keeps its status.
+			case (err != nil || !c.Response().Committed) && router.ClientGone(req, err):
+				status = 499
+				level = cfg.CanceledLevel
 			case status >= 500:
 				level = cfg.ServerErrorLevel
 			case status >= 400:

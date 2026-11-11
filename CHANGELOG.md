@@ -4,8 +4,18 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **`router.ClientGone(r, err)`** reports whether a failure is a client that went away: `err` is `context.Canceled`, or the context of the request is canceled. A deadline does not count.
+- **`middleware.LoggerConfig.CanceledLevel`**, the level of a request whose client went away. It defaults to debug.
+
+### Fixed
+
+- **A client that leaves during a render is no longer a 500** ([#43](https://github.com/dmitrymomot/go-router/issues/43)). `Render`, `RenderStream` and `sse.Writer.SendComponent` keep a failure of a canceled request out of `ErrInternalServerError` and make it `context.Canceled`, even when the component lost the cause, so `StatusOf` reports 499. The router skips the error handler for any request whose context is canceled, not only for an error that is `context.Canceled`, so a handler that renders no longer fails on the dead request and logs ERROR. The router logs such a failure at debug with status 499, and `middleware.Logger` logs it at `CanceledLevel` with status 499 in place of `ServerErrorLevel`. A handler that answered in full and returned nil keeps its status.
+
 ### Changed
 
+- **The error handler no longer answers a request whose context is canceled**, a bare `HTTPError` such as the 429 of `Throttle` included. Nothing is written to a client that went away.
 - **CI** builds with Go 1.27.4, which carries 12 security fixes to the standard library and the toolchain. The `go` directive stays at 1.27.0.
 - **Benchmarks** compare against chi v5.5.0 and echo v5.4.4.
 
