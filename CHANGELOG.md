@@ -4,10 +4,16 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-11
+
 ### Added
 
 - **Package `ws`**, the server side of WebSocket (RFC 6455) with the standard library alone. `ws.Accept(c, opts...)` answers the handshake and returns a `*ws.Conn`, or a `router.HTTPError` the error handler answers: 405, 426 for a request that asks no upgrade or another version than 13, 400 for a bad `Sec-WebSocket-Key`, 403 for a foreign `Origin`. Only the host of the request may open a connection from a browser, unless `ws.Origins(...)` lists more origins, with `path.Match` wildcards or `"*"`. `ws.Subprotocols(...)` picks the first subprotocol of the server that the client offers. `Conn.Read(ctx)` reports whole messages, with fragments joined, pings answered while a message arrives, text checked for UTF-8 and every frame rule enforced with the close code it calls for: 1002, 1007, or 1009 past `ws.ReadLimit` (32 KiB by default). `Conn.Write` and `Conn.WriteJSON` are safe from many goroutines and bounded by `ws.WriteTimeout`. `ws.ReadTimeout` drops a connection on which no frame arrives in time, and `ws.Heartbeat(d)` one that answers no ping. `Conn.Close(code, reason)` runs the close handshake; a client's close reaches `Read` as a `*ws.CloseError`. When the drain of `serve.Run` starts, every open connection gets a close frame with 1012 (service restart), and a handler that returns with its connection open closes it with 1001. There is no permessage-deflate. The package passes the Autobahn test suite (cases 1 to 10; 12 and 13 cover compression), which `ws/autobahn_test.go` describes how to run.
 - **The `wschat` example**, the chat room of `_examples/chat` over WebSocket: a static page under a strict CSP, JSON both ways, a heartbeat, and a reconnect when the drain closes the socket with 1012.
+
+### Changed
+
+- **CI** builds with Go 1.27.3, which fixes GO-2026-6809 in `crypto/x509`. On 1.27.2, govulncheck failed through `middleware/decompress.go`.
 
 ## [0.8.1] - 2026-10-20
 
@@ -686,7 +692,8 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/dmitrymomot/go-router/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/dmitrymomot/go-router/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/dmitrymomot/go-router/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/dmitrymomot/go-router/compare/v0.6.0...v0.7.0
