@@ -1112,3 +1112,37 @@ func TestCanFlushStopsOnACyclicUnwrap(t *testing.T) {
 		t.Errorf("status of the error = %d, want 500", got)
 	}
 }
+
+func TestSendComponentForAClientThatWentAwayIsNoServerFault(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var got error
+	serve(open(func(s *Writer) error {
+		got = s.SendComponent("row", router.ComponentFunc(func(ctx context.Context, _ io.Writer) error {
+			cancel()
+			return errors.New("load rows: " + ctx.Err().Error())
+		}))
+		return got
+	}), newReq().WithContext(ctx))
+
+	if status := router.StatusOf(got); status != 499 {
+		t.Errorf("StatusOf(%v) = %d, want 499", got, status)
+	}
+	if got == nil || got.Error() != "sse: render component: load rows: context canceled" {
+		t.Errorf("error = %v, want the text of the component", got)
+	}
+}
+
+func TestSendComponentOfACanceledCauseIsNoServerFault(t *testing.T) {
+	var got error
+	serve(open(func(s *Writer) error {
+		got = s.SendComponent("row", router.ComponentFunc(func(context.Context, io.Writer) error {
+			return fmt.Errorf("load rows: %w", context.Canceled)
+		}))
+		return got
+	}), newReq())
+
+	if status := router.StatusOf(got); status != 499 {
+		t.Errorf("StatusOf(%v) = %d, want 499", got, status)
+	}
+}

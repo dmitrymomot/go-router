@@ -11,6 +11,7 @@ package sse
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -395,8 +396,9 @@ func (s *Writer) SendJSON(name string, v any, opts ...json.Options) error {
 // an unnamed event into the element that holds hx-sse:connect and dispatches a
 // named one as a DOM event, so pass "" as name for a swap.
 //
-// A render failure that is already a [router.HTTPError] passes through; any
-// other becomes a [router.ErrInternalServerError].
+// A render failure that is already a [router.HTTPError] passes through, one of
+// a client that went away is [context.Canceled], and any other becomes a
+// [router.ErrInternalServerError].
 func (s *Writer) SendComponent(name string, c router.Component) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -405,7 +407,7 @@ func (s *Writer) SendComponent(name string, c router.Component) error {
 		return err
 	}
 	if err := c.Render(s.b, &s.lines); err != nil {
-		return renderError(err)
+		return s.renderError(err)
 	}
 	return s.end()
 }
@@ -424,12 +426,28 @@ func (s *Writer) Comment(text string) error {
 	return s.end()
 }
 
-func renderError(err error) error {
+// renderError is router's own: an HTTPError passes through, the failure of a
+// client that went away carries context.Canceled and stays out of a 500, and
+// anything else becomes a 500.
+func (s *Writer) renderError(err error) error {
 	if _, ok := errors.AsType[*router.HTTPError](err); ok {
 		return err
 	}
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("sse: render component: %w", err)
+	}
+	if errors.Is(s.b.Request().Context().Err(), context.Canceled) {
+		return fmt.Errorf("sse: render component: %w", canceledError{err})
+	}
 	return router.ErrInternalServerError.WithError(fmt.Errorf("sse: render component: %w", err))
 }
+
+// canceledError is an error of a stream whose client went away. It reads as
+// the error and is also context.Canceled.
+type canceledError struct{ err error }
+
+func (e canceledError) Error() string   { return e.err.Error() }
+func (e canceledError) Unwrap() []error { return []error{e.err, context.Canceled} }
 
 // The bool is not the error: a HEAD request closes the stream with no failure
 // to report, and a caller must not then write into a frame that never started.
