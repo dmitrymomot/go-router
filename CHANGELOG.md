@@ -16,6 +16,8 @@ All notable changes to this module are recorded here. The format follows [Keep a
 ### Changed
 
 - **The error handler no longer answers a request whose context is canceled**, a bare `HTTPError` such as the 429 of `Throttle` included. Nothing is written to a client that went away.
+- **CI** builds with Go 1.27.4, which carries 12 security fixes to the standard library and the toolchain. The `go` directive stays at 1.27.0.
+- **Benchmarks** compare against chi v5.5.0 and echo v5.4.4.
 
 ## [0.9.0] - 2026-11-11
 
