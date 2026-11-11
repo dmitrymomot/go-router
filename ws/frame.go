@@ -53,7 +53,7 @@ type frameReader struct {
 	beforeFrame func()
 	// onPing and onPong get the payload of a control frame, which is valid
 	// only during the call.
-	onPing func(payload []byte) error
+	onPing func(payload []byte)
 	onPong func(payload []byte)
 
 	buf     []byte
@@ -170,9 +170,7 @@ func (r *frameReader) next() (MessageType, []byte, error) {
 		if h.length > r.limit-int64(len(r.buf)) {
 			return 0, nil, violation(StatusMessageTooBig, "a message exceeds the read limit of %d bytes", r.limit)
 		}
-		n := len(r.buf)
-		r.buf = grow(r.buf, int(h.length))
-		if err := r.readPayload(r.buf[n:], h.mask); err != nil {
+		if r.buf, err = r.appendPayload(r.buf, h.length, h.mask); err != nil {
 			return 0, nil, err
 		}
 		if typ == Text {
@@ -196,14 +194,28 @@ func grow(b []byte, n int) []byte {
 	return nb
 }
 
-// The largest buffer that next keeps between messages. One large message does
-// not pin its memory for the life of the connection.
-const maxKeptBuf = 64 << 10
+// payloadChunk is the most that appendPayload grows its buffer by before the
+// bytes arrive, so a header that claims a large frame costs memory only as
+// fast as the client sends it.
+const payloadChunk = 64 << 10
 
-func (r *frameReader) release() {
-	if cap(r.buf) > maxKeptBuf {
-		r.buf = nil
+// appendPayload reads a data payload of n bytes onto b and unmasks it.
+func (r *frameReader) appendPayload(b []byte, n int64, mask [4]byte) ([]byte, error) {
+	for pos := 0; n > 0; {
+		k := int(min(n, payloadChunk))
+		start := len(b)
+		b = grow(b, k)
+		p := b[start:]
+		if _, err := io.ReadFull(r.br, p); err != nil {
+			return b, err
+		}
+		for i := range p {
+			p[i] ^= mask[(pos+i)&3]
+		}
+		pos += k
+		n -= int64(k)
 	}
+	return b, nil
 }
 
 func (r *frameReader) readControl(h header) error {
@@ -214,7 +226,7 @@ func (r *frameReader) readControl(h header) error {
 	switch h.opcode {
 	case opPing:
 		if r.onPing != nil {
-			return r.onPing(p)
+			r.onPing(p)
 		}
 	case opPong:
 		if r.onPong != nil {

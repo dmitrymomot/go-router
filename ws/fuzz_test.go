@@ -31,7 +31,7 @@ func FuzzFrameReader(f *testing.F) {
 		r := &frameReader{
 			br:     bufio.NewReader(bytes.NewReader(data)),
 			limit:  limit,
-			onPing: func(p []byte) error { return nil },
+			onPing: func([]byte) {},
 			onPong: func([]byte) {},
 		}
 		for {
@@ -53,7 +53,7 @@ func FuzzFrameReader(f *testing.F) {
 			if typ != Text && typ != Binary {
 				t.Fatalf("message type %v", typ)
 			}
-			r.release()
+			r.buf = nil
 		}
 	})
 }
@@ -83,14 +83,32 @@ func TestCheckUTF8(t *testing.T) {
 	}
 }
 
-func TestGrowAndRelease(t *testing.T) {
+func TestGrow(t *testing.T) {
 	b := grow(make([]byte, 2, 10), 3)
 	if len(b) != 5 || cap(b) != 10 {
 		t.Errorf("grow in place: len %d cap %d", len(b), cap(b))
 	}
-	r := &frameReader{buf: make([]byte, 0, maxKeptBuf+1)}
-	r.release()
-	if r.buf != nil {
-		t.Error("release kept a large buffer")
+}
+
+// A header that claims a large frame allocates no more than one chunk before
+// the bytes arrive.
+func TestPayloadGrowsAsItArrives(t *testing.T) {
+	head := []byte{finBit | opBinary, maskBit | 127, 0, 0, 0, 0, 0x04, 0, 0, 0, 0, 0, 0, 0} // 64 MiB
+	r := &frameReader{br: bufio.NewReader(bytes.NewReader(head)), limit: 1 << 30}
+	_, _, err := r.next()
+	if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		t.Fatalf("next = %v, want the end of the input", err)
+	}
+	if cap(r.buf) > payloadChunk {
+		t.Errorf("the buffer holds %d bytes before any payload arrived", cap(r.buf))
+	}
+}
+
+func TestMaskAcrossChunks(t *testing.T) {
+	p := bytes.Repeat([]byte("0123456789"), payloadChunk/5+3) // over two chunks, not a multiple of 4
+	r := &frameReader{br: bufio.NewReader(bytes.NewReader(frame(true, opBinary, p))), limit: 1 << 20}
+	_, got, err := r.next()
+	if err != nil || !bytes.Equal(got, p) {
+		t.Fatalf("next = %d bytes, %v; want the payload back", len(got), err)
 	}
 }

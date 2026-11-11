@@ -99,6 +99,10 @@ func TestHandshakeRefusals(t *testing.T) {
 		{name: "foreign origin", edit: func(h http.Header) { h.Set("Origin", "https://evil.test") }, status: 403},
 		{name: "bad origin", edit: func(h http.Header) { h.Set("Origin", "::") }, status: 403},
 		{name: "null origin", edit: func(h http.Header) { h.Set("Origin", "null") }, status: 403},
+		{name: "origin with a path", edit: func(h http.Header) { h.Set("Origin", "https://a.example.com/x") }, status: 403},
+		{name: "origin with credentials", edit: func(h http.Header) { h.Set("Origin", "https://u@a.example.com") }, status: 403},
+		{name: "origin of another scheme", edit: func(h http.Header) { h.Set("Origin", "ftp://a.example.com") }, status: 403},
+		{name: "origin on another port", edit: func(h http.Header) { h.Set("Origin", "https://a.example.com:8443") }, status: 403},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,7 +122,7 @@ func TestHandshakeRefusals(t *testing.T) {
 func TestHandshakeOrigins(t *testing.T) {
 	srv := server(t, echo(nil, Origins("https://*.example.com", "HTTPS://Other.test")))
 	host := strings.TrimPrefix(srv.URL, "http://")
-	for _, origin := range []string{"", "http://" + host, "https://" + strings.ToUpper(host), "https://a.example.com", "https://other.TEST"} {
+	for _, origin := range []string{"", "http://" + host, "https://" + strings.ToUpper(host), "https://a.example.com", "https://other.TEST", "https://A.Example.com:443", "https://other.test/"} {
 		h := upgradeHeader()
 		if origin != "" {
 			h.Set("Origin", origin)
@@ -715,5 +719,87 @@ func TestFramesSentWithTheHandshake(t *testing.T) {
 	}
 	if f := c.mustRecv(); string(f.p) != "early" {
 		t.Errorf("frame = %q, want the frame sent with the handshake", f.p)
+	}
+}
+
+func TestDefaultPorts(t *testing.T) {
+	for _, tc := range []struct{ host, origin, want string }{
+		{"a:80", "http://", "a"},
+		{"a:443", "https://", "a"},
+		{"a:443", "http://", "a:443"},
+		{"a:8080", "http://", "a:8080"},
+	} {
+		if got := stripDefaultPort(tc.host, tc.origin); got != tc.want {
+			t.Errorf("stripDefaultPort(%q, %q) = %q, want %q", tc.host, tc.origin, got, tc.want)
+		}
+	}
+}
+
+// A handler that is slow to Read holds a message in the reader, which then
+// reads no pong; the heartbeat must not blame the client for that.
+func TestHeartbeatWaitsForASlowHandler(t *testing.T) {
+	srv := server(t, func(c *tctx) error {
+		conn, err := Accept(c, Heartbeat(20*time.Millisecond))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = conn.Close(StatusNormalClosure, "") }()
+		time.Sleep(150 * time.Millisecond)
+		for range 2 {
+			typ, msg, err := conn.Read(c)
+			if err != nil {
+				return nil
+			}
+			if err := conn.Write(c, typ, msg); err != nil {
+				return nil
+			}
+		}
+		return nil
+	})
+	c := dial(t, srv)
+	c.send(opText, []byte("one"))
+	c.send(opText, []byte("two"))
+	var got []string
+	for len(got) < 2 {
+		f, err := c.recv()
+		if err != nil {
+			t.Fatalf("the connection dropped after %q: %v", got, err)
+		}
+		switch f.op {
+		case opPing:
+			c.send(opPong, f.p)
+		case opText:
+			got = append(got, string(f.p))
+		case opClose:
+			t.Fatalf("close %v after %q", f.p, got)
+		}
+	}
+}
+
+// Once the connection ended without a close frame, Close reports nil and a
+// write reports why it ended, not the error of the closed socket.
+func TestCloseAfterTheConnectionDropped(t *testing.T) {
+	results := make(chan []error, 1)
+	srv := server(t, func(c *tctx) error {
+		conn, err := Accept(c, Heartbeat(20*time.Millisecond))
+		if err != nil {
+			return err
+		}
+		<-conn.Done() // the client answers no ping
+		results <- []error{conn.Write(c, Text, []byte("late")), conn.Close(StatusNormalClosure, "")}
+		return nil
+	})
+	c := dial(t, srv)
+	for { // pings, unanswered, until the server drops the connection
+		if _, err := c.recv(); err != nil {
+			break
+		}
+	}
+	errs := <-results
+	if !errors.Is(errs[0], ErrHeartbeatTimeout) {
+		t.Errorf("Write = %v, want ErrHeartbeatTimeout", errs[0])
+	}
+	if errs[1] != nil {
+		t.Errorf("Close = %v, want nil", errs[1])
 	}
 }
