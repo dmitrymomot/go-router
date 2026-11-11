@@ -267,11 +267,37 @@ func putBuf(buf *bytes.Buffer) {
 	}
 }
 
-func renderError(err error) error {
+// renderError reports the failure of a component. An [HTTPError] passes
+// through. A failure of a request whose client went away is no fault of the
+// server, so it stays out of a 500 and carries [context.Canceled], even when
+// the component lost the cause, as a loader that formats ctx.Err() with %v
+// does. [StatusOf] then reports 499. Anything else becomes a 500.
+func (b *Base) renderError(err error) error {
 	if _, ok := errors.AsType[*HTTPError](err); ok {
 		return err
 	}
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("router: render component: %w", err)
+	}
+	if errors.Is(b.req.Context().Err(), context.Canceled) {
+		return fmt.Errorf("router: render component: %w", canceledError{err})
+	}
 	return ErrInternalServerError.WithError(fmt.Errorf("router: render component: %w", err))
+}
+
+// canceledError is an error of a request whose client went away. It reads as
+// the error and is also [context.Canceled].
+type canceledError struct{ err error }
+
+func (e canceledError) Error() string   { return e.err.Error() }
+func (e canceledError) Unwrap() []error { return []error{e.err, context.Canceled} }
+
+// ClientGone reports whether err is the failure of a client that went away:
+// err is [context.Canceled], or the context of r is canceled. A deadline, such
+// as the one of the Timeout middleware, does not count: it is the server that
+// gave up.
+func ClientGone(r *http.Request, err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled)
 }
 
 // Render renders c into a buffer and writes it as text/html with status. The
@@ -279,8 +305,9 @@ func renderError(err error) error {
 // handler can still answer. See [Base.RenderStream] for a page too large to
 // hold.
 //
-// A render failure that is already an [HTTPError] passes through; any other
-// becomes an [ErrInternalServerError].
+// A render failure that is already an [HTTPError] passes through, one of a
+// client that went away is [context.Canceled], and any other becomes an
+// [ErrInternalServerError].
 func (b *Base) Render(status int, c Component) error {
 	if !validStatus(status) {
 		return errInvalidStatus(status)
@@ -289,7 +316,7 @@ func (b *Base) Render(status int, c Component) error {
 	defer putBuf(buf)
 
 	if err := c.Render(b, buf); err != nil {
-		return renderError(err)
+		return b.renderError(err)
 	}
 	return b.Blob(status, MIMETextHTMLCharsetUTF8, buf.Bytes())
 }
@@ -308,7 +335,7 @@ func (b *Base) RenderStream(status int, c Component) error {
 		return nil
 	}
 	if err := c.Render(b, b.res); err != nil {
-		return renderError(err)
+		return b.renderError(err)
 	}
 	return nil
 }

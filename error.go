@@ -333,7 +333,7 @@ func HTTPErrorOf(err error) *HTTPError {
 // returns the error of that write. [Router.ErrorHandler] installs one.
 //
 // The router calls it at most once per request, and never for a response
-// that already committed or for an error that is [context.Canceled]. The
+// that already committed or for a client that went away (see [ClientGone]). The
 // router logs the failure itself, and answers a bare 500 when the handler
 // returns an error having written nothing.
 type ErrorHandlerFunc[C Context] func(c C, err error) error
@@ -541,7 +541,8 @@ func ProblemErrorHandler[C Context](exposeCause bool) ErrorHandlerFunc[C] {
 // [NewBase], it answers with TextErrorHandler(false).
 //
 // Like the router, HandleError logs the failure, and skips the error handler
-// for a response that already committed and for [context.Canceled].
+// for a response that already committed and for a client that went away (see
+// [ClientGone]).
 //
 // HandleError panics if c is not the context type of the router that serves
 // it, such as the *Base inside an application context.
@@ -572,10 +573,14 @@ func answerError[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 	// A sentinel such as ErrNotFound, returned as it stands, wraps nothing and
 	// so cannot be context.Canceled; the check skips the walk for a 404.
 	bare := isHTTP && he.Err == nil && error(he) == err
-	if !committedBefore && (bare || !errors.Is(err, context.Canceled)) {
+	// No one reads an answer to a client that went away, and an error handler
+	// that renders would fail on the canceled context.
+	gone := errors.Is(b.req.Context().Err(), context.Canceled) ||
+		(!bare && errors.Is(err, context.Canceled))
+	if !committedBefore && !gone {
 		runErrorHandler(c, err, h)
 	}
-	logFailure(b, err, he, isHTTP, committedBefore)
+	logFailure(b, err, he, isHTTP, committedBefore, gone)
 }
 
 // runErrorHandler runs h and answers a bare 500 when h fails before it wrote
@@ -614,9 +619,11 @@ func runErrorHandler[C Context](c C, err error, h ErrorHandlerFunc[C]) {
 // logFailure logs err with the status that went out: the one the error
 // handler wrote, or the one err asks for when the response committed before.
 // A bare HTTPError under 500 is an answer, not a failure, so it goes unlogged.
+// A client that went away is logged at debug as 499.
 //
-// he and isHTTP are httpErrorOf(err), which the caller has.
-func logFailure(b *Base, err error, he *HTTPError, isHTTP, committedBefore bool) {
+// he and isHTTP are httpErrorOf(err), and gone is [ClientGone], which the
+// caller has.
+func logFailure(b *Base, err error, he *HTTPError, isHTTP, committedBefore, gone bool) {
 	var status int
 	switch {
 	case !committedBefore && b.res.Committed:
@@ -632,7 +639,8 @@ func logFailure(b *Base, err error, he *HTTPError, isHTTP, committedBefore bool)
 
 	level := slog.LevelError
 	switch {
-	case errors.Is(err, context.Canceled) || errors.Is(b.req.Context().Err(), context.Canceled):
+	case gone:
+		status = statusClientClosedRequest
 		level = slog.LevelDebug
 	case status < http.StatusBadRequest:
 		// The error handler turned the error into a redirect or a success.

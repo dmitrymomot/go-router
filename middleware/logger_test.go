@@ -95,7 +95,7 @@ func TestLoggerReportsACancelledRequestAs499(t *testing.T) {
 	})
 
 	get(r, "/gone-away")
-	for _, want := range []string{"level=WARN", "status=499", "bytes=0"} {
+	for _, want := range []string{"level=DEBUG", "status=499", "bytes=0"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("record = %q, want %s", buf.String(), want)
 		}
@@ -310,5 +310,75 @@ func TestLoggerInsideBodyLimitAnswersAnOversizedBodyWith413(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "status=413") {
 		t.Errorf("record = %q, want status=413", buf.String())
+	}
+}
+
+// The client goes away while a component renders, and the component returns
+// an error that only carries the text of ctx.Err().
+func TestLoggerReportsAClientThatLeftDuringARenderAs499(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{})
+		r.Logger(slog.New(slog.DiscardHandler))
+		calls := 0
+		r.ErrorHandler(func(c *appContext, err error) error {
+			calls++
+			return c.String(router.StatusOf(err), "failed")
+		})
+		r.GET("/widgets", func(c *appContext) error {
+			ctx, cancel := context.WithCancel(c.Request().Context())
+			c.SetContext(ctx)
+			comp := router.ComponentFunc(func(ctx context.Context, _ io.Writer) error {
+				cancel()
+				return errors.New("load widgets: " + ctx.Err().Error())
+			})
+			if stream {
+				return c.RenderStream(http.StatusOK, comp)
+			}
+			return c.Render(http.StatusOK, comp)
+		})
+
+		get(r, "/widgets")
+		for _, want := range []string{"level=DEBUG", "status=499"} {
+			if !strings.Contains(buf.String(), want) {
+				t.Errorf("stream=%v: record = %q, want %s", stream, buf.String(), want)
+			}
+		}
+		if calls != 0 {
+			t.Errorf("stream=%v: the error handler ran %d times, want 0", stream, calls)
+		}
+	}
+}
+
+func TestLoggerCanceledLevel(t *testing.T) {
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{CanceledLevel: slog.LevelInfo})
+	r.Logger(slog.New(slog.DiscardHandler))
+	r.GET("/gone-away", func(c *appContext) error {
+		ctx, cancel := context.WithCancel(c.Request().Context())
+		c.SetContext(ctx)
+		cancel()
+		return ctx.Err()
+	})
+
+	get(r, "/gone-away")
+	if !strings.Contains(buf.String(), "level=INFO") {
+		t.Errorf("record = %q, want level=INFO", buf.String())
+	}
+}
+
+// A handler that answered in full and returned nil logs its status, even when
+// the client left before the handler returned.
+func TestLoggerKeepsTheStatusOfAFinishedAnswer(t *testing.T) {
+	r, buf := loggerRouter(middleware.LoggerConfig[*appContext]{})
+	r.GET("/done", func(c *appContext) error {
+		err := c.String(http.StatusOK, "done")
+		ctx, cancel := context.WithCancel(c.Request().Context())
+		c.SetContext(ctx)
+		cancel()
+		return err
+	})
+
+	get(r, "/done")
+	if !strings.Contains(buf.String(), "level=INFO") || !strings.Contains(buf.String(), "status=200") {
+		t.Errorf("record = %q, want level=INFO status=200", buf.String())
 	}
 }

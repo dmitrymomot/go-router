@@ -551,7 +551,7 @@ func (r *Router[C]) mustBeRoot(setter, why string) {
 // scopes, then to the router's.
 //
 // The router logs every failure itself, skips h for a response that already
-// committed and for an error that is [context.Canceled], and answers a bare
+// committed and for a client that went away (see [ClientGone]), and answers a bare
 // 500 when h returns an error having written nothing. To give a domain error
 // its status, make it a [StatusCoder] rather than mapping it inside h.
 //
