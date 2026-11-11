@@ -723,14 +723,14 @@ func TestFramesSentWithTheHandshake(t *testing.T) {
 }
 
 func TestDefaultPorts(t *testing.T) {
-	for _, tc := range []struct{ host, origin, want string }{
-		{"a:80", "http://", "a"},
-		{"a:443", "https://", "a"},
-		{"a:443", "http://", "a:443"},
-		{"a:8080", "http://", "a:8080"},
+	for _, tc := range []struct{ host, scheme, want string }{
+		{"a:80", "http", "a"},
+		{"a:443", "https", "a"},
+		{"a:443", "http", "a:443"},
+		{"a:8080", "http", "a:8080"},
 	} {
-		if got := stripDefaultPort(tc.host, tc.origin); got != tc.want {
-			t.Errorf("stripDefaultPort(%q, %q) = %q, want %q", tc.host, tc.origin, got, tc.want)
+		if got := stripDefaultPort(tc.host, tc.scheme); got != tc.want {
+			t.Errorf("stripDefaultPort(%q, %q) = %q, want %q", tc.host, tc.scheme, got, tc.want)
 		}
 	}
 }

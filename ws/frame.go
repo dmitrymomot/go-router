@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"unicode/utf8"
 )
 
@@ -121,19 +122,25 @@ func (r *frameReader) readHeader() (header, error) {
 	return h, nil
 }
 
-// readPayload fills p from the wire and unmasks it.
-func (r *frameReader) readPayload(p []byte, mask [4]byte) error {
-	if _, err := io.ReadFull(r.br, p); err != nil {
-		return err
+// unmask applies mask to p, whose first byte sits at offset pos of the
+// payload. It works eight bytes at a time.
+func unmask(p []byte, mask [4]byte, pos int) {
+	if k := pos & 3; k != 0 {
+		mask = [4]byte{mask[k], mask[(k+1)&3], mask[(k+2)&3], mask[(k+3)&3]}
+	}
+	m32 := uint64(binary.LittleEndian.Uint32(mask[:]))
+	m := m32 | m32<<32
+	for len(p) >= 8 {
+		binary.LittleEndian.PutUint64(p, binary.LittleEndian.Uint64(p)^m)
+		p = p[8:]
 	}
 	for i := range p {
 		p[i] ^= mask[i&3]
 	}
-	return nil
 }
 
 // next reads frames until a whole data message arrives, and reports its type
-// and payload. The payload is valid until the next call. A close frame ends
+// and payload. The payload belongs to the caller. A close frame ends
 // the read with a *CloseError; a frame against the rules, with a
 // *protocolError.
 func (r *frameReader) next() (MessageType, []byte, error) {
@@ -179,19 +186,13 @@ func (r *frameReader) next() (MessageType, []byte, error) {
 			}
 		}
 		if h.fin {
-			return typ, r.buf, nil
+			// The payload belongs to the caller, and the next message gets a
+			// new buffer.
+			data := r.buf
+			r.buf = nil
+			return typ, data, nil
 		}
 	}
-}
-
-// grow extends b by n bytes, reusing its capacity when it can.
-func grow(b []byte, n int) []byte {
-	if n <= cap(b)-len(b) {
-		return b[:len(b)+n]
-	}
-	nb := make([]byte, len(b)+n, max(2*cap(b), len(b)+n))
-	copy(nb, b)
-	return nb
 }
 
 // payloadChunk is the most that appendPayload grows its buffer by before the
@@ -204,14 +205,12 @@ func (r *frameReader) appendPayload(b []byte, n int64, mask [4]byte) ([]byte, er
 	for pos := 0; n > 0; {
 		k := int(min(n, payloadChunk))
 		start := len(b)
-		b = grow(b, k)
+		b = slices.Grow(b, k)[:start+k]
 		p := b[start:]
 		if _, err := io.ReadFull(r.br, p); err != nil {
 			return b, err
 		}
-		for i := range p {
-			p[i] ^= mask[(pos+i)&3]
-		}
+		unmask(p, mask, pos)
 		pos += k
 		n -= int64(k)
 	}
@@ -219,19 +218,16 @@ func (r *frameReader) appendPayload(b []byte, n int64, mask [4]byte) ([]byte, er
 }
 
 func (r *frameReader) readControl(h header) error {
-	p := r.control[:h.length]
-	if err := r.readPayload(p, h.mask); err != nil {
+	// control holds the largest control payload, so this does not allocate.
+	p, err := r.appendPayload(r.control[:0], h.length, h.mask)
+	if err != nil {
 		return err
 	}
 	switch h.opcode {
 	case opPing:
-		if r.onPing != nil {
-			r.onPing(p)
-		}
+		r.onPing(p)
 	case opPong:
-		if r.onPong != nil {
-			r.onPong(p)
-		}
+		r.onPong(p)
 	default:
 		return parseClose(p)
 	}
@@ -265,6 +261,10 @@ func parseClose(p []byte) error {
 // utf8.FullRune counts an invalid sequence as full, so a sequence it reports
 // as not full is the valid start of a character.
 func checkUTF8(b []byte, checked int, done bool) (int, error) {
+	if utf8.Valid(b[checked:]) {
+		// The fast path: whole valid characters to the end.
+		return len(b), nil
+	}
 	i := checked
 	for i < len(b) {
 		if b[i] < utf8.RuneSelf {
@@ -289,12 +289,9 @@ func checkUTF8(b []byte, checked int, done bool) (int, error) {
 	return i, violation(StatusInvalidPayload, "a text message is not valid UTF-8")
 }
 
-// appendHeader appends the header of an unmasked server frame.
-func appendHeader(b []byte, fin bool, opcode byte, length int) []byte {
-	b0 := opcode
-	if fin {
-		b0 |= finBit
-	}
+// appendHeader appends the header of an unmasked, final server frame.
+func appendHeader(b []byte, opcode byte, length int) []byte {
+	b0 := opcode | finBit
 	switch {
 	case length <= 125:
 		return append(b, b0, byte(length)) //nolint:gosec // length is at most 125.

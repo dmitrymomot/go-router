@@ -53,7 +53,6 @@ func FuzzFrameReader(f *testing.F) {
 			if typ != Text && typ != Binary {
 				t.Fatalf("message type %v", typ)
 			}
-			r.buf = nil
 		}
 	})
 }
@@ -83,13 +82,6 @@ func TestCheckUTF8(t *testing.T) {
 	}
 }
 
-func TestGrow(t *testing.T) {
-	b := grow(make([]byte, 2, 10), 3)
-	if len(b) != 5 || cap(b) != 10 {
-		t.Errorf("grow in place: len %d cap %d", len(b), cap(b))
-	}
-}
-
 // A header that claims a large frame allocates no more than one chunk before
 // the bytes arrive.
 func TestPayloadGrowsAsItArrives(t *testing.T) {
@@ -110,5 +102,21 @@ func TestMaskAcrossChunks(t *testing.T) {
 	_, got, err := r.next()
 	if err != nil || !bytes.Equal(got, p) {
 		t.Fatalf("next = %d bytes, %v; want the payload back", len(got), err)
+	}
+}
+
+func TestUnmask(t *testing.T) {
+	mask := [4]byte{0x11, 0x22, 0x33, 0x44}
+	for pos := range 4 {
+		for n := range 20 {
+			p := bytes.Repeat([]byte{0xA5}, n)
+			want := bytes.Clone(p)
+			for i := range want {
+				want[i] ^= mask[(pos+i)&3]
+			}
+			if unmask(p, mask, pos); !bytes.Equal(p, want) {
+				t.Errorf("unmask(%d bytes, pos %d) = %x, want %x", n, pos, p, want)
+			}
+		}
 	}
 }

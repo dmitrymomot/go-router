@@ -340,11 +340,11 @@ func originAllowed(req *http.Request, patterns []string) bool {
 	if origin == "" {
 		return true
 	}
-	origin, host, ok := canonicalOrigin(origin)
+	origin, scheme, host, ok := canonicalOrigin(origin)
 	if !ok {
 		return false
 	}
-	if host == stripDefaultPort(strings.ToLower(req.Host), origin) {
+	if host == stripDefaultPort(strings.ToLower(req.Host), scheme) {
 		return true
 	}
 	for _, p := range patterns {
@@ -359,29 +359,28 @@ func originAllowed(req *http.Request, patterns []string) bool {
 }
 
 // canonicalOrigin reports an Origin as scheme://host[:port] in lower case,
-// without the default port of its scheme, and its host part. A value that is
-// not an origin, with a path, a query or credentials, is not ok.
-func canonicalOrigin(s string) (origin, host string, ok bool) {
+// without the default port of its scheme, with its scheme and host parts. A
+// value that is not an origin, with a path, a query or credentials, is not ok.
+func canonicalOrigin(s string) (origin, scheme, host string, ok bool) {
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") ||
 		u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
-		return "", "", false
+		return "", "", "", false
 	}
-	scheme := strings.ToLower(u.Scheme)
+	scheme = strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return "", "", false
+		return "", "", "", false
 	}
-	origin = scheme + "://"
-	host = stripDefaultPort(strings.ToLower(u.Host), origin)
-	return origin + host, host, true
+	host = stripDefaultPort(strings.ToLower(u.Host), scheme)
+	return scheme + "://" + host, scheme, host, true
 }
 
 // stripDefaultPort drops :80 from an http host and :443 from an https one.
-func stripDefaultPort(host, origin string) string {
-	switch {
-	case origin == "http://" && strings.HasSuffix(host, ":80"):
+func stripDefaultPort(host, scheme string) string {
+	switch scheme {
+	case "http":
 		return strings.TrimSuffix(host, ":80")
-	case origin == "https://" && strings.HasSuffix(host, ":443"):
+	case "https":
 		return strings.TrimSuffix(host, ":443")
 	}
 	return host
@@ -475,8 +474,7 @@ type Conn struct {
 
 	// wmu is the write lock: a channel, so a writer can give up waiting for
 	// it when its context ends.
-	wmu  chan struct{}
-	wbuf []byte
+	wmu chan struct{}
 	// werr is the first write failure, under wmu. sentClose is set once a
 	// close frame went out, under wmu.
 	werr      error
@@ -492,8 +490,7 @@ type Conn struct {
 	// ErrClosed, or ErrHeartbeatTimeout.
 	localErr atomic.Pointer[error]
 
-	done  chan struct{} // closed when every goroutine of the connection returned
-	watch chan struct{} // closed when the watch goroutine returned
+	done chan struct{} // closed when every goroutine of the connection returned
 
 	pongs atomic.Int64 // the pongs that arrived, for the heartbeat
 	// holding is set while the reader waits for Read to take a message, and
@@ -539,18 +536,12 @@ func newConn(b *router.Base, netConn net.Conn, brw *bufio.ReadWriter, cfg config
 		readDone: make(chan struct{}),
 		closing:  make(chan struct{}),
 		done:     make(chan struct{}),
-		watch:    make(chan struct{}),
 	}
 }
 
 func (c *Conn) start(b *router.Base) {
 	go c.read()
 	go c.watchLoop(drain.Done(c.req.Context()))
-	go func() {
-		<-c.readDone
-		<-c.watch
-		close(c.done)
-	}()
 	// The connection must not outlive the handler: net/http forgets a
 	// hijacked connection, so nothing else would close it.
 	routerhook.OnHandlerDone(b, c.release)
@@ -615,9 +606,7 @@ func (c *Conn) read() {
 			c.rerr = c.endRead(err)
 			return
 		}
-		// The message takes the buffer, and the next one gets a new one.
 		m := message{typ: typ, data: data}
-		r.buf = nil
 		c.holding.Store(true)
 		select {
 		case c.msgs <- m:
@@ -676,7 +665,12 @@ func (c *Conn) pong(payload []byte) {
 }
 
 func (c *Conn) watchLoop(draining <-chan struct{}) {
-	defer close(c.watch)
+	// The watch loop returns once the connection is closing, which ends the
+	// reader too, so it is the one to report both gone.
+	defer func() {
+		<-c.readDone
+		close(c.done)
+	}()
 	var beat <-chan time.Time
 	if c.cfg.heartbeat > 0 {
 		t := time.NewTicker(c.cfg.heartbeat)
@@ -699,11 +693,12 @@ func (c *Conn) watchLoop(draining <-chan struct{}) {
 				waiting = false
 				continue
 			}
-			if n := c.pongs.Load(); waiting && n == seen {
+			n := c.pongs.Load()
+			if waiting && n == seen {
 				c.fail(ErrHeartbeatTimeout)
 				return
 			}
-			seen, waiting = c.pongs.Load(), true
+			seen, waiting = n, true
 			_ = c.writeFrame(context.Background(), opPing, nil)
 		}
 	}
@@ -833,9 +828,6 @@ func (c *Conn) writeFrame(ctx context.Context, opcode byte, p []byte) error {
 
 // writeLocked writes one frame. The caller holds the write lock.
 func (c *Conn) writeLocked(ctx context.Context, opcode byte, p []byte) error {
-	if c.werr != nil {
-		return c.werr
-	}
 	if err := c.armWrite(ctx); err != nil {
 		return c.failWrite(err)
 	}
@@ -856,8 +848,7 @@ func (c *Conn) writeLocked(ctx context.Context, opcode byte, p []byte) error {
 	}
 
 	w := c.bw
-	c.wbuf = appendHeader(c.wbuf[:0], true, opcode, len(p))
-	_, _ = w.Write(c.wbuf)
+	_, _ = w.Write(appendHeader(w.AvailableBuffer(), opcode, len(p)))
 	_, _ = w.Write(p)
 	if err := w.Flush(); err != nil {
 		if ctx.Err() != nil {
@@ -871,8 +862,7 @@ func (c *Conn) writeLocked(ctx context.Context, opcode byte, p []byte) error {
 // failWrite records the first write failure and drops the connection.
 func (c *Conn) failWrite(err error) error {
 	c.werr = err
-	c.sentClose = true // nothing more may go out
-	c.shut()
+	c.shut() // nothing more may go out
 	return err
 }
 
