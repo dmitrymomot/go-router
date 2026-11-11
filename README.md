@@ -98,6 +98,7 @@ Each line links to the example that proves it.
 - [Rendering](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.Render), [buffered or streamed](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.RenderStream).
 - [A redirect that stays on the site](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.LocalRedirect), for a `next` parameter, and [a 304 for a client that already holds the page](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.CheckETag).
 - [Server-sent events](https://pkg.go.dev/github.com/dmitrymomot/go-router/sse#example-Serve) that send JSON, text or rendered HTML, in package `sse`.
+- [WebSocket](https://pkg.go.dev/github.com/dmitrymomot/go-router/ws#example-Accept), in package `ws`: the server side of RFC 6455 with the standard library alone, with an origin check, subprotocols, read and write limits, a heartbeat, and a close with code 1012 when the server drains.
 - htmx 4, in package `htmx`: [a fragment or the whole page](https://pkg.go.dev/github.com/dmitrymomot/go-router/htmx#example-RenderPartial) from one handler, and [htmx answers](https://pkg.go.dev/github.com/dmitrymomot/go-router/htmx#example-NewResponse): retarget, reswap, trigger, redirect.
 - Translations, in package `i18n`, from catalogs your application ships and nothing built in: [a locale from the user, a cookie or Accept-Language](https://pkg.go.dev/github.com/dmitrymomot/go-router/i18n#example-MiddlewareWithConfig) that `i18n.T(c, ...)` reads in a handler or a component, [the locale in the path](https://pkg.go.dev/github.com/dmitrymomot/go-router/i18n#example-RedirectToLocale) with a 404 for any other, [plurals, and number, currency and date formats](https://pkg.go.dev/github.com/dmitrymomot/go-router/i18n#example-package), with CLDR rules in `i18n/cldr` that you wire per language.
 - [Cookies with safe defaults](https://pkg.go.dev/github.com/dmitrymomot/go-router#example-Base.NewCookie), and, in package `cookie`, [signed cookies](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec) with a codec your context holds, [encrypted ones](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-NewEncryptedCodec), [key rotation](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-NewCodec-Rotation), and [flash messages](https://pkg.go.dev/github.com/dmitrymomot/go-router/cookie#example-Codec.Flashes) that survive a redirect or show in an htmx partial.
@@ -147,6 +148,7 @@ Each line links to the example that proves it.
 | --- | --- |
 | [`_examples/restapi`](_examples/restapi) | a JSON API: a mounted sub-router, binding, validation, domain errors, a JSON error handler |
 | [`_examples/chat`](_examples/chat) | a chat room: `html/template`, htmx and server-sent events |
+| [`_examples/wschat`](_examples/wschat) | the same room over WebSocket: package `ws`, a static page and plain JavaScript |
 | [`_examples/tenants`](_examples/tenants) | a multi-tenant app: signup on the apex, and a workspace with its own door on each subdomain |
 
 ## License

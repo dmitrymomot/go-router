@@ -1,0 +1,73 @@
+:root {
+	color-scheme: light dark;
+	--bg: light-dark(#f6f7f9, #14161a);
+	--card: light-dark(#ffffff, #1d2026);
+	--line: light-dark(#e2e5ea, #2b303a);
+	--text: light-dark(#171a1f, #e7e9ee);
+	--muted: light-dark(#6b7280, #98a0ae);
+	--own: light-dark(#dbeafe, #24406b);
+	--radius: 12px;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--text);
+	font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+h1 { font-size: 1.25rem; margin: 0; }
+input, button {
+	font: inherit;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	padding: .6rem .8rem;
+	background: var(--card);
+	color: inherit;
+}
+button { background: var(--text); color: var(--card); border-color: transparent; cursor: pointer; }
+.muted { color: var(--muted); font-size: .9rem; margin: 0; }
+
+/* the door */
+.card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	padding: 1.5rem;
+	width: min(28rem, calc(100% - 2rem));
+	margin: 20dvh auto 0;
+	display: grid;
+	gap: .75rem;
+}
+.card form { display: grid; gap: .75rem; }
+
+/* the room */
+.chat { display: grid; grid-template-rows: auto 1fr auto; height: 100dvh; }
+.chat > header, .chat > form {
+	display: flex;
+	gap: .75rem;
+	align-items: center;
+	padding: .75rem 1rem;
+	background: var(--card);
+	border: 0 solid var(--line);
+}
+.chat > header { border-bottom-width: 1px; justify-content: space-between; }
+.chat > form { border-top-width: 1px; }
+.chat > form input { flex: 1; min-width: 0; }
+.identity { display: flex; gap: .5rem; align-items: center; }
+#leave { padding: .35rem .65rem; }
+#log { overflow-y: auto; padding: 1rem; display: grid; gap: .5rem; align-content: start; }
+.msg {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	padding: .5rem .75rem;
+	max-width: min(40rem, 85%);
+	display: grid;
+	gap: .15rem;
+	overflow-wrap: anywhere;
+}
+.msg.own { background: var(--own); justify-self: end; }
+.msg .who { font-weight: 600; font-size: .85rem; }
+.msg time { color: var(--muted); font-size: .75rem; }
+.notice { text-align: center; color: var(--muted); font-size: .85rem; margin: 0; }
