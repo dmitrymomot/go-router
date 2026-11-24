@@ -4,6 +4,15 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **`serve` logs each stage of a stop** to `Config.Logger`, or to `slog.Default()`: `serve: stopping` (with the drain delay), `serve: draining`, `serve: drained` (with the time it took), `serve: stopping jobs`, `serve: job stopped` for each job, and `serve: jobs stopped`. While jobs are left, `serve: waiting for jobs` names them every `serve.JobWaitReport` (2 s). A drain that fails and jobs that miss the timeout log at warn. Every line carries `server`.
+- **`serve.Config.Name`** labels the server in those lines; an empty `Name` takes the address.
+
+### Changed
+
+- **Breaking: `serve.Config.Background` is `[]serve.Job`**, so a slow job has a name in the logs and in the timeout error, which now lists the jobs left (`serve: the background jobs did not stop in 20s: relay`). Migrate `Background: []func(context.Context) error{work}` to `Background: []serve.Job{{Name: "work", Run: work}}`. A job with no `Run` is an error, as a nil function was.
+
 ## [0.10.0] - 2026-11-11
 
 ### Added

@@ -139,18 +139,25 @@ func Stopping(ctx context.Context) <-chan struct{} { return drain.Stopping(ctx) 
 // ClientHello that spans more than one record leaves the JA4 empty and the
 // connection as it was. OnServer may set ConnContext; Run wraps it.
 //
-// Background lists the functions that run beside the server, such as a queue
+// Name labels the server in the lines it logs; an empty Name takes Addr, or
+// the address of the Listener.
+//
+// Background lists the jobs that run beside the server, such as a queue
 // worker or a cache refresher. Each one starts on its own goroutine once the
 // server listens, with a context that carries the values of ctx, ends only
 // when Run cancels it, and answers [Draining] and [Stopping] like a request
-// context. Once ctx
-// ends, the HTTP drain runs first; then Run cancels that context and waits for
-// the functions within ShutdownTimeout, a second window after the drain. A
-// negative ShutdownTimeout cancels them and waits for none. A function that
-// reports an error while the server runs stops the server the way a cancelled
-// ctx does, and Run reports that error as it stands. A function that reports
-// nil ends alone, and stops nothing. After the cancel, an error that is
-// [context.Canceled] counts as a clean stop.
+// context. Once ctx ends, the HTTP drain runs first; then Run cancels that
+// context and waits for the jobs within ShutdownTimeout, a second window after
+// the drain. A negative ShutdownTimeout cancels them and waits for none. A job
+// that reports an error while the server runs stops the server the way a
+// cancelled ctx does, and Run reports that error as it stands. A job that
+// reports nil ends alone, and stops nothing. After the cancel, an error that
+// is [context.Canceled] counts as a clean stop.
+//
+// Run logs each stage of the stop at info to Logger, or to [slog.Default]
+// when Logger is nil: the stop begins, the drain starts, the drain ends, and
+// each job ends. While jobs are left it names them every [JobWaitReport], and
+// a timeout or a drain that fails logs at warn.
 type Config struct {
 	Addr              string
 	Network           string
@@ -164,10 +171,11 @@ type Config struct {
 	DrainDelay        time.Duration
 	ShutdownTimeout   time.Duration
 	Logger            *slog.Logger
+	Name              string
 	OnListen          func(net.Addr)
 	OnDrain           func()
 	OnServer          func(*http.Server) error
-	Background        []func(ctx context.Context) error
+	Background        []Job
 	CaptureJA4        bool
 }
 
@@ -176,8 +184,8 @@ type Config struct {
 // is the ordinary way to stop, so Run reports nil for it.
 //
 // Run reports an error for a nil context, a nil handler, a Config that names
-// neither an address nor a listener, a negative DrainDelay, a nil function in
-// Background, CaptureJA4 on a server without TLS, a TLS config with
+// neither an address nor a listener, a negative DrainDelay, a job in
+// Background with no Run, CaptureJA4 on a server without TLS, a TLS config with
 // no certificate, a listener it cannot open, and a drain that runs out of
 // time. It checks the certificate after OnServer and before it listens, even
 // for a ctx that has already ended.
@@ -237,8 +245,8 @@ func prepare(h http.Handler, cfg Config) (*instance, error) {
 	if cfg.DrainDelay < 0 {
 		return nil, errors.New("serve: Config.DrainDelay is negative")
 	}
-	if i := slices.IndexFunc(cfg.Background, func(fn func(context.Context) error) bool { return fn == nil }); i >= 0 {
-		return nil, fmt.Errorf("serve: Config.Background[%d] is nil", i)
+	if i := slices.IndexFunc(cfg.Background, func(j Job) bool { return j.Run == nil }); i >= 0 {
+		return nil, fmt.Errorf("serve: Config.Background[%d] has no Run", i)
 	}
 	return &instance{h: h, cfg: cfg, stopping: newStopSignal()}, nil
 }
@@ -254,10 +262,7 @@ func newStopSignal() *stopSignal { return &stopSignal{ch: make(chan struct{})} }
 func (s *stopSignal) close() { s.once.Do(func() { close(s.ch) }) }
 
 func (in *instance) build() error {
-	logger := in.cfg.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
+	logger := in.logger()
 
 	in.srv = &http.Server{
 		Addr:              in.cfg.Addr,
@@ -350,7 +355,8 @@ func (in *instance) serve(ctx context.Context) error {
 	if in.cfg.CaptureJA4 {
 		in.withJA4Context()
 	}
-	bg := startBackground(in.withSignals(context.WithoutCancel(ctx)), in.cfg.Background)
+	log := in.logger().With(slog.String("server", in.name()))
+	bg := startBackground(in.withSignals(context.WithoutCancel(ctx)), in.cfg.Background, log)
 	stopped := make(chan struct{})
 	drained := make(chan struct{})
 	var drainErr error
@@ -370,7 +376,7 @@ func (in *instance) serve(ctx context.Context) error {
 			return
 		default:
 		}
-		drainErr = in.drain(ctx, stopped)
+		drainErr = in.drain(ctx, stopped, log)
 	}()
 
 	err := serveOn(in.srv, in.ln)
@@ -433,8 +439,9 @@ func serveOn(srv *http.Server, ln net.Listener) error {
 // drain calls OnDrain, waits DrainDelay while the server still answers, then
 // shuts it down. A server whose serving fails during the delay is already
 // closed, so there is nothing left to drain.
-func (in *instance) drain(ctx context.Context, stopped <-chan struct{}) error {
+func (in *instance) drain(ctx context.Context, stopped <-chan struct{}, log *slog.Logger) error {
 	in.stopping.close()
+	log.Info("serve: stopping", slog.Duration("drain_delay", in.cfg.DrainDelay))
 	if in.cfg.OnDrain != nil {
 		in.cfg.OnDrain()
 	}
@@ -448,7 +455,40 @@ func (in *instance) drain(ctx context.Context, stopped <-chan struct{}) error {
 		}
 	}
 	close(in.draining)
-	return shutdown(ctx, in.srv, in.cfg.ShutdownTimeout)
+	log.Info("serve: draining", slog.Duration("timeout", shutdownTimeout(in.cfg.ShutdownTimeout)))
+	began := time.Now()
+	err := shutdown(ctx, in.srv, in.cfg.ShutdownTimeout)
+	if err != nil {
+		log.Warn("serve: the drain failed", slog.Duration("took", time.Since(began)), slog.Any("error", err))
+		return err
+	}
+	log.Info("serve: drained", slog.Duration("took", time.Since(began)))
+	return nil
+}
+
+func (in *instance) logger() *slog.Logger {
+	if in.cfg.Logger != nil {
+		return in.cfg.Logger
+	}
+	return slog.Default()
+}
+
+func (in *instance) name() string {
+	switch {
+	case in.cfg.Name != "":
+		return in.cfg.Name
+	case in.ln != nil:
+		return in.ln.Addr().String()
+	default:
+		return in.cfg.Addr
+	}
+}
+
+func shutdownTimeout(d time.Duration) time.Duration {
+	if d == 0 {
+		return DefaultShutdownTimeout
+	}
+	return d
 }
 
 func shutdown(ctx context.Context, srv *http.Server, timeout time.Duration) error {
@@ -458,9 +498,7 @@ func shutdown(ctx context.Context, srv *http.Server, timeout time.Duration) erro
 		}
 		return nil
 	}
-	if timeout == 0 {
-		timeout = DefaultShutdownTimeout
-	}
+	timeout = shutdownTimeout(timeout)
 
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()

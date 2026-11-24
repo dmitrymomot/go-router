@@ -75,12 +75,12 @@ func TestStoppingClosesForEveryServerOfRunAll(t *testing.T) {
 func TestStoppingReachesTheBackgroundFunctions(t *testing.T) {
 	saw := make(chan struct{})
 	s := start(t, ok(), serve.Config{
-		Background: []func(context.Context) error{func(ctx context.Context) error {
+		Background: []serve.Job{{Run: func(ctx context.Context) error {
 			<-serve.Stopping(ctx)
 			close(saw)
 			<-ctx.Done()
 			return nil
-		}},
+		}}},
 	})
 	if err := s.stop(t); err != nil {
 		t.Fatalf("err = %v, want nil", err)
