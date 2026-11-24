@@ -4,6 +4,8 @@ All notable changes to this module are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-24
+
 ### Added
 
 - **`serve` logs each stage of a stop** to `Config.Logger`, or to `slog.Default()`: `serve: stopping` (with the drain delay), `serve: draining`, `serve: drained` (with the time it took), `serve: stopping jobs`, `serve: job stopped` for each job, and `serve: jobs stopped`. While jobs are left, `serve: waiting for jobs` names them every `serve.JobWaitReport` (2 s). A drain that fails and jobs that miss the timeout log at warn. Every line carries `server`.
@@ -718,7 +720,8 @@ A public and a private server can now run as one `serve.RunAll` call, the public
 
 The first release. See the [v0.1.0 tag](https://github.com/dmitrymomot/go-router/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/dmitrymomot/go-router/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/dmitrymomot/go-router/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/dmitrymomot/go-router/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/dmitrymomot/go-router/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/dmitrymomot/go-router/compare/v0.8.0...v0.8.1
