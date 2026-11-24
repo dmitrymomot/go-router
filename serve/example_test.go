@@ -252,7 +252,7 @@ func ExampleConfig_background() {
 	err := serve.Run(ctx, h, serve.Config{
 		Addr:       "127.0.0.1:0",
 		Logger:     slog.New(slog.DiscardHandler),
-		Background: []func(context.Context) error{worker},
+		Background: []serve.Job{{Name: "mailer", Run: worker}},
 		OnListen: func(addr net.Addr) {
 			go func() {
 				fmt.Println(get("http://" + addr.String()))

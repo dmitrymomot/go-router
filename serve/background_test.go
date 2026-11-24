@@ -21,11 +21,11 @@ func TestBackgroundRunsWithTheValuesOfTheContext(t *testing.T) {
 	go func() {
 		errc <- serve.Run(ctx, ok(), serve.Config{
 			Addr: "127.0.0.1:0",
-			Background: []func(context.Context) error{func(ctx context.Context) error {
+			Background: []serve.Job{{Run: func(ctx context.Context) error {
 				got <- ctx.Value(ctxKey{})
 				<-ctx.Done()
 				return ctx.Err()
-			}},
+			}}},
 		})
 	}()
 
@@ -48,13 +48,13 @@ func TestBackgroundStopsAfterTheDrain(t *testing.T) {
 	var cancelled atomic.Bool
 	sawDrain := make(chan struct{})
 	s := start(t, b, serve.Config{
-		Background: []func(context.Context) error{func(ctx context.Context) error {
+		Background: []serve.Job{{Run: func(ctx context.Context) error {
 			<-serve.Draining(ctx)
 			close(sawDrain)
 			<-ctx.Done()
 			cancelled.Store(true)
 			return nil
-		}},
+		}}},
 	})
 
 	res := call(client(t), s.url("http", "/"))
@@ -89,15 +89,15 @@ func TestABackgroundFailureStopsTheServer(t *testing.T) {
 	var drained atomic.Bool
 	s := start(t, ok(), serve.Config{
 		OnDrain: func() { drained.Store(true) },
-		Background: []func(context.Context) error{
-			func(context.Context) error {
+		Background: []serve.Job{
+			{Run: func(context.Context) error {
 				<-fail
 				return boom
-			},
-			func(ctx context.Context) error {
+			}},
+			{Run: func(ctx context.Context) error {
 				<-ctx.Done()
 				return ctx.Err()
-			},
+			}},
 		},
 	})
 
@@ -119,10 +119,10 @@ func TestABackgroundFailureStopsTheServer(t *testing.T) {
 func TestABackgroundFunctionThatEndsStopsNothing(t *testing.T) {
 	done := make(chan struct{})
 	s := start(t, ok(), serve.Config{
-		Background: []func(context.Context) error{func(context.Context) error {
+		Background: []serve.Job{{Run: func(context.Context) error {
 			defer close(done)
 			return nil
-		}},
+		}}},
 	})
 	<-done
 	if r := await(t, call(client(t), s.url("http", "/"))); r.status != http.StatusOK {
@@ -136,10 +136,10 @@ func TestABackgroundFunctionThatEndsStopsNothing(t *testing.T) {
 func TestBackgroundReportsAnErrorAfterTheCancel(t *testing.T) {
 	late := errors.New("flush failed")
 	s := start(t, ok(), serve.Config{
-		Background: []func(context.Context) error{func(ctx context.Context) error {
+		Background: []serve.Job{{Run: func(ctx context.Context) error {
 			<-ctx.Done()
 			return late
-		}},
+		}}},
 	})
 	if err := s.stop(t); !errors.Is(err, late) {
 		t.Fatalf("err = %v, want the error the function reported", err)
@@ -151,14 +151,14 @@ func TestBackgroundReportsItsTimeout(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	s := start(t, ok(), serve.Config{
 		ShutdownTimeout: 50 * time.Millisecond,
-		Background: []func(context.Context) error{func(context.Context) error {
+		Background: []serve.Job{{Name: "stuck", Run: func(context.Context) error {
 			<-release
 			return nil
-		}},
+		}}},
 	})
 	err := s.stop(t)
-	if err == nil || !strings.Contains(err.Error(), "did not stop in 50ms") {
-		t.Fatalf("err = %v, want the timeout of the background functions", err)
+	if err == nil || !strings.Contains(err.Error(), "did not stop in 50ms: stuck") {
+		t.Fatalf("err = %v, want the timeout and the name of the job left", err)
 	}
 }
 
@@ -167,23 +167,23 @@ func TestANegativeShutdownTimeoutWaitsForNoBackgroundFunction(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	s := start(t, ok(), serve.Config{
 		ShutdownTimeout: -1,
-		Background: []func(context.Context) error{func(context.Context) error {
+		Background: []serve.Job{{Run: func(context.Context) error {
 			<-release
 			return nil
-		}},
+		}}},
 	})
 	if err := s.stop(t); err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
 }
 
-func TestRunRejectsANilBackgroundFunction(t *testing.T) {
+func TestRunRejectsAJobWithNoRun(t *testing.T) {
 	err := serve.Run(context.Background(), ok(), serve.Config{
 		Addr:       "127.0.0.1:0",
-		Background: []func(context.Context) error{func(context.Context) error { return nil }, nil},
+		Background: []serve.Job{{Run: func(context.Context) error { return nil }}, {Name: "empty"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "Config.Background[1] is nil") {
-		t.Fatalf("err = %v, want the nil function named", err)
+	if err == nil || !strings.Contains(err.Error(), "Config.Background[1] has no Run") {
+		t.Fatalf("err = %v, want the job with no Run named", err)
 	}
 }
 
@@ -193,10 +193,10 @@ func TestBackgroundDoesNotStartForAContextAlreadyDone(t *testing.T) {
 	var ran atomic.Bool
 	err := serve.Run(ctx, ok(), serve.Config{
 		Addr: "127.0.0.1:0",
-		Background: []func(context.Context) error{func(context.Context) error {
+		Background: []serve.Job{{Run: func(context.Context) error {
 			ran.Store(true)
 			return nil
-		}},
+		}}},
 	})
 	if err != nil || ran.Load() {
 		t.Fatalf("err = %v, ran = %v; want nil and no run", err, ran.Load())
@@ -209,10 +209,10 @@ func TestRunAllStopsEveryServerWhenABackgroundFunctionFails(t *testing.T) {
 	g := startAll(t,
 		serve.Server{Handler: ok()},
 		serve.Server{Handler: ok(), Config: serve.Config{
-			Background: []func(context.Context) error{func(context.Context) error {
+			Background: []serve.Job{{Run: func(context.Context) error {
 				<-fail
 				return boom
-			}},
+			}}},
 		}},
 	)
 	close(fail)
